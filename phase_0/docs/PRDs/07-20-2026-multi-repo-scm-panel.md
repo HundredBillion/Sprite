@@ -132,6 +132,10 @@ Keys:
 | `r` | refresh | refresh |
 | typing | snacks fuzzy filter across all changed files in all repos | |
 
+Error (`⚠`) rows behave like repo headers: `<CR>`/`g` still open lazygit
+cd'd there (the repo may be usable even when porcelain parsing failed);
+`d` is a no-op.
+
 `<leader>gs` toggles the panel; opening it closes an open explorer picker
 (one left-rail activity at a time, VSCode-style). Explorer's `<leader>e`
 opening over the SCM panel is acceptable (last-opened wins).
