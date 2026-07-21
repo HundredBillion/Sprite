@@ -79,9 +79,12 @@ function M.setup(opts)
   end
 end
 
+-- The sidebar layout gives the list window border = "none" (no titlebar to
+-- draw into), so titles must go on the input window instead, which has a
+-- border and a "{title} {live} {flags}" template.
 local function set_title(picker, title)
   pcall(function()
-    picker.list.win:set_title(title)
+    picker.input.win:set_title(title)
   end)
 end
 
@@ -215,25 +218,52 @@ function M.refresh_view(picker)
   picker = picker or Snacks.picker.get({ source = "scm" })[1]
   if not picker then return end
   local anchor = item_key(picker:current())
+  -- Remember where the anchor row sat in the OLD list too, so that if it's
+  -- gone after refresh (e.g. its repo just went clean and dropped out) we
+  -- can still land near where it used to be instead of doing nothing.
+  local anchor_idx
+  if anchor then
+    for idx, it in ipairs(picker:items()) do
+      if item_key(it) == anchor then
+        anchor_idx = idx
+        break
+      end
+    end
+  end
   set_title(picker, "Source Control (scanning…)")
   local accepted = core.refresh(M.state.opts, function(entries)
     M.state.entries = entries
     local p = Snacks.picker.get({ source = "scm" })[1]
     if not p then return end -- panel was closed while the scan was in flight
-    p:find()
-    -- zero repos under the configured roots is a normal, expected outcome --
-    -- say so in the title instead of leaving a blank picker window.
-    set_title(p, #entries == 0 and "Source Control (no repositories under configured roots)" or "Source Control")
-    if anchor then -- best-effort: only re-park the cursor if the row still exists
-      vim.schedule(function()
-        for idx, it in ipairs(p:items()) do
+    -- find()'s matcher runs on a coroutine/libuv check-handle, so the new
+    -- items aren't ready until on_done fires; restoring the cursor from a
+    -- bare vim.schedule right after find() would race the matcher and see
+    -- stale (or empty) items. on_done itself already lands back on the
+    -- main/scheduled context (either called inline from an already-scheduled
+    -- caller, or vim.schedule_wrap'd by snacks when the matcher is async),
+    -- so no extra vim.schedule is needed here.
+    p:find({
+      on_done = function()
+        -- zero repos under the configured roots is a normal, expected outcome --
+        -- say so in the title instead of leaving a blank picker window.
+        set_title(p, #entries == 0 and "Source Control (no repositories under configured roots)" or "Source Control")
+        if not anchor then return end
+        local items = p:items()
+        if #items == 0 then return end
+        for idx, it in ipairs(items) do
           if item_key(it) == anchor then
             pcall(function() p.list:view(idx) end)
             return
           end
         end
-      end)
-    end
+        -- anchor row didn't survive the refresh: fall back to the nearest
+        -- surviving row by clamping its old index into the new list's range.
+        if anchor_idx then
+          local fallback_idx = math.min(anchor_idx, #items)
+          pcall(function() p.list:view(fallback_idx) end)
+        end
+      end,
+    })
   end)
   if not accepted then
     set_title(picker, "Source Control") -- a refresh is already in flight; drop this one
