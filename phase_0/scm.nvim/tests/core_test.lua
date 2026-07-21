@@ -208,4 +208,35 @@ for i, e in ipairs(synthetic) do names[i] = e.name end
 eq(names, { "middle", "mmm", "zzz", "aaa", "alpha", "bravo" },
   "compare_entries: needs-attention (dirty or errored) first, alphabetical within each group")
 
+-- panel pure functions (no picker window needed headless)
+local panel = require("scm.panel")
+
+-- xy_display: letter = working-tree state, else index state; mixed marker
+eq(panel.xy_display(".M"), { letter = "M", mixed = false, hl = "ScmModified" }, "unstaged modified")
+eq(panel.xy_display("M."), { letter = "M", mixed = false, hl = "ScmStaged" }, "staged only")
+eq(panel.xy_display("MM"), { letter = "M", mixed = true, hl = "ScmModified" }, "mixed state")
+eq(panel.xy_display("??"), { letter = "??", mixed = false, hl = "ScmUntracked" }, "untracked")
+eq(panel.xy_display("R."), { letter = "R", mixed = false, hl = "ScmStaged" }, "staged rename")
+eq(panel.xy_display(".D"), { letter = "D", mixed = false, hl = "ScmDeleted" }, "deleted")
+eq(panel.xy_display("UU"), { letter = "U", mixed = true, hl = "ScmConflict" }, "conflict")
+
+-- build_items: headers + files, self-identifying ctx, dup detection, sort order
+local entries = {
+  { name = "api", path = "/r/api", branch = "main", ahead = 1, behind = 0, clean = false,
+    files = { { path = "app/models/device.rb", xy = ".M" }, { path = "top.rb", xy = "??" } } },
+  { name = "api", path = "/other/api", branch = "dev", ahead = 0, behind = 0, clean = true, files = {} },
+  { name = "web", path = "/r/web", branch = "main", ahead = 0, behind = 0, clean = true, files = {} },
+}
+local items = panel.build_items(entries)
+eq(#items, 5, "3 headers + 2 files")
+eq(items[1].kind, "header", "header first")
+eq(items[1].dup, true, "name collision flagged")
+eq(items[2].kind, "file", "file after its header")
+eq(items[2].text, "api/app/models/device.rb", "match text includes repo")
+eq(items[2].ctx, "api/app/models", "ctx column repo/dir")
+eq(items[2].file, "/r/api/app/models/device.rb", "abs path for snacks jump")
+eq(items[3].ctx, "api", "top-level file ctx = repo only")
+eq(items[5].dup, nil, "unique name not flagged")
+for i, it in ipairs(items) do eq(it.sort, i, "sort field " .. i) end
+
 print("OK")
