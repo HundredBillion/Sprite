@@ -53,4 +53,26 @@ function M.parse_status(lines)
   return { branch = branch, ahead = ahead, behind = behind, files = files }
 end
 
+-- Find repositories: any directory directly containing `.git` (dir OR file —
+-- worktrees and submodules use a .git file) up to `depth` levels under each
+-- Root. Missing roots are skipped silently.
+function M.scan(opts)
+  local repos = {}
+  for _, root in ipairs(opts.roots) do
+    root = vim.fn.expand(root)
+    if vim.fn.isdirectory(root) == 1 then
+      local out = vim.fn.systemlist({
+        "find", root, "-maxdepth", tostring(opts.depth), "-name", ".git", "-prune",
+      })
+      if vim.v.shell_error == 0 then
+        for _, g in ipairs(out) do
+          repos[#repos + 1] = vim.fn.fnamemodify(g, ":h")
+        end
+      end
+    end
+  end
+  table.sort(repos)
+  return repos
+end
+
 return M

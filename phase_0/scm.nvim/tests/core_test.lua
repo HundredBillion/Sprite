@@ -60,4 +60,15 @@ eq(noup.behind, 0, "no upstream behind")
 local clean = core.parse_status({})
 eq(clean.files, {}, "empty -> no files")
 
+-- scan(): finds .git dirs AND .git files (worktrees), respects depth, sorts
+local tmp = vim.fn.tempname()
+vim.fn.mkdir(tmp .. "/beta/.git", "p")
+vim.fn.mkdir(tmp .. "/alpha", "p")
+vim.fn.writefile({ "gitdir: /elsewhere" }, tmp .. "/alpha/.git") -- worktree-style .git FILE
+vim.fn.mkdir(tmp .. "/too/deep/nested/.git", "p") -- beyond depth 2 from tmp
+vim.fn.mkdir(tmp .. "/not_a_repo", "p")
+
+local repos = core.scan({ roots = { tmp, tmp .. "/does-not-exist" }, depth = 2 })
+eq(repos, { tmp .. "/alpha", tmp .. "/beta" }, "scan finds dir+file .git, sorted, depth-limited, missing root skipped")
+
 print("OK")
