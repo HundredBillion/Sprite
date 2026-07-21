@@ -186,4 +186,26 @@ eq(sort_got[2].clean, false, "second is dirty")
 eq(sort_got[1].name, "aaa_repo", "alphabetically-first name sorts first within group")
 eq(sort_got[2].name, "zzz_repo", "alphabetically-last name sorts second within group")
 
+-- M.compare_entries(): direct unit test of the sort comparator, independent
+-- of scan()'s already-alphabetical repo order. Input is hand-built and
+-- presented NOT-already-alphabetical within each group (reverse-alphabetical
+-- for the needs-attention group, and out-of-order for the clean group), so a
+-- regression that drops the name tiebreak (leaving only group-priority) would
+-- actually have to move elements to pass -- table.sort would leave a
+-- mis-ordered array untouched and this test would fail.
+local synthetic = {
+  { name = "zzz", clean = false },
+  { name = "bravo", clean = true },
+  { name = "mmm", clean = false },
+  { name = "alpha", clean = true },
+  { name = "aaa", clean = true },
+  { name = "middle", clean = true, err = "boom" }, -- clean=true but errored -> needs-attention group
+}
+table.sort(synthetic, core.compare_entries)
+
+local names = {}
+for i, e in ipairs(synthetic) do names[i] = e.name end
+eq(names, { "middle", "mmm", "zzz", "aaa", "alpha", "bravo" },
+  "compare_entries: needs-attention (dirty or errored) first, alphabetical within each group")
+
 print("OK")

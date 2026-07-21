@@ -77,6 +77,17 @@ end
 
 local in_flight = false
 
+-- Sort comparator for Repo Entries: needs-attention (dirty OR errored) first,
+-- alphabetical by name within each group. Exposed as M.compare_entries (not
+-- local) so tests can exercise the tiebreak directly with hand-built entries,
+-- independent of scan()'s already-sorted repo order.
+function M.compare_entries(a, b)
+  local aa = (not a.clean) or a.err ~= nil
+  local bb = (not b.clean) or b.err ~= nil
+  if aa ~= bb then return aa end
+  return a.name < b.name
+end
+
 -- Refresh: scan Roots, fan out one async `git status --porcelain=v2 --branch`
 -- per repo, assemble sorted Repo Entries, deliver via ONE scheduled callback.
 -- CAUTION: vim.system's callback runs in a fast-event context where vim.fn.*
@@ -123,12 +134,7 @@ function M.refresh(opts, cb)
                 }
               end
             end
-            table.sort(entries, function(a, b)
-              local aa = (not a.clean) or a.err ~= nil
-              local bb = (not b.clean) or b.err ~= nil
-              if aa ~= bb then return aa end
-              return a.name < b.name
-            end)
+            table.sort(entries, M.compare_entries)
             in_flight = false
             cb(entries)
           end)
