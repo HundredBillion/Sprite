@@ -58,11 +58,17 @@ neogit, diffview are all single-repo) — this niche is validated open.
 ### 4.1 Components
 
 ```
-~/.config/nvim/lua/scm/core.lua      -- portable brain: scan, status, refresh. NO UI imports.
-~/.config/nvim/lua/scm/panel.lua     -- snacks picker render layer (disposable face)
-~/.config/nvim/lua/plugins/scm.lua   -- plugin spec: <leader>gs key, config (roots, depth)
-~/.config/nvim/tests/core_test.lua   -- headless assert tests (nvim -l)
+~/Projects/Sprite/phase_0/scm.nvim/lua/scm/core.lua    -- portable brain: scan, status, refresh. NO UI imports.
+~/Projects/Sprite/phase_0/scm.nvim/lua/scm/panel.lua   -- snacks picker render layer (disposable face)
+~/Projects/Sprite/phase_0/scm.nvim/tests/core_test.lua -- headless assert tests (nvim -l)
+~/.config/nvim/lua/plugins/scm.lua                     -- thin spec: dir=<plugin path>, <leader>gs key, opts
 ```
+
+The plugin is a real plugin directory inside the Sprite repo (versioned from
+day one; ~/.config/nvim is not a git repo), loaded via lazy.nvim local `dir`.
+`<leader>gs` deliberately overrides LazyVim's single-repo git_status picker
+(decided at grilling; the old picker stays reachable via
+`:lua Snacks.picker.git_status()`).
 
 Config: `roots = { "~/MyServe1.0", "~/Code" }`, `depth = 2` (same defaults as
 git-repos.lua).
