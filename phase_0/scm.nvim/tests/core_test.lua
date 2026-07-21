@@ -71,4 +71,51 @@ vim.fn.mkdir(tmp .. "/not_a_repo", "p")
 local repos = core.scan({ roots = { tmp, tmp .. "/does-not-exist" }, depth = 2 })
 eq(repos, { tmp .. "/alpha", tmp .. "/beta" }, "scan finds dir+file .git, sorted, depth-limited, missing root skipped")
 
+-- refresh(): end-to-end against two real synthetic repos
+local function sh(cmd)
+  local r = vim.system(cmd, { text = true }):wait()
+  assert(r.code == 0, "setup cmd failed: " .. table.concat(cmd, " ") .. "\n" .. (r.stderr or ""))
+end
+
+local work = vim.fn.tempname()
+local dirty, cleanrepo = work .. "/dirty_repo", work .. "/clean_repo"
+vim.fn.mkdir(dirty, "p")
+vim.fn.mkdir(cleanrepo, "p")
+for _, r in ipairs({ dirty, cleanrepo }) do
+  sh({ "git", "-C", r, "init", "-q", "-b", "main" })
+  vim.fn.writefile({ "hello" }, r .. "/a.txt")
+  sh({ "git", "-C", r, "add", "." })
+  sh({ "git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init" })
+end
+vim.fn.writefile({ "changed" }, dirty .. "/a.txt")     -- .M
+vim.fn.writefile({ "new" }, dirty .. "/untracked.txt") -- ??
+
+local got
+assert(core.refresh({ roots = { work }, depth = 2, timeout_ms = 5000 }, function(entries)
+  got = entries
+end) == true, "refresh accepted")
+-- second call while in flight must be dropped
+assert(core.refresh({ roots = { work }, depth = 2, timeout_ms = 5000 }, function() end) == false, "in-flight drop")
+vim.wait(5000, function() return got ~= nil end, 10)
+assert(got, "refresh callback fired")
+
+eq(#got, 2, "two repos")
+eq(got[1].name, "dirty_repo", "needs-attention first")
+eq(got[1].clean, false, "dirty flagged")
+eq(got[1].branch, "main", "branch parsed")
+eq(got[1].files, {
+  { path = "a.txt", xy = ".M" },
+  { path = "untracked.txt", xy = "??" },
+}, "dirty repo File Entries")
+eq(got[2].name, "clean_repo", "clean repo second")
+eq(got[2].clean, true, "clean flagged")
+eq(got[2].files, {}, "clean repo no files")
+assert(got[1].err == nil and got[2].err == nil, "no errors")
+
+-- refresh usable again after completion
+got = nil
+assert(core.refresh({ roots = { work }, depth = 2, timeout_ms = 5000 }, function(entries) got = entries end))
+vim.wait(5000, function() return got ~= nil end, 10)
+assert(got and #got == 2, "second refresh works")
+
 print("OK")

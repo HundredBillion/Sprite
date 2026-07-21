@@ -75,4 +75,68 @@ function M.scan(opts)
   return repos
 end
 
+local in_flight = false
+
+-- Refresh: scan Roots, fan out one async `git status --porcelain=v2 --branch`
+-- per repo, assemble sorted Repo Entries, deliver via ONE scheduled callback.
+-- CAUTION: vim.system's callback runs in a fast-event context where vim.fn.*
+-- is forbidden — raw outputs are collected there and ALL processing happens
+-- inside the final vim.schedule.
+function M.refresh(opts, cb)
+  if in_flight then
+    return false
+  end
+  in_flight = true
+  local repos = M.scan(opts)
+  if #repos == 0 then
+    in_flight = false
+    vim.schedule(function() cb({}) end)
+    return true
+  end
+  local raw, pending = {}, #repos
+  for i, repo in ipairs(repos) do
+    vim.system(
+      { "git", "-C", repo, "status", "--porcelain=v2", "--branch" },
+      { text = true, timeout = opts.timeout_ms },
+      function(out) -- fast context: store only
+        raw[i] = out
+        pending = pending - 1
+        if pending == 0 then
+          vim.schedule(function()
+            local entries = {}
+            for j, r in ipairs(repos) do
+              local o = raw[j]
+              local name = r:match("[^/]+$") or r
+              if o.code == 0 then
+                local p = M.parse_status(vim.split(o.stdout or "", "\n", { trimempty = true }))
+                entries[#entries + 1] = {
+                  name = name, path = r, branch = p.branch,
+                  ahead = p.ahead, behind = p.behind,
+                  files = p.files, clean = #p.files == 0,
+                }
+              else
+                local msg = (o.stderr or ""):match("^[^\n]*")
+                entries[#entries + 1] = {
+                  name = name, path = r, branch = "?", ahead = 0, behind = 0,
+                  files = {}, clean = true,
+                  err = (msg and #msg > 0) and msg or "git failed",
+                }
+              end
+            end
+            table.sort(entries, function(a, b)
+              local aa = (not a.clean) or a.err ~= nil
+              local bb = (not b.clean) or b.err ~= nil
+              if aa ~= bb then return aa end
+              return a.name < b.name
+            end)
+            in_flight = false
+            cb(entries)
+          end)
+        end
+      end
+    )
+  end
+  return true
+end
+
 return M
