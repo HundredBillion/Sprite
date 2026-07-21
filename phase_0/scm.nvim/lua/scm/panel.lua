@@ -3,6 +3,11 @@
 -- building lives at the top (headlessly testable); picker wiring below.
 local M = {}
 
+-- Git's `status --porcelain=v2` documents exactly 7 unmerged XY codes; any of
+-- them means an active, unresolved conflict on that file, regardless of which
+-- letter the usual X/Y derivation below picks.
+local UNMERGED_XY = { DD = true, AU = true, UD = true, UA = true, DU = true, AA = true, UU = true }
+
 -- Derive display fields from a raw XY Code. Letter shows the working-tree
 -- state (Y) when set, else the index state (X); a Mixed State (both set)
 -- additionally gets the mixed marker.
@@ -14,7 +19,7 @@ function M.xy_display(xy)
   local letter = (y ~= ".") and y or x
   local mixed = x ~= "." and y ~= "."
   local hl
-  if letter == "U" then
+  if UNMERGED_XY[xy] then
     hl = "ScmConflict"
   elseif y == "." then
     hl = "ScmStaged"

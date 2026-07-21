@@ -219,6 +219,12 @@ eq(panel.xy_display("??"), { letter = "??", mixed = false, hl = "ScmUntracked" }
 eq(panel.xy_display("R."), { letter = "R", mixed = false, hl = "ScmStaged" }, "staged rename")
 eq(panel.xy_display(".D"), { letter = "D", mixed = false, hl = "ScmDeleted" }, "deleted")
 eq(panel.xy_display("UU"), { letter = "U", mixed = true, hl = "ScmConflict" }, "conflict")
+eq(panel.xy_display("DD"), { letter = "D", mixed = true, hl = "ScmConflict" }, "unmerged: both deleted")
+eq(panel.xy_display("AU"), { letter = "U", mixed = true, hl = "ScmConflict" }, "unmerged: added by us")
+eq(panel.xy_display("UD"), { letter = "D", mixed = true, hl = "ScmConflict" }, "unmerged: deleted by them")
+eq(panel.xy_display("UA"), { letter = "A", mixed = true, hl = "ScmConflict" }, "unmerged: added by them")
+eq(panel.xy_display("DU"), { letter = "U", mixed = true, hl = "ScmConflict" }, "unmerged: deleted by us")
+eq(panel.xy_display("AA"), { letter = "A", mixed = true, hl = "ScmConflict" }, "unmerged: both added")
 
 -- build_items: headers + files, self-identifying ctx, dup detection, sort order
 local entries = {
