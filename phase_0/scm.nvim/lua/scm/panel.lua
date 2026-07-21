@@ -58,4 +58,186 @@ function M.build_items(entries)
   return items
 end
 
+local core = require("scm.core")
+
+M.state = { entries = {}, opts = nil }
+
+function M.setup(opts)
+  M.state.opts = vim.tbl_deep_extend("force", core.defaults, opts or {})
+  local hls = {
+    ScmModified = "GitSignsChange",
+    ScmAdded = "GitSignsAdd",
+    ScmDeleted = "GitSignsDelete",
+    ScmRenamed = "DiagnosticWarn",
+    ScmUntracked = "GitSignsAdd",
+    ScmStaged = "GitSignsAdd",
+    ScmConflict = "DiagnosticError",
+    ScmMarker = "GitSignsAdd",
+  }
+  for name, link in pairs(hls) do
+    vim.api.nvim_set_hl(0, name, { link = link, default = true })
+  end
+end
+
+local function set_title(picker, title)
+  pcall(function()
+    picker.list.win:set_title(title)
+  end)
+end
+
+-- Anchor key for cursor stability across refreshes: identifies a row by repo
+-- (plus file path, for file rows) rather than by list index, so a refresh
+-- that reorders or reshuffles rows can still find "the same row" and re-park
+-- the cursor there instead of snapping back to the top.
+local function item_key(item)
+  if not item then return nil end
+  if item.kind == "file" then
+    return item.entry.path .. "//" .. item.fentry.path
+  end
+  return item.entry.path
+end
+
+-- One row per item. Header rows summarize a repo: name, branch, ahead/behind
+-- counts, and dirty-file count (or an error/clean marker instead). File rows
+-- show the status letter, filename, and a dimmed repo/dir breadcrumb.
+function M.format_item(item)
+  if item.kind == "header" then
+    local e = item.entry
+    if e.err then
+      return {
+        { "⚠ ", "DiagnosticWarn" },
+        { ("%-24s "):format(e.name), "Comment" },
+        { e.err, "Comment" },
+      }
+    end
+    local parts = {}
+    if e.clean then
+      parts[#parts + 1] = { "▶ ", "Comment" }
+      parts[#parts + 1] = { ("%-24s "):format(e.name), "Comment" }
+      parts[#parts + 1] = { e.branch .. "  ", "Comment" }
+      parts[#parts + 1] = { "─", "Comment" }
+    else
+      parts[#parts + 1] = { "▼ ", "Directory" }
+      parts[#parts + 1] = { ("%-24s "):format(e.name), "Title" }
+      parts[#parts + 1] = { e.branch .. " ", "Function" }
+      if e.ahead > 0 then parts[#parts + 1] = { "↑" .. e.ahead, "DiagnosticInfo" } end
+      if e.behind > 0 then parts[#parts + 1] = { "↓" .. e.behind, "DiagnosticWarn" } end
+      parts[#parts + 1] = { ("  %d"):format(#e.files), "Number" }
+    end
+    if item.dup then
+      parts[#parts + 1] = { "  " .. vim.fn.fnamemodify(e.path, ":h:t"), "Comment" }
+    end
+    return parts
+  end
+  -- file row: indent, letter+marker, filename, dimmed repo/dir ctx
+  local d = M.xy_display(item.fentry.xy)
+  local fname = item.fentry.path:match("[^/]+$") or item.fentry.path
+  return {
+    { "    " },
+    { d.letter, d.hl },
+    { d.mixed and "✱" or " ", "ScmMarker" },
+    { (" %-28s "):format(fname), "Normal" },
+    { item.ctx, "Comment" },
+  }
+end
+
+local sactions = function() return require("snacks.picker.actions") end
+
+-- Thin wrapper so every lazygit launch (from actions below, and any future
+-- terminal-close-driven refresh) goes through one place.
+function M.lazygit(repo)
+  Snacks.lazygit({ cwd = repo })
+end
+
+local function key_actions()
+  return {
+    scm_confirm = function(picker, item)
+      if not item then return end
+      if item.kind == "file" then
+        sactions().jump(picker, item, { cmd = "edit" })
+      else
+        M.lazygit(item.entry.path)
+      end
+    end,
+    scm_diff = function(picker, item)
+      if not item or item.kind ~= "file" then return end
+      sactions().jump(picker, item, { cmd = "edit" })
+      if item.fentry.xy == "??" then
+        vim.notify("untracked — no diff", vim.log.levels.INFO)
+      else
+        vim.schedule(function() vim.cmd("Gitsigns diffthis") end)
+      end
+    end,
+    scm_lazygit = function(_, item)
+      if item then M.lazygit(item.entry.path) end
+    end,
+    scm_refresh = function(picker) M.refresh_view(picker) end,
+  }
+end
+
+function M.open()
+  M.setup(M.state.opts) -- idempotent; ensures defaults even if setup() was never called
+  local picker = Snacks.picker.pick({
+    source = "scm",
+    title = "Source Control",
+    finder = function() return M.build_items(M.state.entries) end,
+    format = M.format_item,
+    layout = { preset = "sidebar", preview = false },
+    focus = "list",
+    jump = { close = false }, -- keep the sidebar open when a file is opened from it
+    auto_close = false,
+    matcher = { sort_empty = false, fuzzy = true },
+    sort = { fields = { "sort" } }, -- keep build_items' repo/file order when unfiltered
+    confirm = "scm_confirm",
+    actions = key_actions(),
+    win = {
+      list = { keys = { ["d"] = "scm_diff", ["g"] = "scm_lazygit", ["r"] = "scm_refresh" } },
+      input = { keys = { ["<c-r>"] = { "scm_refresh", mode = { "i", "n" } } } },
+    },
+  })
+  M.refresh_view(picker)
+  return picker
+end
+
+function M.toggle()
+  local open = Snacks.picker.get({ source = "scm" })[1]
+  if open then
+    open:close()
+    return
+  end
+  for _, p in ipairs(Snacks.picker.get({ source = "explorer" })) do
+    p:close() -- only one left-rail sidebar activity open at a time
+  end
+  M.open()
+end
+
+function M.refresh_view(picker)
+  picker = picker or Snacks.picker.get({ source = "scm" })[1]
+  if not picker then return end
+  local anchor = item_key(picker:current())
+  set_title(picker, "Source Control (scanning…)")
+  local accepted = core.refresh(M.state.opts, function(entries)
+    M.state.entries = entries
+    local p = Snacks.picker.get({ source = "scm" })[1]
+    if not p then return end -- panel was closed while the scan was in flight
+    p:find()
+    -- zero repos under the configured roots is a normal, expected outcome --
+    -- say so in the title instead of leaving a blank picker window.
+    set_title(p, #entries == 0 and "Source Control (no repositories under configured roots)" or "Source Control")
+    if anchor then -- best-effort: only re-park the cursor if the row still exists
+      vim.schedule(function()
+        for idx, it in ipairs(p:items()) do
+          if item_key(it) == anchor then
+            pcall(function() p.list:view(idx) end)
+            return
+          end
+        end
+      end)
+    end
+  end)
+  if not accepted then
+    set_title(picker, "Source Control") -- a refresh is already in flight; drop this one
+  end
+end
+
 return M
