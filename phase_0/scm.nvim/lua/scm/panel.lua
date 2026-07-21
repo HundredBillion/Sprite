@@ -152,7 +152,12 @@ local sactions = function() return require("snacks.picker.actions") end
 -- way are left alone.
 function M.lazygit(repo)
   local lg = Snacks.lazygit({ cwd = repo })
-  if lg and lg.on then
+  -- Snacks.lazygit toggles: reopening a hidden (not closed) terminal for the
+  -- same cwd hands back this same cached object, so guard against stacking a
+  -- second TermClose hook on it (which would fire the refresh twice, three
+  -- times, etc. once the process actually exits).
+  if lg and lg.on and not lg._scm_refresh_hooked then
+    lg._scm_refresh_hooked = true
     lg:on("TermClose", function()
       vim.schedule(function() M.refresh_view() end)
     end, { buf = true })
