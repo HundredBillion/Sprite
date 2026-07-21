@@ -1,5 +1,5 @@
--- scm.core — the UI-free Core (see phase_0/CONTEXT.md).
--- Emits Repo Entries; never requires any UI module (ADR 0001/0002).
+-- scm.core — the UI-free Core.
+-- Emits Repo Entries; never requires any UI module.
 local M = {}
 
 M.defaults = {
@@ -9,7 +9,7 @@ M.defaults = {
 }
 
 -- Parse `git status --porcelain=v2 --branch` output into branch/ahead/behind
--- plus File Entries carrying the raw XY Code verbatim (ADR 0002).
+-- plus File Entries carrying the raw XY Code verbatim.
 -- Line shapes (see `git help status`, Porcelain Format Version 2):
 --   # branch.oid <sha> | # branch.head <name|(detached)> | # branch.ab +A -B
 --   1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
