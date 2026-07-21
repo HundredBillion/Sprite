@@ -146,10 +146,17 @@ end
 
 local sactions = function() return require("snacks.picker.actions") end
 
--- Thin wrapper so every lazygit launch (from actions below, and any future
--- terminal-close-driven refresh) goes through one place.
+-- Thin wrapper so every lazygit launch goes through one place. A lazygit
+-- opened from the panel hooks its own close to trigger one refresh, so the
+-- panel reflects whatever was staged or committed; lazygits opened any other
+-- way are left alone.
 function M.lazygit(repo)
-  Snacks.lazygit({ cwd = repo })
+  local lg = Snacks.lazygit({ cwd = repo })
+  if lg and lg.on then
+    lg:on("TermClose", function()
+      vim.schedule(function() M.refresh_view() end)
+    end, { buf = true })
+  end
 end
 
 local function key_actions()
