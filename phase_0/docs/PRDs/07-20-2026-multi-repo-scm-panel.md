@@ -1,7 +1,7 @@
 # PRD: Multi-Repo Source Control Panel (Sprite Phase 0.1)
 
 **Date:** 2026-07-20
-**Status:** Draft — pending review
+**Status:** Approved + grilled (2026-07-20). Glossary: `phase_0/CONTEXT.md`; ADRs 0001-0002.
 **Owner:** David Lee
 **Working name:** `scm` (Lua module namespace; standalone plugin name decided at
 promotion time)
@@ -78,9 +78,10 @@ dirty-repos-first (alpha within group), each entry:
   path   = "/Users/davidlee/MyServe1.0/krypton-api",
   branch = "main",           -- or short SHA when detached
   ahead  = 2, behind = 1,    -- 0 when no upstream
-  files  = {                 -- empty when clean
-    { path = "app/models/device.rb", status = "M",  staged = false },
-    { path = "spec/new_spec.rb",     status = "??" },
+  files  = {                 -- empty when clean; ONE entry per file
+    { path = "app/models/device.rb", xy = ".M" },  -- raw porcelain XY code (ADR 0002)
+    { path = "lib/staged_and_edited.rb", xy = "MM" },
+    { path = "spec/new_spec.rb",     xy = "??" },
   },
   clean  = false,
   err    = nil,              -- string when git failed for this repo
@@ -88,7 +89,9 @@ dirty-repos-first (alpha within group), each entry:
 ```
 
 This table is the renderer contract for snacks (now), a bare-Neovim renderer
-(possible future distro), and Sprite's native panel (Phase 5.2).
+(possible future distro), and Sprite's native panel (Phase 5.2). The XY code
+is stored verbatim; display letters/markers/colors are derived per renderer
+(ADR 0002).
 
 ### 4.3 Core behavior
 
@@ -112,22 +115,44 @@ Row anatomy (VSCode SCM visual language):
 
 ```
  ▼ krypton-api  main ↑2↓1                 4     ← bold name, branch, arrows only when ≠0, count badge
-     M  device.rb          app/models          ← status letter (VSCode colors), filename first, dir dimmed
-     ??  scratch.rb
+     M   device.rb        krypton-api/app/models
+     M✱  staged_edited.rb krypton-api/lib        ← mixed state: letter + ✱ marker
+     ??  scratch.rb       krypton-api
  ▶ argon.simplexmobility.com  main         ─    ← clean repo: dimmed one-liner
  ⚠ broken-repo  git: not a repository           ← per-repo error row, dimmed
 ```
 
-Colors: M = orange, A/?? = green, D = red, R = yellow-ish rename; staged
-variants brighter/filled vs unstaged (v1 encodes staged-ness in color, not
-separate sections). Filename-first with dimmed parent dir.
+Status display (derived from the raw XY code, per renderer):
+- Letter = working-tree state (Y) when set, else index state (X).
+- `✱` marker appended only in the mixed state (both X and Y set, e.g. `MM`).
+- Colors: M = orange, A/?? = green, D = red, R = yellow; staged-only
+  (`M.`-style) tinted green.
+- Filename first; the dimmed trailing column is always `repo/dir` so every
+  file row is self-identifying (survives filter orphaning — see Filtering).
+- Repo headers show a dimmed parent-path suffix only when two repos share a
+  name across roots.
+
+**Filtering:** typing filters the flat item list; repo headers that don't
+match drop out and file rows stand alone — acceptable because rows are
+self-identifying. Headers remain matchable by repo name.
+
+**Persistence:** `jump = { close = false }`, `auto_close = false` (the
+explorer preset's defaults) — opening a file keeps the panel open; the
+scanning loop is open-glance-open-next. `<leader>gs` toggles it away.
+
+**Post-lazygit refresh:** a panel-launched lazygit triggers one
+`core.refresh()` on its TermClose. Lazygits launched outside the panel don't.
+
+**Cursor stability:** after any refresh, the cursor re-anchors to the same
+repo+file when still present, else the nearest surviving row (refresh can
+reorder — a committed repo sinks to the clean section).
 
 Keys:
 
 | Key | File row | Repo header |
 |---|---|---|
 | `<CR>` | open file | open lazygit cd'd into repo |
-| `d` | open file + `:Gitsigns diffthis` | — |
+| `d` | open file + `:Gitsigns diffthis` (`??` files: open + notify "untracked — no diff") | — |
 | `g` | lazygit for the file's repo | lazygit for repo |
 | `r` | refresh | refresh |
 | typing | snacks fuzzy filter across all changed files in all repos | |
@@ -136,9 +161,10 @@ Error (`⚠`) rows behave like repo headers: `<CR>`/`g` still open lazygit
 cd'd there (the repo may be usable even when porcelain parsing failed);
 `d` is a no-op.
 
-`<leader>gs` toggles the panel; opening it closes an open explorer picker
-(one left-rail activity at a time, VSCode-style). Explorer's `<leader>e`
-opening over the SCM panel is acceptable (last-opened wins).
+`<leader>gs` toggle mechanics: if the SCM panel is open, close it; otherwise
+close any open explorer picker, then open SCM (one left-rail activity at a
+time, VSCode-style). Explorer's `<leader>e` opening over the SCM panel is
+acceptable (last-opened wins).
 
 ### 4.5 Data flow
 
@@ -163,9 +189,10 @@ No caches, no background work. Staleness bounded by last open/`r`.
 ## 6. Testing
 
 - `tests/core_test.lua`, run via `nvim -l` (plain asserts, no framework):
-  - Porcelain-v2 parser fixtures: ordinary changes, staged+unstaged same file,
-    renames (tab-separated paths), untracked, unmerged, detached HEAD, no
-    upstream (missing `ab` header), empty output (clean).
+  - Porcelain-v2 parser fixtures: ordinary changes, mixed state (`MM` — one
+    entry, xy preserved raw), renames (tab-separated paths), untracked,
+    unmerged, detached HEAD, no upstream (missing `ab` header), empty output
+    (clean).
   - Integration: temp dir with two synthetic repos (one dirty, one clean) →
     `refresh` returns correctly sorted/shaped results.
 - Panel: manual checklist — open/toggle, swap-with-explorer, fuzzy filter,
