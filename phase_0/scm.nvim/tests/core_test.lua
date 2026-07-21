@@ -118,4 +118,72 @@ assert(core.refresh({ roots = { work }, depth = 2, timeout_ms = 5000 }, function
 vim.wait(5000, function() return got ~= nil end, 10)
 assert(got and #got == 2, "second refresh works")
 
+-- refresh(): per-repo error path must not short-circuit other repos.
+-- A directory whose `.git` is a bare, uninitialized dir looks like a repo to
+-- scan() (find sees the `.git` entry) but `git status` inside it fails.
+local err_work = vim.fn.tempname()
+local bad_repo, ok_repo = err_work .. "/bad_repo", err_work .. "/ok_repo"
+vim.fn.mkdir(bad_repo .. "/.git", "p") -- NOT `git init` -- invalid repo
+vim.fn.mkdir(ok_repo, "p")
+sh({ "git", "-C", ok_repo, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "hello" }, ok_repo .. "/a.txt")
+sh({ "git", "-C", ok_repo, "add", "." })
+sh({ "git", "-C", ok_repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init" })
+
+local err_got
+assert(core.refresh({ roots = { err_work }, depth = 2, timeout_ms = 5000 }, function(entries)
+  err_got = entries
+end) == true, "refresh (error path) accepted")
+vim.wait(5000, function() return err_got ~= nil end, 10)
+assert(err_got, "refresh (error path) callback fired")
+
+eq(#err_got, 2, "both repos still reported despite one failing")
+local by_name = {}
+for _, e in ipairs(err_got) do by_name[e.name] = e end
+assert(by_name.bad_repo, "bad_repo present")
+assert(by_name.ok_repo, "ok_repo present")
+assert(type(by_name.bad_repo.err) == "string" and #by_name.bad_repo.err > 0, "bad_repo has non-nil err string")
+assert(by_name.ok_repo.err == nil, "ok_repo unaffected by sibling's failure")
+eq(by_name.ok_repo.clean, true, "ok_repo still parsed correctly")
+
+-- refresh(): zero-repos path -- no roots contain any .git -> cb({})
+local empty_dir = vim.fn.tempname()
+vim.fn.mkdir(empty_dir, "p")
+
+local empty_got
+assert(core.refresh({ roots = { empty_dir }, depth = 2, timeout_ms = 5000 }, function(entries)
+  empty_got = entries
+end) == true, "refresh (zero-repos) accepted")
+vim.wait(5000, function() return empty_got ~= nil end, 10)
+eq(empty_got, {}, "zero repos -> cb({})")
+
+-- refresh(): intra-group alphabetical tie-breaking -- two repos in the SAME
+-- status group (both dirty here) must come back sorted by name, not scan
+-- order or reversed.
+local sort_work = vim.fn.tempname()
+local repo_zzz, repo_aaa = sort_work .. "/zzz_repo", sort_work .. "/aaa_repo"
+-- create in reverse-alphabetical order to make sure any ordering leak from
+-- creation/scan order would show up as a failure
+for _, r in ipairs({ repo_zzz, repo_aaa }) do
+  vim.fn.mkdir(r, "p")
+  sh({ "git", "-C", r, "init", "-q", "-b", "main" })
+  vim.fn.writefile({ "hello" }, r .. "/a.txt")
+  sh({ "git", "-C", r, "add", "." })
+  sh({ "git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init" })
+  vim.fn.writefile({ "changed" }, r .. "/a.txt") -- both dirty (.M)
+end
+
+local sort_got
+assert(core.refresh({ roots = { sort_work }, depth = 2, timeout_ms = 5000 }, function(entries)
+  sort_got = entries
+end) == true, "refresh (sort) accepted")
+vim.wait(5000, function() return sort_got ~= nil end, 10)
+assert(sort_got, "refresh (sort) callback fired")
+
+eq(#sort_got, 2, "two dirty repos")
+eq(sort_got[1].clean, false, "first is dirty")
+eq(sort_got[2].clean, false, "second is dirty")
+eq(sort_got[1].name, "aaa_repo", "alphabetically-first name sorts first within group")
+eq(sort_got[2].name, "zzz_repo", "alphabetically-last name sorts second within group")
+
 print("OK")
