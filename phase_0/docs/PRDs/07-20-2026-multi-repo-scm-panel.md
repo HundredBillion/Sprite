@@ -229,3 +229,30 @@ No caches, no background work. Staleness bounded by last open/`r`.
 - Sprite build plan: `~/Downloads/terminal-project-brief.md` §6 (Phase 0.1), §7
 - Existing art: `~/.config/nvim/lua/plugins/git-repos.lua`
 - git porcelain v2 format: `git help status`, "Porcelain Format Version 2"
+
+---
+
+## 10. Amendment — Tier 2 refresh triggers (2026-07-22)
+
+Supersedes the v1 refresh model ("on open + manual `r` + panel-launched
+lazygit close" — §2 non-goals, §4.4/§4.5). Daily use surfaced staleness in
+practice (committed in lazygit, panel kept showing old state), and a handoff
+spec requested event-driven refresh. Now implemented:
+
+- **Scoped per-repo refresh** (`core.refresh_repo` + `panel.refresh_repo_view`):
+  one async `git status` for one repo, spliced into the entry list and
+  re-sorted. Debounced per repo (`repo_debounce_ms`, default 150); a request
+  landing mid-scan coalesces into exactly one re-run (never stacks processes).
+- **TermClose trigger** (`scm/refresh.lua`): ANY lazygit terminal exiting —
+  panel-launched or opened by hand in any :terminal — resolves its repo root
+  from the `term://{cwd}//` buffer name (`git rev-parse --show-toplevel`) and
+  does a scoped refresh; full rescan only when recovery fails. This replaced
+  the v1 per-window `:on("TermClose")` hook and its reuse-dedup guard.
+- **Focus safety nets**: WinEnter on the panel's own windows, and FocusGained
+  (Neovim regains OS focus) → full rescan, debounced (`focus_debounce_ms`,
+  default 1500). Both no-op when the panel is closed.
+- Performance invariants preserved: all git via async `vim.system`, no UI
+  blocking, fast-context discipline unchanged.
+- Explicitly out of scope (Tier 3): `vim.uv.fs_event` watchers per repo. The
+  trigger layer sits behind the same two entrypoints so Tier 3 can slot in
+  without restructuring.

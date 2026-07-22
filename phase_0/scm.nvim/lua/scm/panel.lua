@@ -77,6 +77,9 @@ function M.setup(opts)
   for name, link in pairs(hls) do
     vim.api.nvim_set_hl(0, name, { link = link, default = true })
   end
+  -- Event triggers (lazygit exits, focus) live in their own module; requiring
+  -- it here (not at the top) avoids a load-time require cycle.
+  require("scm.refresh").setup()
 end
 
 -- The sidebar layout gives the list window border = "none" (no titlebar to
@@ -152,22 +155,12 @@ end
 
 local sactions = function() return require("snacks.picker.actions") end
 
--- Thin wrapper so every lazygit launch goes through one place. A lazygit
--- opened from the panel hooks its own close to trigger one refresh, so the
--- panel reflects whatever was staged or committed; lazygits opened any other
--- way are left alone.
+-- Thin wrapper so every lazygit launch goes through one place. Refresh-on-exit
+-- is handled by scm.refresh's global TermClose trigger, which catches BOTH
+-- panel-launched lazygits and ones opened by hand in any :terminal — so no
+-- per-window hook (or dedup guard for reused hidden terminals) is needed here.
 function M.lazygit(repo)
-  local lg = Snacks.lazygit({ cwd = repo })
-  -- Snacks.lazygit toggles: reopening a hidden (not closed) terminal for the
-  -- same cwd hands back this same cached object, so guard against stacking a
-  -- second TermClose hook on it (which would fire the refresh twice, three
-  -- times, etc. once the process actually exits).
-  if lg and lg.on and not lg._scm_refresh_hooked then
-    lg._scm_refresh_hooked = true
-    lg:on("TermClose", function()
-      vim.schedule(function() M.refresh_view() end)
-    end, { buf = true })
-  end
+  Snacks.lazygit({ cwd = repo })
 end
 
 local function key_actions()
@@ -232,60 +225,81 @@ function M.toggle()
   M.open()
 end
 
+-- Position of the item matching `key` in `items`, or nil.
+local function index_of(items, key)
+  if not key then return nil end
+  for idx, it in ipairs(items) do
+    if item_key(it) == key then return idx end
+  end
+  return nil
+end
+
+-- Capture the cursor's identity (and old position) so it can be restored
+-- after the item list is rebuilt — same row if it survived, else the nearest
+-- surviving row by clamping its old index into the new list's range.
+local function capture_anchor(picker)
+  local anchor = item_key(picker:current())
+  return anchor, anchor and index_of(picker:items(), anchor) or nil
+end
+
+-- Rebuild the picker's items from M.state.entries and restore the cursor.
+-- find()'s matcher runs on a coroutine/libuv check-handle, so the new items
+-- aren't ready until on_done fires (which snacks delivers on the main loop);
+-- restoring from a bare vim.schedule would race the matcher.
+local function rerender(p, anchor, anchor_idx, title)
+  p:find({
+    on_done = function()
+      set_title(p, title)
+      if not anchor then return end
+      local items = p:items()
+      if #items == 0 then return end
+      local idx = index_of(items, anchor) or (anchor_idx and math.min(anchor_idx, #items))
+      if idx then pcall(function() p.list:view(idx) end) end
+    end,
+  })
+end
+
 function M.refresh_view(picker)
   picker = picker or Snacks.picker.get({ source = "scm" })[1]
   if not picker then return end
-  local anchor = item_key(picker:current())
-  -- Remember where the anchor row sat in the OLD list too, so that if it's
-  -- gone after refresh (e.g. its repo just went clean and dropped out) we
-  -- can still land near where it used to be instead of doing nothing.
-  local anchor_idx
-  if anchor then
-    for idx, it in ipairs(picker:items()) do
-      if item_key(it) == anchor then
-        anchor_idx = idx
-        break
-      end
-    end
-  end
+  local anchor, anchor_idx = capture_anchor(picker)
   set_title(picker, "Source Control (scanning…)")
   local accepted = core.refresh(M.state.opts, function(entries)
     M.state.entries = entries
     local p = Snacks.picker.get({ source = "scm" })[1]
     if not p then return end -- panel was closed while the scan was in flight
-    -- find()'s matcher runs on a coroutine/libuv check-handle, so the new
-    -- items aren't ready until on_done fires; restoring the cursor from a
-    -- bare vim.schedule right after find() would race the matcher and see
-    -- stale (or empty) items. on_done itself already lands back on the
-    -- main/scheduled context (either called inline from an already-scheduled
-    -- caller, or vim.schedule_wrap'd by snacks when the matcher is async),
-    -- so no extra vim.schedule is needed here.
-    p:find({
-      on_done = function()
-        -- zero repos under the configured roots is a normal, expected outcome --
-        -- say so in the title instead of leaving a blank picker window.
-        set_title(p, #entries == 0 and "Source Control (no repositories under configured roots)" or "Source Control")
-        if not anchor then return end
-        local items = p:items()
-        if #items == 0 then return end
-        for idx, it in ipairs(items) do
-          if item_key(it) == anchor then
-            pcall(function() p.list:view(idx) end)
-            return
-          end
-        end
-        -- anchor row didn't survive the refresh: fall back to the nearest
-        -- surviving row by clamping its old index into the new list's range.
-        if anchor_idx then
-          local fallback_idx = math.min(anchor_idx, #items)
-          pcall(function() p.list:view(fallback_idx) end)
-        end
-      end,
-    })
+    -- zero repos under the configured roots is a normal, expected outcome --
+    -- say so in the title instead of leaving a blank picker window.
+    rerender(p, anchor, anchor_idx,
+      #entries == 0 and "Source Control (no repositories under configured roots)" or "Source Control")
   end)
   if not accepted then
     set_title(picker, "Source Control") -- a refresh is already in flight; drop this one
   end
+end
+
+-- Scoped refresh: re-scan ONE repo and splice its fresh entry into the
+-- current list (keeping full multi-repo rescans off the hot paths — lazygit
+-- exits and focus events know which repo they're about). Entries update even
+-- while the panel is closed; rendering is skipped until it reopens.
+function M.refresh_repo_view(repo)
+  return core.refresh_repo(repo, M.state.opts, function(entry)
+    local entries = M.state.entries
+    local found = false
+    for i, e in ipairs(entries) do
+      if e.path == entry.path then
+        entries[i] = entry
+        found = true
+        break
+      end
+    end
+    if not found then entries[#entries + 1] = entry end
+    table.sort(entries, core.compare_entries)
+    local p = Snacks.picker.get({ source = "scm" })[1]
+    if not p then return end
+    local anchor, anchor_idx = capture_anchor(p)
+    rerender(p, anchor, anchor_idx, "Source Control")
+  end)
 end
 
 return M

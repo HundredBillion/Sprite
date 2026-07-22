@@ -245,4 +245,47 @@ eq(items[3].ctx, "api", "top-level file ctx = repo only")
 eq(items[5].dup, nil, "unique name not flagged")
 for i, it in ipairs(items) do eq(it.sort, i, "sort field " .. i) end
 
+-- refresh_repo(): scoped single-repo refresh with debounce + coalescing
+local rwork = vim.fn.tempname()
+local rrepo = rwork .. "/scoped_repo"
+vim.fn.mkdir(rrepo, "p")
+sh({ "git", "-C", rrepo, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "hello" }, rrepo .. "/a.txt")
+sh({ "git", "-C", rrepo, "add", "." })
+sh({ "git", "-C", rrepo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init" })
+vim.fn.writefile({ "changed" }, rrepo .. "/a.txt")
+
+local ropts = { roots = {}, depth = 2, timeout_ms = 5000, repo_debounce_ms = 0 }
+local calls = {}
+local function collect(e) calls[#calls + 1] = e end
+assert(core.refresh_repo(rrepo, ropts, collect) == true, "scoped refresh accepted")
+-- requests landing while the scan is in flight coalesce into ONE re-run
+assert(core.refresh_repo(rrepo, ropts, collect) == false, "mid-flight request coalesced")
+assert(core.refresh_repo(rrepo, ropts, collect) == false, "second mid-flight request also coalesced")
+vim.wait(5000, function() return #calls >= 2 end, 10)
+vim.wait(300, function() return #calls > 2 end, 10) -- settle: a 3rd call would be a bug
+eq(#calls, 2, "exactly one coalesced re-run (no stacking)")
+eq(calls[1].name, "scoped_repo", "scoped entry name")
+eq(calls[1].clean, false, "scoped dirty flag")
+eq(calls[1].files, { { path = "a.txt", xy = ".M" } }, "scoped File Entries")
+
+-- debounce: an immediate follow-up inside a large window is dropped
+local dropped = 0
+assert(
+  core.refresh_repo(rrepo, { roots = {}, depth = 2, timeout_ms = 5000, repo_debounce_ms = 60000 }, function()
+    dropped = dropped + 1
+  end) == false,
+  "debounced drop inside window"
+)
+eq(dropped, 0, "debounced call never runs")
+
+-- error path: a broken repo yields an err entry via the scoped path too
+local rbad = rwork .. "/bad_scoped"
+vim.fn.mkdir(rbad .. "/.git", "p")
+local bad_entry
+assert(core.refresh_repo(rbad, ropts, function(e) bad_entry = e end) == true, "broken repo scan accepted")
+vim.wait(5000, function() return bad_entry ~= nil end, 10)
+assert(bad_entry and bad_entry.err and #bad_entry.err > 0, "scoped error entry has err")
+eq(bad_entry.files, {}, "scoped error entry has no files")
+
 print("OK")
