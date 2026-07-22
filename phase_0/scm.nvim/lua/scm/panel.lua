@@ -106,29 +106,35 @@ end
 function M.format_item(item)
   if item.kind == "header" then
     local e = item.entry
-    if e.err then
-      return {
-        { "⚠ ", "DiagnosticWarn" },
-        { ("%-24s "):format(e.name), "Comment" },
-        { e.err, "Comment" },
-      }
+    -- Name column, fixed width. Colliding repo names get the parent dir woven
+    -- in (dimmed) right after the name, inside this column — appending it at
+    -- the line's end put it past the narrow sidebar's truncation point, which
+    -- left two same-name clones visually indistinguishable.
+    local function name_col(hl)
+      if not item.dup then
+        return { { ("%-24s "):format(e.name), hl } }
+      end
+      local parent = vim.fn.fnamemodify(e.path, ":h:t")
+      local pad = string.rep(" ", math.max(24 - #e.name - #parent - 1, 0))
+      return { { e.name .. " ", hl }, { parent .. pad .. " ", "Comment" } }
     end
     local parts = {}
-    if e.clean then
+    if e.err then
+      parts[#parts + 1] = { "⚠ ", "DiagnosticWarn" }
+      vim.list_extend(parts, name_col("Comment"))
+      parts[#parts + 1] = { e.err, "Comment" }
+    elseif e.clean then
       parts[#parts + 1] = { "▶ ", "Comment" }
-      parts[#parts + 1] = { ("%-24s "):format(e.name), "Comment" }
+      vim.list_extend(parts, name_col("Comment"))
       parts[#parts + 1] = { e.branch .. "  ", "Comment" }
       parts[#parts + 1] = { "─", "Comment" }
     else
       parts[#parts + 1] = { "▼ ", "Directory" }
-      parts[#parts + 1] = { ("%-24s "):format(e.name), "Title" }
+      vim.list_extend(parts, name_col("Title"))
       parts[#parts + 1] = { e.branch .. " ", "Function" }
       if e.ahead > 0 then parts[#parts + 1] = { "↑" .. e.ahead, "DiagnosticInfo" } end
       if e.behind > 0 then parts[#parts + 1] = { "↓" .. e.behind, "DiagnosticWarn" } end
       parts[#parts + 1] = { ("  %d"):format(#e.files), "Number" }
-    end
-    if item.dup then
-      parts[#parts + 1] = { "  " .. vim.fn.fnamemodify(e.path, ":h:t"), "Comment" }
     end
     return parts
   end
