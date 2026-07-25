@@ -74,15 +74,21 @@ still hosting real VT100 grid panes alongside it.
    library, explicitly designed for embedding. Mitchell Hashimoto: "libghostty
    has no opinion about the renderer or GUI framework."
 
-2. **Neovim frontend (Layer 2)** — `nvim --embed` + msgpack-RPC client.
-   Digests `redraw` events (`grid_line`, `hl_attr_define`, `grid_cursor_goto`,
-   `win_viewport`) into plain state structs. With `ext_*` UI options
-   (ext_popupmenu, ext_cmdline, ext_messages), popups/cmdline can be pulled out
-   of the grid and rendered as native widgets. Renderer-agnostic by design.
+2. **Editor frontend (Layer 2)** — behind an `EditorPanel` trait
+   (`render`, `handle_input`, `cursor_position`, plus whatever state the
+   chrome needs: selections, diagnostics, gutter), so `Surface::Panel`
+   (Layer 3) never talks to a specific editor, only the interface.
+   **`NeovimPanel`** is the only implementation being built (Phase 2):
+   `nvim --embed` + msgpack-RPC client, digesting `redraw` events
+   (`grid_line`, `hl_attr_define`, `grid_cursor_goto`, `win_viewport`) into
+   plain state structs; `ext_*` UI options (ext_popupmenu, ext_cmdline,
+   ext_messages) pull popups/cmdline out of the grid as native widgets.
+   A second implementation is a reserved, unscheduled slot behind the same
+   trait — see §5 for whether/when that's worth building.
 
 3. **Compositor (Layer 3)** — owns the window + GPU. Holds a list of surfaces:
    `Surface::Grid` (a VT100 pane — tmux/ssh/htop live here, unchanged) and
-   `Surface::Panel` (native Neovim panel with its own `Layout { padding: [4],
+   `Surface::Panel` (any `EditorPanel` impl, with its own `Layout { padding: [4],
    line_height_extra, corner_radius }`). Per-surface pixel layout is the whole
    point. Plus a **side-channel protocol** so a pane can request promotion to
    a native panel at runtime (Unix socket per pane; programs that don't know it
@@ -158,6 +164,88 @@ channels to the render thread.
   unique styles on screen. **Open test item:** heavy Tree-sitter highlighting
   stress test (the closest real-world match to the pathological case) — run it
   against both the fork and Sprite Phase 2.
+
+### Deferred: a `HelixPanel` second `EditorPanel` implementation
+
+Explored 2026-07-22 via a historical analysis (Vim/Emacs→Neovim,
+Sublime/Atom→VSCode transitions) applied to Neovim-vs-Helix. Verdict:
+**deferred, not scheduled** — build only if a trigger below fires.
+
+Why: the pattern behind both historical overtakings required (a) a
+structural, unretrofittable capability gap, (b) a protocol-standardization
+moment leveling the extension ecosystem, (c) either corporate bootstrapping
+muscle or an incumbent-side forcing crisis (abandonment/stagnation). Applied
+to Helix vs. Neovim: (a) is weak — Helix's edge is zero-config LSP/Tree-sitter
+*packaging*, which Neovim's distro layer (LazyVim/NvChad/AstroNvim) has
+largely closed, the same way Vim 8.0 partially closed Neovim's async gap;
+(b) is neutral — both already have LSP, no unilateral timing wedge like
+Neovim had over Vim for 5+ years; (c) is absent on both counts — Neovim is
+actively governed and thriving (no crisis), Helix has no VSCode-style
+corporate sponsor. The closest real analogy is Vim→Neovim itself (same
+niche, no corporate sponsor either side, no forcing crisis) — and that
+transition, with a *stronger* structural case, still hasn't overtaken its
+parent after 12 years (Neovim 14% vs Vim 24%, SO 2025). Helix's case is
+weaker on every axis except editing-model taste (selection-first modal
+editing — real, but contestable, not a settled capability gap).
+
+Estimate: P(Helix meaningfully overtakes Neovim specifically, 10–15yr
+horizon) ~10–15%; P(Helix becomes "the dominant editor," i.e. overtakes
+VSCode-scale share) low single digits. Wildcard: AI-native tooling on
+VSCode's substrate (Cursor, 17.9% and rising per SO 2025) is the
+fastest-growing force in the current market — a bigger disruption vector to
+this whole niche than either modal editor poses to the other.
+
+**Revisit triggers, refined 2026-07-22** — the estimate above assumes
+incremental feature catch-up, the slow Vim→Neovim-shaped path (base rate:
+"healthy minority" after a decade, not overtaking). A real overtake almost
+certainly needs 2+ of these firing *together*, not one at a time. Split by
+how much each would actually move the needle:
+
+*Necessary but modest — gets Helix to "credible alternative" only (closes
+ecosystem-critical-mass, ingredient D):*
+1. Steel merges upstream AND reaches rough parity with Neovim's
+   LSP/completion/picker/git workflows (not just "exists").
+2. A single, wildly popular curated starter config emerges for Helix — the
+   LazyVim-equivalent on-ramp. Raw plugin count matters less than a
+   one-command path to "90% of the good stuff."
+
+*High-leverage — could change the trajectory, not just the score:*
+3. **Helix ships an external UI protocol designed pixel-native from the
+   start** (per maintainers' stated openness). This is the single most
+   powerful lever, and Sprite-relevant specifically: Neovim's multigrid
+   protocol is still grid-shaped — the reason Sprite/Neovide/ghostty-pixel-
+   scroll all need springs and SDF overlays to fake pixel-native chrome onto
+   a cell grid. A Helix protocol built with a decade's hindsight could skip
+   that ceiling entirely — a genuine structural advantage *for* Helix, not
+   parity. Also collapses the fork-vs-embed cost analysis (§ above) to
+   Neovim-shaped for a `HelixPanel` specifically.
+4. **A well-funded AI-native editor company adopts Helix as its substrate**
+   instead of forking VSCode/Electron — the wedge being that AI agents doing
+   bulk simultaneous edits ("apply this pattern across N locations, review
+   each") map more naturally onto Helix's native multi-selection primitive
+   than onto Vim's single-cursor-plus-macros model. This is the one path
+   structurally analogous to what actually worked historically (corporate
+   engineering muscle + fast distribution), arriving via a *new* use case
+   rather than competing with Neovim on Neovim's own turf.
+5. Neovim's own governance/maintenance visibly stalls (no sign of this as of
+   2026) — removes the one thing Vim never lost either: a working,
+   non-abandoned incumbent.
+
+**The plausible fast-overtake scenario is these compounding**: (3) enables a
+funded AI-native product built for (4)'s bulk-edit UX → that product's
+success pulls Steel contributors/funding in fast (1)-(2) closed quickly
+instead of organically over a decade → Neovim's grid ceiling becomes a
+visible, fork-required weakness by comparison. Three ingredients firing in
+sequence — the only shape, in either historical precedent, that moved at
+VSCode-speed (3–5yr) rather than Neovim-speed (12yr+, still minority).
+
+None of the above raises the base-rate estimate on its own — no trigger
+currently shows real signal (Steel unmerged, no protocol proposal exists, no
+sponsor has surfaced). They describe the conditional worlds where the
+estimate would jump, worth monitoring, not evidence it's happening.
+
+Until a trigger fires: `EditorPanel` (§3) has exactly one implementation,
+`NeovimPanel`. No `HelixPanel` work is scheduled.
 
 ---
 
