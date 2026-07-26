@@ -31,7 +31,8 @@ end
 
 -- Flatten Repo Entries into picker items. Every file row is self-identifying
 -- (text and ctx carry the repo name) so filtering may orphan headers freely.
-function M.build_items(entries)
+function M.build_items(entries, collapsed)
+  collapsed = collapsed or {}
   local dup = {}
   for _, e in ipairs(entries) do
     dup[e.name] = (dup[e.name] or 0) + 1
@@ -42,17 +43,27 @@ function M.build_items(entries)
     items[#items + 1] = it
   end
   for _, e in ipairs(entries) do
-    add({ kind = "header", entry = e, text = e.name .. " " .. (e.branch or ""), dup = dup[e.name] > 1 or nil })
-    for _, f in ipairs(e.files or {}) do
-      local dir = f.path:match("^(.*)/[^/]+$")
-      add({
-        kind = "file",
-        entry = e,
-        fentry = f,
-        file = e.path .. "/" .. f.path,
-        text = e.name .. "/" .. f.path,
-        ctx = dir and (e.name .. "/" .. dir) or e.name,
-      })
+    local has_children = not e.err and not e.clean and #(e.files or {}) > 0
+    local is_collapsed = has_children and collapsed[e.path] == true
+    add({
+      kind = "header",
+      entry = e,
+      text = e.name .. " " .. (e.branch or ""),
+      dup = dup[e.name] > 1 or nil,
+      collapsed = is_collapsed,
+    })
+    if not is_collapsed then
+      for _, f in ipairs(e.files or {}) do
+        local dir = f.path:match("^(.*)/[^/]+$")
+        add({
+          kind = "file",
+          entry = e,
+          fentry = f,
+          file = e.path .. "/" .. f.path,
+          text = e.name .. "/" .. f.path,
+          ctx = dir and (e.name .. "/" .. dir) or e.name,
+        })
+      end
     end
   end
   return items
@@ -60,7 +71,7 @@ end
 
 local core = require("scm.core")
 
-M.state = { entries = {}, opts = nil }
+M.state = { entries = {}, opts = nil, collapsed = {} }
 
 function M.setup(opts)
   M.state.opts = vim.tbl_deep_extend("force", core.defaults, opts or {})
@@ -132,7 +143,7 @@ function M.format_item(item)
       parts[#parts + 1] = { e.branch .. "  ", "Comment" }
       parts[#parts + 1] = { "─", "Comment" }
     else
-      parts[#parts + 1] = { "▼ ", "Directory" }
+      parts[#parts + 1] = { item.collapsed and "▶ " or "▼ ", "Directory" }
       vim.list_extend(parts, name_col("Title"))
       parts[#parts + 1] = { e.branch .. " ", "Function" }
       if e.ahead > 0 then parts[#parts + 1] = { "↑" .. e.ahead, "DiagnosticInfo" } end
@@ -163,14 +174,64 @@ function M.lazygit(repo)
   Snacks.lazygit({ cwd = repo })
 end
 
-local function key_actions()
+local function has_children(item)
+  return item
+    and item.kind == "header"
+    and not item.entry.err
+    and not item.entry.clean
+    and #(item.entry.files or {}) > 0
+end
+
+local function view_header(picker, path)
+  for idx, candidate in ipairs(picker:items()) do
+    if candidate.kind == "header" and candidate.entry.path == path then
+      pcall(function() picker.list:view(idx) end)
+      return true
+    end
+  end
+  return false
+end
+
+local function rebuild_at_header(picker, path)
+  picker:find({
+    on_done = function() view_header(picker, path) end,
+  })
+end
+
+local function set_collapsed(picker, item, collapsed)
+  M.state.collapsed[item.entry.path] = collapsed and true or nil
+  rebuild_at_header(picker, item.entry.path)
+end
+
+function M.key_actions()
   return {
     scm_confirm = function(picker, item)
       if not item then return end
       if item.kind == "file" then
         sactions().jump(picker, item, { cmd = "edit" })
+      elseif item.collapsed then
+        set_collapsed(picker, item, false)
       else
         M.lazygit(item.entry.path)
+      end
+    end,
+    scm_close = function(picker, item)
+      if not item then return end
+      if item.kind == "file" then
+        if view_header(picker, item.entry.path) then return end
+        if #(item.entry.files or {}) == 0 then return end
+        M.state.collapsed[item.entry.path] = true
+        rebuild_at_header(picker, item.entry.path)
+      elseif has_children(item) and not item.collapsed then
+        set_collapsed(picker, item, true)
+      end
+    end,
+    scm_open = function(picker, item)
+      if not item then return end
+      if item.kind == "file" then
+        sactions().jump(picker, item, { cmd = "edit" })
+      elseif has_children(item) and item.collapsed then
+        set_collapsed(picker, item, false)
       end
     end,
     scm_diff = function(picker, item)
@@ -191,10 +252,11 @@ end
 
 function M.open()
   M.setup(M.state.opts) -- idempotent; ensures defaults even if setup() was never called
+  M.state.collapsed = {}
   local picker = Snacks.picker.pick({
     source = "scm",
     title = "Source Control",
-    finder = function() return M.build_items(M.state.entries) end,
+    finder = function() return M.build_items(M.state.entries, M.state.collapsed) end,
     format = M.format_item,
     layout = { preset = "sidebar", preview = false },
     focus = "list",
@@ -203,9 +265,17 @@ function M.open()
     matcher = { sort_empty = false, fuzzy = true },
     sort = { fields = { "sort" } }, -- keep build_items' repo/file order when unfiltered
     confirm = "scm_confirm",
-    actions = key_actions(),
+    actions = M.key_actions(),
     win = {
-      list = { keys = { ["d"] = "scm_diff", ["g"] = "scm_lazygit", ["r"] = "scm_refresh" } },
+      list = {
+        keys = {
+          ["h"] = "scm_close",
+          ["l"] = "scm_open",
+          ["d"] = "scm_diff",
+          ["g"] = "scm_lazygit",
+          ["r"] = "scm_refresh",
+        },
+      },
       input = { keys = { ["<c-r>"] = { "scm_refresh", mode = { "i", "n" } } } },
     },
   })

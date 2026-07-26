@@ -288,4 +288,171 @@ vim.wait(5000, function() return bad_entry ~= nil end, 10)
 assert(bad_entry and bad_entry.err and #bad_entry.err > 0, "scoped error entry has err")
 eq(bad_entry.files, {}, "scoped error entry has no files")
 
+-- Repository Section collapse navigation: visible rows, glyphs, h/l, confirm,
+-- filtered-header fallback, inert headers, and session-local state.
+local nav_entries = {
+  {
+    name = "dirty",
+    path = "/repos/dirty",
+    branch = "main",
+    ahead = 0,
+    behind = 0,
+    clean = false,
+    files = {
+      { path = "one.lua", xy = ".M" },
+      { path = "two.lua", xy = "??" },
+    },
+  },
+  {
+    name = "clean",
+    path = "/repos/clean",
+    branch = "main",
+    ahead = 0,
+    behind = 0,
+    clean = true,
+    files = {},
+  },
+  {
+    name = "broken",
+    path = "/repos/broken",
+    branch = "?",
+    ahead = 0,
+    behind = 0,
+    clean = false,
+    err = "status failed",
+    files = {},
+  },
+}
+
+panel.state.collapsed = {}
+local function nav_items()
+  return panel.build_items(nav_entries, panel.state.collapsed)
+end
+
+local expanded_nav = nav_items()
+eq(#expanded_nav, 5, "expanded Repository Section includes its two files")
+eq(expanded_nav[1].collapsed, false, "expanded header state")
+eq(panel.format_item(expanded_nav[1])[1][1], "▼ ", "expanded disclosure glyph")
+
+panel.state.collapsed["/repos/dirty"] = true
+local collapsed_nav = nav_items()
+eq(#collapsed_nav, 3, "collapsed Repository Section hides only its files")
+eq(collapsed_nav[1].collapsed, true, "collapsed header state")
+eq(panel.format_item(collapsed_nav[1])[1][1], "▶ ", "collapsed disclosure glyph")
+eq(collapsed_nav[2].collapsed, false, "clean header is never collapsible")
+eq(collapsed_nav[3].collapsed, false, "error header is never collapsible")
+
+local function fake_picker(items, filter)
+  local picker = { _items = items, filter_visible = filter }
+  picker.list = {
+    view = function(_, idx) picker.viewed = idx end,
+  }
+  function picker:items()
+    return self._items
+  end
+  function picker:find(opts)
+    self.finds = (self.finds or 0) + 1
+    local rebuilt = nav_items()
+    self._items = self.filter_visible and self.filter_visible(rebuilt) or rebuilt
+    if opts and opts.on_done then opts.on_done() end
+  end
+  return picker
+end
+
+local actions = panel.key_actions()
+
+-- In the normal view, h on a file selects its visible header first.
+panel.state.collapsed = {}
+expanded_nav = nav_items()
+local picker = fake_picker(expanded_nav)
+actions.scm_close(picker, expanded_nav[2])
+eq(picker.viewed, 1, "h on file selects repository header")
+eq(panel.state.collapsed["/repos/dirty"], nil, "first h does not collapse visible parent")
+eq(picker.finds, nil, "selecting a visible parent does not rebuild")
+
+-- The next h collapses; l expands; repeated h/l in the same state are no-ops.
+actions.scm_close(picker, expanded_nav[1])
+eq(panel.state.collapsed["/repos/dirty"], true, "h on header collapses")
+eq(#picker:items(), 3, "collapse rebuild hides file rows")
+eq(picker.viewed, 1, "collapse re-anchors header")
+local finds = picker.finds
+actions.scm_close(picker, picker:items()[1])
+eq(picker.finds, finds, "h on collapsed header is a no-op")
+
+actions.scm_open(picker, picker:items()[1])
+eq(panel.state.collapsed["/repos/dirty"], nil, "l on collapsed header expands")
+eq(#picker:items(), 5, "expand rebuild restores file rows")
+finds = picker.finds
+actions.scm_open(picker, picker:items()[1])
+eq(picker.finds, finds, "l on expanded header is a no-op")
+
+-- l and <CR> on a file use the same existing jump behavior.
+local previous_picker_actions = package.loaded["snacks.picker.actions"]
+local jumps = {}
+package.loaded["snacks.picker.actions"] = {
+  jump = function(got_picker, got_item, opts)
+    jumps[#jumps + 1] = { picker = got_picker, item = got_item, cmd = opts.cmd }
+  end,
+}
+actions.scm_open(picker, picker:items()[2])
+actions.scm_confirm(picker, picker:items()[2])
+eq(#jumps, 2, "l and confirm both open a file")
+eq(jumps[1], { picker = picker, item = picker:items()[2], cmd = "edit" }, "l file jump")
+eq(jumps[2], { picker = picker, item = picker:items()[2], cmd = "edit" }, "confirm file jump")
+package.loaded["snacks.picker.actions"] = previous_picker_actions
+
+-- <CR> expands a collapsed header without lazygit, then opens lazygit once expanded.
+local previous_lazygit = panel.lazygit
+local lazygit_calls = 0
+panel.lazygit = function() lazygit_calls = lazygit_calls + 1 end
+panel.state.collapsed["/repos/dirty"] = true
+picker = fake_picker(nav_items())
+actions.scm_confirm(picker, picker:items()[1])
+eq(panel.state.collapsed["/repos/dirty"], nil, "confirm expands collapsed header")
+eq(lazygit_calls, 0, "expanding does not open lazygit")
+actions.scm_confirm(picker, picker:items()[1])
+eq(lazygit_calls, 1, "confirm on expanded header opens lazygit")
+
+-- Clean/error headers are inert for h/l and retain header confirm behavior.
+local clean_header, error_header = picker:items()[4], picker:items()[5]
+finds = picker.finds
+actions.scm_close(picker, clean_header)
+actions.scm_open(picker, clean_header)
+actions.scm_close(picker, error_header)
+actions.scm_open(picker, error_header)
+eq(picker.finds, finds, "h/l are inert on clean and error headers")
+actions.scm_confirm(picker, clean_header)
+actions.scm_confirm(picker, error_header)
+eq(lazygit_calls, 3, "clean/error confirm still opens lazygit")
+panel.lazygit = previous_lazygit
+
+-- If fuzzy filtering hides the header, h collapses immediately and preserves
+-- the filter's visible result set instead of clearing the query.
+panel.state.collapsed = {}
+expanded_nav = nav_items()
+local filtered = fake_picker({ expanded_nav[2] }, function() return {} end)
+actions.scm_close(filtered, expanded_nav[2])
+eq(panel.state.collapsed["/repos/dirty"], true, "filtered file h collapses hidden parent")
+eq(#filtered:items(), 0, "active filter remains applied after collapse")
+
+-- The same collapse set is reused by refresh-style rebuilds.
+eq(#nav_items(), 3, "collapse state survives rebuilds")
+
+-- Opening a new Panel session resets presentation state without needing a
+-- live Snacks window or a Core refresh in this headless test.
+local previous_snacks = _G.Snacks
+local previous_refresh_view = panel.refresh_view
+local opened_picker = fake_picker({})
+_G.Snacks = {
+  picker = {
+    pick = function() return opened_picker end,
+  },
+}
+panel.refresh_view = function() end
+panel.state.collapsed["/repos/dirty"] = true
+eq(panel.open(), opened_picker, "open returns the new picker")
+eq(panel.state.collapsed, {}, "new Panel session starts fully expanded")
+panel.refresh_view = previous_refresh_view
+_G.Snacks = previous_snacks
+
 print("OK")
