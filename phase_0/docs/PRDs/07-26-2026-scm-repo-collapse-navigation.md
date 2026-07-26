@@ -1,7 +1,7 @@
 # PRD: SCM Repository Collapse Navigation
 
 **Date:** 2026-07-26
-**Status:** Approved design; awaiting written-PRD review
+**Status:** Approved + grilled (2026-07-26)
 **Owner:** David Lee
 **Parent:** `07-20-2026-multi-repo-scm-panel.md`
 
@@ -25,6 +25,9 @@ panel's existing file, lazygit, refresh, and filtering behavior.
 
 - `h` on a file row moves the cursor to that file's repository header without
   collapsing it. Pressing `h` again collapses that expanded repository.
+- If an active fuzzy filter hides that repository header, `h` on its file row
+  collapses the repository immediately without clearing the filter. The user
+  clears the filter before expanding that Repository Section again.
 - `h` on an expanded repository header collapses it.
 - `h` on a collapsed repository header does nothing.
 - `l` on a collapsed repository header expands it.

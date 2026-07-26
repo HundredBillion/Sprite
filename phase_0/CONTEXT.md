@@ -17,6 +17,13 @@ in v1). The disposable half; contains no git knowledge.
 _Avoid_: sidebar (ambiguous with the file explorer), picker (an
 implementation detail of the v1 face)
 
+**Repository Section**:
+One repository header and its zero or more File Entry rows in the Panel. A
+Repository Section may be expanded or collapsed; this is presentation state
+and does not change its Repo Entry.
+_Avoid_: directory (the section groups source-control state, not filesystem
+children), repo tree
+
 **Renderer**:
 Any consumer of Repo Entries — the snacks Panel today, a bare-Neovim face or
 Sprite native panel later. The Repo Entry list is the contract between Core
