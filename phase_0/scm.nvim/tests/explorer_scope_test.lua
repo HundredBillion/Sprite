@@ -127,17 +127,50 @@ core.refresh = old_refresh
 local old_refresh_repo = core.refresh_repo
 local updated = { path = "/shared", name = "shared", branch = "main", clean = false, files = { { path = "x", xy = ".M" } } }
 local untouched = { path = "/other", name = "other", branch = "main", clean = true, files = {} }
-panel.state.tabs[tab_a].entries = { vim.deepcopy(updated) }
-panel.state.tabs[tab_b].entries = { untouched }
-vim.api.nvim_set_current_tabpage(tab_b)
+local stale_a = { path = "/shared", name = "shared", branch = "old-a", clean = true, files = {} }
+local stale_b = { path = "/shared", name = "shared", branch = "old-b", clean = true, files = {} }
+local stale_closed = { path = "/shared", name = "shared", branch = "old-closed", clean = true, files = {} }
+local clean_a = { path = "/a-clean", name = "a-clean", branch = "main", clean = true, files = {} }
+local dirty_z = { path = "/z-dirty", name = "z-dirty", branch = "main", clean = false, files = { { path = "z", xy = ".M" } } }
+panel.state.tabs[tab_a].entries = { clean_a, stale_a }
+panel.state.tabs[tab_b].entries = { dirty_z, stale_b }
+panel.state.tabs[tab_c].entries = { stale_closed }
+vim.cmd("tabnew")
+local tab_d = vim.api.nvim_get_current_tabpage()
+panel.state.tabs[tab_d] = { entries = { untouched } }
+
+local function tracked_picker(tab, anchor)
+  local picker = { _scm_tab = tab, finds = 0, viewed = nil, matcher = {}, input = { win = { set_title = function() end } } }
+  picker.current = function() return { kind = "header", entry = { path = anchor } } end
+  picker.items = function() return panel.build_items(panel.state.tabs[tab].entries) end
+  picker.list = { view = function(_, index) picker.viewed = index end }
+  picker.find = function(_, opts)
+    picker.finds = picker.finds + 1
+    opts.on_done(picker)
+  end
+  return picker
+end
+
+local picker_a = tracked_picker(tab_a, clean_a.path)
+local picker_b = tracked_picker(tab_b, dirty_z.path)
+local picker_c = tracked_picker(tab_c, stale_closed.path)
+local picker_d = tracked_picker(tab_d, untouched.path)
+_G.Snacks = { picker = { get = function(opts)
+  eq(opts, { source = "scm", tab = false }, "scoped refresh queries all tab pickers")
+  return { picker_a, picker_b, picker_c, picker_d }
+end } }
 core.refresh_repo = function(repo, _, cb)
   eq(repo, "/shared", "scoped fanout repo")
   cb(updated)
   return true
 end
 assert(panel.refresh_repo_view("/shared"), "scoped refresh accepted")
-eq(panel.state.tabs[tab_a].entries[1].files, updated.files, "interested tab updates")
-eq(panel.state.tabs[tab_b].entries, { untouched }, "uninterested tab does not gain repo")
+eq(panel.state.tabs[tab_a].entries, { updated, clean_a }, "first interested tab updates and sorts")
+eq(panel.state.tabs[tab_b].entries, { updated, dirty_z }, "second interested tab updates and sorts")
+eq(panel.state.tabs[tab_d].entries, { untouched }, "uninterested tab does not gain repo")
+eq(panel.state.tabs[tab_c].entries, { stale_closed }, "closed tab state is excluded")
+eq({ picker_a.finds, picker_b.finds, picker_c.finds, picker_d.finds }, { 1, 1, 0, 0 }, "only interested tab pickers rerender")
+eq({ picker_a.viewed, picker_b.viewed }, { 3, 3 }, "each picker restores its own cursor anchor")
 core.refresh_repo = old_refresh_repo
 
 _G.Snacks, _G.LazyVim = old_snacks, old_lazyvim
