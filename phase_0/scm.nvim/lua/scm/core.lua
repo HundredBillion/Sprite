@@ -3,8 +3,6 @@
 local M = {}
 
 M.defaults = {
-  roots = { "~/MyServe1.0", "~/Code" },
-  depth = 2,
   timeout_ms = 5000,
   -- Minimum ms between two refreshes of the SAME repo (event storms from
   -- autocmds must never stack git processes for one repo).
@@ -58,34 +56,54 @@ function M.parse_status(lines)
   return { branch = branch, ahead = ahead, behind = behind, files = files }
 end
 
--- Find repositories: any directory directly containing `.git` (dir OR file —
--- worktrees and submodules use a .git file) up to `depth` levels under each
--- Root. Missing roots are skipped silently.
-function M.scan(opts)
-  local repos = {}
-  for _, root in ipairs(opts.roots) do
-    root = vim.fn.expand(root)
-    if vim.fn.isdirectory(root) == 1 then
-      local out = vim.fn.systemlist({
-        "find", root, "-maxdepth", tostring(opts.depth), "-name", ".git", "-prune",
-      })
-      if vim.v.shell_error == 0 then
-        for _, g in ipairs(out) do
-          repos[#repos + 1] = vim.fn.fnamemodify(g, ":h")
+function M.discover(root, opts, cb)
+  root = vim.fs.normalize(vim.uv.fs_realpath(vim.fn.expand(root)) or vim.fn.expand(root))
+  local landed, pending = {}, 2
+  local function finish(kind, out)
+    landed[kind] = out
+    pending = pending - 1
+    if pending ~= 0 then return end
+    vim.schedule(function()
+      if landed.find.code ~= 0 then
+        local msg = vim.trim(landed.find.stderr or "")
+        cb(nil, msg ~= "" and msg or "repository discovery failed")
+        return
+      end
+      local seen, repos = {}, {}
+      local function add(repo)
+        repo = vim.fs.normalize(repo)
+        if repo ~= "" and not seen[repo] then
+          seen[repo] = true
+          repos[#repos + 1] = repo
         end
       end
-    end
+      if landed.parent.code == 0 then
+        add(vim.trim(landed.parent.stdout or ""))
+      end
+      for _, git_entry in ipairs(vim.split(landed.find.stdout or "", "\n", { trimempty = true })) do
+        add(vim.fs.dirname(git_entry))
+      end
+      table.sort(repos)
+      cb(repos, nil)
+    end)
   end
-  table.sort(repos)
-  return repos
+  vim.system(
+    { "git", "-C", root, "rev-parse", "--show-toplevel" },
+    { text = true, timeout = opts.timeout_ms },
+    function(out) finish("parent", out) end
+  )
+  vim.system(
+    { "find", root, "-name", ".git", "-prune", "-print" },
+    { text = true, timeout = opts.timeout_ms },
+    function(out) finish("find", out) end
+  )
+  return true
 end
-
-local in_flight = false
 
 -- Sort comparator for Repo Entries: needs-attention (dirty OR errored) first,
 -- alphabetical by name within each group. Exposed as M.compare_entries (not
 -- local) so tests can exercise the tiebreak directly with hand-built entries,
--- independent of scan()'s already-sorted repo order.
+-- independent of repository discovery order.
 function M.compare_entries(a, b)
   local aa = (not a.clean) or a.err ~= nil
   local bb = (not b.clean) or b.err ~= nil
@@ -152,45 +170,38 @@ function M.refresh_repo(repo, opts, cb)
   return true
 end
 
--- Refresh: scan Roots, fan out one async `git status --porcelain=v2 --branch`
--- per repo, assemble sorted Repo Entries, deliver via ONE scheduled callback.
--- CAUTION: vim.system's callback runs in a fast-event context where vim.fn.*
--- is forbidden — raw outputs are collected there and ALL processing happens
--- inside the final vim.schedule.
-function M.refresh(opts, cb)
-  if in_flight then
-    return false
-  end
-  in_flight = true
-  local repos = M.scan(opts)
-  if #repos == 0 then
-    in_flight = false
-    vim.schedule(function() cb({}) end)
-    return true
-  end
-  local raw, pending = {}, #repos
-  for i, repo in ipairs(repos) do
-    vim.system(
-      { "git", "-C", repo, "status", "--porcelain=v2", "--branch" },
-      { text = true, timeout = opts.timeout_ms },
-      function(out) -- fast context: store only
-        raw[i] = out
-        pending = pending - 1
-        if pending == 0 then
-          vim.schedule(function()
-            local entries = {}
-            for j, r in ipairs(repos) do
-              entries[#entries + 1] = build_entry(r, raw[j])
-            end
-            table.sort(entries, M.compare_entries)
-            in_flight = false
-            cb(entries)
-          end)
+function M.refresh(root, opts, cb)
+  return M.discover(root, opts, function(repos, discover_err)
+    if discover_err then
+      cb(nil, discover_err)
+      return
+    end
+    if #repos == 0 then
+      cb({}, nil)
+      return
+    end
+    local raw, pending = {}, #repos
+    for i, repo in ipairs(repos) do
+      vim.system(
+        { "git", "-C", repo, "status", "--porcelain=v2", "--branch" },
+        { text = true, timeout = opts.timeout_ms },
+        function(out) -- fast context: store only
+          raw[i] = out
+          pending = pending - 1
+          if pending == 0 then
+            vim.schedule(function()
+              local entries = {}
+              for j, r in ipairs(repos) do
+                entries[#entries + 1] = build_entry(r, raw[j])
+              end
+              table.sort(entries, M.compare_entries)
+              cb(entries, nil)
+            end)
+          end
         end
-      end
-    )
-  end
-  return true
+      )
+    end
+  end)
 end
 
 return M

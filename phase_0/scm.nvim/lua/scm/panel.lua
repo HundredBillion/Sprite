@@ -31,7 +31,8 @@ end
 
 -- Flatten Repo Entries into picker items. Every file row is self-identifying
 -- (text and ctx carry the repo name) so filtering may orphan headers freely.
-function M.build_items(entries)
+function M.build_items(entries, collapsed)
+  collapsed = collapsed or {}
   local dup = {}
   for _, e in ipairs(entries) do
     dup[e.name] = (dup[e.name] or 0) + 1
@@ -42,25 +43,54 @@ function M.build_items(entries)
     items[#items + 1] = it
   end
   for _, e in ipairs(entries) do
-    add({ kind = "header", entry = e, text = e.name .. " " .. (e.branch or ""), dup = dup[e.name] > 1 or nil })
-    for _, f in ipairs(e.files or {}) do
-      local dir = f.path:match("^(.*)/[^/]+$")
-      add({
-        kind = "file",
-        entry = e,
-        fentry = f,
-        file = e.path .. "/" .. f.path,
-        text = e.name .. "/" .. f.path,
-        ctx = dir and (e.name .. "/" .. dir) or e.name,
-      })
+    local has_children = not e.err and not e.clean and #(e.files or {}) > 0
+    local is_collapsed = has_children and collapsed[e.path] == true
+    add({
+      kind = "header",
+      entry = e,
+      text = e.name .. " " .. (e.branch or ""),
+      dup = dup[e.name] > 1 or nil,
+      collapsed = is_collapsed,
+    })
+    if not is_collapsed then
+      for _, f in ipairs(e.files or {}) do
+        local dir = f.path:match("^(.*)/[^/]+$")
+        add({
+          kind = "file",
+          entry = e,
+          fentry = f,
+          file = e.path .. "/" .. f.path,
+          text = e.name .. "/" .. f.path,
+          ctx = dir and (e.name .. "/" .. dir) or e.name,
+        })
+      end
     end
   end
   return items
 end
 
 local core = require("scm.core")
+local scope = require("scm.scope")
 
-M.state = { entries = {}, opts = nil }
+M.state = { opts = nil, tabs = {} }
+
+function M.tab_state(tab)
+  tab = tab or vim.api.nvim_get_current_tabpage()
+  for handle in pairs(M.state.tabs) do
+    if not vim.api.nvim_tabpage_is_valid(handle) then M.state.tabs[handle] = nil end
+  end
+  if not M.state.tabs[tab] then
+    M.state.tabs[tab] = {
+      root = nil,
+      entries = {},
+      collapsed = {},
+      refreshing = false,
+      generation = 0,
+      queued_root = nil,
+    }
+  end
+  return M.state.tabs[tab]
+end
 
 function M.setup(opts)
   M.state.opts = vim.tbl_deep_extend("force", core.defaults, opts or {})
@@ -132,7 +162,7 @@ function M.format_item(item)
       parts[#parts + 1] = { e.branch .. "  ", "Comment" }
       parts[#parts + 1] = { "─", "Comment" }
     else
-      parts[#parts + 1] = { "▼ ", "Directory" }
+      parts[#parts + 1] = { item.collapsed and "▶ " or "▼ ", "Directory" }
       vim.list_extend(parts, name_col("Title"))
       parts[#parts + 1] = { e.branch .. " ", "Function" }
       if e.ahead > 0 then parts[#parts + 1] = { "↑" .. e.ahead, "DiagnosticInfo" } end
@@ -155,12 +185,55 @@ end
 
 local sactions = function() return require("snacks.picker.actions") end
 
--- Thin wrapper so every lazygit launch goes through one place. Refresh-on-exit
--- is handled by scm.refresh's global TermClose trigger, which catches BOTH
--- panel-launched lazygits and ones opened by hand in any :terminal — so no
--- per-window hook (or dedup guard for reused hidden terminals) is needed here.
-function M.lazygit(repo)
-  Snacks.lazygit({ cwd = repo })
+local function has_children(item)
+  return item
+    and item.kind == "header"
+    and not item.entry.err
+    and not item.entry.clean
+    and #(item.entry.files or {}) > 0
+end
+
+-- Position of the item matching `key` in `items`, or nil.
+local function index_of(items, key)
+  if not key then return nil end
+  for idx, item in ipairs(items) do
+    if item_key(item) == key then return idx end
+  end
+  return nil
+end
+
+local function view_key(picker, key)
+  local idx = index_of(picker:items(), key)
+  if not idx then return false end
+  pcall(function() picker.list:view(idx) end)
+  return true
+end
+
+-- Rebuild the picker's items and restore its cursor. Snacks still invokes an
+-- aborted matcher's on_done callback, so only the newest render may move the
+-- cursor or publish its title.
+local function rerender(picker, anchor, anchor_idx, title)
+  picker._scm_render_generation = (picker._scm_render_generation or 0) + 1
+  local generation = picker._scm_render_generation
+  picker:find({
+    on_done = function(_, completed_task)
+      if picker.closed then return end
+      if picker._scm_render_generation ~= generation then return end
+      if title then set_title(picker, title) end
+      if completed_task and picker.matcher and picker.matcher.task ~= completed_task then return end
+      if not anchor then return end
+      local items = picker:items()
+      if #items == 0 then return end
+      local idx = index_of(items, anchor) or (anchor_idx and math.min(anchor_idx, #items))
+      if idx then pcall(function() picker.list:view(idx) end) end
+    end,
+  })
+end
+
+local function set_collapsed(picker, item, collapsed)
+  local state = M.tab_state(picker._scm_tab)
+  state.collapsed[item.entry.path] = collapsed and true or nil
+  rerender(picker, item.entry.path, index_of(picker:items(), item.entry.path), "Source Control")
 end
 
 local function key_actions()
@@ -169,8 +242,30 @@ local function key_actions()
       if not item then return end
       if item.kind == "file" then
         sactions().jump(picker, item, { cmd = "edit" })
+      elseif item.collapsed then
+        set_collapsed(picker, item, false)
       else
-        M.lazygit(item.entry.path)
+        Snacks.lazygit({ cwd = item.entry.path })
+      end
+    end,
+    scm_close = function(picker, item)
+      if not item then return end
+      if item.kind == "file" then
+        if view_key(picker, item.entry.path) then return end
+        if #(item.entry.files or {}) == 0 then return end
+        local state = M.tab_state(picker._scm_tab)
+        state.collapsed[item.entry.path] = true
+        rerender(picker, item.entry.path, nil, "Source Control")
+      elseif has_children(item) and not item.collapsed then
+        set_collapsed(picker, item, true)
+      end
+    end,
+    scm_open = function(picker, item)
+      if not item then return end
+      if item.kind == "file" then
+        sactions().jump(picker, item, { cmd = "edit" })
+      elseif has_children(item) and item.collapsed then
+        set_collapsed(picker, item, false)
       end
     end,
     scm_diff = function(picker, item)
@@ -183,21 +278,33 @@ local function key_actions()
       end
     end,
     scm_lazygit = function(_, item)
-      if item then M.lazygit(item.entry.path) end
+      if item then Snacks.lazygit({ cwd = item.entry.path }) end
     end,
     scm_refresh = function(picker) M.refresh_view(picker) end,
   }
 end
 
-function M.open()
+function M.open(root)
   M.setup(M.state.opts) -- idempotent; ensures defaults even if setup() was never called
+  local tab = vim.api.nvim_get_current_tabpage()
+  local state = M.tab_state(tab)
+  local next_root = root or scope.current()
+  if state.root ~= next_root then
+    state.entries = {}
+    state.generation = state.generation + 1
+    state.queued_root = nil
+  end
+  state.root = next_root
+  state.collapsed = {}
   local picker = Snacks.picker.pick({
     source = "scm",
     title = "Source Control",
-    finder = function() return M.build_items(M.state.entries) end,
+    show_empty = true,
+    finder = function() return M.build_items(state.entries, state.collapsed) end,
     format = M.format_item,
     layout = { preset = "sidebar", preview = false },
     focus = "list",
+    on_show = function(shown) shown._scm_tab = tab end,
     jump = { close = false }, -- keep the sidebar open when a file is opened from it
     auto_close = false,
     matcher = { sort_empty = false, fuzzy = true },
@@ -205,10 +312,19 @@ function M.open()
     confirm = "scm_confirm",
     actions = key_actions(),
     win = {
-      list = { keys = { ["d"] = "scm_diff", ["g"] = "scm_lazygit", ["r"] = "scm_refresh" } },
+      list = {
+        keys = {
+          ["h"] = "scm_close",
+          ["l"] = "scm_open",
+          ["d"] = "scm_diff",
+          ["g"] = "scm_lazygit",
+          ["r"] = "scm_refresh",
+        },
+      },
       input = { keys = { ["<c-r>"] = { "scm_refresh", mode = { "i", "n" } } } },
     },
   })
+  picker._scm_tab = tab
   M.refresh_view(picker)
   return picker
 end
@@ -219,19 +335,19 @@ function M.toggle()
     open:close()
     return
   end
-  for _, p in ipairs(Snacks.picker.get({ source = "explorer" })) do
-    p:close() -- only one left-rail sidebar activity open at a time
+  local root = scope.current()
+  for _, picker in ipairs(Snacks.picker.get({ source = "explorer" })) do
+    picker:close() -- only one left-rail sidebar activity open at a time
   end
-  M.open()
-end
-
--- Position of the item matching `key` in `items`, or nil.
-local function index_of(items, key)
-  if not key then return nil end
-  for idx, it in ipairs(items) do
-    if item_key(it) == key then return idx end
+  local manager = package.loaded["neo-tree.sources.manager"]
+  local command = package.loaded["neo-tree.command"]
+  if manager and command then
+    local ok, state = pcall(manager.get_state, "filesystem")
+    if ok and state and state.winid and vim.api.nvim_win_is_valid(state.winid) then
+      pcall(command.execute, { action = "close" })
+    end
   end
-  return nil
+  M.open(root)
 end
 
 -- Capture the cursor's identity (and old position) so it can be restored
@@ -242,63 +358,98 @@ local function capture_anchor(picker)
   return anchor, anchor and index_of(picker:items(), anchor) or nil
 end
 
--- Rebuild the picker's items from M.state.entries and restore the cursor.
--- find()'s matcher runs on a coroutine/libuv check-handle, so the new items
--- aren't ready until on_done fires (which snacks delivers on the main loop);
--- restoring from a bare vim.schedule would race the matcher.
-local function rerender(p, anchor, anchor_idx, title)
-  p:find({
-    on_done = function()
-      set_title(p, title)
-      if not anchor then return end
-      local items = p:items()
-      if #items == 0 then return end
-      local idx = index_of(items, anchor) or (anchor_idx and math.min(anchor_idx, #items))
-      if idx then pcall(function() p.list:view(idx) end) end
-    end,
-  })
+local function picker_for_tab(tab)
+  for _, picker in ipairs(Snacks.picker.get({ source = "scm", tab = false })) do
+    if picker._scm_tab == tab and not picker.closed then return picker end
+  end
+end
+
+local function run_full_refresh(tab, state)
+  local generation, root = state.generation, state.queued_root
+  state.queued_root = nil
+  state.refreshing = true
+  local picker = picker_for_tab(tab)
+  local anchor, anchor_idx
+  if picker then anchor, anchor_idx = capture_anchor(picker) end
+  core.refresh(root, M.state.opts, function(entries, err)
+    state.refreshing = false
+    if vim.api.nvim_tabpage_is_valid(tab) and generation == state.generation then
+      if not err then state.entries = entries end
+      local current = picker_for_tab(tab)
+      if current then
+        local published = state.entries
+        local title = err and ("Source Control (" .. err .. ")")
+          or (#published == 0 and "Source Control (no repositories under Explorer Root)" or "Source Control")
+        rerender(current, anchor, anchor_idx, title)
+      end
+    end
+    if state.queued_root and vim.api.nvim_tabpage_is_valid(tab) then run_full_refresh(tab, state) end
+  end)
 end
 
 function M.refresh_view(picker)
   picker = picker or Snacks.picker.get({ source = "scm" })[1]
-  if not picker then return end
-  local anchor, anchor_idx = capture_anchor(picker)
-  set_title(picker, "Source Control (scanning…)")
-  local accepted = core.refresh(M.state.opts, function(entries)
-    M.state.entries = entries
-    local p = Snacks.picker.get({ source = "scm" })[1]
-    if not p then return end -- panel was closed while the scan was in flight
-    -- zero repos under the configured roots is a normal, expected outcome --
-    -- say so in the title instead of leaving a blank picker window.
-    rerender(p, anchor, anchor_idx,
-      #entries == 0 and "Source Control (no repositories under configured roots)" or "Source Control")
-  end)
-  if not accepted then
-    set_title(picker, "Source Control") -- a refresh is already in flight; drop this one
+  if not picker then return false end
+  local tab = picker._scm_tab or vim.api.nvim_get_current_tabpage()
+  local state = M.tab_state(tab)
+  if not state.root then
+    set_title(picker, "Source Control (Explorer Root unavailable)")
+    return false
   end
+  state.generation = state.generation + 1
+  state.queued_root = state.root
+  set_title(picker, "Source Control (scanning…)")
+  if state.refreshing then return false end
+  run_full_refresh(tab, state)
+  return true
 end
 
--- Scoped refresh: re-scan ONE repo and splice its fresh entry into the
--- current list (keeping full multi-repo rescans off the hot paths — lazygit
+function M.root_changed(root)
+  local tab = vim.api.nvim_get_current_tabpage()
+  local state = M.tab_state(tab)
+  if not root or state.root == root then return false end
+  state.root = root
+  state.generation = state.generation + 1
+  state.queued_root = nil
+  state.entries = {}
+  state.collapsed = {}
+  local picker = picker_for_tab(tab)
+  if picker then return M.refresh_view(picker) end
+  return true
+end
+
+-- Scoped refresh: re-scan ONE repo and splice its fresh entry into every
+-- interested tab (keeping full multi-repo rescans off the hot paths — lazygit
 -- exits and focus events know which repo they're about). Entries update even
--- while the panel is closed; rendering is skipped until it reopens.
+-- while a panel is closed; rendering is skipped until it reopens.
 function M.refresh_repo_view(repo)
   return core.refresh_repo(repo, M.state.opts, function(entry)
-    local entries = M.state.entries
-    local found = false
-    for i, e in ipairs(entries) do
-      if e.path == entry.path then
-        entries[i] = entry
-        found = true
-        break
+    for tab, state in pairs(M.state.tabs) do
+      if vim.api.nvim_tabpage_is_valid(tab) then
+        local found
+        for index, existing in ipairs(state.entries) do
+          if existing.path == entry.path then
+            state.entries[index] = entry
+            found = true
+            break
+          end
+        end
+        if found then
+          if state.refreshing then
+            state.generation = state.generation + 1
+            state.queued_root = state.root
+          end
+          table.sort(state.entries, core.compare_entries)
+          local picker = picker_for_tab(tab)
+          if picker then
+            local anchor, anchor_idx = capture_anchor(picker)
+            local title
+            if not state.refreshing then title = "Source Control" end
+            rerender(picker, anchor, anchor_idx, title)
+          end
+        end
       end
     end
-    if not found then entries[#entries + 1] = entry end
-    table.sort(entries, core.compare_entries)
-    local p = Snacks.picker.get({ source = "scm" })[1]
-    if not p then return end
-    local anchor, anchor_idx = capture_anchor(p)
-    rerender(p, anchor, anchor_idx, "Source Control")
   end)
 end
 

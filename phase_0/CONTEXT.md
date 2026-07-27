@@ -17,16 +17,23 @@ in v1). The disposable half; contains no git knowledge.
 _Avoid_: sidebar (ambiguous with the file explorer), picker (an
 implementation detail of the v1 face)
 
+**Repository Section**:
+One repository header and its zero or more File Entry rows in the Panel. A
+Repository Section may be expanded or collapsed; this is presentation state
+and does not change its Repo Entry.
+_Avoid_: directory (the section groups source-control state, not filesystem
+children), repo tree
+
 **Renderer**:
 Any consumer of Repo Entries — the snacks Panel today, a bare-Neovim face or
 Sprite native panel later. The Repo Entry list is the contract between Core
 and every Renderer.
 _Avoid_: face (informal), frontend
 
-**Root**:
-A configured directory whose children (to a fixed depth) are scanned for
-repositories.
-_Avoid_: workspace, project dir
+**Explorer Root**:
+The top-level directory represented by the file explorer. It defines SCM's
+repository scope even while the explorer is hidden.
+_Avoid_: Root, configured root, workspace, project dir
 
 **Repo Entry**:
 One repository's aggregated state — name, path, branch, ahead/behind, File
@@ -50,6 +57,8 @@ A file whose XY Code has both characters set (staged, then modified again,
 e.g. `MM`). Rendered as the working-tree letter plus the `✱` marker.
 _Avoid_: partially staged, dirty-staged
 
-**Panel-Launched lazygit**:
-A lazygit instance opened from a Panel row, cd'd into that row's repository.
-Its termination triggers a Core refresh; lazygits opened any other way do not.
+**Refresh**:
+Recalculation of Repo Entries after relevant user activity. A Refresh targets
+one repository after lazygit exits, or all configured repositories when the
+user requests it, focus returns to Neovim, or the Panel regains focus.
+_Avoid_: rescan, reload
