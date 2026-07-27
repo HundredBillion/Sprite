@@ -57,6 +57,8 @@ A file whose XY Code has both characters set (staged, then modified again,
 e.g. `MM`). Rendered as the working-tree letter plus the `✱` marker.
 _Avoid_: partially staged, dirty-staged
 
-**Panel-Launched lazygit**:
-A lazygit instance opened from a Panel row, cd'd into that row's repository.
-Its termination triggers a Core refresh; lazygits opened any other way do not.
+**Refresh**:
+Recalculation of Repo Entries after relevant user activity. A Refresh targets
+one repository after lazygit exits, or all configured repositories when the
+user requests it, focus returns to Neovim, or the Panel regains focus.
+_Avoid_: rescan, reload

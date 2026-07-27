@@ -182,28 +182,48 @@ local function has_children(item)
     and #(item.entry.files or {}) > 0
 end
 
-local function view_header(picker, path)
-  for idx, candidate in ipairs(picker:items()) do
-    if candidate.kind == "header" and candidate.entry.path == path then
-      pcall(function() picker.list:view(idx) end)
-      return true
-    end
+-- Position of the item matching `key` in `items`, or nil.
+local function index_of(items, key)
+  if not key then return nil end
+  for idx, item in ipairs(items) do
+    if item_key(item) == key then return idx end
   end
-  return false
+  return nil
 end
 
-local function rebuild_at_header(picker, path)
+local function view_key(picker, key)
+  local idx = index_of(picker:items(), key)
+  if not idx then return false end
+  pcall(function() picker.list:view(idx) end)
+  return true
+end
+
+-- Rebuild the picker's items and restore its cursor. Snacks still invokes an
+-- aborted matcher's on_done callback, so only the newest render may move the
+-- cursor or publish its title.
+local function rerender(picker, anchor, anchor_idx, title)
+  picker._scm_render_generation = (picker._scm_render_generation or 0) + 1
+  local generation = picker._scm_render_generation
   picker:find({
-    on_done = function() view_header(picker, path) end,
+    on_done = function(_, completed_task)
+      if picker._scm_render_generation ~= generation then return end
+      if title then set_title(picker, title) end
+      if completed_task and picker.matcher and picker.matcher.task ~= completed_task then return end
+      if not anchor then return end
+      local items = picker:items()
+      if #items == 0 then return end
+      local idx = index_of(items, anchor) or (anchor_idx and math.min(anchor_idx, #items))
+      if idx then pcall(function() picker.list:view(idx) end) end
+    end,
   })
 end
 
 local function set_collapsed(picker, item, collapsed)
   M.state.collapsed[item.entry.path] = collapsed and true or nil
-  rebuild_at_header(picker, item.entry.path)
+  rerender(picker, item.entry.path, index_of(picker:items(), item.entry.path), "Source Control")
 end
 
-function M.key_actions()
+local function key_actions()
   return {
     scm_confirm = function(picker, item)
       if not item then return end
@@ -218,10 +238,10 @@ function M.key_actions()
     scm_close = function(picker, item)
       if not item then return end
       if item.kind == "file" then
-        if view_header(picker, item.entry.path) then return end
+        if view_key(picker, item.entry.path) then return end
         if #(item.entry.files or {}) == 0 then return end
         M.state.collapsed[item.entry.path] = true
-        rebuild_at_header(picker, item.entry.path)
+        rerender(picker, item.entry.path, nil, "Source Control")
       elseif has_children(item) and not item.collapsed then
         set_collapsed(picker, item, true)
       end
@@ -265,7 +285,7 @@ function M.open()
     matcher = { sort_empty = false, fuzzy = true },
     sort = { fields = { "sort" } }, -- keep build_items' repo/file order when unfiltered
     confirm = "scm_confirm",
-    actions = M.key_actions(),
+    actions = key_actions(),
     win = {
       list = {
         keys = {
@@ -295,38 +315,12 @@ function M.toggle()
   M.open()
 end
 
--- Position of the item matching `key` in `items`, or nil.
-local function index_of(items, key)
-  if not key then return nil end
-  for idx, it in ipairs(items) do
-    if item_key(it) == key then return idx end
-  end
-  return nil
-end
-
 -- Capture the cursor's identity (and old position) so it can be restored
 -- after the item list is rebuilt — same row if it survived, else the nearest
 -- surviving row by clamping its old index into the new list's range.
 local function capture_anchor(picker)
   local anchor = item_key(picker:current())
   return anchor, anchor and index_of(picker:items(), anchor) or nil
-end
-
--- Rebuild the picker's items from M.state.entries and restore the cursor.
--- find()'s matcher runs on a coroutine/libuv check-handle, so the new items
--- aren't ready until on_done fires (which snacks delivers on the main loop);
--- restoring from a bare vim.schedule would race the matcher.
-local function rerender(p, anchor, anchor_idx, title)
-  p:find({
-    on_done = function()
-      set_title(p, title)
-      if not anchor then return end
-      local items = p:items()
-      if #items == 0 then return end
-      local idx = index_of(items, anchor) or (anchor_idx and math.min(anchor_idx, #items))
-      if idx then pcall(function() p.list:view(idx) end) end
-    end,
-  })
 end
 
 function M.refresh_view(picker)

@@ -1,7 +1,7 @@
 # PRD: SCM Repository Collapse Navigation
 
 **Date:** 2026-07-26
-**Status:** Approved + grilled (2026-07-26)
+**Status:** Implemented + review-hardened (2026-07-26)
 **Owner:** David Lee
 **Parent:** `07-20-2026-multi-repo-scm-panel.md`
 
@@ -41,8 +41,9 @@ panel's existing file, lazygit, refresh, and filtering behavior.
   expanded dirty repository uses `▼`.
 - Clean and error repositories have no child rows, so `h` and `l` do nothing
   on their headers and their existing rendering remains unchanged.
-- Collapse state survives manual and Panel-Launched-lazygit refreshes while the
-  Panel remains open. Closing and reopening the Panel starts with all dirty
+- Collapse state survives manual full refreshes, any lazygit-exit scoped
+  refresh, and full refreshes triggered when focus returns to Neovim or the
+  Panel regains focus. Closing and reopening the Panel starts with all dirty
   repositories expanded.
 - While a repository is collapsed, its file rows are absent from fuzzy-filter
   results. Expanding it makes those rows searchable again.
@@ -58,8 +59,11 @@ Entries into picker rows. It always emits each repository header and omits file
 rows whose repository path is in the collapsed set. Header items carry enough
 state for `format_item` to choose the disclosure glyph.
 
-Panel actions update the collapsed set and ask the existing picker to rebuild
-its items. Rebuilds re-anchor the cursor to the affected repository header.
+Panel actions update the collapsed set and use the same render path as full and
+single-repository refreshes. Each render owns a generation number, so a stale
+matcher callback cannot publish after a newer Panel render. Cursor restoration
+also verifies the exact Snacks matcher task, so a newer filter result keeps
+ownership. Rebuilds re-anchor the cursor to the affected repository header.
 The set is cleared when opening a new Panel, but not during refreshes.
 
 No Snacks explorer tree API is reused: that API owns filesystem-directory
@@ -75,7 +79,8 @@ small in-memory set until the Panel closes; this has no visible effect.
 
 ## 6. Testing
 
-Extend the existing headless test harness with one focused behavioral scenario:
+The headless harness covers the behavior through the Panel's real picker
+configuration:
 
 1. Build rows for an expanded dirty repository and verify its files and `▼`
    state are visible.
@@ -83,15 +88,19 @@ Extend the existing headless test harness with one focused behavioral scenario:
 3. Exercise `h` from the header and verify only that repository's file rows are
    removed and its disclosure state is `▶`.
 4. Exercise `l` and `<CR>` expansion and verify the rows return.
-5. Verify refresh-style rebuilds retain the collapsed set and a new Panel open
-   clears it.
+5. Verify full and single-repository refreshes retain the collapsed set across
+   entry reordering, and a new Panel open clears it.
 6. Verify clean/error headers remain inert and existing confirm behavior still
    opens files or lazygit when the repository is expanded.
+7. Interleave Panel renders and a newer filter matcher, then verify stale
+   callbacks cannot override the latest cursor anchor.
+8. Verify duplicate repository-name context remains visible beside both
+   disclosure glyphs.
 
 Run the complete existing harness with:
 
 ```sh
-cd /Users/dalee/Projects/Sprite/phase_0/scm.nvim
+cd phase_0/scm.nvim
 nvim -l tests/core_test.lua
 ```
 
