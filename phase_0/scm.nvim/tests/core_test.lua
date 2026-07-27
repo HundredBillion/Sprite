@@ -388,13 +388,16 @@ _G.Snacks = {
   picker = {
     pick = function(opts)
       opened_opts = opts
+      opened_picker.closed = #opts.finder() == 0 and not opts.show_empty
       return opened_picker
     end,
   },
 }
 panel.refresh_view = function() end
+panel.state.entries = {}
 panel.state.collapsed["/repos/dirty"] = true
 eq(panel.open(), opened_picker, "open returns the new picker")
+eq(opened_picker.closed, false, "first open stays visible while the initial scan is empty")
 eq(panel.state.collapsed, {}, "new Panel session starts fully expanded")
 assert(opened_opts and type(opened_opts.finder) == "function", "open wires the collapse-aware finder")
 eq(opened_opts.win.list.keys.h, "scm_close", "open wires h")

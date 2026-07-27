@@ -276,6 +276,7 @@ function M.open()
   local picker = Snacks.picker.pick({
     source = "scm",
     title = "Source Control",
+    show_empty = true,
     finder = function() return M.build_items(M.state.entries, M.state.collapsed) end,
     format = M.format_item,
     layout = { preset = "sidebar", preview = false },
