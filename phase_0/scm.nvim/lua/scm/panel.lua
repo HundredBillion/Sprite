@@ -87,6 +87,7 @@ function M.tab_state(tab)
       refreshing = false,
       generation = 0,
       queued_root = nil,
+      entry_revision = 0,
     }
   end
   return M.state.tabs[tab]
@@ -185,14 +186,6 @@ end
 
 local sactions = function() return require("snacks.picker.actions") end
 
--- Thin wrapper so every lazygit launch goes through one place. Refresh-on-exit
--- is handled by scm.refresh's global TermClose trigger, which catches BOTH
--- panel-launched lazygits and ones opened by hand in any :terminal — so no
--- per-window hook (or dedup guard for reused hidden terminals) is needed here.
-function M.lazygit(repo)
-  Snacks.lazygit({ cwd = repo })
-end
-
 local function has_children(item)
   return item
     and item.kind == "header"
@@ -225,6 +218,7 @@ local function rerender(picker, anchor, anchor_idx, title)
   local generation = picker._scm_render_generation
   picker:find({
     on_done = function(_, completed_task)
+      if picker.closed then return end
       if picker._scm_render_generation ~= generation then return end
       if title then set_title(picker, title) end
       if completed_task and picker.matcher and picker.matcher.task ~= completed_task then return end
@@ -252,7 +246,7 @@ local function key_actions()
       elseif item.collapsed then
         set_collapsed(picker, item, false)
       else
-        M.lazygit(item.entry.path)
+        Snacks.lazygit({ cwd = item.entry.path })
       end
     end,
     scm_close = function(picker, item)
@@ -285,7 +279,7 @@ local function key_actions()
       end
     end,
     scm_lazygit = function(_, item)
-      if item then M.lazygit(item.entry.path) end
+      if item then Snacks.lazygit({ cwd = item.entry.path }) end
     end,
     scm_refresh = function(picker) M.refresh_view(picker) end,
   }
@@ -296,7 +290,11 @@ function M.open(root)
   local tab = vim.api.nvim_get_current_tabpage()
   local state = M.tab_state(tab)
   local next_root = root or scope.current()
-  if state.root ~= next_root then state.entries = {} end
+  if state.root ~= next_root then
+    state.entries = {}
+    state.generation = state.generation + 1
+    state.queued_root = nil
+  end
   state.root = next_root
   state.collapsed = {}
   local picker = Snacks.picker.pick({
@@ -307,6 +305,7 @@ function M.open(root)
     format = M.format_item,
     layout = { preset = "sidebar", preview = false },
     focus = "list",
+    on_show = function(shown) shown._scm_tab = tab end,
     jump = { close = false }, -- keep the sidebar open when a file is opened from it
     auto_close = false,
     matcher = { sort_empty = false, fuzzy = true },
@@ -368,6 +367,7 @@ end
 
 local function run_full_refresh(tab, state)
   local generation, root = state.generation, state.queued_root
+  local entry_revision = state.entry_revision or 0
   state.queued_root = nil
   state.refreshing = true
   local picker = picker_for_tab(tab)
@@ -376,11 +376,12 @@ local function run_full_refresh(tab, state)
   core.refresh(root, M.state.opts, function(entries, err)
     state.refreshing = false
     if vim.api.nvim_tabpage_is_valid(tab) and generation == state.generation then
-      if not err then state.entries = entries end
+      if not err and entry_revision == (state.entry_revision or 0) then state.entries = entries end
       local current = picker_for_tab(tab)
       if current then
+        local published = state.entries
         local title = err and ("Source Control (" .. err .. ")")
-          or (#entries == 0 and "Source Control (no repositories under Explorer Root)" or "Source Control")
+          or (#published == 0 and "Source Control (no repositories under Explorer Root)" or "Source Control")
         rerender(current, anchor, anchor_idx, title)
       end
     end
@@ -436,11 +437,14 @@ function M.refresh_repo_view(repo)
           end
         end
         if found then
+          state.entry_revision = (state.entry_revision or 0) + 1
           table.sort(state.entries, core.compare_entries)
           local picker = picker_for_tab(tab)
           if picker then
             local anchor, anchor_idx = capture_anchor(picker)
-            rerender(picker, anchor, anchor_idx, "Source Control")
+            local title
+            if not state.refreshing then title = "Source Control" end
+            rerender(picker, anchor, anchor_idx, title)
           end
         end
       end

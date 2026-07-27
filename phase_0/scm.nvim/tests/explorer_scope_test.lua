@@ -51,8 +51,44 @@ eq(scope.current(), first_real, "visible Neo-tree explorer replaces tab root")
 vim.cmd("tabprevious")
 eq(scope.current(), first_real, "original tab retains its independent root")
 
+local current_win = vim.api.nvim_get_current_win()
+_G.Snacks = { picker = { get = function() return { { cwd = function() return first .. "/missing" end } } end } }
+package.loaded["neo-tree.sources.manager"] = {
+  get_state = function() return { path = second, winid = current_win } end,
+}
+eq(scope.current(), second_real, "invalid Snacks root falls through to Neo-tree")
+
+_G.Snacks = nil
+package.loaded["neo-tree.sources.manager"] = nil
+_G.LazyVim = { root = function() return first .. "/missing" end }
+vim.t.scm_explorer_root = nil
+vim.cmd("tcd " .. vim.fn.fnameescape(third))
+eq(scope.current(), third_real, "invalid LazyVim root falls through to Neovim cwd")
+vim.cmd("tcd " .. vim.fn.fnameescape(vim.uv.cwd()))
+
 local panel = require("scm.panel")
 local core = require("scm.core")
+local refresh = require("scm.refresh")
+
+local old_panel_refresh = panel.refresh_view
+local old_panel_opts = panel.state.opts
+local refreshed_tabs = {}
+panel.state.opts = { focus_debounce_ms = 60000 }
+panel.refresh_view = function()
+  refreshed_tabs[#refreshed_tabs + 1] = vim.api.nvim_get_current_tabpage()
+end
+refresh.full()
+vim.cmd("tabnext")
+refresh.full()
+refresh.full()
+eq(refreshed_tabs, {
+  vim.api.nvim_list_tabpages()[1],
+  vim.api.nvim_list_tabpages()[2],
+}, "full Refresh debounce is isolated by tab")
+vim.cmd("tabprevious")
+panel.refresh_view = old_panel_refresh
+panel.state.opts = old_panel_opts
+
 local tab_a = vim.api.nvim_get_current_tabpage()
 local state_a = panel.tab_state(tab_a)
 state_a.entries = { { path = "/a", name = "a", clean = true, files = {} } }
@@ -124,7 +160,90 @@ closed_request.cb({ { path = "/closed", name = "closed", clean = true, files = {
 eq(state_c.entries, {}, "callback after tab close is discarded")
 core.refresh = old_refresh
 
+local race_full_cb, race_scoped_cb
+local stale_shared = { path = "/shared", name = "shared", branch = "stale", clean = true, files = {} }
+local fresh_shared = { path = "/shared", name = "shared", branch = "fresh", clean = true, files = {} }
+state_b.root = second_real
+state_b.entries = { stale_shared }
+state_b.collapsed = {}
+state_b.refreshing = false
+state_b.generation = 0
+state_b.queued_root = nil
+local race_picker = {
+  _scm_tab = tab_b,
+  matcher = {},
+  current = function() return nil end,
+  items = function() return panel.build_items(state_b.entries) end,
+  list = { view = function() end },
+}
+race_picker.input = { win = { set_title = function(_, title) race_picker.title = title end } }
+race_picker.find = function(_, opts) opts.on_done(race_picker) end
+_G.Snacks = { picker = { get = function() return { race_picker } end } }
+core.refresh = function(_, _, cb)
+  race_full_cb = cb
+  return true
+end
 local old_refresh_repo = core.refresh_repo
+core.refresh_repo = function(_, _, cb)
+  race_scoped_cb = cb
+  return true
+end
+assert(panel.refresh_view(race_picker), "full Refresh starts for scoped-first race")
+assert(panel.refresh_repo_view("/shared"), "scoped Refresh starts during full Refresh")
+race_scoped_cb(fresh_shared)
+eq(race_picker.title, "Source Control (scanning…)", "scoped publication preserves the scanning title")
+race_full_cb({ stale_shared }, nil)
+eq(state_b.entries, { fresh_shared }, "stale full result cannot overwrite newer scoped data")
+
+state_b.entries = { stale_shared }
+state_b.refreshing = false
+state_b.queued_root = nil
+race_picker.title = nil
+assert(panel.refresh_view(race_picker), "full Refresh starts for full-first race")
+assert(panel.refresh_repo_view("/shared"), "scoped Refresh starts for full-first race")
+race_full_cb({ stale_shared }, nil)
+eq(race_picker.title, "Source Control", "completed full Refresh clears the scanning title")
+race_scoped_cb(fresh_shared)
+eq(state_b.entries, { fresh_shared }, "scoped result remains newest when full result lands first")
+
+local unavailable_pending = {}
+vim.api.nvim_set_current_tabpage(tab_b)
+core.refresh = function(root, _, cb)
+  unavailable_pending[#unavailable_pending + 1] = { root = root, cb = cb }
+  return true
+end
+state_b.root = second_real
+state_b.entries = { stale_shared }
+state_b.refreshing = false
+state_b.queued_root = nil
+assert(panel.refresh_view(race_picker), "old-root Refresh starts before unavailable open")
+state_b.root = third_real
+assert(not panel.refresh_view(race_picker), "newer former-root Refresh is queued")
+local old_scope_current = scope.current
+scope.current = function() return nil end
+local unavailable_picker = {
+  matcher = {},
+  current = function() return nil end,
+  items = function() return panel.build_items(state_b.entries) end,
+  list = { view = function() end },
+}
+unavailable_picker.input = { win = { set_title = function(_, title) unavailable_picker.title = title end } }
+unavailable_picker.find = function(_, opts) opts.on_done(unavailable_picker) end
+_G.Snacks.picker.pick = function() return unavailable_picker end
+_G.Snacks.picker.get = function() return { unavailable_picker } end
+eq(vim.api.nvim_get_current_tabpage(), tab_b, "unavailable open runs in refresh owner tab")
+eq(panel.open(), unavailable_picker, "open returns Panel when Explorer Root is unavailable")
+eq(state_b.queued_root, nil, "unavailable open clears the queued former root")
+unavailable_pending[1].cb({ stale_shared }, nil)
+if unavailable_pending[2] then unavailable_pending[2].cb({ stale_shared }, nil) end
+eq(#unavailable_pending, 1, "unavailable open drops the queued former-root request")
+eq(state_b.entries, {}, "former-root callbacks cannot publish into unavailable Panel")
+eq(unavailable_picker.title, "Source Control (Explorer Root unavailable)", "unavailable title survives old callbacks")
+scope.current = old_scope_current
+core.refresh = old_refresh
+core.refresh_repo = old_refresh_repo
+
+old_refresh_repo = core.refresh_repo
 local updated = { path = "/shared", name = "shared", branch = "main", clean = false, files = { { path = "x", xy = ".M" } } }
 local untouched = { path = "/other", name = "other", branch = "main", clean = true, files = {} }
 local stale_a = { path = "/shared", name = "shared", branch = "old-a", clean = true, files = {} }
@@ -134,7 +253,7 @@ local clean_a = { path = "/a-clean", name = "a-clean", branch = "main", clean = 
 local dirty_z = { path = "/z-dirty", name = "z-dirty", branch = "main", clean = false, files = { { path = "z", xy = ".M" } } }
 panel.state.tabs[tab_a].entries = { clean_a, stale_a }
 panel.state.tabs[tab_b].entries = { dirty_z, stale_b }
-panel.state.tabs[tab_c].entries = { stale_closed }
+panel.state.tabs[tab_c] = { entries = { stale_closed } }
 vim.cmd("tabnew")
 local tab_d = vim.api.nvim_get_current_tabpage()
 panel.state.tabs[tab_d] = { entries = { untouched } }

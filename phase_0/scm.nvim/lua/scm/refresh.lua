@@ -12,7 +12,7 @@
 --     commits made from other terminals/apps while Neovim was backgrounded.
 local M = {}
 
-local last_full = 0
+local last_full = {}
 
 local function opts()
   local panel = require("scm.panel")
@@ -22,9 +22,13 @@ end
 -- Full Refresh, debounced for the current tab. The Panel no-ops while closed
 -- and coalesces overlapping requests independently for each tab.
 function M.full()
+  local tab = vim.api.nvim_get_current_tabpage()
+  for handle in pairs(last_full) do
+    if not vim.api.nvim_tabpage_is_valid(handle) then last_full[handle] = nil end
+  end
   local now = vim.uv.now()
-  if now - last_full < (opts().focus_debounce_ms or 1500) then return end
-  last_full = now
+  if now - (last_full[tab] or 0) < (opts().focus_debounce_ms or 1500) then return end
+  last_full[tab] = now
   require("scm.panel").refresh_view()
 end
 
@@ -78,7 +82,7 @@ function M.setup()
     callback = function()
       if not _G.Snacks then return end
       local p = Snacks.picker.get({ source = "scm" })[1]
-      if p and in_panel_win(p) then M.full() end
+      if p and p._scm_tab and in_panel_win(p) then M.full() end
     end,
   })
 

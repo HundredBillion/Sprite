@@ -42,16 +42,17 @@ function M.establish()
     local ok, value = pcall(LazyVim.root)
     if ok then root = value end
   end
-  local established = M.remember(root or vim.uv.cwd())
+  local established = M.remember(root)
+  if established then return established end
+  established = M.remember(vim.fn.getcwd())
   return established
 end
 
 function M.current()
-  local active = snacks_root() or neotree_root()
-  if active then
-    local remembered = M.remember(active)
-    return remembered
-  end
+  local remembered = M.remember(snacks_root())
+  if remembered then return remembered end
+  remembered = M.remember(neotree_root())
+  if remembered then return remembered end
   return M.establish()
 end
 

@@ -57,6 +57,7 @@ function M.parse_status(lines)
 end
 
 function M.discover(root, opts, cb)
+  root = vim.fs.normalize(vim.uv.fs_realpath(vim.fn.expand(root)) or vim.fn.expand(root))
   local landed, pending = {}, 2
   local function finish(kind, out)
     landed[kind] = out
@@ -69,22 +70,8 @@ function M.discover(root, opts, cb)
         return
       end
       local seen, repos = {}, {}
-      local root_real = vim.uv.fs_realpath(root)
       local function add(repo)
         repo = vim.fs.normalize(repo)
-        local repo_real = vim.uv.fs_realpath(repo)
-        if root_real and repo_real then
-          if repo_real == root_real then
-            repo = vim.fs.normalize(root)
-          elseif root_real:sub(1, #repo_real + 1) == repo_real .. "/" then
-            local suffix = root_real:sub(#repo_real + 1)
-            if root:sub(-#suffix) == suffix then
-              repo = vim.fs.normalize(root:sub(1, #root - #suffix))
-            end
-          elseif repo_real:sub(1, #root_real + 1) == root_real .. "/" then
-            repo = vim.fs.normalize(root .. repo_real:sub(#root_real + 1))
-          end
-        end
         if repo ~= "" and not seen[repo] then
           seen[repo] = true
           repos[#repos + 1] = repo

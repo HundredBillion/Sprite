@@ -78,6 +78,8 @@ sh({ "git", "-C", parent, "init", "-q", "-b", "main" })
 sh({ "git", "-C", external, "init", "-q", "-b", "main" })
 vim.fn.writefile({ "gitdir: /elsewhere" }, deep .. "/.git")
 assert(vim.uv.fs_symlink(external, root .. "/linked-external", { dir = true }), "create nested directory symlink")
+local parent_real = assert(vim.uv.fs_realpath(parent), "canonical parent repository")
+local deep_real = assert(vim.uv.fs_realpath(deep), "canonical nested worktree")
 
 local discovered, discover_err
 assert(core.discover(root, { timeout_ms = 5000 }, function(repos, err)
@@ -85,7 +87,7 @@ assert(core.discover(root, { timeout_ms = 5000 }, function(repos, err)
 end))
 vim.wait(5000, function() return discovered ~= nil or discover_err ~= nil end, 10)
 eq(discover_err, nil, "discovery succeeds")
-eq(discovered, { parent, deep }, "containing and arbitrary-depth repositories are found once")
+eq(discovered, { parent_real, deep_real }, "containing and arbitrary-depth repositories are canonicalized")
 
 local root_discovered
 core.discover(parent, { timeout_ms = 5000 }, function(repos, err)
@@ -93,12 +95,59 @@ core.discover(parent, { timeout_ms = 5000 }, function(repos, err)
   root_discovered = repos
 end)
 vim.wait(5000, function() return root_discovered ~= nil end, 10)
-eq(root_discovered, { parent, deep }, "Root repository is deduplicated and nested symlinks are not traversed")
+eq(root_discovered, { parent_real, deep_real }, "Root repository is deduplicated and nested symlinks are not traversed")
+
+local parent_link = tmp .. "/parent-link"
+assert(vim.uv.fs_symlink(parent, parent_link, { dir = true }), "create symlinked Explorer Root")
+local linked_discovered
+core.discover(parent_link, { timeout_ms = 5000 }, function(repos, err)
+  assert(not err, err)
+  linked_discovered = repos
+end)
+vim.wait(5000, function() return linked_discovered ~= nil end, 10)
+eq(linked_discovered, { parent_real, deep_real }, "symlinked Explorer Root is canonicalized once before discovery")
 
 local missing_err
 core.discover(root .. "/missing", { timeout_ms = 5000 }, function(_, err) missing_err = err end)
 vim.wait(5000, function() return missing_err ~= nil end, 10)
 assert(type(missing_err) == "string" and missing_err ~= "", "discovery failures are reported")
+
+local worktree_base = vim.fn.tempname()
+local primary_repo = worktree_base .. "/primary"
+local linked_worktree = worktree_base .. "/linked"
+vim.fn.mkdir(primary_repo .. "/inside", "p")
+sh({ "git", "-C", primary_repo, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "inside" }, primary_repo .. "/inside/tracked.txt")
+vim.fn.writefile({ "outside" }, primary_repo .. "/outside.txt")
+sh({ "git", "-C", primary_repo, "add", "." })
+sh({ "git", "-C", primary_repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init" })
+sh({ "git", "-C", primary_repo, "worktree", "add", "-q", "-b", "linked", linked_worktree })
+eq(vim.fn.filereadable(linked_worktree .. "/.git"), 1, "linked worktree uses a valid .git file")
+
+local worktree_discovered
+core.discover(worktree_base, { timeout_ms = 5000 }, function(repos, err)
+  assert(not err, err)
+  worktree_discovered = repos
+end)
+vim.wait(5000, function() return worktree_discovered ~= nil end, 10)
+local expected_worktrees = {
+  (assert(vim.uv.fs_realpath(primary_repo), "canonical primary repo")),
+  (assert(vim.uv.fs_realpath(linked_worktree), "canonical linked worktree")),
+}
+table.sort(expected_worktrees)
+eq(worktree_discovered, expected_worktrees, "discovery includes repository directories and worktree .git files")
+
+vim.fn.writefile({ "changed outside Explorer Root" }, linked_worktree .. "/outside.txt")
+local worktree_status
+core.refresh(linked_worktree .. "/inside", { timeout_ms = 5000 }, function(entries, err)
+  assert(not err, err)
+  worktree_status = entries
+end)
+vim.wait(5000, function() return worktree_status ~= nil end, 10)
+eq(#worktree_status, 1, "subdirectory Explorer Root refreshes its containing worktree")
+eq(worktree_status[1].path, expected_worktrees[1], "worktree Repo Entry uses canonical root")
+eq(worktree_status[1].files, { { path = "outside.txt", xy = ".M" } },
+  "status includes repository-wide changes outside the Explorer Root subdirectory")
 
 -- Two request-local full refreshes may run concurrently; Panel owns coalescing.
 local concurrent = 0
@@ -421,24 +470,56 @@ end
 -- Capture the real picker configuration so wiring and actions are tested
 -- through the same boundary Snacks uses when the Panel opens.
 local previous_snacks = _G.Snacks
-local previous_refresh_view = panel.refresh_view
+local previous_core_refresh = core.refresh
 local opened_picker = fake_picker({})
 local opened_opts
+local owner_during_show
+local active_picker
+local open_pending = {}
+local open_tab = vim.api.nvim_get_current_tabpage()
+opened_picker.list.win = { win = vim.api.nvim_get_current_win() }
+opened_picker.input.win.win = vim.api.nvim_get_current_win()
+core.refresh = function(root, opts, cb)
+  open_pending[#open_pending + 1] = { root = root, opts = opts, cb = cb }
+  return true
+end
 _G.Snacks = {
   picker = {
     pick = function(opts)
       opened_opts = opts
+      opened_picker.finder = opts.finder
       opened_picker.closed = #opts.finder() == 0 and not opts.show_empty
+      active_picker = opened_picker
+      vim.api.nvim_exec_autocmds("WinEnter", {})
+      if opts.on_show then
+        opts.on_show(opened_picker)
+        owner_during_show = opened_picker._scm_tab
+      end
       return opened_picker
     end,
+    get = function() return active_picker and { active_picker } or {} end,
   },
 }
-panel.refresh_view = function() end
+panel.state.opts = { focus_debounce_ms = 0 }
 panel_state().entries = {}
 panel_state().collapsed["/repos/dirty"] = true
-eq(panel.open(), opened_picker, "open returns the new picker")
+eq(panel.open("/explorer/root"), opened_picker, "open returns the new picker")
+eq(owner_during_show, open_tab, "Panel owns its tab during on_show")
 eq(opened_picker.closed, false, "first open stays visible while the initial scan is empty")
 eq(panel_state().collapsed, {}, "new Panel session starts fully expanded")
+eq(opened_picker.title, "Source Control (scanning…)", "first open shows scanning title")
+eq(#open_pending, 1, "first open starts one Core request")
+local first_open_entry = vim.deepcopy(nav_entries[1])
+open_pending[1].cb({ first_open_entry }, nil)
+eq(#open_pending, 1, "picker registration WinEnter does not queue a duplicate first scan")
+eq(opened_picker.title, "Source Control", "successful first scan clears scanning title")
+eq(panel_state().entries, { first_open_entry }, "successful first scan publishes Repo Entries")
+
+assert(panel.refresh_view(opened_picker), "discovery-error Refresh starts through real Panel path")
+eq(opened_picker.title, "Source Control (scanning…)", "error-path Refresh first shows scanning title")
+open_pending[2].cb(nil, "repository discovery failed")
+eq(opened_picker.title, "Source Control (repository discovery failed)", "discovery error is shown in title")
+eq(panel_state().entries, { first_open_entry }, "discovery error preserves successful Panel state")
 assert(opened_opts and type(opened_opts.finder) == "function", "open wires the collapse-aware finder")
 eq(opened_opts.win.list.keys.h, "scm_close", "open wires h")
 eq(opened_opts.win.list.keys.l, "scm_open", "open wires l")
@@ -448,7 +529,7 @@ panel_state().entries = nav_entries
 panel_state().collapsed["/repos/dirty"] = true
 eq(#opened_opts.finder(), 5, "open finder honors collapsed state")
 eq(panel.key_actions, nil, "picker actions remain a private implementation detail")
-panel.refresh_view = previous_refresh_view
+core.refresh = previous_core_refresh
 _G.Snacks = previous_snacks
 
 local actions = opened_opts.actions
@@ -494,16 +575,16 @@ eq(jumps[2], { picker = picker, item = picker:items()[2], cmd = "edit" }, "confi
 package.loaded["snacks.picker.actions"] = previous_picker_actions
 
 -- <CR> expands a collapsed header without lazygit, then opens lazygit once expanded.
-local previous_lazygit = panel.lazygit
-local lazygit_calls = 0
-panel.lazygit = function() lazygit_calls = lazygit_calls + 1 end
+local action_snacks = _G.Snacks
+local lazygit_calls = {}
+_G.Snacks = { lazygit = function(opts) lazygit_calls[#lazygit_calls + 1] = opts end }
 panel_state().collapsed["/repos/dirty"] = true
 picker = fake_picker(nav_items())
 actions.scm_confirm(picker, picker:items()[1])
 eq(panel_state().collapsed["/repos/dirty"], nil, "confirm expands collapsed header")
-eq(lazygit_calls, 0, "expanding does not open lazygit")
+eq(#lazygit_calls, 0, "expanding does not open lazygit")
 actions.scm_confirm(picker, picker:items()[1])
-eq(lazygit_calls, 1, "confirm on expanded header opens lazygit")
+eq(lazygit_calls, { { cwd = "/repos/dirty" } }, "confirm on expanded header opens lazygit in its repo")
 
 -- Clean/error headers are inert for h/l and retain header confirm behavior.
 local clean_header, error_header = picker:items()[4], picker:items()[5]
@@ -515,8 +596,15 @@ actions.scm_open(picker, error_header)
 eq(picker.finds, finds, "h/l are inert on clean and error headers")
 actions.scm_confirm(picker, clean_header)
 actions.scm_confirm(picker, error_header)
-eq(lazygit_calls, 3, "clean/error confirm still opens lazygit")
-panel.lazygit = previous_lazygit
+actions.scm_lazygit(picker, error_header)
+eq(lazygit_calls, {
+  { cwd = "/repos/dirty" },
+  { cwd = "/repos/clean" },
+  { cwd = "/repos/broken" },
+  { cwd = "/repos/broken" },
+}, "confirm and g actions call Snacks lazygit directly")
+eq(panel.lazygit, nil, "Panel does not export a lazygit pass-through")
+_G.Snacks = action_snacks
 
 -- If fuzzy filtering hides the header, h collapses immediately and preserves
 -- the filter's visible result set instead of clearing the query.
@@ -563,6 +651,29 @@ eq(deferred.viewed, 4, "latest render restores the latest repository header")
 eq(deferred.title, "Source Control", "latest action render clears a superseded scanning title")
 deferred:complete(1)
 eq(deferred.viewed, 4, "stale render cannot overwrite the latest cursor anchor")
+
+panel_state().collapsed = {}
+local closed_before_done = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
+closed_before_done.pending = {}
+closed_before_done.matcher = {}
+function closed_before_done:find(opts)
+  local task = {}
+  self.matcher.task = task
+  self.pending[#self.pending + 1] = { opts = opts, task = task }
+end
+actions.scm_close(closed_before_done, closed_before_done:items()[1])
+closed_before_done.closed = true
+closed_before_done.title_touches = 0
+closed_before_done.input.win.set_title = function()
+  closed_before_done.title_touches = closed_before_done.title_touches + 1
+end
+closed_before_done.items = function() error("closed picker items touched") end
+local closed_done_ok = pcall(function()
+  local pending = closed_before_done.pending[1]
+  pending.opts.on_done(nil, pending.task)
+end)
+assert(closed_done_ok, "matcher completion ignores a closed picker")
+eq(closed_before_done.title_touches, 0, "closed matcher completion does not touch the title")
 
 -- A newer filter-driven matcher is outside scm's render generation. Its task
 -- still owns the filtered list, so an older scm callback may finish the title
