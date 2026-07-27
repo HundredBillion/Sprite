@@ -72,22 +72,27 @@ local refresh = require("scm.refresh")
 
 local old_panel_refresh = panel.refresh_view
 local old_panel_opts = panel.state.opts
+local old_now = vim.uv.now
+local debounce_owner = vim.api.nvim_get_current_tabpage()
 local refreshed_tabs = {}
-panel.state.opts = { focus_debounce_ms = 60000 }
+panel.state.opts = { focus_debounce_ms = 1500 }
 panel.refresh_view = function()
   refreshed_tabs[#refreshed_tabs + 1] = vim.api.nvim_get_current_tabpage()
 end
-refresh.full()
-vim.cmd("tabnext")
-refresh.full()
-refresh.full()
-eq(refreshed_tabs, {
-  vim.api.nvim_list_tabpages()[1],
-  vim.api.nvim_list_tabpages()[2],
-}, "full Refresh debounce is isolated by tab")
-vim.cmd("tabprevious")
+local debounce_ok, debounce_err = xpcall(function()
+  vim.uv.now = function() return 1000 end
+  refresh.full()
+  vim.cmd("tabnext")
+  local second_tab = vim.api.nvim_get_current_tabpage()
+  refresh.full()
+  refresh.full()
+  eq(refreshed_tabs, { debounce_owner, second_tab }, "full Refresh debounce is isolated by tab")
+end, debug.traceback)
+vim.uv.now = old_now
+vim.api.nvim_set_current_tabpage(debounce_owner)
 panel.refresh_view = old_panel_refresh
 panel.state.opts = old_panel_opts
+assert(debounce_ok, debounce_err)
 
 local tab_a = vim.api.nvim_get_current_tabpage()
 local state_a = panel.tab_state(tab_a)

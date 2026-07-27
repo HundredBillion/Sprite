@@ -27,7 +27,8 @@ function M.full()
     if not vim.api.nvim_tabpage_is_valid(handle) then last_full[handle] = nil end
   end
   local now = vim.uv.now()
-  if now - (last_full[tab] or 0) < (opts().focus_debounce_ms or 1500) then return end
+  local previous = last_full[tab]
+  if previous and now - previous < (opts().focus_debounce_ms or 1500) then return end
   last_full[tab] = now
   require("scm.panel").refresh_view()
 end
