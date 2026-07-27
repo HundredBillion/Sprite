@@ -87,7 +87,6 @@ function M.tab_state(tab)
       refreshing = false,
       generation = 0,
       queued_root = nil,
-      entry_revision = 0,
     }
   end
   return M.state.tabs[tab]
@@ -367,7 +366,6 @@ end
 
 local function run_full_refresh(tab, state)
   local generation, root = state.generation, state.queued_root
-  local entry_revision = state.entry_revision or 0
   state.queued_root = nil
   state.refreshing = true
   local picker = picker_for_tab(tab)
@@ -376,7 +374,7 @@ local function run_full_refresh(tab, state)
   core.refresh(root, M.state.opts, function(entries, err)
     state.refreshing = false
     if vim.api.nvim_tabpage_is_valid(tab) and generation == state.generation then
-      if not err and entry_revision == (state.entry_revision or 0) then state.entries = entries end
+      if not err then state.entries = entries end
       local current = picker_for_tab(tab)
       if current then
         local published = state.entries
@@ -437,7 +435,10 @@ function M.refresh_repo_view(repo)
           end
         end
         if found then
-          state.entry_revision = (state.entry_revision or 0) + 1
+          if state.refreshing then
+            state.generation = state.generation + 1
+            state.queued_root = state.root
+          end
           table.sort(state.entries, core.compare_entries)
           local picker = picker_for_tab(tab)
           if picker then

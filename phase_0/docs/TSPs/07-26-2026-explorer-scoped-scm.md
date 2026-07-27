@@ -46,7 +46,7 @@
 - Create: `phase_0/scm.nvim/tests/explorer_scope_test.lua`
 
 **Interfaces:**
-- Consumes: active Snacks picker `picker:cwd()`, loaded Neo-tree filesystem state `{ path, winid }`, `LazyVim.root()`, and `vim.uv.cwd()`.
+- Consumes: active Snacks picker `picker:cwd()`, loaded Neo-tree filesystem state `{ path, winid }`, `LazyVim.root()`, and `vim.fn.getcwd()`.
 - Produces: `scope.remember(path) -> normalized_root|nil, changed:boolean`; `scope.establish() -> normalized_root|nil`; `scope.current() -> normalized_root|nil`.
 
 - [ ] **Step 1: Write the failing scope tests**
@@ -172,7 +172,7 @@ function M.establish()
     local ok, value = pcall(LazyVim.root)
     if ok then root = value end
   end
-  local established = M.remember(root or vim.uv.cwd())
+  local established = M.remember(root or vim.fn.getcwd())
   return established
 end
 

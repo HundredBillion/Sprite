@@ -160,11 +160,13 @@ closed_request.cb({ { path = "/closed", name = "closed", clean = true, files = {
 eq(state_c.entries, {}, "callback after tab close is discarded")
 core.refresh = old_refresh
 
-local race_full_cb, race_scoped_cb
+local race_full_pending, race_scoped_cb = {}, nil
 local stale_shared = { path = "/shared", name = "shared", branch = "stale", clean = true, files = {} }
 local fresh_shared = { path = "/shared", name = "shared", branch = "fresh", clean = true, files = {} }
+local new_sibling = { path = "/new", name = "new", branch = "main", clean = true, files = {} }
+local deleted_sibling = { path = "/deleted", name = "deleted", branch = "main", clean = true, files = {} }
 state_b.root = second_real
-state_b.entries = { stale_shared }
+state_b.entries = { deleted_sibling, stale_shared }
 state_b.collapsed = {}
 state_b.refreshing = false
 state_b.generation = 0
@@ -179,8 +181,8 @@ local race_picker = {
 race_picker.input = { win = { set_title = function(_, title) race_picker.title = title end } }
 race_picker.find = function(_, opts) opts.on_done(race_picker) end
 _G.Snacks = { picker = { get = function() return { race_picker } end } }
-core.refresh = function(_, _, cb)
-  race_full_cb = cb
+core.refresh = function(root, _, cb)
+  race_full_pending[#race_full_pending + 1] = { root = root, cb = cb }
   return true
 end
 local old_refresh_repo = core.refresh_repo
@@ -192,19 +194,26 @@ assert(panel.refresh_view(race_picker), "full Refresh starts for scoped-first ra
 assert(panel.refresh_repo_view("/shared"), "scoped Refresh starts during full Refresh")
 race_scoped_cb(fresh_shared)
 eq(race_picker.title, "Source Control (scanning…)", "scoped publication preserves the scanning title")
-race_full_cb({ stale_shared }, nil)
-eq(state_b.entries, { fresh_shared }, "stale full result cannot overwrite newer scoped data")
+race_full_pending[1].cb({ new_sibling, stale_shared }, nil)
+eq(#race_full_pending, 2, "scoped-first race starts exactly one replacement full Refresh")
+eq(race_full_pending[2].root, second_real, "replacement full Refresh uses the current Explorer Root")
+eq(race_picker.title, "Source Control (scanning…)", "stale full completion leaves replacement scan title intact")
+eq(state_b.entries, { deleted_sibling, fresh_shared }, "stale full result cannot change repository membership")
+race_full_pending[2].cb({ new_sibling, fresh_shared }, nil)
+eq(state_b.entries, { new_sibling, fresh_shared }, "replacement full Refresh publishes complete repository membership")
+eq(race_picker.title, "Source Control", "replacement full Refresh clears the scanning title")
 
-state_b.entries = { stale_shared }
+state_b.entries = { deleted_sibling, stale_shared }
 state_b.refreshing = false
 state_b.queued_root = nil
 race_picker.title = nil
 assert(panel.refresh_view(race_picker), "full Refresh starts for full-first race")
 assert(panel.refresh_repo_view("/shared"), "scoped Refresh starts for full-first race")
-race_full_cb({ stale_shared }, nil)
+race_full_pending[3].cb({ new_sibling, stale_shared }, nil)
 eq(race_picker.title, "Source Control", "completed full Refresh clears the scanning title")
 race_scoped_cb(fresh_shared)
-eq(state_b.entries, { fresh_shared }, "scoped result remains newest when full result lands first")
+eq(state_b.entries, { new_sibling, fresh_shared }, "scoped result remains newest when full result lands first")
+eq(#race_full_pending, 3, "full-first ordering does not queue a replacement Refresh")
 
 local unavailable_pending = {}
 vim.api.nvim_set_current_tabpage(tab_b)

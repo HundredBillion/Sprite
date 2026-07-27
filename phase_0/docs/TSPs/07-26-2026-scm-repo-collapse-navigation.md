@@ -60,7 +60,7 @@ plain-assert `nvim -l` harness. No runtime dependencies were added.
   results.
 - [x] Reset collapse state on Panel open and retain it across Refreshes.
 - [x] Rebase onto the scoped-refresh architecture and keep the global refresh
-  setup and hook-free lazygit wrapper.
+  setup with direct `Snacks.lazygit` adapter calls.
 - [x] Route actions, full refresh, and single-repository refresh through one
   render helper.
 - [x] Add latest-render and exact-task ownership for delayed, aborted, and
