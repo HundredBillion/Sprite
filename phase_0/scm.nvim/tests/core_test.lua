@@ -247,6 +247,10 @@ eq(names, { "middle", "mmm", "zzz", "aaa", "alpha", "bravo" },
 local panel = require("scm.panel")
 local scope = require("scm.scope")
 
+local function panel_state()
+  return panel.tab_state(vim.api.nvim_get_current_tabpage())
+end
+
 -- xy_display: letter = working-tree state, else index state; mixed marker
 eq(panel.xy_display(".M"), { letter = "M", mixed = false, hl = "ScmModified" }, "unstaged modified")
 eq(panel.xy_display("M."), { letter = "M", mixed = false, hl = "ScmStaged" }, "staged only")
@@ -369,9 +373,9 @@ local nav_entries = {
   },
 }
 
-panel.state.collapsed = {}
+panel_state().collapsed = {}
 local function nav_items()
-  return panel.build_items(nav_entries, panel.state.collapsed)
+  return panel.build_items(nav_entries, panel_state().collapsed)
 end
 
 local expanded_nav = nav_items()
@@ -382,7 +386,7 @@ local duplicate_header = panel.format_item(expanded_nav[1])
 eq(duplicate_header[2][1], "dirty ", "duplicate name remains beside disclosure glyph")
 assert(duplicate_header[3][1]:find("repos", 1, true), "duplicate parent remains visible with collapse glyph")
 
-panel.state.collapsed["/repos/dirty"] = true
+panel_state().collapsed["/repos/dirty"] = true
 local collapsed_nav = nav_items()
 eq(#collapsed_nav, 5, "collapsed Repository Section hides only its files")
 eq(collapsed_nav[1].collapsed, true, "collapsed header state")
@@ -430,18 +434,18 @@ _G.Snacks = {
   },
 }
 panel.refresh_view = function() end
-panel.state.entries = {}
-panel.state.collapsed["/repos/dirty"] = true
+panel_state().entries = {}
+panel_state().collapsed["/repos/dirty"] = true
 eq(panel.open(), opened_picker, "open returns the new picker")
 eq(opened_picker.closed, false, "first open stays visible while the initial scan is empty")
-eq(panel.state.collapsed, {}, "new Panel session starts fully expanded")
+eq(panel_state().collapsed, {}, "new Panel session starts fully expanded")
 assert(opened_opts and type(opened_opts.finder) == "function", "open wires the collapse-aware finder")
 eq(opened_opts.win.list.keys.h, "scm_close", "open wires h")
 eq(opened_opts.win.list.keys.l, "scm_open", "open wires l")
 assert(type(opened_opts.actions.scm_close) == "function", "open wires close action")
 assert(type(opened_opts.actions.scm_open) == "function", "open wires open action")
-panel.state.entries = nav_entries
-panel.state.collapsed["/repos/dirty"] = true
+panel_state().entries = nav_entries
+panel_state().collapsed["/repos/dirty"] = true
 eq(#opened_opts.finder(), 5, "open finder honors collapsed state")
 eq(panel.key_actions, nil, "picker actions remain a private implementation detail")
 panel.refresh_view = previous_refresh_view
@@ -450,17 +454,17 @@ _G.Snacks = previous_snacks
 local actions = opened_opts.actions
 
 -- In the normal view, h on a file selects its visible header first.
-panel.state.collapsed = {}
+panel_state().collapsed = {}
 expanded_nav = nav_items()
 local picker = fake_picker(expanded_nav)
 actions.scm_close(picker, expanded_nav[2])
 eq(picker.viewed, 1, "h on file selects repository header")
-eq(panel.state.collapsed["/repos/dirty"], nil, "first h does not collapse visible parent")
+eq(panel_state().collapsed["/repos/dirty"], nil, "first h does not collapse visible parent")
 eq(picker.finds, nil, "selecting a visible parent does not rebuild")
 
 -- The next h collapses; l expands; repeated h/l in the same state are no-ops.
 actions.scm_close(picker, expanded_nav[1])
-eq(panel.state.collapsed["/repos/dirty"], true, "h on header collapses")
+eq(panel_state().collapsed["/repos/dirty"], true, "h on header collapses")
 eq(#picker:items(), 5, "collapse rebuild hides file rows")
 eq(picker.viewed, 1, "collapse re-anchors header")
 local finds = picker.finds
@@ -468,7 +472,7 @@ actions.scm_close(picker, picker:items()[1])
 eq(picker.finds, finds, "h on collapsed header is a no-op")
 
 actions.scm_open(picker, picker:items()[1])
-eq(panel.state.collapsed["/repos/dirty"], nil, "l on collapsed header expands")
+eq(panel_state().collapsed["/repos/dirty"], nil, "l on collapsed header expands")
 eq(#picker:items(), 7, "expand rebuild restores file rows")
 finds = picker.finds
 actions.scm_open(picker, picker:items()[1])
@@ -493,10 +497,10 @@ package.loaded["snacks.picker.actions"] = previous_picker_actions
 local previous_lazygit = panel.lazygit
 local lazygit_calls = 0
 panel.lazygit = function() lazygit_calls = lazygit_calls + 1 end
-panel.state.collapsed["/repos/dirty"] = true
+panel_state().collapsed["/repos/dirty"] = true
 picker = fake_picker(nav_items())
 actions.scm_confirm(picker, picker:items()[1])
-eq(panel.state.collapsed["/repos/dirty"], nil, "confirm expands collapsed header")
+eq(panel_state().collapsed["/repos/dirty"], nil, "confirm expands collapsed header")
 eq(lazygit_calls, 0, "expanding does not open lazygit")
 actions.scm_confirm(picker, picker:items()[1])
 eq(lazygit_calls, 1, "confirm on expanded header opens lazygit")
@@ -516,11 +520,11 @@ panel.lazygit = previous_lazygit
 
 -- If fuzzy filtering hides the header, h collapses immediately and preserves
 -- the filter's visible result set instead of clearing the query.
-panel.state.collapsed = {}
+panel_state().collapsed = {}
 expanded_nav = nav_items()
 local filtered = fake_picker({ expanded_nav[2] }, function() return {} end)
 actions.scm_close(filtered, expanded_nav[2])
-eq(panel.state.collapsed["/repos/dirty"], true, "filtered file h collapses hidden parent")
+eq(panel_state().collapsed["/repos/dirty"], true, "filtered file h collapses hidden parent")
 eq(#filtered:items(), 0, "active filter remains applied after collapse")
 
 -- The same collapse set is reused by refresh-style rebuilds.
@@ -528,8 +532,8 @@ eq(#nav_items(), 5, "collapse state survives rebuilds")
 
 -- Matcher completion can arrive after a newer find. Only the latest render
 -- owns cursor restoration, even when an aborted older task still calls done.
-panel.state.entries = nav_entries
-panel.state.collapsed = {}
+panel_state().entries = nav_entries
+panel_state().collapsed = {}
 local deferred = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
 deferred.pending = {}
 deferred.matcher = { task = {} }
@@ -563,7 +567,7 @@ eq(deferred.viewed, 4, "stale render cannot overwrite the latest cursor anchor")
 -- A newer filter-driven matcher is outside scm's render generation. Its task
 -- still owns the filtered list, so an older scm callback may finish the title
 -- transition but must not move the cursor within those newer results.
-panel.state.collapsed = {}
+panel_state().collapsed = {}
 local filter_race = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
 filter_race.pending = {}
 filter_race.matcher = { task = {} }
@@ -593,12 +597,14 @@ local previous_core_refresh_repo = core.refresh_repo
 local previous_scope_current = scope.current
 previous_snacks = _G.Snacks
 
-panel.state.entries = { alpha, beta }
-panel.state.collapsed = { [alpha.path] = true }
+panel_state().entries = { alpha, beta }
+panel_state().collapsed = { [alpha.path] = true }
 local refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
+refresh_picker._scm_tab = vim.api.nvim_get_current_tabpage()
 refresh_picker.current_idx = 3 -- beta's file before the refresh reorders rows
 _G.Snacks = { picker = { get = function() return { refresh_picker } end } }
 scope.current = function() return "/explorer/root" end
+panel_state().root = scope.current()
 core.refresh = function(root, opts, cb)
   eq(root, "/explorer/root", "full refresh uses current Explorer Root")
   eq(opts, panel.state.opts, "full refresh preserves Core options")
@@ -606,13 +612,14 @@ core.refresh = function(root, opts, cb)
   return true
 end
 panel.refresh_view(refresh_picker)
-eq(panel.state.entries[1].path, beta.path, "full refresh accepts reordered entries")
+eq(panel_state().entries[1].path, beta.path, "full refresh accepts reordered entries")
 eq(#refresh_picker:items(), 3, "full refresh keeps alpha's files collapsed")
 eq(refresh_picker:items()[3].entry.path, alpha.path, "collapsed header survives full refresh reorder")
 eq(refresh_picker.viewed, 2, "full refresh restores the surviving file anchor")
 
-panel.state.entries = { beta, alpha }
+panel_state().entries = { beta, alpha }
 refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
+refresh_picker._scm_tab = vim.api.nvim_get_current_tabpage()
 _G.Snacks = { picker = { get = function() return { refresh_picker } end } }
 core.refresh = function(_, _, cb)
   cb(nil, "repository discovery failed")
@@ -620,11 +627,12 @@ core.refresh = function(_, _, cb)
 end
 local refresh_ok = pcall(panel.refresh_view, refresh_picker)
 assert(refresh_ok, "full refresh discovery errors do not crash the Panel")
-eq(panel.state.entries, { beta, alpha }, "full refresh discovery errors preserve current entries")
+eq(panel_state().entries, { beta, alpha }, "full refresh discovery errors preserve current entries")
 
-panel.state.entries = { beta, alpha }
-panel.state.collapsed = { [alpha.path] = true }
+panel_state().entries = { beta, alpha }
+panel_state().collapsed = { [alpha.path] = true }
 refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
+refresh_picker._scm_tab = vim.api.nvim_get_current_tabpage()
 refresh_picker.current_idx = 2 -- beta's file
 _G.Snacks = { picker = { get = function() return { refresh_picker } end } }
 local updated_alpha = vim.deepcopy(alpha)
@@ -636,7 +644,7 @@ core.refresh_repo = function(repo, _, cb)
   return true
 end
 assert(panel.refresh_repo_view(alpha.path), "scoped refresh accepted")
-eq(panel.state.entries[1].path, alpha.path, "scoped refresh re-sorts entries")
+eq(panel_state().entries[1].path, alpha.path, "scoped refresh re-sorts entries")
 eq(#refresh_picker:items(), 3, "scoped refresh keeps alpha's replacement file collapsed")
 eq(refresh_picker:items()[1].entry.path, alpha.path, "collapsed header survives scoped refresh reorder")
 eq(refresh_picker.viewed, 3, "scoped refresh restores beta's surviving file anchor")

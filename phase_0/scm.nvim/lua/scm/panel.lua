@@ -72,7 +72,25 @@ end
 local core = require("scm.core")
 local scope = require("scm.scope")
 
-M.state = { entries = {}, opts = nil, collapsed = {} }
+M.state = { opts = nil, tabs = {} }
+
+function M.tab_state(tab)
+  tab = tab or vim.api.nvim_get_current_tabpage()
+  for handle in pairs(M.state.tabs) do
+    if not vim.api.nvim_tabpage_is_valid(handle) then M.state.tabs[handle] = nil end
+  end
+  if not M.state.tabs[tab] then
+    M.state.tabs[tab] = {
+      root = nil,
+      entries = {},
+      collapsed = {},
+      refreshing = false,
+      generation = 0,
+      queued_root = nil,
+    }
+  end
+  return M.state.tabs[tab]
+end
 
 function M.setup(opts)
   M.state.opts = vim.tbl_deep_extend("force", core.defaults, opts or {})
@@ -220,7 +238,8 @@ local function rerender(picker, anchor, anchor_idx, title)
 end
 
 local function set_collapsed(picker, item, collapsed)
-  M.state.collapsed[item.entry.path] = collapsed and true or nil
+  local state = M.tab_state(picker._scm_tab)
+  state.collapsed[item.entry.path] = collapsed and true or nil
   rerender(picker, item.entry.path, index_of(picker:items(), item.entry.path), "Source Control")
 end
 
@@ -241,7 +260,8 @@ local function key_actions()
       if item.kind == "file" then
         if view_key(picker, item.entry.path) then return end
         if #(item.entry.files or {}) == 0 then return end
-        M.state.collapsed[item.entry.path] = true
+        local state = M.tab_state(picker._scm_tab)
+        state.collapsed[item.entry.path] = true
         rerender(picker, item.entry.path, nil, "Source Control")
       elseif has_children(item) and not item.collapsed then
         set_collapsed(picker, item, true)
@@ -271,14 +291,19 @@ local function key_actions()
   }
 end
 
-function M.open()
+function M.open(root)
   M.setup(M.state.opts) -- idempotent; ensures defaults even if setup() was never called
-  M.state.collapsed = {}
+  local tab = vim.api.nvim_get_current_tabpage()
+  local state = M.tab_state(tab)
+  local next_root = root or scope.current()
+  if state.root ~= next_root then state.entries = {} end
+  state.root = next_root
+  state.collapsed = {}
   local picker = Snacks.picker.pick({
     source = "scm",
     title = "Source Control",
     show_empty = true,
-    finder = function() return M.build_items(M.state.entries, M.state.collapsed) end,
+    finder = function() return M.build_items(state.entries, state.collapsed) end,
     format = M.format_item,
     layout = { preset = "sidebar", preview = false },
     focus = "list",
@@ -301,6 +326,7 @@ function M.open()
       input = { keys = { ["<c-r>"] = { "scm_refresh", mode = { "i", "n" } } } },
     },
   })
+  picker._scm_tab = tab
   M.refresh_view(picker)
   return picker
 end
@@ -311,10 +337,19 @@ function M.toggle()
     open:close()
     return
   end
-  for _, p in ipairs(Snacks.picker.get({ source = "explorer" })) do
-    p:close() -- only one left-rail sidebar activity open at a time
+  local root = scope.current()
+  for _, picker in ipairs(Snacks.picker.get({ source = "explorer" })) do
+    picker:close() -- only one left-rail sidebar activity open at a time
   end
-  M.open()
+  local manager = package.loaded["neo-tree.sources.manager"]
+  local command = package.loaded["neo-tree.command"]
+  if manager and command then
+    local ok, state = pcall(manager.get_state, "filesystem")
+    if ok and state and state.winid and vim.api.nvim_win_is_valid(state.winid) then
+      pcall(command.execute, { action = "close" })
+    end
+  end
+  M.open(root)
 end
 
 -- Capture the cursor's identity (and old position) so it can be restored
@@ -325,27 +360,63 @@ local function capture_anchor(picker)
   return anchor, anchor and index_of(picker:items(), anchor) or nil
 end
 
+local function picker_for_tab(tab)
+  for _, picker in ipairs(Snacks.picker.get({ source = "scm", tab = false })) do
+    if picker._scm_tab == tab and not picker.closed then return picker end
+  end
+end
+
+local function run_full_refresh(tab, state)
+  local generation, root = state.generation, state.queued_root
+  state.queued_root = nil
+  state.refreshing = true
+  local picker = picker_for_tab(tab)
+  local anchor, anchor_idx
+  if picker then anchor, anchor_idx = capture_anchor(picker) end
+  core.refresh(root, M.state.opts, function(entries, err)
+    state.refreshing = false
+    if vim.api.nvim_tabpage_is_valid(tab) and generation == state.generation then
+      if not err then state.entries = entries end
+      local current = picker_for_tab(tab)
+      if current then
+        local title = err and ("Source Control (" .. err .. ")")
+          or (#entries == 0 and "Source Control (no repositories under Explorer Root)" or "Source Control")
+        rerender(current, anchor, anchor_idx, title)
+      end
+    end
+    if state.queued_root and vim.api.nvim_tabpage_is_valid(tab) then run_full_refresh(tab, state) end
+  end)
+end
+
 function M.refresh_view(picker)
   picker = picker or Snacks.picker.get({ source = "scm" })[1]
-  if not picker then return end
-  local anchor, anchor_idx = capture_anchor(picker)
-  set_title(picker, "Source Control (scanning…)")
-  local accepted = core.refresh(scope.current(), M.state.opts, function(entries, err)
-    if err then
-      set_title(picker, "Source Control")
-      return
-    end
-    M.state.entries = entries
-    local p = Snacks.picker.get({ source = "scm" })[1]
-    if not p then return end -- panel was closed while the scan was in flight
-    -- zero repos under the configured roots is a normal, expected outcome --
-    -- say so in the title instead of leaving a blank picker window.
-    rerender(p, anchor, anchor_idx,
-      #entries == 0 and "Source Control (no repositories under configured roots)" or "Source Control")
-  end)
-  if not accepted then
-    set_title(picker, "Source Control") -- a refresh is already in flight; drop this one
+  if not picker then return false end
+  local tab = picker._scm_tab or vim.api.nvim_get_current_tabpage()
+  local state = M.tab_state(tab)
+  if not state.root then
+    set_title(picker, "Source Control (Explorer Root unavailable)")
+    return false
   end
+  state.generation = state.generation + 1
+  state.queued_root = state.root
+  set_title(picker, "Source Control (scanning…)")
+  if state.refreshing then return false end
+  run_full_refresh(tab, state)
+  return true
+end
+
+function M.root_changed(root)
+  local tab = vim.api.nvim_get_current_tabpage()
+  local state = M.tab_state(tab)
+  if not root or state.root == root then return false end
+  state.root = root
+  state.generation = state.generation + 1
+  state.queued_root = nil
+  state.entries = {}
+  state.collapsed = {}
+  local picker = picker_for_tab(tab)
+  if picker then return M.refresh_view(picker) end
+  return true
 end
 
 -- Scoped refresh: re-scan ONE repo and splice its fresh entry into the
@@ -353,8 +424,10 @@ end
 -- exits and focus events know which repo they're about). Entries update even
 -- while the panel is closed; rendering is skipped until it reopens.
 function M.refresh_repo_view(repo)
+  local tab = vim.api.nvim_get_current_tabpage()
+  local state = M.tab_state(tab)
   return core.refresh_repo(repo, M.state.opts, function(entry)
-    local entries = M.state.entries
+    local entries = state.entries
     local found = false
     for i, e in ipairs(entries) do
       if e.path == entry.path then
@@ -365,7 +438,7 @@ function M.refresh_repo_view(repo)
     end
     if not found then entries[#entries + 1] = entry end
     table.sort(entries, core.compare_entries)
-    local p = Snacks.picker.get({ source = "scm" })[1]
+    local p = picker_for_tab(tab)
     if not p then return end
     local anchor, anchor_idx = capture_anchor(p)
     rerender(p, anchor, anchor_idx, "Source Control")
