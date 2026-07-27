@@ -245,6 +245,7 @@ eq(names, { "middle", "mmm", "zzz", "aaa", "alpha", "bravo" },
 
 -- panel pure functions (no picker window needed headless)
 local panel = require("scm.panel")
+local scope = require("scm.scope")
 
 -- xy_display: letter = working-tree state, else index state; mixed marker
 eq(panel.xy_display(".M"), { letter = "M", mixed = false, hl = "ScmModified" }, "unstaged modified")
@@ -589,6 +590,7 @@ local beta = vim.deepcopy(nav_entries[4])
 beta.name = "beta"
 local previous_core_refresh = core.refresh
 local previous_core_refresh_repo = core.refresh_repo
+local previous_scope_current = scope.current
 previous_snacks = _G.Snacks
 
 panel.state.entries = { alpha, beta }
@@ -596,7 +598,10 @@ panel.state.collapsed = { [alpha.path] = true }
 local refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
 refresh_picker.current_idx = 3 -- beta's file before the refresh reorders rows
 _G.Snacks = { picker = { get = function() return { refresh_picker } end } }
-core.refresh = function(_, cb)
+scope.current = function() return "/explorer/root" end
+core.refresh = function(root, opts, cb)
+  eq(root, "/explorer/root", "full refresh uses current Explorer Root")
+  eq(opts, panel.state.opts, "full refresh preserves Core options")
   cb({ beta, alpha })
   return true
 end
@@ -627,6 +632,7 @@ eq(refresh_picker.viewed, 3, "scoped refresh restores beta's surviving file anch
 
 core.refresh = previous_core_refresh
 core.refresh_repo = previous_core_refresh_repo
+scope.current = previous_scope_current
 _G.Snacks = previous_snacks
 
 print("OK")

@@ -70,6 +70,7 @@ function M.build_items(entries, collapsed)
 end
 
 local core = require("scm.core")
+local scope = require("scm.scope")
 
 M.state = { entries = {}, opts = nil, collapsed = {} }
 
@@ -329,7 +330,7 @@ function M.refresh_view(picker)
   if not picker then return end
   local anchor, anchor_idx = capture_anchor(picker)
   set_title(picker, "Source Control (scanning…)")
-  local accepted = core.refresh(M.state.opts, function(entries)
+  local accepted = core.refresh(scope.current(), M.state.opts, function(entries)
     M.state.entries = entries
     local p = Snacks.picker.get({ source = "scm" })[1]
     if not p then return end -- panel was closed while the scan was in flight
