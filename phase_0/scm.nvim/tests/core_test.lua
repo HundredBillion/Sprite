@@ -612,6 +612,17 @@ eq(refresh_picker:items()[3].entry.path, alpha.path, "collapsed header survives 
 eq(refresh_picker.viewed, 2, "full refresh restores the surviving file anchor")
 
 panel.state.entries = { beta, alpha }
+refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
+_G.Snacks = { picker = { get = function() return { refresh_picker } end } }
+core.refresh = function(_, _, cb)
+  cb(nil, "repository discovery failed")
+  return true
+end
+local refresh_ok = pcall(panel.refresh_view, refresh_picker)
+assert(refresh_ok, "full refresh discovery errors do not crash the Panel")
+eq(panel.state.entries, { beta, alpha }, "full refresh discovery errors preserve current entries")
+
+panel.state.entries = { beta, alpha }
 panel.state.collapsed = { [alpha.path] = true }
 refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
 refresh_picker.current_idx = 2 -- beta's file
