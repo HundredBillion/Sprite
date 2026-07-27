@@ -60,23 +60,60 @@ eq(noup.behind, 0, "no upstream behind")
 local clean = core.parse_status({})
 eq(clean.files, {}, "empty -> no files")
 
--- scan(): finds .git dirs AND .git files (worktrees), respects depth, sorts
-local tmp = vim.fn.tempname()
-vim.fn.mkdir(tmp .. "/beta/.git", "p")
-vim.fn.mkdir(tmp .. "/alpha", "p")
-vim.fn.writefile({ "gitdir: /elsewhere" }, tmp .. "/alpha/.git") -- worktree-style .git FILE
-vim.fn.mkdir(tmp .. "/too/deep/nested/.git", "p") -- beyond depth 2 from tmp
-vim.fn.mkdir(tmp .. "/not_a_repo", "p")
-
-local repos = core.scan({ roots = { tmp, tmp .. "/does-not-exist" }, depth = 2 })
-eq(repos, { tmp .. "/alpha", tmp .. "/beta" }, "scan finds dir+file .git, sorted, depth-limited, missing root skipped")
-
--- refresh(): end-to-end against two real synthetic repos
 local function sh(cmd)
   local r = vim.system(cmd, { text = true }):wait()
   assert(r.code == 0, "setup cmd failed: " .. table.concat(cmd, " ") .. "\n" .. (r.stderr or ""))
 end
 
+-- discover(): containing repo + root repo + arbitrary-depth worktree, deduplicated.
+local tmp = vim.fn.tempname()
+local parent = tmp .. "/parent"
+local root = parent .. "/visible/subdir"
+local deep = root .. "/one/two/three/worktree"
+local external = tmp .. "/external"
+vim.fn.mkdir(root, "p")
+vim.fn.mkdir(deep, "p")
+vim.fn.mkdir(external, "p")
+sh({ "git", "-C", parent, "init", "-q", "-b", "main" })
+sh({ "git", "-C", external, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "gitdir: /elsewhere" }, deep .. "/.git")
+assert(vim.uv.fs_symlink(external, root .. "/linked-external", { dir = true }), "create nested directory symlink")
+
+local discovered, discover_err
+assert(core.discover(root, { timeout_ms = 5000 }, function(repos, err)
+  discovered, discover_err = repos, err
+end))
+vim.wait(5000, function() return discovered ~= nil or discover_err ~= nil end, 10)
+eq(discover_err, nil, "discovery succeeds")
+eq(discovered, { parent, deep }, "containing and arbitrary-depth repositories are found once")
+
+local root_discovered
+core.discover(parent, { timeout_ms = 5000 }, function(repos, err)
+  assert(not err, err)
+  root_discovered = repos
+end)
+vim.wait(5000, function() return root_discovered ~= nil end, 10)
+eq(root_discovered, { parent, deep }, "Root repository is deduplicated and nested symlinks are not traversed")
+
+local missing_err
+core.discover(root .. "/missing", { timeout_ms = 5000 }, function(_, err) missing_err = err end)
+vim.wait(5000, function() return missing_err ~= nil end, 10)
+assert(type(missing_err) == "string" and missing_err ~= "", "discovery failures are reported")
+
+-- Two request-local full refreshes may run concurrently; Panel owns coalescing.
+local concurrent = 0
+core.refresh(root, { timeout_ms = 5000 }, function(_, err)
+  assert(not err, err)
+  concurrent = concurrent + 1
+end)
+core.refresh(root, { timeout_ms = 5000 }, function(_, err)
+  assert(not err, err)
+  concurrent = concurrent + 1
+end)
+vim.wait(5000, function() return concurrent == 2 end, 10)
+eq(concurrent, 2, "Core full refreshes carry request-local state")
+
+-- refresh(): end-to-end against two real synthetic repos
 local work = vim.fn.tempname()
 local dirty, cleanrepo = work .. "/dirty_repo", work .. "/clean_repo"
 vim.fn.mkdir(dirty, "p")
@@ -91,11 +128,9 @@ vim.fn.writefile({ "changed" }, dirty .. "/a.txt")     -- .M
 vim.fn.writefile({ "new" }, dirty .. "/untracked.txt") -- ??
 
 local got
-assert(core.refresh({ roots = { work }, depth = 2, timeout_ms = 5000 }, function(entries)
+assert(core.refresh(work, { timeout_ms = 5000 }, function(entries)
   got = entries
 end) == true, "refresh accepted")
--- second call while in flight must be dropped
-assert(core.refresh({ roots = { work }, depth = 2, timeout_ms = 5000 }, function() end) == false, "in-flight drop")
 vim.wait(5000, function() return got ~= nil end, 10)
 assert(got, "refresh callback fired")
 
@@ -114,13 +149,13 @@ assert(got[1].err == nil and got[2].err == nil, "no errors")
 
 -- refresh usable again after completion
 got = nil
-assert(core.refresh({ roots = { work }, depth = 2, timeout_ms = 5000 }, function(entries) got = entries end))
+assert(core.refresh(work, { timeout_ms = 5000 }, function(entries) got = entries end))
 vim.wait(5000, function() return got ~= nil end, 10)
 assert(got and #got == 2, "second refresh works")
 
 -- refresh(): per-repo error path must not short-circuit other repos.
 -- A directory whose `.git` is a bare, uninitialized dir looks like a repo to
--- scan() (find sees the `.git` entry) but `git status` inside it fails.
+-- discovery (find sees the `.git` entry) but `git status` inside it fails.
 local err_work = vim.fn.tempname()
 local bad_repo, ok_repo = err_work .. "/bad_repo", err_work .. "/ok_repo"
 vim.fn.mkdir(bad_repo .. "/.git", "p") -- NOT `git init` -- invalid repo
@@ -131,7 +166,7 @@ sh({ "git", "-C", ok_repo, "add", "." })
 sh({ "git", "-C", ok_repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init" })
 
 local err_got
-assert(core.refresh({ roots = { err_work }, depth = 2, timeout_ms = 5000 }, function(entries)
+assert(core.refresh(err_work, { timeout_ms = 5000 }, function(entries)
   err_got = entries
 end) == true, "refresh (error path) accepted")
 vim.wait(5000, function() return err_got ~= nil end, 10)
@@ -146,24 +181,24 @@ assert(type(by_name.bad_repo.err) == "string" and #by_name.bad_repo.err > 0, "ba
 assert(by_name.ok_repo.err == nil, "ok_repo unaffected by sibling's failure")
 eq(by_name.ok_repo.clean, true, "ok_repo still parsed correctly")
 
--- refresh(): zero-repos path -- no roots contain any .git -> cb({})
+-- refresh(): zero-repos path -- Explorer Root contains no .git -> cb({})
 local empty_dir = vim.fn.tempname()
 vim.fn.mkdir(empty_dir, "p")
 
 local empty_got
-assert(core.refresh({ roots = { empty_dir }, depth = 2, timeout_ms = 5000 }, function(entries)
+assert(core.refresh(empty_dir, { timeout_ms = 5000 }, function(entries)
   empty_got = entries
 end) == true, "refresh (zero-repos) accepted")
 vim.wait(5000, function() return empty_got ~= nil end, 10)
 eq(empty_got, {}, "zero repos -> cb({})")
 
 -- refresh(): intra-group alphabetical tie-breaking -- two repos in the SAME
--- status group (both dirty here) must come back sorted by name, not scan
+-- status group (both dirty here) must come back sorted by name, not discovery
 -- order or reversed.
 local sort_work = vim.fn.tempname()
 local repo_zzz, repo_aaa = sort_work .. "/zzz_repo", sort_work .. "/aaa_repo"
 -- create in reverse-alphabetical order to make sure any ordering leak from
--- creation/scan order would show up as a failure
+-- creation/discovery order would show up as a failure
 for _, r in ipairs({ repo_zzz, repo_aaa }) do
   vim.fn.mkdir(r, "p")
   sh({ "git", "-C", r, "init", "-q", "-b", "main" })
@@ -174,7 +209,7 @@ for _, r in ipairs({ repo_zzz, repo_aaa }) do
 end
 
 local sort_got
-assert(core.refresh({ roots = { sort_work }, depth = 2, timeout_ms = 5000 }, function(entries)
+assert(core.refresh(sort_work, { timeout_ms = 5000 }, function(entries)
   sort_got = entries
 end) == true, "refresh (sort) accepted")
 vim.wait(5000, function() return sort_got ~= nil end, 10)
@@ -187,7 +222,7 @@ eq(sort_got[1].name, "aaa_repo", "alphabetically-first name sorts first within g
 eq(sort_got[2].name, "zzz_repo", "alphabetically-last name sorts second within group")
 
 -- M.compare_entries(): direct unit test of the sort comparator, independent
--- of scan()'s already-alphabetical repo order. Input is hand-built and
+-- of discovery's already-alphabetical repo order. Input is hand-built and
 -- presented NOT-already-alphabetical within each group (reverse-alphabetical
 -- for the needs-attention group, and out-of-order for the clean group), so a
 -- regression that drops the name tiebreak (leaving only group-priority) would
