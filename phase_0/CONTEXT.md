@@ -30,10 +30,10 @@ Sprite native panel later. The Repo Entry list is the contract between Core
 and every Renderer.
 _Avoid_: face (informal), frontend
 
-**Root**:
-A configured directory whose children (to a fixed depth) are scanned for
-repositories.
-_Avoid_: workspace, project dir
+**Explorer Root**:
+The top-level directory represented by the file explorer. It defines SCM's
+repository scope even while the explorer is hidden.
+_Avoid_: Root, configured root, workspace, project dir
 
 **Repo Entry**:
 One repository's aggregated state — name, path, branch, ahead/behind, File
