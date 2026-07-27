@@ -124,6 +124,22 @@ closed_request.cb({ { path = "/closed", name = "closed", clean = true, files = {
 eq(state_c.entries, {}, "callback after tab close is discarded")
 core.refresh = old_refresh
 
+local old_refresh_repo = core.refresh_repo
+local updated = { path = "/shared", name = "shared", branch = "main", clean = false, files = { { path = "x", xy = ".M" } } }
+local untouched = { path = "/other", name = "other", branch = "main", clean = true, files = {} }
+panel.state.tabs[tab_a].entries = { vim.deepcopy(updated) }
+panel.state.tabs[tab_b].entries = { untouched }
+vim.api.nvim_set_current_tabpage(tab_b)
+core.refresh_repo = function(repo, _, cb)
+  eq(repo, "/shared", "scoped fanout repo")
+  cb(updated)
+  return true
+end
+assert(panel.refresh_repo_view("/shared"), "scoped refresh accepted")
+eq(panel.state.tabs[tab_a].entries[1].files, updated.files, "interested tab updates")
+eq(panel.state.tabs[tab_b].entries, { untouched }, "uninterested tab does not gain repo")
+core.refresh_repo = old_refresh_repo
+
 _G.Snacks, _G.LazyVim = old_snacks, old_lazyvim
 package.loaded["neo-tree.sources.manager"] = old_manager
 print("OK explorer scope")

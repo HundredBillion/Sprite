@@ -28,7 +28,9 @@ jobs:
 
       - name: Run SCM headless tests
         working-directory: phase_0/scm.nvim
-        run: nvim -l tests/core_test.lua
+        run: |
+          nvim -l tests/core_test.lua
+          nvim -l tests/explorer_scope_test.lua
 
       - name: Check proposed diff for whitespace errors
         run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"

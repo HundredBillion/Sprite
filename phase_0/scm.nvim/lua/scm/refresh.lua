@@ -19,8 +19,8 @@ local function opts()
   return panel.state.opts or require("scm.core").defaults
 end
 
--- Full rescan, debounced. The panel's refresh already no-ops when the panel
--- is closed and drops overlapping scans; this only spaces out event bursts.
+-- Full Refresh, debounced for the current tab. The Panel no-ops while closed
+-- and coalesces overlapping requests independently for each tab.
 function M.full()
   local now = vim.uv.now()
   if now - last_full < (opts().focus_debounce_ms or 1500) then return end

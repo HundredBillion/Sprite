@@ -419,29 +419,32 @@ function M.root_changed(root)
   return true
 end
 
--- Scoped refresh: re-scan ONE repo and splice its fresh entry into the
--- current list (keeping full multi-repo rescans off the hot paths — lazygit
+-- Scoped refresh: re-scan ONE repo and splice its fresh entry into every
+-- interested tab (keeping full multi-repo rescans off the hot paths — lazygit
 -- exits and focus events know which repo they're about). Entries update even
--- while the panel is closed; rendering is skipped until it reopens.
+-- while a panel is closed; rendering is skipped until it reopens.
 function M.refresh_repo_view(repo)
-  local tab = vim.api.nvim_get_current_tabpage()
-  local state = M.tab_state(tab)
   return core.refresh_repo(repo, M.state.opts, function(entry)
-    local entries = state.entries
-    local found = false
-    for i, e in ipairs(entries) do
-      if e.path == entry.path then
-        entries[i] = entry
-        found = true
-        break
+    for tab, state in pairs(M.state.tabs) do
+      if vim.api.nvim_tabpage_is_valid(tab) then
+        local found
+        for index, existing in ipairs(state.entries) do
+          if existing.path == entry.path then
+            state.entries[index] = entry
+            found = true
+            break
+          end
+        end
+        if found then
+          table.sort(state.entries, core.compare_entries)
+          local picker = picker_for_tab(tab)
+          if picker then
+            local anchor, anchor_idx = capture_anchor(picker)
+            rerender(picker, anchor, anchor_idx, "Source Control")
+          end
+        end
       end
     end
-    if not found then entries[#entries + 1] = entry end
-    table.sort(entries, core.compare_entries)
-    local p = picker_for_tab(tab)
-    if not p then return end
-    local anchor, anchor_idx = capture_anchor(p)
-    rerender(p, anchor, anchor_idx, "Source Control")
   end)
 end
 
