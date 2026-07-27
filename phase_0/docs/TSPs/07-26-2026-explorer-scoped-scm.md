@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use dmi-superpowers:subagent-driven-development (recommended) or dmi-superpowers:executing-plans to implement this TSP task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Approved requirements; TSP self-reviewed and grilled on 2026-07-26.
+
 **Goal:** Make each Neovim tab's persistent Explorer Root determine which Git repositories appear in the SCM Panel, without manual directory configuration.
 
 **Architecture:** A new UI-side `scm.scope` module observes Snacks or Neo-tree and stores one normalized Explorer Root in native tab-local state. Core receives that Root as plain data and asynchronously discovers its containing and nested repositories. Panel view and Refresh coordination become tab-scoped so separate tabs cannot overwrite each other.
@@ -450,8 +452,10 @@ local picker = {
 }
 _G.Snacks = { picker = { get = function() return {} end } }
 state_b.root = second_real
+state_b.entries = { { path = "/old-scope", name = "old-scope", clean = true, files = {} } }
 assert(panel.root_changed(third_real), "provider root change is accepted")
 eq(state_b.root, third_real, "provider root change updates current tab")
+eq(state_b.entries, {}, "provider root change clears entries from previous scope")
 state_b.root = second_real
 assert(panel.refresh_view(picker), "first tab refresh starts")
 state_b.root = third_real
@@ -582,7 +586,9 @@ function M.open(root)
   M.setup(M.state.opts)
   local tab = vim.api.nvim_get_current_tabpage()
   local state = M.tab_state(tab)
-  state.root = root or scope.current()
+  local next_root = root or scope.current()
+  if state.root ~= next_root then state.entries = {} end
+  state.root = next_root
   state.collapsed = {}
   local picker = Snacks.picker.pick({
     source = "scm",
@@ -678,6 +684,8 @@ function M.root_changed(root)
   local state = M.tab_state(tab)
   if not root or state.root == root then return false end
   state.root = root
+  state.entries = {}
+  state.collapsed = {}
   local picker = picker_for_tab(tab)
   if picker then return M.refresh_view(picker) end
   return true
