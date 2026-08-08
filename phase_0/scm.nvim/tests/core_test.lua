@@ -89,6 +89,22 @@ vim.wait(5000, function() return discovered ~= nil or discover_err ~= nil end, 1
 eq(discover_err, nil, "discovery succeeds")
 eq(discovered, { parent_real, deep_real }, "containing and arbitrary-depth repositories are canonicalized")
 
+local visible_discovered
+core.discover(root, { timeout_ms = 5000 }, function(repos, err)
+  assert(not err, err)
+  visible_discovered = repos
+end, { root })
+vim.wait(5000, function() return visible_discovered ~= nil end, 10)
+eq(visible_discovered, { parent_real }, "hidden tree directories are excluded from discovery")
+
+local expanded_discovered
+core.discover(root, { timeout_ms = 5000 }, function(repos, err)
+  assert(not err, err)
+  expanded_discovered = repos
+end, { root, deep })
+vim.wait(5000, function() return expanded_discovered ~= nil end, 10)
+eq(expanded_discovered, { parent_real }, "filetree scope stays on the selected directory")
+
 local root_discovered
 core.discover(parent, { timeout_ms = 5000 }, function(repos, err)
   assert(not err, err)

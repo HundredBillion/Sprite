@@ -56,7 +56,7 @@ function M.parse_status(lines)
   return { branch = branch, ahead = ahead, behind = behind, files = files }
 end
 
-function M.discover(root, opts, cb)
+function M.discover(root, opts, cb, visible_dirs)
   root = vim.fs.normalize(vim.uv.fs_realpath(vim.fn.expand(root)) or vim.fn.expand(root))
   local landed, pending = {}, 2
   local function finish(kind, out)
@@ -80,8 +80,10 @@ function M.discover(root, opts, cb)
       if landed.parent.code == 0 then
         add(vim.trim(landed.parent.stdout or ""))
       end
-      for _, git_entry in ipairs(vim.split(landed.find.stdout or "", "\n", { trimempty = true })) do
-        add(vim.fs.dirname(git_entry))
+      if not visible_dirs then
+        for _, git_entry in ipairs(vim.split(landed.find.stdout or "", "\n", { trimempty = true })) do
+          add(vim.fs.dirname(git_entry))
+        end
       end
       table.sort(repos)
       cb(repos, nil)
@@ -170,7 +172,7 @@ function M.refresh_repo(repo, opts, cb)
   return true
 end
 
-function M.refresh(root, opts, cb)
+function M.refresh(root, opts, cb, visible_dirs)
   return M.discover(root, opts, function(repos, discover_err)
     if discover_err then
       cb(nil, discover_err)
@@ -201,7 +203,7 @@ function M.refresh(root, opts, cb)
         end
       )
     end
-  end)
+  end, visible_dirs)
 end
 
 return M

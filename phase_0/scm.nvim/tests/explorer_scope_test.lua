@@ -6,6 +6,7 @@ end
 
 local scope = require("scm.scope")
 local old_snacks, old_lazyvim = _G.Snacks, _G.LazyVim
+local old_svgtree = package.loaded["svgtree"]
 local old_manager = package.loaded["neo-tree.sources.manager"]
 local first, second, third = vim.fn.tempname(), vim.fn.tempname(), vim.fn.tempname()
 vim.fn.mkdir(first, "p")
@@ -30,13 +31,30 @@ _G.LazyVim = { root = function() return second end }
 eq(scope.establish(), second_real, "new tab establishes LazyVim root")
 _G.LazyVim.root = function() return third end
 eq(scope.current(), second_real, "established root survives project-root changes")
+vim.fn.mkdir(third .. "/shown", "p")
 
 _G.Snacks = { picker = { get = function(opts)
   eq(opts, { source = "explorer" }, "Snacks query is current-tab scoped")
-  return { { cwd = function() return third end } }
+  return { { cwd = function() return second end, dir = function() return third end } }
 end } }
 eq(scope.current(), third_real, "visible Snacks explorer replaces tab root")
+_G.Snacks = { picker = { get = function() return { {
+  cwd = function() return third end,
+  dir = function() return third end,
+  items = function()
+    return { { file = third, dir = true }, { file = third .. "/shown", dir = true } }
+  end,
+} } end } }
+local snapshot_root, snapshot_dirs = scope.snapshot()
+eq(snapshot_root, third_real, "Snacks snapshot root")
+eq(snapshot_dirs, { third_real, third_real .. "/shown" }, "Snacks snapshot visible directories")
 _G.Snacks = nil
+package.loaded["svgtree"] = { root = function() return third end }
+eq(scope.current(), third_real, "visible svgtree replaces tab root")
+local svgtree_root, svgtree_dirs = scope.snapshot()
+eq(svgtree_root, third_real, "svgtree snapshot root")
+eq(svgtree_dirs, { third_real }, "svgtree snapshot directory")
+package.loaded["svgtree"] = old_svgtree
 eq(scope.current(), third_real, "Snacks root persists after explorer closes")
 
 local win = vim.api.nvim_get_current_win()
@@ -122,6 +140,9 @@ state_b.entries = { { path = "/old-scope", name = "old-scope", clean = true, fil
 assert(panel.root_changed(third_real), "provider root change is accepted")
 eq(state_b.root, third_real, "provider root change updates current tab")
 eq(state_b.entries, {}, "provider root change clears entries from previous scope")
+state_b.visible_dirs = { second_real }
+assert(panel.root_changed(second_real, { third_real }), "provider directory snapshot change is accepted")
+eq(state_b.visible_dirs, { third_real }, "provider directory snapshot updates current tab")
 state_b.root = second_real
 assert(panel.refresh_view(picker), "first tab refresh starts")
 state_b.root = third_real

@@ -19,6 +19,15 @@ local function opts()
   return panel.state.opts or require("scm.core").defaults
 end
 
+local function sync_scope()
+  if not _G.Snacks then return end
+  local panel = require("scm.panel")
+  if not Snacks.picker.get({ source = "scm" })[1] then return end
+  local scope = require("scm.scope")
+  local root, visible_dirs = scope.snapshot()
+  panel.root_changed(root, visible_dirs)
+end
+
 -- Full Refresh, debounced for the current tab. The Panel no-ops while closed
 -- and coalesces overlapping requests independently for each tab.
 function M.full()
@@ -85,6 +94,11 @@ function M.setup()
       local p = Snacks.picker.get({ source = "scm" })[1]
       if p and p._scm_tab and in_panel_win(p) then M.full() end
     end,
+  })
+
+  vim.api.nvim_create_autocmd("DirChanged", {
+    group = aug,
+    callback = function() vim.schedule(sync_scope) end,
   })
 
   vim.api.nvim_create_autocmd("FocusGained", {
