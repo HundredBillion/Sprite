@@ -38,7 +38,7 @@
 - Create: `phase_0/scm.nvim/tests/handoff_test.lua`
 
 **Interfaces:**
-- Consumes: `vim.schedule(fn)`, `vim.api.nvim_get_current_tabpage()`, `vim.api.nvim_tabpage_is_valid(tab)`, and `vim.api.nvim_tabpage_call(tab, fn)`.
+- Consumes: `vim.schedule(fn)`, `vim.api.nvim_get_current_tabpage()`, `vim.api.nvim_tabpage_is_valid(tab)`, `vim.api.nvim_tabpage_get_win(tab)`, and `vim.api.nvim_win_call(win, fn)`.
 - Produces: `request(open: fun()): nil` and `cancel(): nil` from `require("scm.transition")`.
 
 - [ ] **Step 1: Write the failing coalescer test**
@@ -121,7 +121,8 @@ local function flush()
   pending = nil
   scheduled = false
   if not request or not vim.api.nvim_tabpage_is_valid(request.tab) then return end
-  vim.api.nvim_tabpage_call(request.tab, request.open)
+  local win = vim.api.nvim_tabpage_get_win(request.tab)
+  vim.api.nvim_win_call(win, request.open)
 end
 
 function M.request(open)
