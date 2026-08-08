@@ -51,51 +51,53 @@ local ok, err = xpcall(function()
   local old_manager = package.loaded["neo-tree.sources.manager"]
   local old_command = package.loaded["neo-tree.command"]
   local old_svgtree = package.loaded["svgtree"]
-  local scm_closed, explorer_closed, neotree_closed, svgtree_closed = 0, 0, 0, 0
-  local active_scm = { { close = function() scm_closed = scm_closed + 1 end } }
-  local active_explorer = {}
-  _G.Snacks = { picker = { get = function(opts)
-    if opts.source == "scm" then return active_scm end
-    if opts.source == "explorer" then return active_explorer end
-    return {}
-  end } }
+  local panel_ok, panel_err = xpcall(function()
+    local scm_closed, explorer_closed, neotree_closed, svgtree_closed = 0, 0, 0, 0
+    local active_scm = { { close = function() scm_closed = scm_closed + 1 end } }
+    local active_explorer = {}
+    _G.Snacks = { picker = { get = function(opts)
+      if opts.source == "scm" then return active_scm end
+      if opts.source == "explorer" then return active_explorer end
+      return {}
+    end } }
 
-  local explorer_opened = 0
-  panel.handoff(function() explorer_opened = explorer_opened + 1 end)
-  eq(scm_closed, 1, "handoff closes SCM synchronously")
-  eq(explorer_opened, 0, "handoff defers Explorer open")
-  assert(flush())
-  eq(explorer_opened, 1, "handoff opens Explorer on the flush")
+    local explorer_opened = 0
+    panel.handoff(function() explorer_opened = explorer_opened + 1 end)
+    eq(scm_closed, 1, "handoff closes SCM synchronously")
+    eq(explorer_opened, 0, "handoff defers Explorer open")
+    assert(flush())
+    eq(explorer_opened, 1, "handoff opens Explorer on the flush")
 
-  active_scm = {}
-  active_explorer = { {
-    close = function() explorer_closed = explorer_closed + 1 end,
-    dir = function() return "/tmp" end,
-    items = function() return {} end,
-  } }
-  package.loaded["neo-tree.sources.manager"] = {
-    get_state = function() return { winid = vim.api.nvim_get_current_win() } end,
-  }
-  package.loaded["neo-tree.command"] = {
-    execute = function() neotree_closed = neotree_closed + 1 end,
-  }
-  package.loaded["svgtree"] = {
-    close = function() svgtree_closed = svgtree_closed + 1 end,
-  }
-  scope.snapshot = function() return "/tmp", { "/tmp" } end
-  local opened = {}
-  panel.open = function(root, dirs) opened = { root, dirs } end
-  panel.toggle()
-  eq({ explorer_closed, neotree_closed, svgtree_closed }, { 1, 1, 1 }, "SCM closes every Explorer host")
-  eq(opened, {}, "SCM open waits for teardown")
-  assert(flush())
-  eq(opened, { "/tmp", { "/tmp" } }, "SCM opens with the captured Explorer scope")
+    active_scm = {}
+    active_explorer = { {
+      close = function() explorer_closed = explorer_closed + 1 end,
+      dir = function() return "/tmp" end,
+      items = function() return {} end,
+    } }
+    package.loaded["neo-tree.sources.manager"] = {
+      get_state = function() return { winid = vim.api.nvim_get_current_win() } end,
+    }
+    package.loaded["neo-tree.command"] = {
+      execute = function() neotree_closed = neotree_closed + 1 end,
+    }
+    package.loaded["svgtree"] = {
+      close = function() svgtree_closed = svgtree_closed + 1 end,
+    }
+    scope.snapshot = function() return "/tmp", { "/tmp" } end
+    local opened = {}
+    panel.open = function(root, dirs) opened = { root, dirs } end
+    panel.toggle()
+    eq({ explorer_closed, neotree_closed, svgtree_closed }, { 1, 1, 1 }, "SCM closes every Explorer host")
+    eq(opened, {}, "SCM open waits for teardown")
+    assert(flush())
+    eq(opened, { "/tmp", { "/tmp" } }, "SCM opens with the captured Explorer scope")
 
-  transition.request(function() opened = { "stale" } end)
-  active_scm = { { close = function() scm_closed = scm_closed + 1 end } }
-  panel.toggle()
-  assert(flush())
-  eq(opened, { "/tmp", { "/tmp" } }, "toggle-off cancels a pending open")
+    transition.request(function() opened = { "stale" } end)
+    active_scm = { { close = function() scm_closed = scm_closed + 1 end } }
+    panel.toggle()
+    assert(flush())
+    eq(opened, { "/tmp", { "/tmp" } }, "toggle-off cancels a pending open")
+  end, debug.traceback)
 
   scope.snapshot = old_snapshot
   panel.open = old_open
@@ -103,6 +105,7 @@ local ok, err = xpcall(function()
   package.loaded["neo-tree.sources.manager"] = old_manager
   package.loaded["neo-tree.command"] = old_command
   package.loaded["svgtree"] = old_svgtree
+  assert(panel_ok, panel_err)
 end, debug.traceback)
 
 vim.schedule = old_schedule
