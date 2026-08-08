@@ -44,24 +44,24 @@ All configured explorer entry points that require mutual exclusion must use this
 
 ## Transition behavior
 
-The transition implementation keeps one temporary `pending` action and one `scheduled` flag:
+The transition implementation keeps one temporary `pending` request and one `scheduled` flag. A request contains the desired open action and the tab page where the user made the request:
 
 1. Close the currently active conflicting sidebar synchronously.
-2. Replace `pending` with the newest requested open action.
+2. Replace `pending` with the newest request.
 3. Schedule at most one flush for the next Neovim event-loop tick.
-4. During the flush, copy the latest pending action, clear `pending` and `scheduled`, then run the action.
+4. During the flush, copy the latest pending request, clear `pending` and `scheduled`, then run the action in its originating tab if that tab still exists.
 
-Replacing `pending` gives the system latest-request-wins behavior without a ticket list or generation history. Multiple requests before the flush do not create multiple scheduled open callbacks.
+Replacing `pending` gives the system latest-request-wins behavior without a ticket list or generation history. Multiple requests before the flush do not create multiple scheduled open callbacks. Rapid duplicate requests coalesce into one request for that activity; they are not replayed later as a series of toggles.
 
-SCM's existing toggle will use this same transition implementation when it closes an explorer and opens SCM. Closing an already-open SCM panel remains an immediate toggle-off operation and cancels any pending SCM open.
+SCM's existing toggle will use this same transition implementation when it closes an explorer and opens SCM. It will close Snacks Explorer, Neo-tree, or SVGTree's standalone tree before requesting SCM. Closing an already-open SCM panel remains an immediate toggle-off operation and cancels any pending SCM open.
 
 ## Memory and persistence
 
 Transition state is ephemeral:
 
 - no files, database records, globals intended for persistence, or session data are written;
-- at most one open function and one boolean are retained while a transition is pending;
-- both values are cleared before the selected action runs;
+- at most one open function, its originating tab handle, and one boolean are retained while a transition is pending;
+- all pending request data and the scheduled marker are cleared before the selected action runs;
 - after the event-loop flush, the transition module retains no action or history;
 - exiting Neovim releases the module and all remaining process memory.
 
@@ -87,6 +87,8 @@ Tests will cover:
 4. An opening error leaves transition state empty and future requests usable.
 5. Explorer-to-SCM and SCM-to-Explorer both close before opening.
 6. Toggling an already-open SCM panel closes it without reopening it.
+7. A request executes in its originating tab and is discarded if that tab no longer exists.
+8. Snacks Explorer, Neo-tree, and SVGTree's standalone tree are all recognized as conflicting activities when SCM opens.
 
 A real Neovim PTY regression will repeatedly alternate the configured Explorer and SCM at least 100 times. At each stable checkpoint it will assert:
 

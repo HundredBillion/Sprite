@@ -17,6 +17,16 @@ in v1). The disposable half; contains no git knowledge.
 _Avoid_: sidebar (ambiguous with the file explorer), picker (an
 implementation detail of the v1 face)
 
+**Sidebar Activity**:
+One mutually exclusive left-rail mode: either the Panel or a file explorer.
+Only one Sidebar Activity may be visible in a tab at a time.
+_Avoid_: side panel, drawer
+
+**Handoff**:
+The ordered replacement of one Sidebar Activity by another, where the outgoing
+activity is fully closed before the incoming activity opens.
+_Avoid_: swap, delayed open
+
 **Repository Section**:
 One repository header and its zero or more File Entry rows in the Panel. A
 Repository Section may be expanded or collapsed; this is presentation state
