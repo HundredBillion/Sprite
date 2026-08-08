@@ -2,283 +2,196 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use dmi-superpowers:subagent-driven-development (recommended) or dmi-superpowers:executing-plans to implement this TSP task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Allow SCM and the configured file explorer to replace each other indefinitely without overlapping layouts, shrinking editor windows, or retaining transition history.
+**Goal:** Let SCM and the configured Explorer replace each other indefinitely while preserving Explorer-root repository scope, tab ownership, teardown failures, and complete multi-repository results.
 
-**Architecture:** A focused `scm.transition` module coalesces requests into one temporary pending action and one scheduled flush. `scm.panel` closes the outgoing Sidebar Activity synchronously and delegates the incoming open to that module; user mappings supply the concrete Explorer open function.
+**Architecture:** `scm.scope.current()` captures one canonical Explorer root from the current tab. `scm.core` always discovers Git repositories recursively below that root. `scm.panel` closes the outgoing Sidebar Activity synchronously, then delegates the incoming open to the one-slot `scm.transition` coalescer.
 
-**Tech Stack:** Lua, Neovim Lua API, Snacks Picker, LazyVim key specifications, existing assert-based Neovim tests.
+**Tech Stack:** Lua, Neovim 0.12 Lua API, Snacks Picker, optional Neo-tree/SVGTree public functions, LazyVim key specifications, assert-based `nvim -l` tests, and a real Neovim PTY.
 
-## Global Constraints
+## Global constraints
 
-- Exactly one requested Sidebar Activity may be visible in the current tab after a transition settles.
-- The outgoing Sidebar Activity must close before the incoming activity opens.
-- No transition history or ticket list may be retained or written to disk.
-- Only one pending open function, its originating tab handle, and one scheduled marker may exist at a time.
-- Pending request data must be cleared before its action runs.
-- Rapid requests use latest-request-wins semantics and schedule at most one flush.
-- Snacks Explorer, Neo-tree, and SVGTree's standalone tree must be recognized when SCM opens.
-- Direct third-party commands that bypass configured handoff mappings are outside the guarantee.
-- Add no dependencies and do not monkey-patch Snacks, Neo-tree, or SVGTree.
+- Snacks Explorer scope comes from `picker:cwd()` only. Cursor movement must not change SCM scope.
+- Entering a directory or going up changes Explorer `cwd()` and must be captured by the next SCM open.
+- Core discovery is recursive and includes nested repository directories and linked-worktree `.git` files.
+- SCM and Explorer remain mutually exclusive; SCM does not synchronize scope while Explorer is closed.
+- Standalone SVGTree is considered only when a current-tab normal window has filetype `svgtree`.
+- Teardown completes before an incoming activity is scheduled. A close failure aborts the handoff.
+- A new handoff cancels stale pending work before teardown starts.
+- Only `setup`, `toggle`, and `handoff` are exported from `require("scm")`; `panel.open` remains internal/testable.
+- Explorer mappings belong to user configuration. SCM adds no SVGTree dependency and patches no explorer internals.
+- Direct third-party commands that bypass configured handoff mappings are outside the mutual-exclusion guarantee.
 
 ---
 
-## File structure
-
-- Create `phase_0/scm.nvim/lua/scm/transition.lua`: the single ephemeral request slot and next-tick flush.
-- Create `phase_0/scm.nvim/tests/handoff_test.lua`: deterministic transition and Panel handoff tests using the existing plain-assert style.
-- Modify `phase_0/scm.nvim/lua/scm/panel.lua`: close conflicting Sidebar Activities and route both directions through the transition module.
-- Modify `phase_0/scm.nvim/lua/scm/init.lua`: export the public `handoff(open)` interface.
-- Modify `/home/hundredbillion/.config/nvim/lua/plugins/snacks-animated-scrolling-off.lua`: keep Snacks as the sole owner of the four Explorer mappings, route them through SCM, and remove the late SCM close from SVGTree's post-open rendering hook.
-- Create `phase_0/scm.nvim/tests/sidebar_handoff_pty.lua`: exercise 100 real Explorer/SCM cycles in the user's full Neovim configuration.
-
-### Task 1: Ephemeral transition coalescer
+### Task 1: Restore cwd-only Explorer scope and recursive Core discovery
 
 **Files:**
-- Create: `phase_0/scm.nvim/lua/scm/transition.lua`
-- Create: `phase_0/scm.nvim/tests/handoff_test.lua`
-
-**Interfaces:**
-- Consumes: `vim.schedule(fn)`, `vim.api.nvim_get_current_tabpage()`, `vim.api.nvim_tabpage_is_valid(tab)`, `vim.api.nvim_tabpage_get_win(tab)`, and `vim.api.nvim_win_call(win, fn)`.
-- Produces: `request(open: fun()): nil` and `cancel(): nil` from `require("scm.transition")`.
-
-- [ ] **Step 1: Write the failing coalescer test**
-
-Create `phase_0/scm.nvim/tests/handoff_test.lua` with:
-
-```lua
-vim.opt.runtimepath:prepend(vim.uv.cwd())
-
-local function eq(got, want, label)
-  assert(vim.deep_equal(got, want), ("%s\nexpected: %s\ngot: %s"):format(label, vim.inspect(want), vim.inspect(got)))
-end
-
-local old_schedule = vim.schedule
-local queue = {}
-vim.schedule = function(fn) queue[#queue + 1] = fn end
-
-local ok, err = xpcall(function()
-  package.loaded["scm.transition"] = nil
-  local transition = require("scm.transition")
-  local ran = {}
-  local function flush()
-    local fn = table.remove(queue, 1)
-    assert(fn, "expected one scheduled transition flush")
-    return pcall(fn)
-  end
-
-  transition.request(function() ran[#ran + 1] = "old" end)
-  transition.request(function() ran[#ran + 1] = "latest" end)
-  eq(#queue, 1, "many requests schedule one flush")
-  assert(flush())
-  eq(ran, { "latest" }, "only the latest request runs")
-
-  transition.request(function() ran[#ran + 1] = "cancelled" end)
-  transition.cancel()
-  assert(flush())
-  eq(ran, { "latest" }, "cancel clears the pending request")
-
-  transition.request(function() error("open failed") end)
-  local error_ok, open_err = flush()
-  assert(not error_ok and tostring(open_err):find("open failed", 1, true), "open errors surface")
-  transition.request(function() ran[#ran + 1] = "after-error" end)
-  eq(#queue, 1, "an error leaves the coalescer schedulable")
-  assert(flush())
-  eq(ran, { "latest", "after-error" }, "a later request runs after an error")
-
-  vim.cmd("tabnew")
-  transition.request(function() ran[#ran + 1] = "closed-tab" end)
-  vim.cmd("tabclose")
-  assert(flush())
-  eq(ran, { "latest", "after-error" }, "a request for a closed tab is discarded")
-end, debug.traceback)
-
-vim.schedule = old_schedule
-assert(ok, err)
-print("OK sidebar handoff")
-```
-
-- [ ] **Step 2: Run the test and verify the module is missing**
-
-Run from `phase_0/scm.nvim`:
-
-```bash
-nvim -l tests/handoff_test.lua
-```
-
-Expected: failure containing `module 'scm.transition' not found`.
-
-- [ ] **Step 3: Implement the minimal coalescer**
-
-Create `phase_0/scm.nvim/lua/scm/transition.lua` with:
-
-```lua
-local M = {}
-local pending
-local scheduled = false
-
-local function flush()
-  local request = pending
-  pending = nil
-  scheduled = false
-  if not request or not vim.api.nvim_tabpage_is_valid(request.tab) then return end
-  local win = vim.api.nvim_tabpage_get_win(request.tab)
-  vim.api.nvim_win_call(win, request.open)
-end
-
-function M.request(open)
-  assert(type(open) == "function", "scm handoff requires an open function")
-  pending = { open = open, tab = vim.api.nvim_get_current_tabpage() }
-  if scheduled then return end
-  scheduled = true
-  vim.schedule(flush)
-end
-
-function M.cancel()
-  pending = nil
-end
-
-return M
-```
-
-- [ ] **Step 4: Run the focused test**
-
-Run:
-
-```bash
-nvim -l tests/handoff_test.lua
-```
-
-Expected: `OK sidebar handoff` and exit code `0`.
-
-- [ ] **Step 5: Commit the coalescer**
-
-Run from the repository root:
-
-```bash
-git add phase_0/scm.nvim/lua/scm/transition.lua phase_0/scm.nvim/tests/handoff_test.lua
-git commit -m "feat: coalesce sidebar handoffs"
-```
-
-### Task 2: Panel lifecycle integration
-
-**Files:**
-- Modify: `phase_0/scm.nvim/lua/scm/panel.lua:1-4,334-360`
-- Modify: `phase_0/scm.nvim/lua/scm/init.lua:1-12`
+- Modify: `phase_0/scm.nvim/lua/scm/scope.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/core.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/panel.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/refresh.lua`
+- Modify: `phase_0/scm.nvim/tests/core_test.lua`
+- Modify: `phase_0/scm.nvim/tests/explorer_scope_test.lua`
 - Modify: `phase_0/scm.nvim/tests/handoff_test.lua`
 
 **Interfaces:**
-- Consumes: `scm.transition.request(open)` and `scm.transition.cancel()` from Task 1.
-- Produces: `require("scm").handoff(open: fun()): nil`; `require("scm").toggle()` uses the same coalescer.
+- Consumes: current-tab Snacks `picker:cwd()`, optional current-tab Neo-tree state, optional current-tab SVGTree root.
+- Produces: `scope.current(): string?`, `core.discover(root, opts, cb): true`, `core.refresh(root, opts, cb): true`, and internal `panel.open(root)`.
 
-- [ ] **Step 1: Extend the test with Panel handoff behavior**
+- [ ] **Step 1: Make cwd win over cursor directory**
 
-Insert the following inside the `xpcall` block in `tests/handoff_test.lua`, after the closed-tab assertion and before `end, debug.traceback)`:
+Add a focused scope assertion:
 
 ```lua
-  local panel = require("scm.panel")
-  local scope = require("scm.scope")
-  local old_snapshot = scope.snapshot
-  local old_open = panel.open
-  local old_snacks = _G.Snacks
-  local old_manager = package.loaded["neo-tree.sources.manager"]
-  local old_command = package.loaded["neo-tree.command"]
-  local old_svgtree = package.loaded["svgtree"]
-  local scm_closed, explorer_closed, neotree_closed, svgtree_closed = 0, 0, 0, 0
-  local active_scm = { { close = function() scm_closed = scm_closed + 1 end } }
-  local active_explorer = {}
-  _G.Snacks = { picker = { get = function(opts)
-    if opts.source == "scm" then return active_scm end
-    if opts.source == "explorer" then return active_explorer end
-    return {}
-  end } }
-
-  local explorer_opened = 0
-  panel.handoff(function() explorer_opened = explorer_opened + 1 end)
-  eq(scm_closed, 1, "handoff closes SCM synchronously")
-  eq(explorer_opened, 0, "handoff defers Explorer open")
-  assert(flush())
-  eq(explorer_opened, 1, "handoff opens Explorer on the flush")
-
-  active_scm = {}
-  active_explorer = { {
-    close = function() explorer_closed = explorer_closed + 1 end,
-    dir = function() return "/tmp" end,
-    items = function() return {} end,
+local dir_called, items_called = false, false
+_G.Snacks = { picker = { get = function()
+  return { {
+    cwd = function() return second end,
+    dir = function() dir_called = true end,
+    items = function() items_called = true end,
   } }
-  package.loaded["neo-tree.sources.manager"] = {
-    get_state = function() return { winid = vim.api.nvim_get_current_win() } end,
-  }
-  package.loaded["neo-tree.command"] = {
-    execute = function() neotree_closed = neotree_closed + 1 end,
-  }
-  package.loaded["svgtree"] = {
-    close = function() svgtree_closed = svgtree_closed + 1 end,
-  }
-  scope.snapshot = function() return "/tmp", { "/tmp" } end
-  local opened = {}
-  panel.open = function(root, dirs) opened = { root, dirs } end
-  panel.toggle()
-  eq({ explorer_closed, neotree_closed, svgtree_closed }, { 1, 1, 1 }, "SCM closes every Explorer host")
-  eq(opened, {}, "SCM open waits for teardown")
-  assert(flush())
-  eq(opened, { "/tmp", { "/tmp" } }, "SCM opens with the captured Explorer scope")
+end } }
 
-  transition.request(function() opened = { "stale" } end)
-  active_scm = { { close = function() scm_closed = scm_closed + 1 end } }
-  panel.toggle()
-  assert(flush())
-  eq(opened, { "/tmp", { "/tmp" } }, "toggle-off cancels a pending open")
-
-  scope.snapshot = old_snapshot
-  panel.open = old_open
-  _G.Snacks = old_snacks
-  package.loaded["neo-tree.sources.manager"] = old_manager
-  package.loaded["neo-tree.command"] = old_command
-  package.loaded["svgtree"] = old_svgtree
+eq(scope.current(), second_real, "Snacks Explorer cwd replaces tab root")
+eq({ dir_called, items_called }, { false, false }, "SCM reads only the Snacks Explorer cwd")
 ```
-
-- [ ] **Step 2: Run the test and verify the public handoff is missing**
 
 Run:
 
 ```bash
+cd /home/hundredbillion/.local/share/nvim/lazy/scm.nvim/phase_0/scm.nvim
+nvim -l tests/explorer_scope_test.lua
+```
+
+Expected before implementation: the cursor directory wins or rendered items are read.
+
+- [ ] **Step 2: Reduce the Snacks scope adapter to cwd**
+
+Use this contract in `scm.scope`:
+
+```lua
+local function snacks_root()
+  if not (_G.Snacks and Snacks.picker and Snacks.picker.get) then return nil end
+  local picker = Snacks.picker.get({ source = "explorer" })[1]
+  if not picker then return nil end
+  local ok, root = pcall(function() return picker:cwd() end)
+  return ok and root or nil
+end
+```
+
+Keep only one canonical root in Panel tab state. `panel.toggle()` captures `scope.current()` before closing Explorer and schedules `M.open(root)`. Delete the closed-Panel scope synchronizer and its `DirChanged` autocmd because mutually exclusive activities cannot change Explorer scope while SCM is visible.
+
+- [ ] **Step 3: Preserve unconditional nested discovery**
+
+Keep Core's three-argument discovery interface and always consume every `find` result:
+
+```lua
+if landed.parent.code == 0 then
+  add(vim.trim(landed.parent.stdout or ""))
+end
+for _, git_entry in ipairs(vim.split(landed.find.stdout or "", "\n", { trimempty = true })) do
+  add(vim.fs.dirname(git_entry))
+end
+table.sort(repos)
+cb(repos, nil)
+```
+
+The unit fixture must include a containing repository and an arbitrary-depth nested worktree, with this observable result:
+
+```lua
+eq(discovered, { parent_real, deep_real }, "containing and arbitrary-depth repositories are canonicalized")
+```
+
+- [ ] **Step 4: Cover cursor, enter, and go-up capture**
+
+Use a mutable fake `picker:cwd()` and a distinct mutable cursor directory. Assert cursor changes retain the root, then assert entering and going up change `scope.current()`. In `handoff_test.lua`, stub `scope.current()` and verify the exact root captured by each subsequent `panel.toggle()` call.
+
+- [ ] **Step 5: Run the task tests**
+
+```bash
+nvim -l tests/core_test.lua
+nvim -l tests/explorer_scope_test.lua
 nvim -l tests/handoff_test.lua
 ```
 
-Expected: failure containing `attempt to call field 'handoff' (a nil value)`.
+Expected: `OK`, `OK explorer scope`, and `OK sidebar handoff`; exit code `0`.
 
-- [ ] **Step 3: Integrate transition ordering into the Panel**
+---
 
-Add this require after `local M = {}` in `lua/scm/panel.lua`:
+### Task 2: Scope standalone SVGTree and make teardown transactional
 
-```lua
-local transition = require("scm.transition")
+**Files:**
+- Modify: `phase_0/scm.nvim/lua/scm/scope.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/panel.lua`
+- Modify: `phase_0/scm.nvim/tests/explorer_scope_test.lua`
+- Modify: `phase_0/scm.nvim/tests/handoff_test.lua`
+
+**Interfaces:**
+- Consumes: `vim.api.nvim_tabpage_list_wins(0)`, normal-window configs, buffer filetype, optional `svgtree.root()`, optional `svgtree.close()`, and Neo-tree's optional `command.execute()`.
+- Produces: tab-local scope/teardown and errors prefixed with `SCM handoff failed to close Neo-tree:` or `SCM handoff failed to close SVGTree:`.
+
+- [ ] **Step 1: Add the two-tab SVGTree regression**
+
+Create a normal `svgtree` buffer in tab A. Verify `scope.current()` reads `svgtree.root()` in A. Switch to tab B, verify the root function is not called again, request SCM, and verify `svgtree.close()` remains untouched. Return to A and verify SCM does close the standalone tree there.
+
+Run:
+
+```bash
+nvim -l tests/explorer_scope_test.lua
+nvim -l tests/handoff_test.lua
 ```
 
-Replace `M.toggle()` with the following functions:
+Expected before implementation: tab B receives tab A's SVGTree root and/or closes tab A's tree.
+
+- [ ] **Step 2: Gate optional SVGTree access on a current-tab normal window**
+
+Before reading the loaded module, inspect current-tab windows:
+
+```lua
+local has_svgtree = false
+for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+  if vim.api.nvim_win_get_config(win).relative == ""
+    and vim.bo[vim.api.nvim_win_get_buf(win)].filetype == "svgtree"
+  then
+    has_svgtree = true
+    break
+  end
+end
+
+if has_svgtree then
+  local svgtree = package.loaded["svgtree"]
+  if svgtree and svgtree.close then
+    local closed, close_err = pcall(svgtree.close)
+    if not closed then error("SCM handoff failed to close SVGTree: " .. tostring(close_err), 0) end
+  end
+end
+```
+
+Do not patch SVGTree or inspect its private state.
+
+- [ ] **Step 3: Add close-failure regressions**
+
+For each handoff/toggle-on failure path:
+
+1. Queue a stale transition.
+2. Make the active host's close raise.
+3. Assert the error surfaces.
+4. Flush and assert neither stale nor requested SCM open ran.
+5. Restore close behavior and assert a later request runs.
+
+Cover natural Snacks close propagation plus contextual Neo-tree and SVGTree errors.
+
+- [ ] **Step 4: Cancel before teardown and abort on close errors**
+
+Both directions begin with cancellation:
 
 ```lua
 function M.handoff(open)
+  transition.cancel()
   for _, picker in ipairs(Snacks.picker.get({ source = "scm" })) do
     picker:close()
   end
   transition.request(open)
-end
-
-local function close_explorers()
-  for _, picker in ipairs(Snacks.picker.get({ source = "explorer" })) do
-    picker:close()
-  end
-  local manager = package.loaded["neo-tree.sources.manager"]
-  local command = package.loaded["neo-tree.command"]
-  if manager and command then
-    local ok, state = pcall(manager.get_state, "filesystem")
-    if ok and state and state.winid and vim.api.nvim_win_is_valid(state.winid) then
-      pcall(command.execute, { action = "close" })
-    end
-  end
-  local svgtree = package.loaded["svgtree"]
-  if svgtree and svgtree.close then pcall(svgtree.close) end
 end
 
 function M.toggle()
@@ -288,244 +201,143 @@ function M.toggle()
     open:close()
     return
   end
-  local root, visible_dirs = scope.snapshot()
+  transition.cancel()
+  local root = scope.current()
   close_explorers()
-  transition.request(function() M.open(root, visible_dirs) end)
+  transition.request(function()
+    M.open(root)
+  end)
 end
 ```
 
-Add `handoff = panel.handoff` to the returned table in `lua/scm/init.lua`:
+Do not suppress active Neo-tree/SVGTree close failures. Add context and rethrow before `transition.request()` can run.
 
-```lua
-return {
-  setup = panel.setup,
-  toggle = panel.toggle,
-  open = panel.open,
-  handoff = panel.handoff,
-}
-```
-
-- [ ] **Step 4: Run all SCM tests**
-
-Run from `phase_0/scm.nvim`:
+- [ ] **Step 5: Run the task tests**
 
 ```bash
 nvim -l tests/handoff_test.lua
-nvim -l tests/core_test.lua
 nvim -l tests/explorer_scope_test.lua
 ```
 
-Expected: `OK sidebar handoff`, `OK`, and `OK explorer scope`; all commands exit `0`.
+Expected: both exit `0`.
 
-- [ ] **Step 5: Commit Panel integration**
+---
 
-Run from the repository root:
-
-```bash
-git add phase_0/scm.nvim/lua/scm/panel.lua phase_0/scm.nvim/lua/scm/init.lua phase_0/scm.nvim/tests/handoff_test.lua
-git commit -m "feat: serialize sidebar activity changes"
-```
-
-### Task 3: Route configured Explorer mappings through SCM
+### Task 3: Narrow the public interface, extend CI, and strengthen the live regression
 
 **Files:**
-- Modify: `/home/hundredbillion/.config/nvim/lua/plugins/snacks-animated-scrolling-off.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/init.lua`
+- Modify: `phase_0/scm.nvim/tests/handoff_test.lua`
+- Modify: `phase_0/scm.nvim/tests/sidebar_handoff_pty.lua`
+- Modify: `.github/workflows/scm.yml`
+- Read only: `/home/hundredbillion/.config/nvim/lua/plugins/snacks-animated-scrolling-off.lua`
 
 **Interfaces:**
-- Consumes: `require("scm").handoff(open)` from Task 2.
-- Produces: `<leader>e` and `<leader>fe` for Explorer at `LazyVim.root()`; `<leader>E` and `<leader>fE` for Explorer at Neovim's current working directory.
+- Produces: public `setup(opts)`, `toggle()`, and `handoff(open)` only.
+- CI runs all three `nvim -l` suites.
+- PTY runs 100 complete Explorer→SCM cycles at 69 rows × 129 columns.
 
-- [ ] **Step 1: Record the pre-change mapping source**
+- [ ] **Step 1: Lock the transition origin and public surface**
 
-Run:
-
-```bash
-nvim --headless "+verbose nmap <leader>e" "+verbose nmap <leader>fe" +qa
-```
-
-Expected: both mappings exist with the `Explorer Snacks (root dir)` description. Lazy's placeholder may report `~/.config/nvim/init.lua` as the source.
-
-- [ ] **Step 2: Add the handoff-backed mappings and remove the post-open close**
-
-Replace `/home/hundredbillion/.config/nvim/lua/plugins/snacks-animated-scrolling-off.lua` with:
+In `handoff_test.lua`, request a transition in tab A, switch to tab B, flush, and assert the callback observes tab A while tab B remains current. Also assert:
 
 ```lua
-local function explorer(cwd)
-  require("lazy").load({ plugins = { "scm.nvim" } })
-  require("scm").handoff(function()
-    Snacks.explorer(cwd and { cwd = cwd } or nil)
-  end)
-end
-
-return {
-  "folke/snacks.nvim",
-  dependencies = { "HundredBillion/svgtree.nvim" },
-  keys = {
-    { "<leader>fe", function() explorer(LazyVim.root()) end, desc = "Explorer Snacks (root dir)" },
-    { "<leader>fE", function() explorer() end, desc = "Explorer Snacks (cwd)" },
-    { "<leader>e", function() explorer(LazyVim.root()) end, desc = "Explorer Snacks (root dir)" },
-    { "<leader>E", function() explorer() end, desc = "Explorer Snacks (cwd)" },
-  },
-  opts = {
-    image = {
-      enabled = true,
-      formats = { "png", "svg" },
-    },
-    picker = {
-      sources = {
-        explorer = {
-          format = function(item, picker)
-            return require("svgtree.adapters.snacks").format(item, picker)
-          end,
-          on_show = function(picker)
-            return require("svgtree.adapters.snacks").on_show(picker)
-          end,
-        },
-      },
-    },
-    scroll = {
-      enabled = false,
-    },
-  },
-}
+assert(require("scm").open == nil, "scm.open is not part of the public interface")
 ```
 
-- [ ] **Step 3: Verify the full configuration and mappings load**
+Remove `open = panel.open` from `scm/init.lua`; tests may continue to stub `require("scm.panel").open`.
 
-Run:
+- [ ] **Step 2: Add handoff tests to CI**
 
-```bash
-nvim --headless "+lua require('lazy').load({plugins={'scm.nvim'}}); assert(require('scm').handoff)" "+verbose nmap <leader>e" "+verbose nmap <leader>fe" +qa
+The workflow command block is:
+
+```yaml
+run: |
+  nvim -l tests/handoff_test.lua
+  nvim -l tests/core_test.lua
+  nvim -l tests/explorer_scope_test.lua
 ```
 
-Expected: exit code `0`; SCM exports `handoff`, and both mappings retain the `Explorer Snacks (root dir)` description. Task 4 verifies that the resolved mapping behavior uses the handoff.
+- [ ] **Step 3: Exercise the configured Explorer callback**
 
-- [ ] **Step 4: Check formatting and syntax**
-
-Run:
-
-```bash
-stylua --check /home/hundredbillion/.config/nvim/lua/plugins/snacks-animated-scrolling-off.lua
-```
-
-Expected: exit code `0`. If formatting differs, run `stylua` on that exact file, then repeat `stylua --check`.
-
-### Task 4: Real PTY stress regression
-
-**Files:**
-- Create: `phase_0/scm.nvim/tests/sidebar_handoff_pty.lua`
-
-**Interfaces:**
-- Consumes: the full user Neovim configuration, `require("scm").handoff(open)`, `require("scm").toggle()`, and `Snacks.explorer(opts)`.
-- Produces: a process-level pass/fail result for 100 complete Explorer → SCM cycles.
-
-- [ ] **Step 1: Add the PTY regression script**
-
-Create `phase_0/scm.nvim/tests/sidebar_handoff_pty.lua` with:
+Resolve `<leader>e` from the live mapping table and invoke its Lua callback on at least the first cycle:
 
 ```lua
-local baseline_cmdheight
-local cycles = 0
-local limit = 100
-
-local function fail(message)
-  vim.api.nvim_err_writeln(message)
-  vim.cmd("cquit 1")
+local mapping = vim.fn.maparg(vim.g.mapleader .. "e", "n", false, true)
+if type(mapping.callback) ~= "function" then
+  return fail("configured <leader>e Lua callback is unavailable")
 end
-
-local function source_count(source)
-  return #Snacks.picker.get({ source = source })
-end
-
-local function assert_layout(expected)
-  assert(vim.o.cmdheight == baseline_cmdheight, ("cmdheight changed to %d"):format(vim.o.cmdheight))
-  assert(source_count(expected) == 1, expected .. " is not the sole requested picker")
-  local other = expected == "scm" and "explorer" or "scm"
-  assert(source_count(other) == 0, other .. " overlaps " .. expected)
-  local top = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1 or 0
-  local bottom = vim.o.cmdheight + (vim.o.laststatus == 3 and 1 or 0)
-  local expected_height = vim.o.lines - top - bottom
-  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.api.nvim_win_get_config(win).relative == "" then
-      assert(vim.api.nvim_win_get_height(win) == expected_height, "normal window lost full vertical height")
-    end
-  end
-end
-
-local function wait_for(predicate, done, started)
-  started = started or vim.uv.now()
-  if predicate() then return done() end
-  if vim.uv.now() - started >= 2000 then return fail("sidebar transition timed out") end
-  vim.defer_fn(function() wait_for(predicate, done, started) end, 10)
-end
-
-local function open_explorer()
-  require("scm").handoff(function()
-    Snacks.explorer({ cwd = vim.uv.cwd() })
-  end)
-end
-
-local run_cycle
-run_cycle = function()
-  if cycles == limit then
-    return vim.defer_fn(function()
-      local ok, err = pcall(assert_layout, "scm")
-      if not ok then return fail(err) end
-      print(("OK sidebar handoff %d cycles"):format(limit))
-      vim.cmd("qa!")
-    end, 100)
-  end
-  open_explorer()
-  wait_for(function() return source_count("explorer") == 1 and source_count("scm") == 0 end, function()
-    local ok, err = pcall(assert_layout, "explorer")
-    if not ok then return fail(err) end
-    require("scm").toggle()
-    wait_for(function() return source_count("scm") == 1 and source_count("explorer") == 0 end, function()
-      local scm_ok, scm_err = pcall(assert_layout, "scm")
-      if not scm_ok then return fail(scm_err) end
-      cycles = cycles + 1
-      run_cycle()
-    end)
-  end)
-end
-
-vim.defer_fn(function()
-  baseline_cmdheight = vim.o.cmdheight
-  for _, source in ipairs({ "scm", "explorer" }) do
-    for _, picker in ipairs(Snacks.picker.get({ source = source })) do picker:close() end
-  end
-  vim.schedule(run_cycle)
-end, 500)
+explorer_mapping = mapping.callback
 ```
 
-- [ ] **Step 2: Run the real PTY regression**
+Do not replace this checkpoint with feedkey timing.
 
-Run from `/home/hundredbillion/Projects/svgtree.nvim` in a PTY sized to at least 69 rows by 129 columns:
+- [ ] **Step 4: Require complete SCM content at every checkpoint**
+
+Canonicalize `vim.uv.cwd()` as the expected repository. For each SCM open, wait for a newer Panel generation to finish and assert:
+
+- exactly one SCM picker and no Explorer picker;
+- Panel state contains a Repo Entry whose path is the real root and whose name is `svgtree.nvim`;
+- picker items contain the corresponding repository header;
+- `cmdheight` and full normal-window height are unchanged.
+
+Keep all 100 cycles and repeat the layout/content assertion after the final cycle.
+
+- [ ] **Step 5: Run the 69×129 PTY regression**
+
+From `/home/hundredbillion/Projects/svgtree.nvim`, start a PTY with exactly 69 rows and 129 columns, then run:
 
 ```bash
 nvim -c "luafile /home/hundredbillion/.local/share/nvim/lazy/scm.nvim/phase_0/scm.nvim/tests/sidebar_handoff_pty.lua" .
 ```
 
-Expected: `OK sidebar handoff 100 cycles`, no error notifications, and exit code `0`.
+Expected: `OK sidebar handoff 100 cycles` and process exit code `0`.
 
-- [ ] **Step 3: Run the complete verification set**
+---
 
-Run from `phase_0/scm.nvim`:
+### Task 4: Document installation and verify the cohesive remediation
+
+**Files:**
+- Create: `phase_0/scm.nvim/README.md`
+- Modify: `docs/TSPs/08-08-2026-perpetual-sidebar-handoff.md`
+- Create: `.superpowers/sdd/final-review-fix-report.md`
+
+- [ ] **Step 1: Document the current local-clone bootstrap**
+
+The README must include the sparse clone of `https://github.com/HundredBillion/Sprite.git` at `/home/hundredbillion/.local/share/nvim/lazy/scm.nvim`, Lazy's local `dir` pointing to `phase_0/scm.nvim`, and the exact four handoff-backed Explorer mappings.
+
+State that direct Explorer commands bypass the guarantee and that SCM neither depends on SVGTree nor patches explorer internals.
+
+- [ ] **Step 2: Run the final headless matrix**
 
 ```bash
+cd /home/hundredbillion/.local/share/nvim/lazy/scm.nvim/phase_0/scm.nvim
 nvim -l tests/handoff_test.lua
 nvim -l tests/core_test.lua
 nvim -l tests/explorer_scope_test.lua
-nvim --headless "+lua require('lazy').load({plugins={'scm.nvim'}}); assert(require('scm').handoff)" +qa
+nvim --headless "+lua local lhs=vim.g.mapleader..'e'; local m=vim.fn.maparg(lhs,'n',false,true); assert(type(m.callback)=='function'); require('lazy').load({plugins={'scm.nvim'}}); local s=require('scm'); assert(type(s.handoff)=='function'); assert(s.open==nil)" +qa
 ```
 
-Expected: all three tests print their success messages; the full-config headless load exits `0` without a Lua stack trace.
+- [ ] **Step 3: Run formatting and repository checks**
 
-- [ ] **Step 4: Commit the regression**
-
-Run from the repository root:
+Use Mason StyLua with the active Neovim formatter config on every changed Lua file:
 
 ```bash
-git add phase_0/scm.nvim/tests/sidebar_handoff_pty.lua
-git commit -m "test: stress repeated sidebar handoffs"
+/home/hundredbillion/.local/share/nvim/mason/bin/stylua \
+  --config-path /home/hundredbillion/.config/nvim/stylua.toml \
+  --check lua/scm/init.lua lua/scm/scope.lua lua/scm/panel.lua lua/scm/core.lua lua/scm/refresh.lua \
+  tests/handoff_test.lua tests/core_test.lua tests/explorer_scope_test.lua tests/sidebar_handoff_pty.lua
+git diff --check
 ```
+
+- [ ] **Step 4: Record evidence and commit once**
+
+Write red/green evidence, changed files, final commands, self-review, and concerns to `.superpowers/sdd/final-review-fix-report.md`. Then create one focused commit:
+
+```bash
+git add .github/workflows/scm.yml docs/TSPs/08-08-2026-perpetual-sidebar-handoff.md \
+  phase_0/scm.nvim .superpowers/sdd/final-review-fix-report.md
+git commit -m "fix: preserve explorer scope during handoff"
+```
+
+Do not push, merge, or modify the external Snacks configuration.

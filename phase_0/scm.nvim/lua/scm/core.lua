@@ -27,16 +27,22 @@ function M.parse_status(lines)
     local first = l:sub(1, 1)
     if first == "#" then
       local h = l:match("^# branch%.head (.+)$")
-      if h then branch = h end
+      if h then
+        branch = h
+      end
       local o = l:match("^# branch%.oid (%S+)")
-      if o then oid = o end
+      if o then
+        oid = o
+      end
       local a, b = l:match("^# branch%.ab %+(%d+) %-(%d+)$")
       if a then
         ahead, behind = tonumber(a), tonumber(b)
       end
     elseif first == "1" then
       local xy, path = l:match("^1 (..) %S+ %S+ %S+ %S+ %S+ %S+ (.+)$")
-      if xy then files[#files + 1] = { path = path, xy = xy } end
+      if xy then
+        files[#files + 1] = { path = path, xy = xy }
+      end
     elseif first == "2" then
       local xy, rest = l:match("^2 (..) %S+ %S+ %S+ %S+ %S+ %S+ %S+ (.+)$")
       if xy then
@@ -44,10 +50,14 @@ function M.parse_status(lines)
       end
     elseif first == "u" then
       local xy, path = l:match("^u (..) %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ (.+)$")
-      if xy then files[#files + 1] = { path = path, xy = xy } end
+      if xy then
+        files[#files + 1] = { path = path, xy = xy }
+      end
     elseif first == "?" then
       local p = l:match("^%? (.+)$")
-      if p then files[#files + 1] = { path = p, xy = "??" } end
+      if p then
+        files[#files + 1] = { path = p, xy = "??" }
+      end
     end
   end
   if branch == "(detached)" and oid then
@@ -56,13 +66,15 @@ function M.parse_status(lines)
   return { branch = branch, ahead = ahead, behind = behind, files = files }
 end
 
-function M.discover(root, opts, cb, visible_dirs)
+function M.discover(root, opts, cb)
   root = vim.fs.normalize(vim.uv.fs_realpath(vim.fn.expand(root)) or vim.fn.expand(root))
   local landed, pending = {}, 2
   local function finish(kind, out)
     landed[kind] = out
     pending = pending - 1
-    if pending ~= 0 then return end
+    if pending ~= 0 then
+      return
+    end
     vim.schedule(function()
       if landed.find.code ~= 0 then
         local msg = vim.trim(landed.find.stderr or "")
@@ -80,10 +92,8 @@ function M.discover(root, opts, cb, visible_dirs)
       if landed.parent.code == 0 then
         add(vim.trim(landed.parent.stdout or ""))
       end
-      if not visible_dirs then
-        for _, git_entry in ipairs(vim.split(landed.find.stdout or "", "\n", { trimempty = true })) do
-          add(vim.fs.dirname(git_entry))
-        end
+      for _, git_entry in ipairs(vim.split(landed.find.stdout or "", "\n", { trimempty = true })) do
+        add(vim.fs.dirname(git_entry))
       end
       table.sort(repos)
       cb(repos, nil)
@@ -92,12 +102,16 @@ function M.discover(root, opts, cb, visible_dirs)
   vim.system(
     { "git", "-C", root, "rev-parse", "--show-toplevel" },
     { text = true, timeout = opts.timeout_ms },
-    function(out) finish("parent", out) end
+    function(out)
+      finish("parent", out)
+    end
   )
   vim.system(
     { "find", root, "-name", ".git", "-prune", "-print" },
     { text = true, timeout = opts.timeout_ms },
-    function(out) finish("find", out) end
+    function(out)
+      finish("find", out)
+    end
   )
   return true
 end
@@ -109,7 +123,9 @@ end
 function M.compare_entries(a, b)
   local aa = (not a.clean) or a.err ~= nil
   local bb = (not b.clean) or b.err ~= nil
-  if aa ~= bb then return aa end
+  if aa ~= bb then
+    return aa
+  end
   return a.name < b.name
 end
 
@@ -121,15 +137,24 @@ local function build_entry(repo, out)
   if out.code == 0 then
     local p = M.parse_status(vim.split(out.stdout or "", "\n", { trimempty = true }))
     return {
-      name = name, path = repo, branch = p.branch,
-      ahead = p.ahead, behind = p.behind,
-      files = p.files, clean = #p.files == 0,
+      name = name,
+      path = repo,
+      branch = p.branch,
+      ahead = p.ahead,
+      behind = p.behind,
+      files = p.files,
+      clean = #p.files == 0,
     }
   end
   local msg = (out.stderr or ""):match("^[^\n]*")
   return {
-    name = name, path = repo, branch = "?", ahead = 0, behind = 0,
-    files = {}, clean = true,
+    name = name,
+    path = repo,
+    branch = "?",
+    ahead = 0,
+    behind = 0,
+    files = {},
+    clean = true,
     err = (msg and #msg > 0) and msg or "git failed",
   }
 end
@@ -172,7 +197,7 @@ function M.refresh_repo(repo, opts, cb)
   return true
 end
 
-function M.refresh(root, opts, cb, visible_dirs)
+function M.refresh(root, opts, cb)
   return M.discover(root, opts, function(repos, discover_err)
     if discover_err then
       cb(nil, discover_err)
@@ -203,7 +228,7 @@ function M.refresh(root, opts, cb, visible_dirs)
         end
       )
     end
-  end, visible_dirs)
+  end)
 end
 
 return M

@@ -78,7 +78,9 @@ M.state = { opts = nil, tabs = {} }
 function M.tab_state(tab)
   tab = tab or vim.api.nvim_get_current_tabpage()
   for handle in pairs(M.state.tabs) do
-    if not vim.api.nvim_tabpage_is_valid(handle) then M.state.tabs[handle] = nil end
+    if not vim.api.nvim_tabpage_is_valid(handle) then
+      M.state.tabs[handle] = nil
+    end
   end
   if not M.state.tabs[tab] then
     M.state.tabs[tab] = {
@@ -88,7 +90,6 @@ function M.tab_state(tab)
       refreshing = false,
       generation = 0,
       queued_root = nil,
-      visible_dirs = nil,
     }
   end
   return M.state.tabs[tab]
@@ -128,7 +129,9 @@ end
 -- that reorders or reshuffles rows can still find "the same row" and re-park
 -- the cursor there instead of snapping back to the top.
 local function item_key(item)
-  if not item then return nil end
+  if not item then
+    return nil
+  end
   if item.kind == "file" then
     return item.entry.path .. "//" .. item.fentry.path
   end
@@ -167,8 +170,12 @@ function M.format_item(item)
       parts[#parts + 1] = { item.collapsed and "▶ " or "▼ ", "Directory" }
       vim.list_extend(parts, name_col("Title"))
       parts[#parts + 1] = { e.branch .. " ", "Function" }
-      if e.ahead > 0 then parts[#parts + 1] = { "↑" .. e.ahead, "DiagnosticInfo" } end
-      if e.behind > 0 then parts[#parts + 1] = { "↓" .. e.behind, "DiagnosticWarn" } end
+      if e.ahead > 0 then
+        parts[#parts + 1] = { "↑" .. e.ahead, "DiagnosticInfo" }
+      end
+      if e.behind > 0 then
+        parts[#parts + 1] = { "↓" .. e.behind, "DiagnosticWarn" }
+      end
       parts[#parts + 1] = { ("  %d"):format(#e.files), "Number" }
     end
     return parts
@@ -185,7 +192,9 @@ function M.format_item(item)
   }
 end
 
-local sactions = function() return require("snacks.picker.actions") end
+local sactions = function()
+  return require("snacks.picker.actions")
+end
 
 local function has_children(item)
   return item
@@ -197,17 +206,25 @@ end
 
 -- Position of the item matching `key` in `items`, or nil.
 local function index_of(items, key)
-  if not key then return nil end
+  if not key then
+    return nil
+  end
   for idx, item in ipairs(items) do
-    if item_key(item) == key then return idx end
+    if item_key(item) == key then
+      return idx
+    end
   end
   return nil
 end
 
 local function view_key(picker, key)
   local idx = index_of(picker:items(), key)
-  if not idx then return false end
-  pcall(function() picker.list:view(idx) end)
+  if not idx then
+    return false
+  end
+  pcall(function()
+    picker.list:view(idx)
+  end)
   return true
 end
 
@@ -219,15 +236,31 @@ local function rerender(picker, anchor, anchor_idx, title)
   local generation = picker._scm_render_generation
   picker:find({
     on_done = function(_, completed_task)
-      if picker.closed then return end
-      if picker._scm_render_generation ~= generation then return end
-      if title then set_title(picker, title) end
-      if completed_task and picker.matcher and picker.matcher.task ~= completed_task then return end
-      if not anchor then return end
+      if picker.closed then
+        return
+      end
+      if picker._scm_render_generation ~= generation then
+        return
+      end
+      if title then
+        set_title(picker, title)
+      end
+      if completed_task and picker.matcher and picker.matcher.task ~= completed_task then
+        return
+      end
+      if not anchor then
+        return
+      end
       local items = picker:items()
-      if #items == 0 then return end
+      if #items == 0 then
+        return
+      end
       local idx = index_of(items, anchor) or (anchor_idx and math.min(anchor_idx, #items))
-      if idx then pcall(function() picker.list:view(idx) end) end
+      if idx then
+        pcall(function()
+          picker.list:view(idx)
+        end)
+      end
     end,
   })
 end
@@ -241,7 +274,9 @@ end
 local function key_actions()
   return {
     scm_confirm = function(picker, item)
-      if not item then return end
+      if not item then
+        return
+      end
       if item.kind == "file" then
         sactions().jump(picker, item, { cmd = "edit" })
       elseif item.collapsed then
@@ -251,10 +286,16 @@ local function key_actions()
       end
     end,
     scm_close = function(picker, item)
-      if not item then return end
+      if not item then
+        return
+      end
       if item.kind == "file" then
-        if view_key(picker, item.entry.path) then return end
-        if #(item.entry.files or {}) == 0 then return end
+        if view_key(picker, item.entry.path) then
+          return
+        end
+        if #(item.entry.files or {}) == 0 then
+          return
+        end
         local state = M.tab_state(picker._scm_tab)
         state.collapsed[item.entry.path] = true
         rerender(picker, item.entry.path, nil, "Source Control")
@@ -263,7 +304,9 @@ local function key_actions()
       end
     end,
     scm_open = function(picker, item)
-      if not item then return end
+      if not item then
+        return
+      end
       if item.kind == "file" then
         sactions().jump(picker, item, { cmd = "edit" })
       elseif has_children(item) and item.collapsed then
@@ -271,22 +314,30 @@ local function key_actions()
       end
     end,
     scm_diff = function(picker, item)
-      if not item or item.kind ~= "file" then return end
+      if not item or item.kind ~= "file" then
+        return
+      end
       sactions().jump(picker, item, { cmd = "edit" })
       if item.fentry.xy == "??" then
         vim.notify("untracked — no diff", vim.log.levels.INFO)
       else
-        vim.schedule(function() vim.cmd("Gitsigns diffthis") end)
+        vim.schedule(function()
+          vim.cmd("Gitsigns diffthis")
+        end)
       end
     end,
     scm_lazygit = function(_, item)
-      if item then Snacks.lazygit({ cwd = item.entry.path }) end
+      if item then
+        Snacks.lazygit({ cwd = item.entry.path })
+      end
     end,
-    scm_refresh = function(picker) M.refresh_view(picker) end,
+    scm_refresh = function(picker)
+      M.refresh_view(picker)
+    end,
   }
 end
 
-function M.open(root, visible_dirs)
+function M.open(root)
   M.setup(M.state.opts) -- idempotent; ensures defaults even if setup() was never called
   local tab = vim.api.nvim_get_current_tabpage()
   local state = M.tab_state(tab)
@@ -297,17 +348,20 @@ function M.open(root, visible_dirs)
     state.queued_root = nil
   end
   state.root = next_root
-  state.visible_dirs = visible_dirs
   state.collapsed = {}
   local picker = Snacks.picker.pick({
     source = "scm",
     title = "Source Control",
     show_empty = true,
-    finder = function() return M.build_items(state.entries, state.collapsed) end,
+    finder = function()
+      return M.build_items(state.entries, state.collapsed)
+    end,
     format = M.format_item,
     layout = { preset = "sidebar", preview = false },
     focus = "list",
-    on_show = function(shown) shown._scm_tab = tab end,
+    on_show = function(shown)
+      shown._scm_tab = tab
+    end,
     jump = { close = false }, -- keep the sidebar open when a file is opened from it
     auto_close = false,
     matcher = { sort_empty = false, fuzzy = true },
@@ -333,6 +387,7 @@ function M.open(root, visible_dirs)
 end
 
 function M.handoff(open)
+  transition.cancel()
   for _, picker in ipairs(Snacks.picker.get({ source = "scm" })) do
     picker:close()
   end
@@ -347,12 +402,37 @@ local function close_explorers()
   local command = package.loaded["neo-tree.command"]
   if manager and command then
     local ok, state = pcall(manager.get_state, "filesystem")
-    if ok and state and state.winid and vim.api.nvim_win_is_valid(state.winid) then
-      pcall(command.execute, { action = "close" })
+    if
+      ok
+      and state
+      and state.winid
+      and vim.api.nvim_win_is_valid(state.winid)
+      and vim.api.nvim_win_get_tabpage(state.winid) == vim.api.nvim_get_current_tabpage()
+    then
+      local closed, close_err = pcall(command.execute, { action = "close" })
+      if not closed then
+        error("SCM handoff failed to close Neo-tree: " .. tostring(close_err), 0)
+      end
     end
   end
-  local svgtree = package.loaded["svgtree"]
-  if svgtree and svgtree.close then pcall(svgtree.close) end
+  local has_svgtree = false
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if
+      vim.api.nvim_win_get_config(win).relative == "" and vim.bo[vim.api.nvim_win_get_buf(win)].filetype == "svgtree"
+    then
+      has_svgtree = true
+      break
+    end
+  end
+  if has_svgtree then
+    local svgtree = package.loaded["svgtree"]
+    if svgtree and svgtree.close then
+      local closed, close_err = pcall(svgtree.close)
+      if not closed then
+        error("SCM handoff failed to close SVGTree: " .. tostring(close_err), 0)
+      end
+    end
+  end
 end
 
 function M.toggle()
@@ -362,9 +442,12 @@ function M.toggle()
     open:close()
     return
   end
-  local root, visible_dirs = scope.snapshot()
+  transition.cancel()
+  local root = scope.current()
   close_explorers()
-  transition.request(function() M.open(root, visible_dirs) end)
+  transition.request(function()
+    M.open(root)
+  end)
 end
 
 -- Capture the cursor's identity (and old position) so it can be restored
@@ -377,7 +460,9 @@ end
 
 local function picker_for_tab(tab)
   for _, picker in ipairs(Snacks.picker.get({ source = "scm", tab = false })) do
-    if picker._scm_tab == tab and not picker.closed then return picker end
+    if picker._scm_tab == tab and not picker.closed then
+      return picker
+    end
   end
 end
 
@@ -387,11 +472,15 @@ local function run_full_refresh(tab, state)
   state.refreshing = true
   local picker = picker_for_tab(tab)
   local anchor, anchor_idx
-  if picker then anchor, anchor_idx = capture_anchor(picker) end
+  if picker then
+    anchor, anchor_idx = capture_anchor(picker)
+  end
   core.refresh(root, M.state.opts, function(entries, err)
     state.refreshing = false
     if vim.api.nvim_tabpage_is_valid(tab) and generation == state.generation then
-      if not err then state.entries = entries end
+      if not err then
+        state.entries = entries
+      end
       local current = picker_for_tab(tab)
       if current then
         local published = state.entries
@@ -400,13 +489,17 @@ local function run_full_refresh(tab, state)
         rerender(current, anchor, anchor_idx, title)
       end
     end
-    if state.queued_root and vim.api.nvim_tabpage_is_valid(tab) then run_full_refresh(tab, state) end
-  end, state.visible_dirs)
+    if state.queued_root and vim.api.nvim_tabpage_is_valid(tab) then
+      run_full_refresh(tab, state)
+    end
+  end)
 end
 
 function M.refresh_view(picker)
   picker = picker or Snacks.picker.get({ source = "scm" })[1]
-  if not picker then return false end
+  if not picker then
+    return false
+  end
   local tab = picker._scm_tab or vim.api.nvim_get_current_tabpage()
   local state = M.tab_state(tab)
   if not state.root then
@@ -416,26 +509,10 @@ function M.refresh_view(picker)
   state.generation = state.generation + 1
   state.queued_root = state.root
   set_title(picker, "Source Control (scanning…)")
-  if state.refreshing then return false end
+  if state.refreshing then
+    return false
+  end
   run_full_refresh(tab, state)
-  return true
-end
-
-function M.root_changed(root, visible_dirs)
-  local tab = vim.api.nvim_get_current_tabpage()
-  local state = M.tab_state(tab)
-  if not root then return false end
-  if state.root == root and vim.deep_equal(state.visible_dirs, visible_dirs) then return false end
-  local root_changed = state.root ~= root
-  state.root = root
-  state.visible_dirs = visible_dirs
-  if not root_changed then return M.refresh_view(picker_for_tab(tab)) end
-  state.generation = state.generation + 1
-  state.queued_root = nil
-  state.entries = {}
-  state.collapsed = {}
-  local picker = picker_for_tab(tab)
-  if picker then return M.refresh_view(picker) end
   return true
 end
 
@@ -465,7 +542,9 @@ function M.refresh_repo_view(repo)
           if picker then
             local anchor, anchor_idx = capture_anchor(picker)
             local title
-            if not state.refreshing then title = "Source Control" end
+            if not state.refreshing then
+              title = "Source Control"
+            end
             rerender(picker, anchor, anchor_idx, title)
           end
         end
