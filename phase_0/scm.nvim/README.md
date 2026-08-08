@@ -11,11 +11,11 @@ Lazy normally stores plugins, while the plugin itself is the nested
 `phase_0/scm.nvim` directory:
 
 ```bash
+SCM_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/lazy/scm.nvim"
 git clone --filter=blob:none --sparse \
   https://github.com/HundredBillion/Sprite.git \
-  /home/hundredbillion/.local/share/nvim/lazy/scm.nvim
-git -C /home/hundredbillion/.local/share/nvim/lazy/scm.nvim \
-  sparse-checkout set phase_0/scm.nvim
+  "$SCM_DIR"
+git -C "$SCM_DIR" sparse-checkout set phase_0/scm.nvim
 ```
 
 Point Lazy at that nested local directory:

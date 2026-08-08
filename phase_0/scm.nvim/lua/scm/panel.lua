@@ -400,16 +400,20 @@ local function close_explorers()
   end
   local manager = package.loaded["neo-tree.sources.manager"]
   local command = package.loaded["neo-tree.command"]
-  if manager and command then
+  if manager then
     local ok, state = pcall(manager.get_state, "filesystem")
+    if not ok then
+      error("SCM handoff failed to inspect Neo-tree: " .. tostring(state), 0)
+    end
     if
-      ok
-      and state
+      state
       and state.winid
       and vim.api.nvim_win_is_valid(state.winid)
       and vim.api.nvim_win_get_tabpage(state.winid) == vim.api.nvim_get_current_tabpage()
     then
-      local closed, close_err = pcall(command.execute, { action = "close" })
+      local closed, close_err = pcall(function()
+        command.execute({ action = "close", source = "filesystem" })
+      end)
       if not closed then
         error("SCM handoff failed to close Neo-tree: " .. tostring(close_err), 0)
       end

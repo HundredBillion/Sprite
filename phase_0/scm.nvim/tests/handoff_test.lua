@@ -143,16 +143,6 @@ local ok, err = xpcall(function()
         end,
       },
     }
-    package.loaded["neo-tree.sources.manager"] = {
-      get_state = function()
-        return { winid = vim.api.nvim_get_current_win() }
-      end,
-    }
-    package.loaded["neo-tree.command"] = {
-      execute = function()
-        error("Neo-tree close failed")
-      end,
-    }
     package.loaded["svgtree"] = {
       close = function()
         svgtree_closed = svgtree_closed + 1
@@ -165,6 +155,51 @@ local ok, err = xpcall(function()
     panel.open = function(root)
       opened = { root }
     end
+    package.loaded["neo-tree.sources.manager"] = {
+      get_state = function()
+        error("Neo-tree state unavailable")
+      end,
+    }
+    package.loaded["neo-tree.command"] = {
+      execute = function()
+        error("Neo-tree close must not run after inspection failure")
+      end,
+    }
+    transition.request(function()
+      ran[#ran + 1] = "stale-before-inspection-failure"
+    end)
+    local inspect_ok, inspect_err = pcall(panel.toggle)
+    assert(
+      not inspect_ok and tostring(inspect_err):find("SCM handoff failed to inspect Neo-tree", 1, true),
+      "Neo-tree inspection errors surface clearly"
+    )
+    assert(flush())
+    eq(opened, {}, "failed Neo-tree inspection does not open SCM")
+    eq(ran, { "latest", "after-error" }, "failed Neo-tree inspection cancels stale pending work")
+
+    package.loaded["neo-tree.sources.manager"] = {
+      get_state = function()
+        return { winid = vim.api.nvim_get_current_win() }
+      end,
+    }
+    local neotree_close_args
+    package.loaded["neo-tree.command"] = {
+      execute = function(args)
+        neotree_close_args = args
+        neotree_closed = neotree_closed + 1
+      end,
+    }
+    panel.toggle()
+    eq(neotree_close_args, { action = "close", source = "filesystem" }, "Neo-tree closes through the filesystem source")
+    assert(flush())
+    eq(opened, { "/tmp" }, "a later request works after Neo-tree inspection failure")
+
+    opened = {}
+    package.loaded["neo-tree.command"] = {
+      execute = function()
+        error("Neo-tree close failed")
+      end,
+    }
     transition.request(function()
       ran[#ran + 1] = "stale-before-failed-toggle"
     end)
@@ -188,7 +223,7 @@ local ok, err = xpcall(function()
     panel.toggle()
     eq(
       { explorer_closed, neotree_closed, svgtree_closed },
-      { 2, 1, 0 },
+      { 4, 2, 0 },
       "SCM in tab B does not close standalone svgtree in tab A"
     )
     eq(opened, {}, "SCM open waits for teardown")

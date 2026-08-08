@@ -127,8 +127,8 @@ Expected: `OK`, `OK explorer scope`, and `OK sidebar handoff`; exit code `0`.
 - Modify: `phase_0/scm.nvim/tests/handoff_test.lua`
 
 **Interfaces:**
-- Consumes: `vim.api.nvim_tabpage_list_wins(0)`, normal-window configs, buffer filetype, optional `svgtree.root()`, optional `svgtree.close()`, and Neo-tree's optional `command.execute()`.
-- Produces: tab-local scope/teardown and errors prefixed with `SCM handoff failed to close Neo-tree:` or `SCM handoff failed to close SVGTree:`.
+- Consumes: `vim.api.nvim_tabpage_list_wins(0)`, normal-window configs, buffer filetype, optional `svgtree.root()`, optional `svgtree.close()`, and Neo-tree's `manager.get_state()`/`command.execute()` interfaces.
+- Produces: tab-local scope/teardown and errors prefixed with `SCM handoff failed to inspect Neo-tree:`, `SCM handoff failed to close Neo-tree:`, or `SCM handoff failed to close SVGTree:`.
 
 - [ ] **Step 1: Add the two-tab SVGTree regression**
 
@@ -179,7 +179,13 @@ For each handoff/toggle-on failure path:
 4. Flush and assert neither stale nor requested SCM open ran.
 5. Restore close behavior and assert a later request runs.
 
-Cover natural Snacks close propagation plus contextual Neo-tree and SVGTree errors.
+Cover natural Snacks close propagation plus contextual Neo-tree inspection,
+Neo-tree close, and SVGTree close errors. For Neo-tree, assert the active
+current-tab filesystem state closes with this exact call:
+
+```lua
+command.execute({ action = "close", source = "filesystem" })
+```
 
 - [ ] **Step 4: Cancel before teardown and abort on close errors**
 
@@ -210,7 +216,8 @@ function M.toggle()
 end
 ```
 
-Do not suppress active Neo-tree/SVGTree close failures. Add context and rethrow before `transition.request()` can run.
+Do not suppress Neo-tree inspection or active Neo-tree/SVGTree close failures.
+Add context and rethrow before `transition.request()` can run.
 
 - [ ] **Step 5: Run the task tests**
 
@@ -300,11 +307,14 @@ Expected: `OK sidebar handoff 100 cycles` and process exit code `0`.
 **Files:**
 - Create: `phase_0/scm.nvim/README.md`
 - Modify: `docs/TSPs/08-08-2026-perpetual-sidebar-handoff.md`
-- Create: `.superpowers/sdd/final-review-fix-report.md`
 
 - [ ] **Step 1: Document the current local-clone bootstrap**
 
-The README must include the sparse clone of `https://github.com/HundredBillion/Sprite.git` at `/home/hundredbillion/.local/share/nvim/lazy/scm.nvim`, Lazy's local `dir` pointing to `phase_0/scm.nvim`, and the exact four handoff-backed Explorer mappings.
+The README must derive the clone location from `XDG_DATA_HOME` with a
+`$HOME/.local/share` fallback, clone
+`https://github.com/HundredBillion/Sprite.git` into that location, keep Lazy's
+local `dir` based on `vim.fn.stdpath("data")`, and show the exact four
+handoff-backed Explorer mappings.
 
 State that direct Explorer commands bypass the guarantee and that SCM neither depends on SVGTree nor patches explorer internals.
 
@@ -326,18 +336,18 @@ Use Mason StyLua with the active Neovim formatter config on every changed Lua fi
 /home/hundredbillion/.local/share/nvim/mason/bin/stylua \
   --config-path /home/hundredbillion/.config/nvim/stylua.toml \
   --check lua/scm/init.lua lua/scm/scope.lua lua/scm/panel.lua lua/scm/core.lua lua/scm/refresh.lua \
+  lua/scm/transition.lua \
   tests/handoff_test.lua tests/core_test.lua tests/explorer_scope_test.lua tests/sidebar_handoff_pty.lua
 git diff --check
 ```
 
-- [ ] **Step 4: Record evidence and commit once**
+- [ ] **Step 4: Commit the verified correction**
 
-Write red/green evidence, changed files, final commands, self-review, and concerns to `.superpowers/sdd/final-review-fix-report.md`. Then create one focused commit:
+Create one focused commit without adding ignored internal reports:
 
 ```bash
-git add .github/workflows/scm.yml docs/TSPs/08-08-2026-perpetual-sidebar-handoff.md \
-  phase_0/scm.nvim .superpowers/sdd/final-review-fix-report.md
-git commit -m "fix: preserve explorer scope during handoff"
+git add docs/TSPs/08-08-2026-perpetual-sidebar-handoff.md phase_0/scm.nvim
+git commit -m "fix: propagate explorer teardown failures"
 ```
 
 Do not push, merge, or modify the external Snacks configuration.
