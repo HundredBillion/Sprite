@@ -2,6 +2,7 @@
 -- This file may use snacks; scm.core never does. Pure derivation/item
 -- building lives at the top (headlessly testable); picker wiring below.
 local M = {}
+local transition = require("scm.transition")
 
 -- Git's `status --porcelain=v2` documents exactly 7 unmerged XY codes; any of
 -- them means an active, unresolved conflict on that file, regardless of which
@@ -87,6 +88,7 @@ function M.tab_state(tab)
       refreshing = false,
       generation = 0,
       queued_root = nil,
+      visible_dirs = nil,
     }
   end
   return M.state.tabs[tab]
@@ -284,7 +286,7 @@ local function key_actions()
   }
 end
 
-function M.open(root)
+function M.open(root, visible_dirs)
   M.setup(M.state.opts) -- idempotent; ensures defaults even if setup() was never called
   local tab = vim.api.nvim_get_current_tabpage()
   local state = M.tab_state(tab)
@@ -295,6 +297,7 @@ function M.open(root)
     state.queued_root = nil
   end
   state.root = next_root
+  state.visible_dirs = visible_dirs
   state.collapsed = {}
   local picker = Snacks.picker.pick({
     source = "scm",
@@ -329,15 +332,16 @@ function M.open(root)
   return picker
 end
 
-function M.toggle()
-  local open = Snacks.picker.get({ source = "scm" })[1]
-  if open then
-    open:close()
-    return
+function M.handoff(open)
+  for _, picker in ipairs(Snacks.picker.get({ source = "scm" })) do
+    picker:close()
   end
-  local root = scope.current()
+  transition.request(open)
+end
+
+local function close_explorers()
   for _, picker in ipairs(Snacks.picker.get({ source = "explorer" })) do
-    picker:close() -- only one left-rail sidebar activity open at a time
+    picker:close()
   end
   local manager = package.loaded["neo-tree.sources.manager"]
   local command = package.loaded["neo-tree.command"]
@@ -347,7 +351,20 @@ function M.toggle()
       pcall(command.execute, { action = "close" })
     end
   end
-  M.open(root)
+  local svgtree = package.loaded["svgtree"]
+  if svgtree and svgtree.close then pcall(svgtree.close) end
+end
+
+function M.toggle()
+  local open = Snacks.picker.get({ source = "scm" })[1]
+  if open then
+    transition.cancel()
+    open:close()
+    return
+  end
+  local root, visible_dirs = scope.snapshot()
+  close_explorers()
+  transition.request(function() M.open(root, visible_dirs) end)
 end
 
 -- Capture the cursor's identity (and old position) so it can be restored
@@ -384,7 +401,7 @@ local function run_full_refresh(tab, state)
       end
     end
     if state.queued_root and vim.api.nvim_tabpage_is_valid(tab) then run_full_refresh(tab, state) end
-  end)
+  end, state.visible_dirs)
 end
 
 function M.refresh_view(picker)
@@ -404,11 +421,15 @@ function M.refresh_view(picker)
   return true
 end
 
-function M.root_changed(root)
+function M.root_changed(root, visible_dirs)
   local tab = vim.api.nvim_get_current_tabpage()
   local state = M.tab_state(tab)
-  if not root or state.root == root then return false end
+  if not root then return false end
+  if state.root == root and vim.deep_equal(state.visible_dirs, visible_dirs) then return false end
+  local root_changed = state.root ~= root
   state.root = root
+  state.visible_dirs = visible_dirs
+  if not root_changed then return M.refresh_view(picker_for_tab(tab)) end
   state.generation = state.generation + 1
   state.queued_root = nil
   state.entries = {}
