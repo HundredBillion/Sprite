@@ -251,8 +251,9 @@ fork and no longer imply a later native-panel port.
 Deliverable: an independent terminal suitable for daily use on Arch Linux and
 macOS. Croft is an acceptance-test application, not a dependency.
 
-- **1.1 Repository/workspace:** `phase_1` is its own repo containing
-  `sprite-term` (terminal adapter) and `sprite-app` (GPUI product). Add
+- **1.1 Repository/workspace:** the `phase_1` directory contains its own Rust
+  workspace within the Sprite repository, with `sprite-term` (terminal adapter)
+  and `sprite-app` (GPUI product). Add
   `phase_1/vendor/ghostty` as a git submodule pinned to the newest tested stable
   Ghostty release tag; adapt `libghostty-rs` to build against that source.
 - **1.2 Terminal lifecycle:** PTY + login shell, correct resize, shutdown and
