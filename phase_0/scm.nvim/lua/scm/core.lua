@@ -169,7 +169,7 @@ end
 -- Build one Repo Entry from a finished `git status` subprocess result. Runs
 -- on the main loop (callers vim.schedule this) — never in vim.system's
 -- fast-event callback context.
-local function build_entry(repo, out, committed)
+local function build_entry(repo, out, committed, comparison_base)
   local name = repo:match("[^/]+$") or repo
   if out.code == 0 then
     local p = M.parse_status(vim.split(out.stdout or "", "\n", { trimempty = true }))
@@ -182,6 +182,7 @@ local function build_entry(repo, out, committed)
       behind = p.behind,
       files = files,
       clean = #files == 0,
+      comparison_base = comparison_base,
     }
   end
   local msg = (out.stderr or ""):match("^[^\n]*")
@@ -207,57 +208,32 @@ local function run_git(repo, opts, args, cb)
   end)
 end
 
-local function first_existing_ref(repo, opts, refs, index, cb)
-  local ref = refs[index]
+local comparison_refs = { "refs/remotes/origin/HEAD", "refs/heads/main", "refs/heads/master" }
+
+local function resolve_comparison_base(repo, opts, index, cb)
+  local ref = comparison_refs[index]
   if not ref then
-    cb(nil, nil, false)
+    cb(nil)
     return
   end
-  run_git(repo, opts, { "rev-parse", "--verify", "--quiet", ref }, function(out)
-    if out.code == 0 then
-      cb(ref, ref:match("([^/]+)$"), false)
+  run_git(repo, opts, { "merge-base", ref, "HEAD" }, function(out)
+    local base = vim.trim(out.stdout or "")
+    if out.code == 0 and base ~= "" then
+      cb(base)
     else
-      first_existing_ref(repo, opts, refs, index + 1, cb)
+      resolve_comparison_base(repo, opts, index + 1, cb)
     end
   end)
 end
 
-local function resolve_default_ref(repo, opts, cb)
-  run_git(repo, opts, { "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD" }, function(out)
-    local ref = vim.trim(out.stdout or "")
-    if out.code == 0 and ref ~= "" then
-      cb(ref, ref:match("([^/]+)$"), true)
-      return
-    end
-    first_existing_ref(repo, opts, { "refs/heads/main", "refs/heads/master" }, 1, cb)
-  end)
-end
-
-local function resolve_comparison_base(repo, branch, opts, cb)
-  resolve_default_ref(repo, opts, function(ref, default_branch, remote)
-    if not ref then
-      cb(nil)
-      return
-    end
-    if branch == default_branch then
-      cb(remote and ref or nil)
-      return
-    end
-    run_git(repo, opts, { "merge-base", ref, "HEAD" }, function(out)
-      local base = vim.trim(out.stdout or "")
-      cb(out.code == 0 and base ~= "" and base or nil)
-    end)
-  end)
-end
-
-local function collect_committed(repo, branch, opts, cb)
-  resolve_comparison_base(repo, branch, opts, function(base)
+local function collect_committed(repo, opts, cb)
+  resolve_comparison_base(repo, opts, 1, function(base)
     if not base then
-      cb({})
+      cb({}, nil)
       return
     end
     run_git(repo, opts, { "diff", "--name-status", "-z", base .. "..HEAD" }, function(out)
-      cb(out.code == 0 and parse_name_status(out.stdout or "") or {})
+      cb(out.code == 0 and parse_name_status(out.stdout or "") or {}, base)
     end)
   end)
 end
@@ -268,9 +244,8 @@ local function scan_repo(repo, opts, cb)
       cb(build_entry(repo, out))
       return
     end
-    local status = M.parse_status(vim.split(out.stdout or "", "\n", { trimempty = true }))
-    collect_committed(repo, status.branch, opts, function(committed)
-      cb(build_entry(repo, out, committed))
+    collect_committed(repo, opts, function(committed, comparison_base)
+      cb(build_entry(repo, out, committed, comparison_base))
     end)
   end)
 end

@@ -468,6 +468,35 @@ eq(pending_entry.files, {
   { path = "untracked.txt", xy = "??" },
 }, "pending state overrides committed state by path")
 
+local fallback_root = vim.fn.tempname()
+vim.fn.mkdir(fallback_root, "p")
+sh({ "git", "-C", fallback_root, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "base" }, fallback_root .. "/base.txt")
+sh({ "git", "-C", fallback_root, "add", "." })
+sh({ "git", "-C", fallback_root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base" })
+local fallback_base = vim.trim(vim.system({ "git", "-C", fallback_root, "rev-parse", "HEAD" }, { text = true }):wait().stdout)
+sh({ "git", "-C", fallback_root, "switch", "-q", "-c", "feature" })
+vim.fn.writefile({ "feature" }, fallback_root .. "/feature.txt")
+sh({ "git", "-C", fallback_root, "add", "." })
+sh({ "git", "-C", fallback_root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "feature" })
+sh({
+  "git",
+  "-C",
+  fallback_root,
+  "symbolic-ref",
+  "refs/remotes/origin/HEAD",
+  "refs/remotes/origin/missing",
+})
+local fallback_entry
+assert(core.refresh_repo(fallback_root, ropts, function(entry)
+  fallback_entry = entry
+end), "broken origin HEAD refresh accepted")
+assert(vim.wait(5000, function()
+  return fallback_entry ~= nil
+end, 10), "broken origin HEAD refresh completed")
+eq(fallback_entry.files, { { path = "feature.txt", commit_status = "A" } }, "broken origin HEAD falls back to main")
+eq(fallback_entry.comparison_base, fallback_base, "fallback publishes the main merge base")
+
 local orphan = vim.fn.tempname()
 vim.fn.mkdir(orphan, "p")
 sh({ "git", "-C", orphan, "init", "-q", "-b", "topic" })
@@ -701,6 +730,40 @@ actions.scm_confirm(picker, picker:items()[2])
 eq(#jumps, 2, "l and confirm both open a file")
 eq(jumps[1], { picker = picker, item = picker:items()[2], cmd = "edit" }, "l file jump")
 eq(jumps[2], { picker = picker, item = picker:items()[2], cmd = "edit" }, "confirm file jump")
+package.loaded["snacks.picker.actions"] = previous_picker_actions
+
+-- Pending rows use Gitsigns' default comparison; committed-only rows use the
+-- Comparison Base that Core attached to their Repo Entry.
+local diff_calls = {}
+local previous_gitsigns = package.loaded["gitsigns"]
+previous_picker_actions = package.loaded["snacks.picker.actions"]
+package.loaded["snacks.picker.actions"] = { jump = function() end }
+package.loaded["gitsigns"] = {
+  diffthis = function(base)
+    diff_calls[#diff_calls + 1] = base or "<default>"
+  end,
+}
+vim.api.nvim_create_user_command("Gitsigns", function(opts)
+  diff_calls[#diff_calls + 1] = "command:" .. opts.args
+end, { nargs = "*" })
+local pending_diff = {
+  kind = "file",
+  entry = { comparison_base = "base-sha" },
+  fentry = { path = "pending.lua", xy = ".M" },
+}
+local committed_diff = {
+  kind = "file",
+  entry = { comparison_base = "base-sha" },
+  fentry = { path = "committed.lua", commit_status = "M" },
+}
+actions.scm_diff(picker, pending_diff)
+actions.scm_diff(picker, committed_diff)
+assert(vim.wait(1000, function()
+  return #diff_calls == 2
+end, 10), "both diff actions completed")
+eq(diff_calls, { "<default>", "base-sha" }, "committed diff uses its Comparison Base")
+vim.api.nvim_del_user_command("Gitsigns")
+package.loaded["gitsigns"] = previous_gitsigns
 package.loaded["snacks.picker.actions"] = previous_picker_actions
 
 -- <CR> expands a collapsed header without lazygit, then opens lazygit once expanded.
