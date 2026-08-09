@@ -27,7 +27,7 @@
 - Consumes: the committed branch in `/home/hundredbillion/.local/share/nvim/lazy/scm.nvim`
 - Produces: `require("scm")` loaded from `/home/hundredbillion/Projects/Sprite/phase_0/scm.nvim`
 
-- [ ] **Step 1: Transfer the exact branch tip**
+- [x] **Step 1: Transfer the exact branch tip**
 
 ```bash
 git -C /home/hundredbillion/Projects/Sprite fetch /home/hundredbillion/.local/share/nvim/lazy/scm.nvim feat/perpetual-sidebar-handoff:feat/perpetual-sidebar-handoff
@@ -36,13 +36,13 @@ git -C /home/hundredbillion/Projects/Sprite switch feat/perpetual-sidebar-handof
 
 Expected: both checkouts report the same `git rev-parse feat/perpetual-sidebar-handoff` value.
 
-- [ ] **Step 2: Point Lazy at the project checkout**
+- [x] **Step 2: Point Lazy at the project checkout**
 
 ```lua
 dir = vim.fn.expand("~/Projects/Sprite/phase_0/scm.nvim"),
 ```
 
-- [ ] **Step 3: Run SCM regression tests**
+- [x] **Step 3: Run SCM regression tests**
 
 ```bash
 cd /home/hundredbillion/Projects/Sprite/phase_0/scm.nvim
@@ -67,7 +67,7 @@ Expected: every script exits zero.
 - Consumes: SVGTree's active `view.tree.root`
 - Produces: `require("svgtree").root() -> string|nil` and a local Lazy plugin spec named `svgtree.nvim`
 
-- [ ] **Step 1: Add a failing public-root API check**
+- [x] **Step 1: Add a failing public-root API check**
 
 ```lua
 vim.opt.runtimepath:prepend(vim.fn.getcwd())
@@ -86,7 +86,7 @@ Add `scripts/test-root.lua` to the `scripts=(...)` list in `scripts/test.sh`, th
 
 Expected before implementation: `attempt to call field 'root' (a nil value)`.
 
-- [ ] **Step 2: Expose the minimal root accessors**
+- [x] **Step 2: Expose the minimal root accessors**
 
 ```lua
 -- lua/svgtree/init.lua
@@ -100,7 +100,7 @@ function M.root()
 end
 ```
 
-- [ ] **Step 3: Run SVGTree tests and commit**
+- [x] **Step 3: Run SVGTree tests and commit**
 
 ```bash
 SVGTREE_NVIM=nvim bash scripts/test.sh
@@ -110,7 +110,7 @@ git commit -m "feat: expose active tree root"
 
 Expected: `SUITE PASSED` and a clean working tree.
 
-- [ ] **Step 4: Point Lazy at the project checkout**
+- [x] **Step 4: Point Lazy at the project checkout**
 
 Use this plugin identity in both Neovim plugin specifications:
 
@@ -131,7 +131,7 @@ Use this plugin identity in both Neovim plugin specifications:
 - Consumes: local Lazy plugin specs from Tasks 1 and 2
 - Produces: one canonical editable checkout per plugin
 
-- [ ] **Step 1: Verify Lazy's resolved directories**
+- [x] **Step 1: Verify Lazy's resolved directories**
 
 ```bash
 nvim --headless "+lua local p=require('lazy.core.config').plugins; assert(p['scm.nvim'].dir == vim.fn.expand('~/Projects/Sprite/phase_0/scm.nvim')); assert(p['svgtree.nvim'].dir == vim.fn.expand('~/Projects/svgtree.nvim'))" +qa
@@ -139,14 +139,14 @@ nvim --headless "+lua local p=require('lazy.core.config').plugins; assert(p['scm
 
 Expected: exit zero.
 
-- [ ] **Step 2: Move both cache directories to desktop trash**
+- [x] **Step 2: Move both cache directories to desktop trash**
 
 ```bash
 gio trash /home/hundredbillion/.local/share/nvim/lazy/scm.nvim
 gio trash /home/hundredbillion/.local/share/nvim/lazy/svgtree.nvim
 ```
 
-- [ ] **Step 3: Repeat the resolved-directory check**
+- [x] **Step 3: Repeat the resolved-directory check**
 
 Run the Step 1 command again.
 
