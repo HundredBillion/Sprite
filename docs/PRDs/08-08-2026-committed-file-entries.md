@@ -16,7 +16,7 @@ Committing a pending file must not make it disappear while that commit remains p
 
 ## Comparison base
 
-Core resolves the repository's default branch from `refs/remotes/origin/HEAD`. If that symbolic ref is unavailable, Core checks local `main` and then local `master`.
+Core tries `refs/remotes/origin/HEAD`, local `main`, and local `master` in that order. A candidate is usable when Git can calculate its merge base with `HEAD`; metadata lookup and ref validation are left to Git rather than duplicated in Core.
 
 For a non-default branch, committed files are calculated from the merge base of the default branch and `HEAD` through `HEAD`. For the default branch itself, Core compares its remote default ref with `HEAD`, allowing local commits that have not been pushed to remain visible.
 
@@ -33,13 +33,15 @@ A File Entry is one of two source states:
 
 `xy` remains Git's raw porcelain-v2 XY Code for pending files. `commit_status` remains Git's raw `diff --name-status` code for committed-only files. Core does not synthesize an XY Code for committed files.
 
+When Core resolves a Comparison Base, the Repo Entry carries it as `comparison_base`. Renderers may use that value to open a committed-file diff without reimplementing Git branch policy.
+
 When both scans contain the same path, Core emits the pending File Entry. The Repo Entry is clean only when the merged File Entry list is empty.
 
 ## Panel presentation
 
 Pending File Entries keep their current letter, color, and Mixed State marker.
 
-Committed-only File Entries display their `git diff --name-status` letter and a `✓` marker using a dedicated `ScmCommitted` highlight. Repository expand/collapse, filtering, file opening, and lazygit actions continue to operate on both entry types.
+Committed-only File Entries display their `git diff --name-status` letter and a `✓` marker using a dedicated `ScmCommitted` highlight. Their diff action compares the file against the Repo Entry's Comparison Base. Pending File Entries keep the existing index/working-tree diff, while untracked files continue to report that no diff is available. Repository expand/collapse, filtering, file opening, and lazygit actions continue to operate on both entry types.
 
 ## Refresh and failure behavior
 
@@ -58,6 +60,7 @@ Tests must prove:
 5. Default-branch fallback and no-base degradation preserve pending files.
 6. The Panel renders committed-only entries distinctly without changing pending rendering.
 7. The real Sprite feature branch reports its committed files through the public refresh interface.
+8. A committed-only row opens Gitsigns against its Comparison Base while a pending row keeps the default Gitsigns comparison.
 
 ## Out of scope
 

@@ -206,3 +206,70 @@ Change every task checkbox in this TSP from `[ ]` to `[x]`, then run:
 git add docs/TSPs/08-08-2026-committed-file-entries.md
 git commit -m "docs: record committed file entry delivery"
 ```
+
+### Task 4: Correct committed diffs and simplify the implementation
+
+**Files:**
+- Modify: `phase_0/scm.nvim/tests/core_test.lua`
+- Modify: `phase_0/scm.nvim/tests/explorer_scope_test.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/core.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/panel.lua`
+- Modify: `phase_0/scm.nvim/lua/scm/refresh.lua`
+
+**Interfaces:**
+- Consumes: Git comparison-base candidates and the existing `scm_diff` picker action
+- Produces: Repo Entries with optional `comparison_base`; committed rows call `gitsigns.diffthis(comparison_base)` and pending rows call `gitsigns.diffthis()`
+
+- [ ] **Step 1: Write and run the committed-diff regression test**
+
+Capture the real picker actions as the existing headless test does, provide one pending row and one committed row, stub `gitsigns.diffthis`, and assert that only the committed call receives the Repo Entry's Comparison Base.
+
+Run: `cd phase_0/scm.nvim && nvim -l tests/core_test.lua`
+
+Expected: FAIL because both rows currently execute the same bare Ex command.
+
+- [ ] **Step 2: Carry the Comparison Base and use it in the Panel**
+
+Make `build_entry(repo, out, committed, comparison_base)` publish `comparison_base` on the Repo Entry. Replace the scheduled Ex command with:
+
+```lua
+local base = item.fentry.commit_status and item.entry.comparison_base or nil
+vim.schedule(function()
+  require("gitsigns").diffthis(base)
+end)
+```
+
+Run the Core test and expect PASS.
+
+- [ ] **Step 3: Simplify Comparison Base resolution**
+
+Replace `first_existing_ref()`, `resolve_default_ref()`, and branch-name special cases with one function that tries these candidates in order:
+
+```lua
+local comparison_refs = {
+  "refs/remotes/origin/HEAD",
+  "refs/heads/main",
+  "refs/heads/master",
+}
+```
+
+For each candidate, run `git merge-base candidate HEAD`; return the first non-empty successful result or `nil`. Add a regression fixture where `origin/HEAD` is broken but local `main` remains usable.
+
+- [ ] **Step 4: Apply behavior-preserving concision refactors**
+
+Restore one-line form for trivial guards in `panel.lua`. In `refresh.lua`, replace the module-level tab-handle table and invalid-handle cleanup with `vim.t.scm_last_full`, retaining per-tab debounce behavior.
+
+Run: `cd phase_0/scm.nvim && nvim -l tests/explorer_scope_test.lua`
+
+Expected: PASS, including the existing per-tab debounce assertion.
+
+- [ ] **Step 5: Run all verification suites**
+
+```bash
+cd phase_0/scm.nvim
+nvim -l tests/core_test.lua
+nvim -l tests/explorer_scope_test.lua
+nvim -l tests/handoff_test.lua
+```
+
+Expected: all scripts exit zero.
