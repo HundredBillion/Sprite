@@ -30,6 +30,22 @@ function M.xy_display(xy)
   return { letter = letter, mixed = mixed, hl = hl }
 end
 
+function M.file_display(entry)
+  if entry.xy then
+    local display = M.xy_display(entry.xy)
+    return {
+      letter = display.letter,
+      marker = display.mixed and "✱" or " ",
+      hl = display.hl,
+    }
+  end
+  return {
+    letter = entry.commit_status:sub(1, 1),
+    marker = "✓",
+    hl = "ScmCommitted",
+  }
+end
+
 -- Flatten Repo Entries into picker items. Every file row is self-identifying
 -- (text and ctx carry the repo name) so filtering may orphan headers freely.
 function M.build_items(entries, collapsed)
@@ -104,6 +120,7 @@ function M.setup(opts)
     ScmRenamed = "DiagnosticWarn",
     ScmUntracked = "GitSignsAdd",
     ScmStaged = "GitSignsAdd",
+    ScmCommitted = "GitSignsChange",
     ScmConflict = "DiagnosticError",
     ScmMarker = "GitSignsAdd",
   }
@@ -181,12 +198,12 @@ function M.format_item(item)
     return parts
   end
   -- file row: indent, letter+marker, filename, dimmed repo/dir ctx
-  local d = M.xy_display(item.fentry.xy)
+  local d = M.file_display(item.fentry)
   local fname = item.fentry.path:match("[^/]+$") or item.fentry.path
   return {
     { "    " },
     { d.letter, d.hl },
-    { d.mixed and "✱" or " ", "ScmMarker" },
+    { d.marker, "ScmMarker" },
     { (" %-28s "):format(fname), "Normal" },
     { item.ctx, "Comment" },
   }

@@ -352,6 +352,16 @@ eq(panel.xy_display("UD"), { letter = "D", mixed = true, hl = "ScmConflict" }, "
 eq(panel.xy_display("UA"), { letter = "A", mixed = true, hl = "ScmConflict" }, "unmerged: added by them")
 eq(panel.xy_display("DU"), { letter = "U", mixed = true, hl = "ScmConflict" }, "unmerged: deleted by us")
 eq(panel.xy_display("AA"), { letter = "A", mixed = true, hl = "ScmConflict" }, "unmerged: both added")
+eq(panel.file_display({ path = "committed.lua", commit_status = "M" }), {
+  letter = "M",
+  marker = "✓",
+  hl = "ScmCommitted",
+}, "committed-only display")
+eq(panel.file_display({ path = "pending.lua", xy = "M." }), {
+  letter = "M",
+  marker = " ",
+  hl = "ScmStaged",
+}, "pending display unchanged")
 
 -- build_items: headers + files, self-identifying ctx, dup detection, sort order
 local entries = {
