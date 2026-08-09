@@ -20,6 +20,8 @@ Core tries `refs/remotes/origin/HEAD`, local `main`, and local `master` in that 
 
 For a non-default branch, committed files are calculated from the merge base of the default branch and `HEAD` through `HEAD`. For the default branch itself, Core compares its remote default ref with `HEAD`, allowing local commits that have not been pushed to remain visible.
 
+Before reporting merge-base changes, Core compares the current branch tree with the resolved default-branch tree. If those trees are identical, Core emits no Committed File Entries. This covers squash-merged and rebased branches whose content is fully present on the default branch even though their original commits are not ancestors of it.
+
 If no comparison base can be resolved, or the repository has no commits, Core continues returning pending files without treating base-resolution failure as a repository error.
 
 ## Core contract
@@ -61,6 +63,7 @@ Tests must prove:
 6. The Panel renders committed-only entries distinctly without changing pending rendering.
 7. The real Sprite feature branch reports its committed files through the public refresh interface.
 8. A committed-only row opens Gitsigns against its Comparison Base while a pending row keeps the default Gitsigns comparison.
+9. A squash-merged feature branch with the same tree as the default branch emits no Committed File Entries.
 
 ## Out of scope
 
