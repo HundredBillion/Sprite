@@ -208,7 +208,7 @@ Expected: all scripts exit zero.
 - Consumes: the resolved default-branch ref and Comparison Base
 - Produces: the unchanged Repo Entry interface, with no Committed File Entries when the default branch and `HEAD` have identical trees
 
-- [ ] **Step 1: Write the failing squash-merge regression test**
+- [x] **Step 1: Write the failing squash-merge regression test**
 
 Create `main`, commit a base, create `feature`, commit a file, squash-merge `feature` into `main`, then switch back to the original `feature` commit. Assert that `core.refresh_repo()` returns no File Entries even though `git merge-base main HEAD` predates the feature commit.
 
@@ -216,11 +216,11 @@ Run: `cd phase_0/scm.nvim && nvim -l tests/core_test.lua`
 
 Expected: FAIL because Core currently reports files from the merge base through `HEAD` without checking whether `main` already has the same tree.
 
-- [ ] **Step 2: Add the identical-tree guard**
+- [x] **Step 2: Add the identical-tree guard**
 
 Return both the successful default ref and its merge base from comparison-base resolution. Before collecting committed files, run `git diff --quiet default_ref HEAD`. Return no committed files when the command exits zero; otherwise retain the existing `merge_base..HEAD` collection.
 
-- [ ] **Step 3: Verify all behavior**
+- [x] **Step 3: Verify all behavior**
 
 ```bash
 cd phase_0/scm.nvim
