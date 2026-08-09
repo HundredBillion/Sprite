@@ -17,6 +17,16 @@ in v1). The disposable half; contains no git knowledge.
 _Avoid_: sidebar (ambiguous with the file explorer), picker (an
 implementation detail of the v1 face)
 
+**Sidebar Activity**:
+One mutually exclusive left-rail mode: either the Panel or a file explorer.
+Only one Sidebar Activity may be visible in a tab at a time.
+_Avoid_: side panel, drawer
+
+**Handoff**:
+The ordered replacement of one Sidebar Activity by another, where the outgoing
+activity is fully closed before the incoming activity opens.
+_Avoid_: swap, delayed open
+
 **Repository Section**:
 One repository header and its zero or more File Entry rows in the Panel. A
 Repository Section may be expanded or collapsed; this is presentation state
@@ -41,15 +51,30 @@ Entries, clean flag, optional error — as plain Lua data emitted by Core.
 _Avoid_: repo status, repo record
 
 **File Entry**:
-One changed file within a Repo Entry: its path plus its raw XY Code. Exactly
-one File Entry per file regardless of how many states the file is in.
+One changed file within a Repo Entry. It is either a Pending File Entry or a
+Committed File Entry, and each path appears at most once.
 _Avoid_: change, status line
+
+**Pending File Entry**:
+A File Entry whose change still exists in Git's index or working tree. Its
+pending state takes precedence when the same path is also committed.
+_Avoid_: dirty file, uncommitted file
+
+**Committed File Entry**:
+A File Entry changed by commits on the current branch since its Comparison
+Base, with no pending state for the same path.
+_Avoid_: history entry, commit row
+
+**Comparison Base**:
+The point where the current branch diverged from the repository's default
+branch. Committed File Entries describe changes after this point.
+_Avoid_: upstream, parent branch, target branch
 
 **XY Code**:
 git porcelain-v2's two-character state pair (X = staged/index state, Y =
-working-tree state), carried raw and unmodified in File Entries — e.g. `.M`,
-`M.`, `MM`, `??`. The single source of truth for file state; display letters
-and markers are derived by Renderers, never stored.
+working-tree state), carried raw and unmodified in Pending File Entries — e.g.
+`.M`, `M.`, `MM`, `??`. The single source of truth for pending file state;
+display letters and markers are derived by Renderers, never stored.
 _Avoid_: status letter (derived), status flag
 
 **Mixed State**:

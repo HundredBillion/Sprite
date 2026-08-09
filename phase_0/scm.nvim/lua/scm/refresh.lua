@@ -12,8 +12,6 @@
 --     commits made from other terminals/apps while Neovim was backgrounded.
 local M = {}
 
-local last_full = {}
-
 local function opts()
   local panel = require("scm.panel")
   return panel.state.opts or require("scm.core").defaults
@@ -22,14 +20,12 @@ end
 -- Full Refresh, debounced for the current tab. The Panel no-ops while closed
 -- and coalesces overlapping requests independently for each tab.
 function M.full()
-  local tab = vim.api.nvim_get_current_tabpage()
-  for handle in pairs(last_full) do
-    if not vim.api.nvim_tabpage_is_valid(handle) then last_full[handle] = nil end
-  end
   local now = vim.uv.now()
-  local previous = last_full[tab]
-  if previous and now - previous < (opts().focus_debounce_ms or 1500) then return end
-  last_full[tab] = now
+  local previous = vim.t.scm_last_full
+  if previous and now - previous < (opts().focus_debounce_ms or 1500) then
+    return
+  end
+  vim.t.scm_last_full = now
   require("scm.panel").refresh_view()
 end
 
@@ -73,25 +69,37 @@ function M.setup()
     group = aug,
     callback = function(ev)
       local name = vim.api.nvim_buf_get_name(ev.buf)
-      if not name:find("lazygit", 1, true) then return end
-      vim.schedule(function() on_lazygit_close(name) end)
+      if not name:find("lazygit", 1, true) then
+        return
+      end
+      vim.schedule(function()
+        on_lazygit_close(name)
+      end)
     end,
   })
 
   vim.api.nvim_create_autocmd("WinEnter", {
     group = aug,
     callback = function()
-      if not _G.Snacks then return end
+      if not _G.Snacks then
+        return
+      end
       local p = Snacks.picker.get({ source = "scm" })[1]
-      if p and p._scm_tab and in_panel_win(p) then M.full() end
+      if p and p._scm_tab and in_panel_win(p) then
+        M.full()
+      end
     end,
   })
 
   vim.api.nvim_create_autocmd("FocusGained", {
     group = aug,
     callback = function()
-      if not _G.Snacks then return end
-      if Snacks.picker.get({ source = "scm" })[1] then M.full() end
+      if not _G.Snacks then
+        return
+      end
+      if Snacks.picker.get({ source = "scm" })[1] then
+        M.full()
+      end
     end,
   })
 end

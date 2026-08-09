@@ -85,7 +85,9 @@ local discovered, discover_err
 assert(core.discover(root, { timeout_ms = 5000 }, function(repos, err)
   discovered, discover_err = repos, err
 end))
-vim.wait(5000, function() return discovered ~= nil or discover_err ~= nil end, 10)
+vim.wait(5000, function()
+  return discovered ~= nil or discover_err ~= nil
+end, 10)
 eq(discover_err, nil, "discovery succeeds")
 eq(discovered, { parent_real, deep_real }, "containing and arbitrary-depth repositories are canonicalized")
 
@@ -94,7 +96,9 @@ core.discover(parent, { timeout_ms = 5000 }, function(repos, err)
   assert(not err, err)
   root_discovered = repos
 end)
-vim.wait(5000, function() return root_discovered ~= nil end, 10)
+vim.wait(5000, function()
+  return root_discovered ~= nil
+end, 10)
 eq(root_discovered, { parent_real, deep_real }, "Root repository is deduplicated and nested symlinks are not traversed")
 
 local parent_link = tmp .. "/parent-link"
@@ -104,12 +108,18 @@ core.discover(parent_link, { timeout_ms = 5000 }, function(repos, err)
   assert(not err, err)
   linked_discovered = repos
 end)
-vim.wait(5000, function() return linked_discovered ~= nil end, 10)
+vim.wait(5000, function()
+  return linked_discovered ~= nil
+end, 10)
 eq(linked_discovered, { parent_real, deep_real }, "symlinked Explorer Root is canonicalized once before discovery")
 
 local missing_err
-core.discover(root .. "/missing", { timeout_ms = 5000 }, function(_, err) missing_err = err end)
-vim.wait(5000, function() return missing_err ~= nil end, 10)
+core.discover(root .. "/missing", { timeout_ms = 5000 }, function(_, err)
+  missing_err = err
+end)
+vim.wait(5000, function()
+  return missing_err ~= nil
+end, 10)
 assert(type(missing_err) == "string" and missing_err ~= "", "discovery failures are reported")
 
 local worktree_base = vim.fn.tempname()
@@ -129,7 +139,9 @@ core.discover(worktree_base, { timeout_ms = 5000 }, function(repos, err)
   assert(not err, err)
   worktree_discovered = repos
 end)
-vim.wait(5000, function() return worktree_discovered ~= nil end, 10)
+vim.wait(5000, function()
+  return worktree_discovered ~= nil
+end, 10)
 local expected_worktrees = {
   (assert(vim.uv.fs_realpath(primary_repo), "canonical primary repo")),
   (assert(vim.uv.fs_realpath(linked_worktree), "canonical linked worktree")),
@@ -143,11 +155,16 @@ core.refresh(linked_worktree .. "/inside", { timeout_ms = 5000 }, function(entri
   assert(not err, err)
   worktree_status = entries
 end)
-vim.wait(5000, function() return worktree_status ~= nil end, 10)
+vim.wait(5000, function()
+  return worktree_status ~= nil
+end, 10)
 eq(#worktree_status, 1, "subdirectory Explorer Root refreshes its containing worktree")
 eq(worktree_status[1].path, expected_worktrees[1], "worktree Repo Entry uses canonical root")
-eq(worktree_status[1].files, { { path = "outside.txt", xy = ".M" } },
-  "status includes repository-wide changes outside the Explorer Root subdirectory")
+eq(
+  worktree_status[1].files,
+  { { path = "outside.txt", xy = ".M" } },
+  "status includes repository-wide changes outside the Explorer Root subdirectory"
+)
 
 -- Two request-local full refreshes may run concurrently; Panel owns coalescing.
 local concurrent = 0
@@ -159,7 +176,9 @@ core.refresh(root, { timeout_ms = 5000 }, function(_, err)
   assert(not err, err)
   concurrent = concurrent + 1
 end)
-vim.wait(5000, function() return concurrent == 2 end, 10)
+vim.wait(5000, function()
+  return concurrent == 2
+end, 10)
 eq(concurrent, 2, "Core full refreshes carry request-local state")
 
 -- refresh(): end-to-end against two real synthetic repos
@@ -173,14 +192,16 @@ for _, r in ipairs({ dirty, cleanrepo }) do
   sh({ "git", "-C", r, "add", "." })
   sh({ "git", "-C", r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init" })
 end
-vim.fn.writefile({ "changed" }, dirty .. "/a.txt")     -- .M
+vim.fn.writefile({ "changed" }, dirty .. "/a.txt") -- .M
 vim.fn.writefile({ "new" }, dirty .. "/untracked.txt") -- ??
 
 local got
 assert(core.refresh(work, { timeout_ms = 5000 }, function(entries)
   got = entries
 end) == true, "refresh accepted")
-vim.wait(5000, function() return got ~= nil end, 10)
+vim.wait(5000, function()
+  return got ~= nil
+end, 10)
 assert(got, "refresh callback fired")
 
 eq(#got, 2, "two repos")
@@ -198,8 +219,12 @@ assert(got[1].err == nil and got[2].err == nil, "no errors")
 
 -- refresh usable again after completion
 got = nil
-assert(core.refresh(work, { timeout_ms = 5000 }, function(entries) got = entries end))
-vim.wait(5000, function() return got ~= nil end, 10)
+assert(core.refresh(work, { timeout_ms = 5000 }, function(entries)
+  got = entries
+end))
+vim.wait(5000, function()
+  return got ~= nil
+end, 10)
 assert(got and #got == 2, "second refresh works")
 
 -- refresh(): per-repo error path must not short-circuit other repos.
@@ -218,12 +243,16 @@ local err_got
 assert(core.refresh(err_work, { timeout_ms = 5000 }, function(entries)
   err_got = entries
 end) == true, "refresh (error path) accepted")
-vim.wait(5000, function() return err_got ~= nil end, 10)
+vim.wait(5000, function()
+  return err_got ~= nil
+end, 10)
 assert(err_got, "refresh (error path) callback fired")
 
 eq(#err_got, 2, "both repos still reported despite one failing")
 local by_name = {}
-for _, e in ipairs(err_got) do by_name[e.name] = e end
+for _, e in ipairs(err_got) do
+  by_name[e.name] = e
+end
 assert(by_name.bad_repo, "bad_repo present")
 assert(by_name.ok_repo, "ok_repo present")
 assert(type(by_name.bad_repo.err) == "string" and #by_name.bad_repo.err > 0, "bad_repo has non-nil err string")
@@ -238,7 +267,9 @@ local empty_got
 assert(core.refresh(empty_dir, { timeout_ms = 5000 }, function(entries)
   empty_got = entries
 end) == true, "refresh (zero-repos) accepted")
-vim.wait(5000, function() return empty_got ~= nil end, 10)
+vim.wait(5000, function()
+  return empty_got ~= nil
+end, 10)
 eq(empty_got, {}, "zero repos -> cb({})")
 
 -- refresh(): intra-group alphabetical tie-breaking -- two repos in the SAME
@@ -261,7 +292,9 @@ local sort_got
 assert(core.refresh(sort_work, { timeout_ms = 5000 }, function(entries)
   sort_got = entries
 end) == true, "refresh (sort) accepted")
-vim.wait(5000, function() return sort_got ~= nil end, 10)
+vim.wait(5000, function()
+  return sort_got ~= nil
+end, 10)
 assert(sort_got, "refresh (sort) callback fired")
 
 eq(#sort_got, 2, "two dirty repos")
@@ -288,9 +321,14 @@ local synthetic = {
 table.sort(synthetic, core.compare_entries)
 
 local names = {}
-for i, e in ipairs(synthetic) do names[i] = e.name end
-eq(names, { "middle", "mmm", "zzz", "aaa", "alpha", "bravo" },
-  "compare_entries: needs-attention (dirty or errored) first, alphabetical within each group")
+for i, e in ipairs(synthetic) do
+  names[i] = e.name
+end
+eq(
+  names,
+  { "middle", "mmm", "zzz", "aaa", "alpha", "bravo" },
+  "compare_entries: needs-attention (dirty or errored) first, alphabetical within each group"
+)
 
 -- panel pure functions (no picker window needed headless)
 local panel = require("scm.panel")
@@ -314,11 +352,28 @@ eq(panel.xy_display("UD"), { letter = "D", mixed = true, hl = "ScmConflict" }, "
 eq(panel.xy_display("UA"), { letter = "A", mixed = true, hl = "ScmConflict" }, "unmerged: added by them")
 eq(panel.xy_display("DU"), { letter = "U", mixed = true, hl = "ScmConflict" }, "unmerged: deleted by us")
 eq(panel.xy_display("AA"), { letter = "A", mixed = true, hl = "ScmConflict" }, "unmerged: both added")
+eq(panel.file_display({ path = "committed.lua", commit_status = "M" }), {
+  letter = "M",
+  marker = "✓",
+  hl = "ScmCommitted",
+}, "committed-only display")
+eq(panel.file_display({ path = "pending.lua", xy = "M." }), {
+  letter = "M",
+  marker = " ",
+  hl = "ScmStaged",
+}, "pending display unchanged")
 
 -- build_items: headers + files, self-identifying ctx, dup detection, sort order
 local entries = {
-  { name = "api", path = "/r/api", branch = "main", ahead = 1, behind = 0, clean = false,
-    files = { { path = "app/models/device.rb", xy = ".M" }, { path = "top.rb", xy = "??" } } },
+  {
+    name = "api",
+    path = "/r/api",
+    branch = "main",
+    ahead = 1,
+    behind = 0,
+    clean = false,
+    files = { { path = "app/models/device.rb", xy = ".M" }, { path = "top.rb", xy = "??" } },
+  },
   { name = "api", path = "/other/api", branch = "dev", ahead = 0, behind = 0, clean = true, files = {} },
   { name = "web", path = "/r/web", branch = "main", ahead = 0, behind = 0, clean = true, files = {} },
 }
@@ -332,7 +387,9 @@ eq(items[2].ctx, "api/app/models", "ctx column repo/dir")
 eq(items[2].file, "/r/api/app/models/device.rb", "abs path for snacks jump")
 eq(items[3].ctx, "api", "top-level file ctx = repo only")
 eq(items[5].dup, nil, "unique name not flagged")
-for i, it in ipairs(items) do eq(it.sort, i, "sort field " .. i) end
+for i, it in ipairs(items) do
+  eq(it.sort, i, "sort field " .. i)
+end
 
 -- refresh_repo(): scoped single-repo refresh with debounce + coalescing
 local rwork = vim.fn.tempname()
@@ -346,13 +403,19 @@ vim.fn.writefile({ "changed" }, rrepo .. "/a.txt")
 
 local ropts = { roots = {}, depth = 2, timeout_ms = 5000, repo_debounce_ms = 0 }
 local calls = {}
-local function collect(e) calls[#calls + 1] = e end
+local function collect(e)
+  calls[#calls + 1] = e
+end
 assert(core.refresh_repo(rrepo, ropts, collect) == true, "scoped refresh accepted")
 -- requests landing while the scan is in flight coalesce into ONE re-run
 assert(core.refresh_repo(rrepo, ropts, collect) == false, "mid-flight request coalesced")
 assert(core.refresh_repo(rrepo, ropts, collect) == false, "second mid-flight request also coalesced")
-vim.wait(5000, function() return #calls >= 2 end, 10)
-vim.wait(300, function() return #calls > 2 end, 10) -- settle: a 3rd call would be a bug
+vim.wait(5000, function()
+  return #calls >= 2
+end, 10)
+vim.wait(300, function()
+  return #calls > 2
+end, 10) -- settle: a 3rd call would be a bug
 eq(#calls, 2, "exactly one coalesced re-run (no stacking)")
 eq(calls[1].name, "scoped_repo", "scoped entry name")
 eq(calls[1].clean, false, "scoped dirty flag")
@@ -360,20 +423,105 @@ eq(calls[1].files, { { path = "a.txt", xy = ".M" } }, "scoped File Entries")
 
 -- debounce: an immediate follow-up inside a large window is dropped
 local dropped = 0
-assert(
-  core.refresh_repo(rrepo, { roots = {}, depth = 2, timeout_ms = 5000, repo_debounce_ms = 60000 }, function()
-    dropped = dropped + 1
-  end) == false,
-  "debounced drop inside window"
-)
+assert(core.refresh_repo(rrepo, { roots = {}, depth = 2, timeout_ms = 5000, repo_debounce_ms = 60000 }, function()
+  dropped = dropped + 1
+end) == false, "debounced drop inside window")
 eq(dropped, 0, "debounced call never runs")
+
+-- A clean feature branch still exposes files committed since it diverged from
+-- the repository's default branch.
+local croot = vim.fn.tempname()
+vim.fn.mkdir(croot, "p")
+sh({ "git", "-C", croot, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "base" }, croot .. "/base.txt")
+sh({ "git", "-C", croot, "add", "." })
+sh({ "git", "-C", croot, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base" })
+sh({ "git", "-C", croot, "switch", "-q", "-c", "feature" })
+vim.fn.writefile({ "committed" }, croot .. "/committed.txt")
+sh({ "git", "-C", croot, "add", "." })
+sh({ "git", "-C", croot, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "feature" })
+
+local committed_entry
+assert(core.refresh_repo(croot, ropts, function(entry)
+  committed_entry = entry
+end), "committed feature refresh accepted")
+assert(vim.wait(5000, function()
+  return committed_entry ~= nil
+end, 10), "committed feature refresh completed")
+eq(
+  committed_entry.files,
+  { { path = "committed.txt", commit_status = "A" } },
+  "clean feature branch keeps committed file"
+)
+
+vim.fn.writefile({ "pending" }, croot .. "/committed.txt")
+vim.fn.writefile({ "untracked" }, croot .. "/untracked.txt")
+local pending_entry
+assert(core.refresh_repo(croot, ropts, function(entry)
+  pending_entry = entry
+end), "pending precedence refresh accepted")
+assert(vim.wait(5000, function()
+  return pending_entry ~= nil
+end, 10), "pending precedence refresh completed")
+eq(pending_entry.files, {
+  { path = "committed.txt", xy = ".M" },
+  { path = "untracked.txt", xy = "??" },
+}, "pending state overrides committed state by path")
+
+local fallback_root = vim.fn.tempname()
+vim.fn.mkdir(fallback_root, "p")
+sh({ "git", "-C", fallback_root, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "base" }, fallback_root .. "/base.txt")
+sh({ "git", "-C", fallback_root, "add", "." })
+sh({ "git", "-C", fallback_root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base" })
+local fallback_base = vim.trim(vim.system({ "git", "-C", fallback_root, "rev-parse", "HEAD" }, { text = true }):wait().stdout)
+sh({ "git", "-C", fallback_root, "switch", "-q", "-c", "feature" })
+vim.fn.writefile({ "feature" }, fallback_root .. "/feature.txt")
+sh({ "git", "-C", fallback_root, "add", "." })
+sh({ "git", "-C", fallback_root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "feature" })
+sh({
+  "git",
+  "-C",
+  fallback_root,
+  "symbolic-ref",
+  "refs/remotes/origin/HEAD",
+  "refs/remotes/origin/missing",
+})
+local fallback_entry
+assert(core.refresh_repo(fallback_root, ropts, function(entry)
+  fallback_entry = entry
+end), "broken origin HEAD refresh accepted")
+assert(vim.wait(5000, function()
+  return fallback_entry ~= nil
+end, 10), "broken origin HEAD refresh completed")
+eq(fallback_entry.files, { { path = "feature.txt", commit_status = "A" } }, "broken origin HEAD falls back to main")
+eq(fallback_entry.comparison_base, fallback_base, "fallback publishes the main merge base")
+
+local orphan = vim.fn.tempname()
+vim.fn.mkdir(orphan, "p")
+sh({ "git", "-C", orphan, "init", "-q", "-b", "topic" })
+vim.fn.writefile({ "staged" }, orphan .. "/only.txt")
+sh({ "git", "-C", orphan, "add", "." })
+local orphan_entry
+assert(core.refresh_repo(orphan, ropts, function(entry)
+  orphan_entry = entry
+end), "no-base refresh accepted")
+assert(vim.wait(5000, function()
+  return orphan_entry ~= nil
+end, 10), "no-base refresh completed")
+eq(orphan_entry.files, { { path = "only.txt", xy = "A." } }, "no-base repository preserves pending files")
+assert(orphan_entry.err == nil, "no-base repository does not report a status error")
 
 -- error path: a broken repo yields an err entry via the scoped path too
 local rbad = rwork .. "/bad_scoped"
 vim.fn.mkdir(rbad .. "/.git", "p")
 local bad_entry
-assert(core.refresh_repo(rbad, ropts, function(e) bad_entry = e end) == true, "broken repo scan accepted")
-vim.wait(5000, function() return bad_entry ~= nil end, 10)
+assert(core.refresh_repo(rbad, ropts, function(e)
+  bad_entry = e
+end) == true, "broken repo scan accepted")
+vim.wait(5000, function()
+  return bad_entry ~= nil
+end, 10)
 assert(bad_entry and bad_entry.err and #bad_entry.err > 0, "scoped error entry has err")
 eq(bad_entry.files, {}, "scoped error entry has no files")
 
@@ -449,9 +597,15 @@ eq(collapsed_nav[3].collapsed, false, "error header is never collapsible")
 local function fake_picker(items, filter, finder)
   local picker = { _items = items, filter_visible = filter, finder = finder or nav_items }
   picker.list = {
-    view = function(_, idx) picker.viewed = idx end,
+    view = function(_, idx)
+      picker.viewed = idx
+    end,
   }
-  picker.input = { win = { set_title = function(_, title) picker.title = title end } }
+  picker.input = { win = {
+    set_title = function(_, title)
+      picker.title = title
+    end,
+  } }
   function picker:items()
     return self._items
   end
@@ -462,7 +616,9 @@ local function fake_picker(items, filter, finder)
     self.finds = (self.finds or 0) + 1
     local rebuilt = self.finder()
     self._items = self.filter_visible and self.filter_visible(rebuilt) or rebuilt
-    if opts and opts.on_done then opts.on_done() end
+    if opts and opts.on_done then
+      opts.on_done()
+    end
   end
   return picker
 end
@@ -497,7 +653,9 @@ _G.Snacks = {
       end
       return opened_picker
     end,
-    get = function() return active_picker and { active_picker } or {} end,
+    get = function()
+      return active_picker and { active_picker } or {}
+    end,
   },
 }
 panel.state.opts = { focus_debounce_ms = 0 }
@@ -574,10 +732,48 @@ eq(jumps[1], { picker = picker, item = picker:items()[2], cmd = "edit" }, "l fil
 eq(jumps[2], { picker = picker, item = picker:items()[2], cmd = "edit" }, "confirm file jump")
 package.loaded["snacks.picker.actions"] = previous_picker_actions
 
+-- Pending rows use Gitsigns' default comparison; committed-only rows use the
+-- Comparison Base that Core attached to their Repo Entry.
+local diff_calls = {}
+local previous_gitsigns = package.loaded["gitsigns"]
+previous_picker_actions = package.loaded["snacks.picker.actions"]
+package.loaded["snacks.picker.actions"] = { jump = function() end }
+package.loaded["gitsigns"] = {
+  diffthis = function(base)
+    diff_calls[#diff_calls + 1] = base or "<default>"
+  end,
+}
+vim.api.nvim_create_user_command("Gitsigns", function(opts)
+  diff_calls[#diff_calls + 1] = "command:" .. opts.args
+end, { nargs = "*" })
+local pending_diff = {
+  kind = "file",
+  entry = { comparison_base = "base-sha" },
+  fentry = { path = "pending.lua", xy = ".M" },
+}
+local committed_diff = {
+  kind = "file",
+  entry = { comparison_base = "base-sha" },
+  fentry = { path = "committed.lua", commit_status = "M" },
+}
+actions.scm_diff(picker, pending_diff)
+actions.scm_diff(picker, committed_diff)
+assert(vim.wait(1000, function()
+  return #diff_calls == 2
+end, 10), "both diff actions completed")
+eq(diff_calls, { "<default>", "base-sha" }, "committed diff uses its Comparison Base")
+vim.api.nvim_del_user_command("Gitsigns")
+package.loaded["gitsigns"] = previous_gitsigns
+package.loaded["snacks.picker.actions"] = previous_picker_actions
+
 -- <CR> expands a collapsed header without lazygit, then opens lazygit once expanded.
 local action_snacks = _G.Snacks
 local lazygit_calls = {}
-_G.Snacks = { lazygit = function(opts) lazygit_calls[#lazygit_calls + 1] = opts end }
+_G.Snacks = {
+  lazygit = function(opts)
+    lazygit_calls[#lazygit_calls + 1] = opts
+  end,
+}
 panel_state().collapsed["/repos/dirty"] = true
 picker = fake_picker(nav_items())
 actions.scm_confirm(picker, picker:items()[1])
@@ -610,7 +806,9 @@ _G.Snacks = action_snacks
 -- the filter's visible result set instead of clearing the query.
 panel_state().collapsed = {}
 expanded_nav = nav_items()
-local filtered = fake_picker({ expanded_nav[2] }, function() return {} end)
+local filtered = fake_picker({ expanded_nav[2] }, function()
+  return {}
+end)
 actions.scm_close(filtered, expanded_nav[2])
 eq(panel_state().collapsed["/repos/dirty"], true, "filtered file h collapses hidden parent")
 eq(#filtered:items(), 0, "active filter remains applied after collapse")
@@ -639,7 +837,9 @@ end
 local first_header = deferred:items()[1]
 local second_header
 for _, item in ipairs(deferred:items()) do
-  if item.kind == "header" and item.entry.path == "/other/dirty" then second_header = item end
+  if item.kind == "header" and item.entry.path == "/other/dirty" then
+    second_header = item
+  end
 end
 assert(second_header, "second collapsible header fixture exists")
 actions.scm_close(deferred, first_header)
@@ -667,7 +867,9 @@ closed_before_done.title_touches = 0
 closed_before_done.input.win.set_title = function()
   closed_before_done.title_touches = closed_before_done.title_touches + 1
 end
-closed_before_done.items = function() error("closed picker items touched") end
+closed_before_done.items = function()
+  error("closed picker items touched")
+end
 local closed_done_ok = pcall(function()
   local pending = closed_before_done.pending[1]
   pending.opts.on_done(nil, pending.task)
@@ -713,8 +915,14 @@ panel_state().collapsed = { [alpha.path] = true }
 local refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
 refresh_picker._scm_tab = vim.api.nvim_get_current_tabpage()
 refresh_picker.current_idx = 3 -- beta's file before the refresh reorders rows
-_G.Snacks = { picker = { get = function() return { refresh_picker } end } }
-scope.current = function() return "/explorer/root" end
+_G.Snacks = { picker = {
+  get = function()
+    return { refresh_picker }
+  end,
+} }
+scope.current = function()
+  return "/explorer/root"
+end
 panel_state().root = scope.current()
 core.refresh = function(root, opts, cb)
   eq(root, "/explorer/root", "full refresh uses current Explorer Root")
@@ -731,7 +939,11 @@ eq(refresh_picker.viewed, 2, "full refresh restores the surviving file anchor")
 panel_state().entries = { beta, alpha }
 refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
 refresh_picker._scm_tab = vim.api.nvim_get_current_tabpage()
-_G.Snacks = { picker = { get = function() return { refresh_picker } end } }
+_G.Snacks = { picker = {
+  get = function()
+    return { refresh_picker }
+  end,
+} }
 core.refresh = function(_, _, cb)
   cb(nil, "repository discovery failed")
   return true
@@ -745,7 +957,11 @@ panel_state().collapsed = { [alpha.path] = true }
 refresh_picker = fake_picker(opened_opts.finder(), nil, opened_opts.finder)
 refresh_picker._scm_tab = vim.api.nvim_get_current_tabpage()
 refresh_picker.current_idx = 2 -- beta's file
-_G.Snacks = { picker = { get = function() return { refresh_picker } end } }
+_G.Snacks = { picker = {
+  get = function()
+    return { refresh_picker }
+  end,
+} }
 local updated_alpha = vim.deepcopy(alpha)
 updated_alpha.ahead = 2
 updated_alpha.files = { { path = "replacement.lua", xy = ".M" } }

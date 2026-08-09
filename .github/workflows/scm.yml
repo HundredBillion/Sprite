@@ -29,6 +29,7 @@ jobs:
       - name: Run SCM headless tests
         working-directory: phase_0/scm.nvim
         run: |
+          nvim -l tests/handoff_test.lua
           nvim -l tests/core_test.lua
           nvim -l tests/explorer_scope_test.lua
 

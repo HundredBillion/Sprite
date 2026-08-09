@@ -2,6 +2,7 @@
 -- This file may use snacks; scm.core never does. Pure derivation/item
 -- building lives at the top (headlessly testable); picker wiring below.
 local M = {}
+local transition = require("scm.transition")
 
 -- Git's `status --porcelain=v2` documents exactly 7 unmerged XY codes; any of
 -- them means an active, unresolved conflict on that file, regardless of which
@@ -27,6 +28,22 @@ function M.xy_display(xy)
     hl = ({ M = "ScmModified", A = "ScmAdded", D = "ScmDeleted", R = "ScmRenamed" })[letter] or "ScmModified"
   end
   return { letter = letter, mixed = mixed, hl = hl }
+end
+
+function M.file_display(entry)
+  if entry.xy then
+    local display = M.xy_display(entry.xy)
+    return {
+      letter = display.letter,
+      marker = display.mixed and "✱" or " ",
+      hl = display.hl,
+    }
+  end
+  return {
+    letter = entry.commit_status:sub(1, 1),
+    marker = "✓",
+    hl = "ScmCommitted",
+  }
 end
 
 -- Flatten Repo Entries into picker items. Every file row is self-identifying
@@ -101,6 +118,7 @@ function M.setup(opts)
     ScmRenamed = "DiagnosticWarn",
     ScmUntracked = "GitSignsAdd",
     ScmStaged = "GitSignsAdd",
+    ScmCommitted = "GitSignsChange",
     ScmConflict = "DiagnosticError",
     ScmMarker = "GitSignsAdd",
   }
@@ -172,12 +190,12 @@ function M.format_item(item)
     return parts
   end
   -- file row: indent, letter+marker, filename, dimmed repo/dir ctx
-  local d = M.xy_display(item.fentry.xy)
+  local d = M.file_display(item.fentry)
   local fname = item.fentry.path:match("[^/]+$") or item.fentry.path
   return {
     { "    " },
     { d.letter, d.hl },
-    { d.mixed and "✱" or " ", "ScmMarker" },
+    { d.marker, "ScmMarker" },
     { (" %-28s "):format(fname), "Normal" },
     { item.ctx, "Comment" },
   }
@@ -274,7 +292,10 @@ local function key_actions()
       if item.fentry.xy == "??" then
         vim.notify("untracked — no diff", vim.log.levels.INFO)
       else
-        vim.schedule(function() vim.cmd("Gitsigns diffthis") end)
+        local base = item.fentry.commit_status and item.entry.comparison_base or nil
+        vim.schedule(function()
+          require("gitsigns").diffthis(base)
+        end)
       end
     end,
     scm_lazygit = function(_, item)
@@ -329,25 +350,72 @@ function M.open(root)
   return picker
 end
 
-function M.toggle()
-  local open = Snacks.picker.get({ source = "scm" })[1]
-  if open then
-    open:close()
-    return
+function M.handoff(open)
+  transition.cancel()
+  for _, picker in ipairs(Snacks.picker.get({ source = "scm" })) do
+    picker:close()
   end
-  local root = scope.current()
+  transition.request(open)
+end
+
+local function close_explorers()
   for _, picker in ipairs(Snacks.picker.get({ source = "explorer" })) do
-    picker:close() -- only one left-rail sidebar activity open at a time
+    picker:close()
   end
   local manager = package.loaded["neo-tree.sources.manager"]
   local command = package.loaded["neo-tree.command"]
-  if manager and command then
+  if manager then
     local ok, state = pcall(manager.get_state, "filesystem")
-    if ok and state and state.winid and vim.api.nvim_win_is_valid(state.winid) then
-      pcall(command.execute, { action = "close" })
+    if not ok then
+      error("SCM handoff failed to inspect Neo-tree: " .. tostring(state), 0)
+    end
+    if
+      state
+      and state.winid
+      and vim.api.nvim_win_is_valid(state.winid)
+      and vim.api.nvim_win_get_tabpage(state.winid) == vim.api.nvim_get_current_tabpage()
+    then
+      local closed, close_err = pcall(function()
+        command.execute({ action = "close", source = "filesystem" })
+      end)
+      if not closed then
+        error("SCM handoff failed to close Neo-tree: " .. tostring(close_err), 0)
+      end
     end
   end
-  M.open(root)
+  local has_svgtree = false
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if
+      vim.api.nvim_win_get_config(win).relative == "" and vim.bo[vim.api.nvim_win_get_buf(win)].filetype == "svgtree"
+    then
+      has_svgtree = true
+      break
+    end
+  end
+  if has_svgtree then
+    local svgtree = package.loaded["svgtree"]
+    if svgtree and svgtree.close then
+      local closed, close_err = pcall(svgtree.close)
+      if not closed then
+        error("SCM handoff failed to close SVGTree: " .. tostring(close_err), 0)
+      end
+    end
+  end
+end
+
+function M.toggle()
+  local open = Snacks.picker.get({ source = "scm" })[1]
+  if open then
+    transition.cancel()
+    open:close()
+    return
+  end
+  transition.cancel()
+  local root = scope.current()
+  close_explorers()
+  transition.request(function()
+    M.open(root)
+  end)
 end
 
 -- Capture the cursor's identity (and old position) so it can be restored
@@ -401,20 +469,6 @@ function M.refresh_view(picker)
   set_title(picker, "Source Control (scanning…)")
   if state.refreshing then return false end
   run_full_refresh(tab, state)
-  return true
-end
-
-function M.root_changed(root)
-  local tab = vim.api.nvim_get_current_tabpage()
-  local state = M.tab_state(tab)
-  if not root or state.root == root then return false end
-  state.root = root
-  state.generation = state.generation + 1
-  state.queued_root = nil
-  state.entries = {}
-  state.collapsed = {}
-  local picker = picker_for_tab(tab)
-  if picker then return M.refresh_view(picker) end
   return true
 end
 

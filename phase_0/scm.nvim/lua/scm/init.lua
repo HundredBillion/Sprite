@@ -6,5 +6,5 @@ local panel = require("scm.panel")
 return {
   setup = panel.setup,
   toggle = panel.toggle,
-  open = panel.open,
+  handoff = panel.handoff,
 }
