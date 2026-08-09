@@ -213,13 +213,13 @@ local comparison_refs = { "refs/remotes/origin/HEAD", "refs/heads/main", "refs/h
 local function resolve_comparison_base(repo, opts, index, cb)
   local ref = comparison_refs[index]
   if not ref then
-    cb(nil)
+    cb(nil, nil)
     return
   end
   run_git(repo, opts, { "merge-base", ref, "HEAD" }, function(out)
     local base = vim.trim(out.stdout or "")
     if out.code == 0 and base ~= "" then
-      cb(base)
+      cb(base, ref)
     else
       resolve_comparison_base(repo, opts, index + 1, cb)
     end
@@ -227,13 +227,19 @@ local function resolve_comparison_base(repo, opts, index, cb)
 end
 
 local function collect_committed(repo, opts, cb)
-  resolve_comparison_base(repo, opts, 1, function(base)
+  resolve_comparison_base(repo, opts, 1, function(base, default_ref)
     if not base then
       cb({}, nil)
       return
     end
-    run_git(repo, opts, { "diff", "--name-status", "-z", base .. "..HEAD" }, function(out)
-      cb(out.code == 0 and parse_name_status(out.stdout or "") or {}, base)
+    run_git(repo, opts, { "diff", "--quiet", default_ref, "HEAD" }, function(tree_diff)
+      if tree_diff.code == 0 then
+        cb({}, base)
+        return
+      end
+      run_git(repo, opts, { "diff", "--name-status", "-z", base .. "..HEAD" }, function(out)
+        cb(out.code == 0 and parse_name_status(out.stdout or "") or {}, base)
+      end)
     end)
   end)
 end
