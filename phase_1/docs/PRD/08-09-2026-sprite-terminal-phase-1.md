@@ -50,17 +50,25 @@ release tag. The initial target is Ghostty v1.3.1. Sprite adapts the audited
 reviewed pin changes after the compatibility suite passes.
 
 Sprite identifies itself honestly with `TERM_PROGRAM=Sprite` and a Sprite
-version. Phase 1 implements the capabilities represented by `xterm-ghostty` and
-may use that terminal type for compatibility while shipping the matching terminfo
-data; it must never claim `TERM_PROGRAM=ghostty`. The later Croft fork can detect
-Sprite directly. The Phase 1 control namespace is parsed and versioned but has no
-IDE-specific commands.
+version. Phase 1 implements the capabilities represented by `xterm-ghostty`,
+uses that terminal type, and ships the matching terminfo data; it must never
+claim `TERM_PROGRAM=ghostty`. The later Croft fork can detect Sprite directly.
+The Phase 1 control namespace is parsed and versioned but has no IDE-specific
+commands.
 
 Phase 1 is complete when the packaged application can be daily-driven on Arch
 Linux and macOS; ordinary shells and TUIs pass the terminal compatibility suite;
 Croft's keyboard, mouse, alternate-screen, minimap, icons, previews, and embedded
 terminal work; configuration reload is failure-safe; the app is event-driven at
 idle; and release artifacts install and launch outside a developer shell.
+
+Completion requires all five checkpoint suites, current Croft `main`, native
+Wayland, native X11, the macOS `.app`, and recorded performance budgets to pass.
+It also requires a 24-hour automated output/resource soak, seven days of daily
+use with the packaged Arch build without crash, lost input, terminal corruption,
+zombie children, or unbounded resource growth, and one manual real-macOS
+acceptance pass outside the developer shell. A serious terminal-correctness fix
+restarts the affected soak or daily-use gate.
 
 ## User Stories
 
@@ -203,6 +211,14 @@ idle; and release artifacts install and launch outside a developer shell.
     tests, so that one platform does not become a late manual port.
 60. As a user, I want Sprite to remain useful without Croft, Neovim, Omarchy, or
     any IDE-specific component installed, so that it is genuinely a terminal.
+61. As a terminal user, I want a local shell tool launched inside Sprite to have
+    automatic read-only access to terminal panes in the same Sprite window, so
+    that an LLM or automation can understand relevant work without Sprite
+    depending on a particular AI product.
+62. As a screen-reader user, I want Sprite to expose tabs, panes, visible
+    terminal text, cursor and selection state, bells, exits, and important
+    errors through platform accessibility services, so that the terminal is not
+    usable only through rendered pixels.
 
 ## Implementation Decisions
 
@@ -217,13 +233,48 @@ idle; and release artifacts install and launch outside a developer shell.
 - Sprite Terminal is independently buildable, installable, versioned, and
   useful. Croft is never linked, vendored, or required at runtime.
 - Phase 1 initially supports one application window with multiple tabs and
-  recursive splits. Multi-window coordination is deferred.
+  recursive splits. Multi-window creation, restoration, menu/focus coordination,
+  and pane movement between windows are deferred, while Window ownership remains
+  explicit so later support does not alter Terminal Session semantics.
+
+### Delivery checkpoints and architectural spine
+
+- Phase 1 is delivered through five testable checkpoints, but every checkpoint
+  extends the same two-module architecture and terminal-session seam. No
+  checkpoint is a disposable prototype or a competing implementation.
+- Checkpoint 1 proves the complete path through `sprite-app`, the owned
+  command/event interface, the `sprite-term` worker, libghostty, a real PTY, and
+  a login shell in one window. It establishes one coherent terminal generation
+  and owned projection seam later used by rendering and Pane Observation.
+- Before Checkpoint 2 begins, Checkpoint 1 runs the benchmark harness against
+  the pinned Ghostty release on the same Arch and macOS validation machines and
+  records numerical performance budgets in version control.
+- Checkpoint 2 deepens that same terminal module with correct text, input,
+  mouse, selection, scrolling, shell integration, lifecycle behavior, active-
+  screen history, observation metadata, and focused-pane accessibility state.
+- Checkpoint 3 composes multiple instances of the same terminal session into
+  tabs and recursive split trees, then exposes their tested snapshot model
+  through the protected `sprite panes snapshot` Observation Client. It does not
+  create a second terminal model or an LLM-specific path, and exposes tab/pane
+  names and focus through the same accessibility tree.
+- Checkpoint 4 extends the existing owned snapshot contract with Kitty graphics
+  and validates Croft as an unmodified external application.
+- Checkpoint 5 packages and validates the same application on Arch Linux and
+  macOS, including observation IPC, capability scoping, CLI discovery, and JSON
+  output. Packaging must not introduce a platform-specific product architecture.
+- A checkpoint is accepted only when its end-to-end path and regression suite
+  pass. Phase 1 is complete only when all five checkpoints and the full
+  acceptance suite pass together.
 
 ### Primary module and test seam
 
-- The primary seam is the public terminal-session interface owned by
-  `sprite-term`. Consumers create a session, send typed commands, and receive
-  typed events plus owned immutable render snapshots.
+- The primary seam is the terminal-session workspace API owned by
+  `sprite-term`. During Phase 1, this API is an internal contract for
+  `sprite-app` and Sprite's tests, not a supported third-party SDK. Its design
+  remains strict and testable without promising external API stability before
+  daily use has validated it. Internal consumers create a session, send typed
+  commands, and receive typed events plus owned immutable Render Snapshots and
+  on-demand observation projections.
 - Commands cover input bytes/events, resize with cell and pixel dimensions,
   scroll, selection, search, clipboard responses, configuration that affects
   terminal semantics, and shutdown.
@@ -235,6 +286,15 @@ idle; and release artifacts install and launch outside a developer shell.
 - The application sees a snapshot as a complete coherent generation. It never
   combines rows, colors, cursor data, or image placements from different
   terminal mutations.
+- One terminal generation has two distinct projections. Render Snapshots carry
+  rich styled cells, cursor, selection, damage, and image-placement data for
+  GPUI. Pane Snapshots carry the intentionally reduced text and metadata contract
+  for Pane Observation.
+- `sprite-term` produces the terminal-owned fields for both projections from the
+  same state generation. `sprite-app` adds tab, focus, and normalized layout
+  metadata to Pane Snapshots. Neither projection is made by scraping pixels or
+  converting the other, and the shell-facing JSON cannot freeze the renderer's
+  internal contract.
 
 ### Threading and lifecycle
 
@@ -244,12 +304,30 @@ idle; and release artifacts install and launch outside a developer shell.
 - libghostty values remain on their owner thread because the audited bindings
   are `!Send + !Sync`. Sprite will not add unsafe `Send` or `Sync`
   implementations to bypass that constraint.
+- Phase 1 does not place each Terminal Session in a helper process. Ordinary
+  errors and supervised worker termination remain pane-local, but a native
+  memory fault inside libghostty may still terminate the Sprite process.
 - GPUI remains on the application thread. Communication uses bounded channels
   and coalesces redundant render invalidations so heavy output cannot starve
   input or grow an unbounded queue.
+- PTY output bytes are never dropped and are applied to terminal state in order.
+  At most the newest complete Render Snapshot generation is needed by GPUI;
+  obsolete intermediate snapshots and repeated invalidations are coalesced.
+- Keyboard/paste input is ordered and never dropped. Large paste is chunked,
+  while repeated resize commands coalesce to the newest dimensions without
+  reordering input relative to terminal-mode changes.
+- When bounded queues and coalescing cannot absorb sustained output, Sprite lets
+  the operating system PTY buffer backpressure the child rather than allocating
+  unbounded application memory.
 - Shutdown is explicit and idempotent. It stops reads, requests child
   termination according to the close policy, reaps the child, releases terminal
   and image state, and joins worker resources without blocking the GPUI thread.
+- After an approved close, Sprite closes the PTY and sends hangup, waits up to
+  two seconds asynchronously, sends termination if the process group remains,
+  waits one additional second, then force-kills and reaps remaining children.
+- Tab/application shutdown runs the same policy concurrently for affected Panes
+  rather than serially multiplying the deadline. A user-approved shutdown does
+  not reappear as an unexpected-signal error Pane.
 
 ### PTY and shell behavior
 
@@ -260,19 +338,62 @@ idle; and release artifacts install and launch outside a developer shell.
 - New panes inherit the active pane's current directory only from trusted shell
   integration or an OS process query scoped to that pane. Failure falls back to
   the configured startup directory without guessing from displayed text.
+- Sprite bundles versioned shell-integration scripts for Bash, Zsh, and Fish and
+  loads the matching script into shells it launches. Integration is enabled by
+  default and can be disabled in TOML.
+- Sprite never edits or appends to `.bashrc`, `.zshrc`, Fish configuration, or
+  another user dotfile. Unsupported shells and integration failures fall back to
+  scoped platform process information; unavailable metadata remains unknown
+  rather than being inferred from terminal text.
+- Each Terminal Session prepends the directory containing its running Sprite
+  executable to that child's `PATH`. This is session-local and ensures
+  `sprite panes snapshot` uses the Observation Client matching the containing
+  app; Sprite does not rewrite the user's global PATH or shell files.
 - Resize updates both the PTY character dimensions and libghostty pixel/cell
   dimensions in one ordered command.
 - Closing a pane with no relevant foreground child is immediate. Closing a pane
   with a live foreground child requires confirmation unless the user has
   explicitly disabled it.
+- A shell waiting as the PTY's foreground process is considered idle. A
+  different foreground process group, including an editor, build, Croft, or SSH
+  client, is considered active and triggers the warning; Sprite does not infer
+  activity from displayed text.
+- Closing a tab with active children shows one confirmation that reports the
+  number of affected Panes rather than prompting once per Pane. A configuration
+  setting may disable close confirmations globally.
+- An ordinary shell process exit closes its Pane, collapses an empty tab, and
+  closes the Phase 1 application when no Panes remain. This applies to an
+  ordinary process exit regardless of its numeric exit status, because an
+  interactive shell may intentionally exit with the previous command's status.
+- A shell launch failure or signal termination keeps the Pane open with a clear
+  status and relaunch/close actions instead of collapsing it automatically.
 
 ### Ghostty and dependency provenance
 
+- The Phase 1 Rust workspace is licensed `MIT OR Apache-2.0`. It contains both
+  license texts, declares the expression in each Sprite crate, and preserves
+  upstream copyright/license notices for adapted source.
+- Release packaging generates third-party notices, and CI checks dependency
+  licenses. Copyleft, unlicensed, or unknown code requires explicit review and
+  approval before entering the build.
+- Phase 1 initially depends on the official GPUI crate at exact version
+  `=0.2.2`, with only audited required features enabled. It never uses a
+  wildcard GPUI version or follows the Zed repository's moving main branch.
+- GPUI updates are dedicated reviewed commits. An automated job may report a
+  new release, but the pin moves only after Linux Wayland/X11, macOS, rendering,
+  input, packaging, and Pane Observation suites pass.
 - Ghostty source is a git submodule under the Phase 1 vendor area, initially
   pinned to stable tag v1.3.1.
 - Sprite carries or adapts the audited `libghostty-rs` safe interface against
   the pinned Ghostty source. It does not use `gpui-ghostty` as a Cargo dependency
   or repository template.
+- Sprite may carry small, deterministic, separately documented patches that
+  expose behavior Ghostty already implements through libghostty. Each patch has
+  focused tests, license/provenance review, and an upstream contribution path.
+- Sprite patches may not bypass thread ownership, add unsafe `Send`/`Sync`, or
+  change Ghostty's parser, terminal semantics, allocator model, or core behavior.
+  A capability requiring such changes stops the checkpoint for architectural
+  review rather than silently creating a Sprite-specific terminal fork.
 - Cargo resolves exact transitive versions through a committed lockfile. The
   Rust toolchain is explicitly documented and pinned for CI/release builds.
 - An automated job may report a newer stable Ghostty tag and open an update
@@ -280,6 +401,13 @@ idle; and release artifacts install and launch outside a developer shell.
   full terminal and Croft compatibility suites.
 - Every new direct dependency must document which correctness-hard or cross-
   platform capability it replaces. Convenience alone is insufficient.
+- `phase_1/DEPENDENCIES.md` is the required direct-dependency ledger. Each entry
+  records capability, rejected standard-library/existing options, enabled
+  features, license/source, and update policy; adding a direct dependency
+  requires updating the ledger in the same commit.
+- CI checks unused dependencies, known vulnerabilities, avoidable duplicate
+  versions, unexpected feature expansion, and licenses. No arbitrary numeric
+  dependency cap replaces case-by-case leverage review.
 
 ### Rendering
 
@@ -295,8 +423,27 @@ idle; and release artifacts install and launch outside a developer shell.
 - Fractional scroll offset is application/render state layered over libghostty's
   row-based viewport. Accumulated deltas cross row boundaries by issuing ordered
   terminal scroll commands while the remaining fraction translates rendering.
+- A viewport already at the live bottom follows new output. A viewport reading
+  older scrollback stays anchored and reports an unseen-line count; an explicit
+  End action returns to live output.
+- Sending terminal keyboard/paste input returns that Pane to the live bottom so
+  its result is visible. Selection, copy, and scrollback-search actions preserve
+  the current viewport.
 - Font or DPI changes rebuild layout and caches, send updated pixel/cell sizes to
   the terminal, and preserve the PTY and pane tree.
+- Sprite maps owned terminal snapshots into GPUI's platform accessibility tree.
+  It exposes tab/pane labels, focus, the focused Pane's visible text, cursor and
+  selection state, and announcements for bells, process exits, and important
+  errors; Pane Observation is not an accessibility substitute.
+- Accessibility updates are damage/event driven and coalesced so high-volume
+  terminal output does not flood assistive technology.
+- Sprite prefers GPUI hardware rendering. When GPUI can launch through its
+  software renderer, Sprite permits that as a clearly diagnosed degraded mode
+  instead of maintaining a separate CPU renderer.
+- Terminal correctness, diagnostics, and Pane Observation still apply in
+  software mode where supported, but smooth-graphics expectations and release
+  performance targets do not. Hardware acceleration is required for performance
+  qualification.
 
 ### Kitty graphics
 
@@ -314,6 +461,9 @@ idle; and release artifacts install and launch outside a developer shell.
   generations release or invalidate textures deterministically.
 - Graphics memory has independent terminal-side and GPU-side limits. Exceeding a
   limit degrades that image with a diagnostic; it does not terminate the pane.
+- Direct Kitty graphics are required, and graphics passing through the current
+  stable tmux are required when tmux's documented passthrough option is enabled.
+  Sprite documents that setting and does not patch or override tmux.
 
 ### Input, clipboard, and links
 
@@ -322,18 +472,39 @@ idle; and release artifacts install and launch outside a developer shell.
   precedence; all other keys go through libghostty's key encoder.
 - Kitty keyboard negotiation, legacy key sequences, mouse modes, focus events,
   and bracketed paste follow terminal state rather than application guesses.
+- When terminal mouse reporting is inactive, ordinary drag performs Sprite text
+  selection. When reporting is active, ordinary mouse events go exclusively to
+  the child application; holding Shift overrides reporting for Sprite selection.
+  The override modifier is configurable, and one event is never delivered to
+  both paths.
 - IME composition is displayed at the active cursor without mutating terminal
   state until text is committed.
 - Clipboard reads and writes occur only after the terminal/application emits a
   typed request. OSC 52 writes obey a configurable security policy and never
   execute arbitrary commands.
+- By default, OSC 52 clipboard writes are accepted only from the focused Pane
+  and only up to 1 MiB of decoded content. Hidden/unfocused writes, malformed or
+  oversized payloads, and all terminal-initiated clipboard reads are denied.
+- Normal user-initiated copy and paste remain available. TOML may tighten or
+  explicitly relax OSC 52 read/write policy, but the secure defaults are used
+  whenever configuration is absent or invalid.
 - Hyperlinks allow only configured URI schemes. Hover/click behavior uses
   snapshot metadata and never reparses terminal text as shell instructions.
+- The default hyperlink schemes are `https` and `http`. Opening requires
+  Ctrl+Click on Linux or Command+Click on macOS and shows the encoded destination
+  on hover; `file`, bare paths, and custom application schemes are disabled
+  unless explicitly trusted in TOML.
+- Sprite passes the parsed URI directly to the platform opener and never builds
+  or executes a shell command from terminal-provided labels or destinations.
 
 ### Tabs, splits, and application state
 
 - A tab owns one recursive binary split tree. Leaves own terminal-session IDs;
   internal nodes own orientation and normalized size ratios.
+- Each pane owns exactly one independent terminal session and child process.
+  Splitting creates a new session; sessions are never shared between panes.
+  Closing, moving, or resizing one pane cannot restart or terminate another
+  pane's session.
 - Focus movement uses pane geometry and direction, not creation order. Closing a
   leaf collapses redundant internal nodes and chooses the nearest surviving
   focus target deterministically.
@@ -341,20 +512,180 @@ idle; and release artifacts install and launch outside a developer shell.
   does not recreate its PTY.
 - Runtime tabs and splits are in scope. Persisting and restoring live processes
   across application restarts is not.
+- A Phase 1 launch creates one fresh tab with one fresh Terminal Session. Sprite
+  does not automatically recreate the previous tab/split tree, working
+  directories, titles, terminal contents, or command state.
+- Sprite may persist non-sensitive window presentation state such as size and
+  maximized/full-screen state where the platform permits it. The Wayland
+  compositor remains authoritative and Sprite does not attempt to restore a
+  forbidden absolute position.
+
+### Cross-pane observation
+
+- Phase 1 provides a protected, local, read-only interface through which a
+  shell tool can request owned text snapshots from other panes.
+- Sprite brokers every observation request. A requesting tool never receives a
+  PTY handle, libghostty object, mutable terminal state, keystroke stream, or
+  direct access to another child process.
+- Pane observation is a general terminal capability, not an LLM integration.
+  Sprite does not bundle, call, authenticate to, or depend on any model or AI
+  provider.
+- Pane observation is automatically available, without prompts, to local tools
+  launched within a Sprite window. It is limited to panes in that same window
+  and ends when the window closes.
+- Local processes outside Sprite, tools launched in another Sprite window, and
+  remote clients receive no observation access. Access remains read-only and
+  never includes commands that mutate application or terminal state.
+- Every observation includes the pane's current screen and may include up to
+  5,000 of its most recent scrollback lines. The default is 500 lines per pane;
+  a client may request any value from zero through 5,000 but cannot exceed this
+  limit.
+- A Pane Snapshot contains only the currently active terminal screen. When an
+  alternate-screen application is active, Sprite returns that screen and any
+  history owned by it; Sprite does not mix in the hidden normal-screen shell
+  buffer. Normal-screen snapshots include normal scrollback within the requested
+  limit.
+- Pane observation is pull-based. A client requests a point-in-time Pane
+  Snapshot when it needs context and may request another later; Phase 1 does
+  not expose subscriptions, continuous output, or keystroke streams.
+- A Pane Snapshot is structured text containing stable pane identity, title,
+  tab identity and title, focus/requester state, working directory, terminal
+  dimensions, cursor position, active-screen kind, preserved Unicode rows and
+  whitespace, line-wrap markers, current viewport, the requested recent-history
+  range, capture time, and content generation.
+- Each Pane Snapshot includes normalized `x`, `y`, `width`, and `height` values
+  describing its visual rectangle within its tab. This conveys left/right and
+  above/below relationships without coupling clients to pixels, DPI, or a
+  monitor size.
+- The JSON orders tabs by their window order and panes by normalized top edge,
+  then left edge, then stable Pane ID. Concurrent completion order never changes
+  the serialized order.
+- A snapshot may include the foreground executable's basename when Sprite can
+  obtain it safely from platform process state. It never includes process
+  arguments or environment values and uses JSON `null` rather than guessing
+  from displayed terminal text when the executable is unavailable.
+- Each Pane Snapshot is internally coherent and immutable after capture. A
+  multi-pane request captures panes independently without pausing shells, input,
+  or output across the window; snapshots may therefore differ by a few
+  milliseconds and do not claim one window-wide atomic instant.
+- A multi-pane JSON response contains a top-level `complete` flag, the usable
+  `panes`, and structured per-pane `errors`. A pane that closes, exits, or fails
+  during collection does not discard snapshots from healthy panes; the response
+  sets `complete` to false and names what is missing.
+- Sprite requests selected panes concurrently and applies one 500-millisecond
+  deadline to the complete observation request. At the deadline it returns all
+  finished snapshots and reports each unfinished pane with a `pane_timeout`
+  error; no slow pane can extend the deadline for the others.
+- One response is limited to 16 MiB of encoded JSON. When necessary, Sprite
+  removes the oldest requested history first, preserves complete Unicode rows,
+  and marks affected snapshots as truncated. It never emits malformed or
+  partially cut JSON.
+- Metadata and complete current screens take priority over history. If those
+  still cannot all fit, Sprite omits whole Pane Snapshots rather than returning
+  half a screen, sets `complete` to false, and reports each omission with a
+  `response_limit` error.
+- Phase 1 snapshots exclude screenshots, colors and font data, raw terminal
+  control sequences, clipboard data, environment variables, Kitty image bytes,
+  decoded pixels, filenames, and image recognition.
+- For Kitty placements intersecting the returned screen/history range, a Pane
+  Snapshot includes untrusted placement metadata: stable placement identity,
+  transmission format, pixel dimensions, cell bounds, and z-order. This tells a
+  client that an image occupies terminal space without revealing image content.
+- The official shell-facing representation is one versioned JSON object. It
+  contains `schema_version` and a `panes` array so one request can return
+  multiple Pane Snapshots without joining unrelated text streams.
+- Sprite constructs the response from typed Rust data. Human-readable pretty
+  printing changes JSON whitespace only and never creates a second schema.
+- Phase 1 ships `sprite panes snapshot` as the shell-facing observation client.
+  It sends a bounded request to the containing Sprite window and writes the JSON
+  response to standard output, with diagnostics on standard error and a nonzero
+  exit status on failure.
+- A syntactically valid Pane Observation response exits with status zero even
+  when `complete` is false, because its healthy snapshots remain usable. A
+  nonzero status means Sprite could not produce a valid response, such as for
+  invalid arguments, missing credentials, an unavailable socket, or an
+  unsupported protocol.
+- Each Sprite window owns a private Unix-domain socket for Pane Observation.
+  Linux and macOS use this local operating-system IPC; Sprite opens no TCP port,
+  accepts no remote connection, and sends no observation over the internet.
+- The bundled Observation Client is the only supported Phase 1 consumer of the
+  socket. Its private request protocol is versioned for mismatch diagnostics but
+  is not a third-party contract; tools integrate through the command's versioned
+  JSON output rather than connecting to the socket directly.
+- When a window opens, Sprite creates an unguessable observation key and
+  injects that key plus the private socket location into every Terminal Session
+  launched in the window. Sprite also supplies each session's Pane identity.
+  The Observation Client must present the key on every request; a missing or
+  incorrect key is rejected without returning pane data.
+- The observation key is scoped to one Sprite window. Closing that window
+  destroys its socket and key, so copied connection information can no longer
+  reach an observation endpoint.
+- Automatic access deliberately treats every descendant program launched in a
+  Sprite pane as trusted with the window key. Such a program can intentionally
+  copy or disclose its key; Sprite does not claim to confine a client after
+  granting it this capability.
+- Pane Observation is enabled by default and can be disabled with
+  `pane_observation.enabled = false`. Disabling applies live: Sprite closes the
+  socket, destroys the active key, rejects new requests, and stops injecting
+  observation connection data into new Terminal Sessions.
+- Sprite cannot erase environment values already copied into running child
+  processes, but those values cannot reach an endpoint after the socket and key
+  are destroyed.
+- Re-enabling observation creates a new endpoint and key rather than reviving
+  destroyed credentials. Only Terminal Sessions created afterward inherit the
+  new capability; existing sessions continue running without observation access
+  until they are replaced or Sprite restarts.
+- By default, `sprite panes snapshot` returns every other Pane in scope and
+  excludes the requesting Pane. `--include-self` includes the requester, while
+  `--pane <pane-id>` restricts the response to a specified Pane.
+- The default scope is the tab that owns the requesting Pane, even if another
+  tab becomes visually active while the request runs. `--window` broadens the
+  scope to every tab in the same Sprite window; it never crosses into another
+  window.
+- Sprite does not claim to detect or redact secrets from terminal output. Any
+  credential or private value printed within the observed range is readable by
+  an authorized same-window client; non-echoed password input is absent from
+  terminal content and therefore absent from observations.
+- Every Pane Snapshot declares `content_trust` as
+  `untrusted_terminal_output`. Sprite preserves terminal text as safely escaped
+  JSON data but does not classify, remove, or neutralize prompt-injection text.
+  Observation clients must treat pane content as information, never as
+  permission or higher-priority instructions.
 
 ### Configuration and error handling
 
-- Configuration has a versioned schema covering fonts, theme, cursor, scroll,
-  shell/startup directory, scrollback/image limits, tabs/splits, keybindings,
-  clipboard/link security, and platform behavior.
+- Configuration uses a human-edited TOML file with a versioned schema covering
+  fonts, theme, cursor, scroll, shell/startup directory, scrollback/image
+  limits, tabs/splits, keybindings, clipboard/link security, Pane Observation,
+  and platform behavior.
+- Sprite uses a maintained Rust TOML parser rather than creating a custom
+  configuration language. The parser is an accepted correctness dependency;
+  comments and ordinary TOML editing remain part of the user-facing contract.
+- On Linux, the user file is `$XDG_CONFIG_HOME/sprite/config.toml` when that
+  variable is set and otherwise `~/.config/sprite/config.toml`. On macOS,
+  explicit `$XDG_CONFIG_HOME` is honored and the default is
+  `~/Library/Application Support/Sprite/config.toml`.
+- `sprite --config <path>` selects an explicit file on both platforms and takes
+  precedence over automatic path discovery.
 - Sprite loads platform defaults, then the user file, then explicit launch
   overrides. The effective configuration can be inspected without exposing
   secrets.
 - Hot reload parses and validates a complete candidate before applying it.
   Invalid candidates leave the last known good configuration active and surface
   actionable diagnostics with location and reason.
+- Sprite watches the selected TOML file through an audited cross-platform
+  filesystem-watcher dependency hidden behind an internal seam. It coalesces
+  editor save events before running the same reload transaction exposed by
+  `sprite config reload`.
+- The watcher is an accepted portability dependency; Sprite does not duplicate
+  Linux inotify and macOS filesystem-event implementations in Phase 1.
 - Reload classifies changes as live-applicable, new-session-only, or restart-
   required. It never silently restarts PTYs or discards pane state.
+- Fonts, colors, cursor presentation, opacity, keybindings, scroll behavior, and
+  close warnings apply live when valid. Shell, startup-directory, environment,
+  and terminal-identity changes apply only to Terminal Sessions created after
+  the reload. Restart-required changes produce a diagnostic and remain pending.
+- No configuration reload restarts or replaces an existing Terminal Session.
 - A failed terminal child is represented in its pane with exit status and a
   relaunch action. A failed pane does not crash unrelated panes or the app.
 - Logs are structured by session/pane and omit terminal contents, clipboard
@@ -365,10 +696,14 @@ idle; and release artifacts install and launch outside a developer shell.
 - Sprite exports its real program identity and version. Compatibility terminal
   type data describes implemented terminal capabilities, not the application
   brand.
-- Phase 1 implements the `xterm-ghostty` capability set closely enough to use
-  its terminfo entry for current program compatibility while retaining
+- Phase 1 implements the `xterm-ghostty` capability set and uses its terminfo
+  entry for current program compatibility while retaining
   `TERM_PROGRAM=Sprite`. A Sprite-specific terminfo name can replace it only
   after remote-install and ecosystem behavior are specified and tested.
+- Sprite installs the matching terminfo entry locally with its packages but does
+  not copy or install files on an SSH server automatically. Documentation gives
+  users an explicit remote-install command and describes `TERM=xterm-256color`
+  as a reduced-capability temporary fallback for unknown remotes.
 - Sprite reserves OSC 1338 as its versioned private control namespace, following
   the previously evaluated fork precedent. Phase 1 parses a version, command,
   and length-bounded UTF-8 payload into a typed event, rejects malformed or
@@ -379,22 +714,39 @@ idle; and release artifacts install and launch outside a developer shell.
 
 - Linux development and daily use are validated on Arch/Omarchy, but runtime
   behavior uses standard Linux/desktop facilities.
+- Linux release support includes both native Wayland and native X11, preferring
+  Wayland when both display servers are available. Running through XWayland does
+  not satisfy the native Wayland requirement.
+- Checkpoint 5 exercises launch, rendering, resize, DPI, keyboard, mouse, IME,
+  clipboard, and Pane Observation on both Linux backends. A regression in either
+  backend blocks the Linux Phase 1 release.
 - Linux output includes the binary, desktop entry, application metadata, icons,
   terminfo data, and an Arch-friendly package recipe.
 - macOS output is a signed-or-ad-hoc-signed development `.app` with icons,
   menus, clipboard/IME integration, terminfo data, and PATH repair for GUI
   launches. Production notarization is deferred until distribution identity is
   available.
+- The macOS app offers an explicit “Install Command Line Tool” action that shows
+  its destination before creating a user-visible symlink for shells outside
+  Sprite. It is optional; commands inside Sprite already find the bundle's
+  matching executable. Arch packaging installs the executable conventionally as
+  `/usr/bin/sprite`.
 - Phase 1 release builds support x86_64 Linux and a universal macOS application.
   Linux aarch64 must compile in CI but is not a required packaged artifact.
 - CI runs formatting, linting, tests, build/package smoke checks, and license/
   provenance checks on Linux and macOS.
+- Package tests verify that both Sprite license texts and generated third-party
+  notices are present in distributable artifacts.
 
 ### Performance decisions
 
 - Before optimization, Phase 1 records repeatable baselines for cold launch to
   prompt, input-to-render scheduling, PTY throughput, scroll/frame cadence, idle
   CPU, memory, and graphics-memory reclamation.
+- Checkpoint 1 freezes measured budgets for those metrics before Checkpoint 2.
+  Later checkpoints may strengthen them but cannot silently weaken them; an
+  unexplained regression greater than 10% requires investigation and explicit
+  user approval.
 - Ghostty is the terminal-behavior/performance reference, while the prior pixel-
   scroll fork's sustained high-refresh cadence is the smoothness reference.
 - Phase 1 does not claim a numeric speed advantage over Ghostty or VS Code. It
@@ -417,36 +769,88 @@ idle; and release artifacts install and launch outside a developer shell.
   marks, true/index/default colors, style flags, cursor modes, alternate screen,
   scroll regions, hyperlinks, OSC 52 policy, shell markers, Kitty keyboard,
   mouse modes, bracketed paste, and malformed/oversized control sequences.
+- Shell-integration tests launch Bash, Zsh, and Fish with isolated temporary
+  configuration homes, verify working-directory and command-boundary events,
+  prove user files remain unchanged, and exercise disabled/unsupported/failure
+  fallbacks.
 - Fractional-scroll tests verify accumulation, direction reversal, row-boundary
   crossing, alternate-screen behavior, and stable results across different
   event/frame rates.
+- Scroll-follow tests verify bottom following, anchored history under new output,
+  unseen-line counts, explicit return, input-triggered return, and viewport
+  preservation during selection/copy/search.
 - Kitty graphics fixtures cover PNG and raw transfer, chunking, replacement,
   crop, scale, placement IDs, negative/positive z, scrolling, screen switches,
   deletion, generation changes, storage limits, malformed payloads, and texture
   reclamation. Tests compare owned graphics snapshots rather than GPU internals.
+- Pane Observation fixtures verify visible Kitty placement metadata and prove
+  that JSON never contains transmitted bytes, decoded pixels, source filenames,
+  or inferred image content.
 - Renderer tests consume deterministic snapshots in an offscreen or controlled
   GPUI harness and compare geometry, text/cursor/selection placement, clipping,
   z-order, and image output. Platform raster differences use explicit tolerances
   and do not weaken terminal-state assertions.
+- Accessibility tests consume the same snapshots and verify tab/pane labels,
+  focus, visible text, cursor, selection, and event announcements without
+  requiring pixel recognition or exposing hidden scrollback by default.
 - Application end-to-end tests launch Sprite, create/resize/close tabs and
   splits, route keys/mouse/IME, reload valid and invalid config, and prove one
   failed pane does not terminate the window.
-- Croft is an external acceptance suite. The test launches the recorded upstream
-  Croft baseline and exercises startup, editor input, mouse hit testing, resize,
-  alternate screen, Kitty activity icons, minimap, preview overlays, menu
-  clipping, and the embedded terminal. Sprite-specific Croft patches are not
-  permitted in this Phase 1 gate.
+- Pane Observation tests exercise the bundled command rather than the private
+  socket protocol. They cover requesting-tab/default-self scope, explicit Pane
+  and window scope, history limits, active-screen isolation, stable layout
+  ordering, Unicode/JSON escaping, untrusted-content labels, coherent
+  generations, partial errors, the 500-millisecond deadline, the 16 MiB cap,
+  key rejection, window isolation, kill/re-enable behavior, and the absence of
+  all mutation operations.
+- Croft is an external acceptance suite. The test launches upstream Croft
+  `main` as resolved at the start of each run and exercises startup,
+  editor input, mouse hit testing, resize, alternate screen, Kitty activity
+  icons, minimap, preview overlays, menu clipping, and the embedded terminal.
+  Sprite-specific Croft patches are not permitted in this Phase 1 gate.
+- Croft compatibility deliberately has no permanent pinned baseline. Every run
+  records the exact resolved Croft commit in logs and artifacts for diagnosis,
+  but the next run resolves moving `main` again so upstream changes surface
+  immediately rather than allowing compatibility to grow stale.
+- The moving Croft suite is required on every pull request and merge, every
+  checkpoint/release candidate, and a nightly schedule even when Sprite does not
+  change. A failure blocks merging and release until triage determines whether
+  Sprite must adapt or Croft `main` itself is broken.
+- Ordinary local `cargo test` remains offline and deterministic; the external
+  Croft suite is an explicit CI/acceptance command rather than a hidden network
+  side effect of the Rust test suite.
 - Compatibility smoke applications include at least a shell, Neovim, tmux,
   htop/btop, lazygit, and Croft. Their presence is test tooling, not runtime
   dependency.
+- tmux acceptance verifies ordinary text/input/mouse/resize behavior under
+  normal configuration and runs Kitty fixtures plus Croft through the current
+  stable tmux with documented passthrough enabled.
 - Packaging tests install artifacts into isolated locations and launch them
   outside an interactive developer shell. macOS tests verify the `.app` path and
   repaired tool visibility; Linux tests verify desktop metadata, icons, terminfo,
   and the package manifest.
+- Packaging tests also prove that each pane resolves the matching Sprite CLI,
+  the optional macOS command-line-tool action is explicit and reversible, and
+  the Arch package exposes `/usr/bin/sprite`.
+- Terminfo tests launch outside the developer environment, verify the packaged
+  local `xterm-ghostty` entry, exercise an unknown remote environment without
+  modifying it, and verify the documented `xterm-256color` fallback.
+- Linux application tests run under native Wayland and native X11 rather than
+  treating XWayland as Wayland coverage.
 - Resource tests repeatedly create and destroy sessions and graphics placements,
   then assert bounded thread, process, terminal-storage, CPU, and GPU-resource
   behavior. Timing tests report distributions and use regression thresholds
   derived from recorded baselines rather than brittle single-run deadlines.
+- Final qualification includes a 24-hour automated output/resource soak, a
+  seven-day packaged Arch daily-drive period, and a manual packaged macOS
+  acceptance pass. Serious correctness changes invalidate and restart the
+  affected qualification evidence.
+- Backpressure stress tests send output faster than rendering, proving byte-
+  accurate final terminal state, ordered lossless input, bounded queues/memory,
+  resize coalescing, and delivery of the newest coherent generation.
+- Renderer correctness receives a software-fallback smoke test where GPUI
+  supports it, while all performance gates run on documented hardware-rendered
+  validation machines.
 - The initial empty Phase 1 implementation has no prior local terminal tests.
   Ghostty/libghostty upstream fixtures and the audited reference applications
   are prior art; Sprite wraps them with tests at its own public boundary.
@@ -464,9 +868,17 @@ idle; and release artifacts install and launch outside a developer shell.
 - Native Windows, WSL-specific integration, Android, iOS, or web targets.
 - Multiple coordinated application windows in Phase 1.
 - Persisting or resurrecting live PTY processes across Sprite restarts.
+- A helper process per Pane or a promise that Sprite survives native memory
+  faults in the terminal engine.
+- Automatically restoring prior tabs, split layouts, pane contents, working
+  directories, or command state. Deliberate named fresh-shell layouts may be a
+  later feature.
 - Remote collaboration, terminal sharing, CRDTs, accounts, cloud sync, or
-  telemetry services.
+  telemetry services. Local, automatic, window-scoped read-only Pane Observation
+  is the sole Phase 1 exception and does not permit remote access or pane control.
 - A plugin/extension system for Sprite Terminal.
+- A public Pane Observation socket protocol, observation SDK, or support for
+  third-party clients that bypass the bundled Observation Client.
 - Production code signing, Apple notarization, automatic updates, Homebrew/AUR
   publication, or a public package registry release. The buildable artifacts and
   package recipes are in scope.
@@ -479,7 +891,8 @@ idle; and release artifacts install and launch outside a developer shell.
   product direction. This PRD deliberately covers only Sprite Terminal Phase 1.
 - Croft's role in this PRD is adversarial compatibility coverage: it is a large,
   modern TUI that stresses keyboard, mouse, alternate-screen, terminal graphics,
-  clipping, and nested PTYs simultaneously.
+  clipping, and nested PTYs simultaneously. Its moving `main` is an intentional
+  freshness gate, while each test records the resolved commit for traceability.
 - `gpui-ghostty`, `tty7`, ghostling/libghostty examples, and the pixel-scroll
   Ghostty fork are implementation references. Source may be adapted only after
   license/provenance review and should be rewritten behind Sprite's approved

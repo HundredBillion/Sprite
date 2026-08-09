@@ -255,7 +255,9 @@ macOS. Croft is an acceptance-test application, not a dependency.
   workspace within the Sprite repository, with `sprite-term` (terminal adapter)
   and `sprite-app` (GPUI product). Add
   `phase_1/vendor/ghostty` as a git submodule pinned to the newest tested stable
-  Ghostty release tag; adapt `libghostty-rs` to build against that source.
+  Ghostty release tag; adapt `libghostty-rs` to build against that source. Pin
+  official GPUI releases exactly, beginning with `0.2.2`, and upgrade only after
+  the platform/compatibility suite passes.
 - **1.2 Terminal lifecycle:** PTY + login shell, correct resize, shutdown and
   child reaping, tabs, recursive split tree, focus navigation, scrollback,
   selection, clipboard, search, hyperlinks, and working-directory inheritance.
@@ -268,17 +270,29 @@ macOS. Croft is an acceptance-test application, not a dependency.
   decoded images to GPUI textures; implement placement geometry, clipping,
   scrolling, generations/cache invalidation, deletion, and below-background /
   below-text / above-text z-layers.
-- **1.6 Configuration:** documented config with hot reload, platform defaults,
-  themes, fonts, keybindings, shell selection, and no Omarchy-specific runtime
-  assumptions.
+- **1.6 Configuration:** versioned TOML with transactional automatic/manual hot
+  reload, platform defaults, themes, fonts, keybindings, shell selection, and no
+  Omarchy-specific runtime assumptions. Reload never restarts a running PTY.
 - **1.7 Packaging:** macOS `.app` with icon, menu integration, PATH-safe login-
   shell behavior, and universal/relevant-architecture builds; Linux binary,
   desktop entry, icon, and Arch-friendly `PKGBUILD` path. CI builds and tests on
-  macOS and Linux.
-- **1.8 Croft compatibility gate:** unmodified upstream Croft launches and its
-  keyboard, mouse, paste, resize, alternate screen, icons, minimap, image/PDF
-  previews, and internal terminal work on both target platforms. Sprite must
-  identify its capabilities honestly; do not claim `TERM_PROGRAM=ghostty`.
+  macOS and Linux, including native Wayland and native X11 gates.
+- **1.8 Croft compatibility gate:** unmodified upstream Croft moving `main`
+  launches and its keyboard, mouse, paste, resize, alternate screen, icons,
+  minimap, image/PDF previews, and internal terminal work on both target
+  platforms. Every run records the resolved commit, but there is no permanent
+  Phase-1 Croft pin. Sprite must identify its capabilities honestly; do not claim
+  `TERM_PROGRAM=ghostty`.
+- **1.9 Pane Observation:** without bundling or depending on an LLM, provide the
+  protected `sprite panes snapshot` command so local tools launched inside a
+  Sprite window can automatically request read-only, versioned JSON snapshots
+  of other panes through a private per-window Unix socket. Scope, history,
+  security labels, size/deadline limits, and the kill switch are specified in
+  the Phase-1 PRD and ADRs.
+- **1.10 Accessibility and qualification:** expose focused terminal semantics,
+  tabs, panes, cursor, selection, bells, exits, and errors through platform
+  accessibility services. Five cohesive checkpoints culminate in performance,
+  soak, packaged Arch daily-drive, and real-macOS acceptance gates.
 
 ### Phase 2 — Croft qualification and minimal fork
 
@@ -770,3 +784,36 @@ the primary Linux development/daily-driver environment, with no Omarchy runtime
 dependency. Phase 1 includes a macOS `.app`, Linux desktop integration and icons,
 an Arch-friendly package path, and CI on both operating systems. Croft compatibility
 is tested on both before its fork begins.
+
+## A.12 Phase-1 grilling decisions: EXPANDED (2026-08-09)
+
+The approved Phase-1 PRD was stress-tested with documentation side effects. Its
+five checkpoints now extend one permanent architecture: an internal-but-strict
+`sprite-term` interface, one owner thread and one child process per Pane,
+coherent owned projections, and a GPUI application that composes tabs and
+recursive splits.
+Render Snapshots and shell-facing Pane Snapshots are separate views of the same
+terminal generation so observation does not freeze renderer internals.
+
+Pane Observation was added to Phase 1 as a general terminal capability, not an
+AI integration or dependency. `sprite panes snapshot` returns versioned JSON
+through a private per-window Unix socket; automatic access is scoped by a
+temporary window key inherited only by processes launched inside that window.
+Snapshots are on demand, read-only, active-screen-only, labeled as untrusted,
+default to 500 and cap at 5,000 history lines per pane, use a 500 ms request
+deadline and 16 MiB response cap, and never expose clipboard/environment data or
+Kitty image pixels. Observation is enabled by default with a live kill switch.
+
+The grill also fixed configuration to TOML, required native Wayland and X11,
+added basic screen-reader accessibility, chose dual `MIT OR Apache-2.0` licensing
+for the Phase-1 workspace, and established a direct-dependency ledger. GPUI is
+pinned to reviewed releases, small Ghostty patches may expose existing library
+behavior but may not fork terminal semantics, and severe native terminal-engine
+faults remain an accepted in-process risk for Phase 1.
+
+Unlike Ghostty, GPUI, and build inputs, Croft deliberately remains unpinned for
+the Phase-1 compatibility gate. Pull requests, merges, nightly CI, checkpoints,
+and release candidates resolve upstream Croft `main` anew and record the exact
+commit. This knowingly trades stable day-to-day acceptance inputs for immediate
+pressure against terminal compatibility staleness; local Rust tests remain
+offline and deterministic.
