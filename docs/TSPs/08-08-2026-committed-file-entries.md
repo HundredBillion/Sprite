@@ -27,7 +27,7 @@
 - Consumes: `refs/remotes/origin/HEAD`, fallback local `main`/`master`, porcelain-v2 status, and `git diff --name-status -z`
 - Produces: unchanged `core.refresh_repo(repo, opts, cb)` and `core.refresh(root, opts, cb)` interfaces emitting `{ path, xy }` pending entries or `{ path, commit_status }` committed-only entries
 
-- [ ] **Step 1: Write the failing branch-divergence integration test**
+- [x] **Step 1: Write the failing branch-divergence integration test**
 
 Create a temporary `main` branch with `base.txt`, create `feature`, commit `committed.txt`, and call `core.refresh_repo()` with a clean worktree:
 
@@ -53,7 +53,7 @@ Run: `cd phase_0/scm.nvim && nvim -l tests/core_test.lua`
 
 Expected: FAIL because `committed_entry.files` is empty.
 
-- [ ] **Step 2: Implement default-branch resolution and committed diff collection**
+- [x] **Step 2: Implement default-branch resolution and committed diff collection**
 
 Add private Core helpers with these exact responsibilities:
 
@@ -89,13 +89,13 @@ end
 
 Replace direct status calls in both refresh paths with one private `scan_repo(repo, opts, cb)` that runs status first, skips committed collection when status fails, otherwise merges committed entries with pending entries and calls back exactly once.
 
-- [ ] **Step 3: Run the Core test**
+- [x] **Step 3: Run the Core test**
 
 Run: `cd phase_0/scm.nvim && nvim -l tests/core_test.lua`
 
 Expected: PASS including `clean feature branch keeps committed file`.
 
-- [ ] **Step 4: Add pending-precedence and no-base tests**
+- [x] **Step 4: Add pending-precedence and no-base tests**
 
 After the clean committed assertion, modify `committed.txt` and create `untracked.txt`, refresh again, and assert:
 
@@ -110,7 +110,7 @@ Create an orphan repository with no `origin/HEAD`, `main`, or `master`, stage `o
 
 Run the Core test and expect PASS.
 
-- [ ] **Step 5: Commit Core behavior**
+- [x] **Step 5: Commit Core behavior**
 
 ```bash
 git add phase_0/scm.nvim/lua/scm/core.lua phase_0/scm.nvim/tests/core_test.lua
@@ -127,7 +127,7 @@ git commit -m "feat(scm): include committed branch files"
 - Consumes: `{ path, commit_status }` File Entries from Core
 - Produces: `panel.file_display(entry) -> { letter, marker, hl }`; pending rendering remains derived from `xy`
 
-- [ ] **Step 1: Write the failing presentation test**
+- [x] **Step 1: Write the failing presentation test**
 
 ```lua
 eq(panel.file_display({ path = 'committed.lua', commit_status = 'M' }), {
@@ -140,7 +140,7 @@ eq(panel.file_display({ path = 'pending.lua', xy = 'M.' }), {
 
 Run the Core test and expect FAIL because `file_display` does not exist.
 
-- [ ] **Step 2: Implement tagged presentation**
+- [x] **Step 2: Implement tagged presentation**
 
 Add `ScmCommitted = 'GitSignsChange'` to default highlights and implement:
 
@@ -156,7 +156,7 @@ end
 
 Change `format_item()` to consume `file_display(item.fentry)` instead of calling `xy_display()` directly.
 
-- [ ] **Step 3: Run tests and commit**
+- [x] **Step 3: Run tests and commit**
 
 ```bash
 cd phase_0/scm.nvim
@@ -178,7 +178,7 @@ Expected: all three scripts exit zero.
 - Consumes: public `core.refresh_repo()` from Tasks 1–2
 - Produces: deterministic proof that Sprite's clean feature branch emits committed files
 
-- [ ] **Step 1: Run the real-repository feedback loop**
+- [x] **Step 1: Run the real-repository feedback loop**
 
 ```bash
 cd /home/hundredbillion/Projects/Sprite
@@ -187,7 +187,7 @@ nvim --headless "+lua require('lazy').load({plugins={'scm.nvim'}}); require('scm
 
 Expected: exit zero with a positive file count.
 
-- [ ] **Step 2: Run all regression suites**
+- [x] **Step 2: Run all regression suites**
 
 ```bash
 cd phase_0/scm.nvim
@@ -198,7 +198,7 @@ nvim -l tests/handoff_test.lua
 
 Expected: all scripts exit zero.
 
-- [ ] **Step 3: Record completion and commit**
+- [x] **Step 3: Record completion and commit**
 
 Change every task checkbox in this TSP from `[ ]` to `[x]`, then run:
 
