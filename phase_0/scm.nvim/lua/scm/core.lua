@@ -66,6 +66,43 @@ function M.parse_status(lines)
   return { branch = branch, ahead = ahead, behind = behind, files = files }
 end
 
+local function parse_name_status(stdout)
+  local fields = vim.split(stdout, "\0", { plain = true, trimempty = true })
+  local files, index = {}, 1
+  while index <= #fields do
+    local status = fields[index]
+    index = index + 1
+    local path
+    if status:match("^[RC]") then
+      index = index + 1
+      path = fields[index]
+      index = index + 1
+    else
+      path = fields[index]
+      index = index + 1
+    end
+    if path then
+      files[#files + 1] = { path = path, commit_status = status }
+    end
+  end
+  return files
+end
+
+local function merge_files(committed, pending)
+  local by_path = {}
+  for _, file in ipairs(committed) do
+    by_path[file.path] = file
+  end
+  for _, file in ipairs(pending) do
+    by_path[file.path] = file
+  end
+  local files = vim.tbl_values(by_path)
+  table.sort(files, function(a, b)
+    return a.path < b.path
+  end)
+  return files
+end
+
 function M.discover(root, opts, cb)
   root = vim.fs.normalize(vim.uv.fs_realpath(vim.fn.expand(root)) or vim.fn.expand(root))
   local landed, pending = {}, 2
@@ -132,18 +169,19 @@ end
 -- Build one Repo Entry from a finished `git status` subprocess result. Runs
 -- on the main loop (callers vim.schedule this) — never in vim.system's
 -- fast-event callback context.
-local function build_entry(repo, out)
+local function build_entry(repo, out, committed)
   local name = repo:match("[^/]+$") or repo
   if out.code == 0 then
     local p = M.parse_status(vim.split(out.stdout or "", "\n", { trimempty = true }))
+    local files = merge_files(committed or {}, p.files)
     return {
       name = name,
       path = repo,
       branch = p.branch,
       ahead = p.ahead,
       behind = p.behind,
-      files = p.files,
-      clean = #p.files == 0,
+      files = files,
+      clean = #files == 0,
     }
   end
   local msg = (out.stderr or ""):match("^[^\n]*")
@@ -157,6 +195,84 @@ local function build_entry(repo, out)
     clean = true,
     err = (msg and #msg > 0) and msg or "git failed",
   }
+end
+
+local function run_git(repo, opts, args, cb)
+  local cmd = { "git", "-C", repo }
+  vim.list_extend(cmd, args)
+  vim.system(cmd, { text = true, timeout = opts.timeout_ms }, function(out)
+    vim.schedule(function()
+      cb(out)
+    end)
+  end)
+end
+
+local function first_existing_ref(repo, opts, refs, index, cb)
+  local ref = refs[index]
+  if not ref then
+    cb(nil, nil, false)
+    return
+  end
+  run_git(repo, opts, { "rev-parse", "--verify", "--quiet", ref }, function(out)
+    if out.code == 0 then
+      cb(ref, ref:match("([^/]+)$"), false)
+    else
+      first_existing_ref(repo, opts, refs, index + 1, cb)
+    end
+  end)
+end
+
+local function resolve_default_ref(repo, opts, cb)
+  run_git(repo, opts, { "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD" }, function(out)
+    local ref = vim.trim(out.stdout or "")
+    if out.code == 0 and ref ~= "" then
+      cb(ref, ref:match("([^/]+)$"), true)
+      return
+    end
+    first_existing_ref(repo, opts, { "refs/heads/main", "refs/heads/master" }, 1, cb)
+  end)
+end
+
+local function resolve_comparison_base(repo, branch, opts, cb)
+  resolve_default_ref(repo, opts, function(ref, default_branch, remote)
+    if not ref then
+      cb(nil)
+      return
+    end
+    if branch == default_branch then
+      cb(remote and ref or nil)
+      return
+    end
+    run_git(repo, opts, { "merge-base", ref, "HEAD" }, function(out)
+      local base = vim.trim(out.stdout or "")
+      cb(out.code == 0 and base ~= "" and base or nil)
+    end)
+  end)
+end
+
+local function collect_committed(repo, branch, opts, cb)
+  resolve_comparison_base(repo, branch, opts, function(base)
+    if not base then
+      cb({})
+      return
+    end
+    run_git(repo, opts, { "diff", "--name-status", "-z", base .. "..HEAD" }, function(out)
+      cb(out.code == 0 and parse_name_status(out.stdout or "") or {})
+    end)
+  end)
+end
+
+local function scan_repo(repo, opts, cb)
+  run_git(repo, opts, { "status", "--porcelain=v2", "--branch" }, function(out)
+    if out.code ~= 0 then
+      cb(build_entry(repo, out))
+      return
+    end
+    local status = M.parse_status(vim.split(out.stdout or "", "\n", { trimempty = true }))
+    collect_committed(repo, status.branch, opts, function(committed)
+      cb(build_entry(repo, out, committed))
+    end)
+  end)
 end
 
 local repo_last, repo_in_flight, repo_again = {}, {}, {}
@@ -177,23 +293,17 @@ function M.refresh_repo(repo, opts, cb)
   end
   repo_in_flight[repo] = true
   repo_last[repo] = now
-  vim.system(
-    { "git", "-C", repo, "status", "--porcelain=v2", "--branch" },
-    { text = true, timeout = opts.timeout_ms },
-    function(out) -- fast context: hand straight off to the main loop
-      vim.schedule(function()
-        repo_in_flight[repo] = nil
-        cb(build_entry(repo, out))
-        if repo_again[repo] then
-          repo_again[repo] = nil
-          -- Reset the stamp so the coalesced re-run isn't itself dropped by
-          -- the debounce window it would otherwise still be inside.
-          repo_last[repo] = 0
-          M.refresh_repo(repo, opts, cb)
-        end
-      end)
+  scan_repo(repo, opts, function(entry)
+    repo_in_flight[repo] = nil
+    cb(entry)
+    if repo_again[repo] then
+      repo_again[repo] = nil
+      -- Reset the stamp so the coalesced re-run isn't itself dropped by
+      -- the debounce window it would otherwise still be inside.
+      repo_last[repo] = 0
+      M.refresh_repo(repo, opts, cb)
     end
-  )
+  end)
   return true
 end
 
@@ -207,26 +317,16 @@ function M.refresh(root, opts, cb)
       cb({}, nil)
       return
     end
-    local raw, pending = {}, #repos
+    local entries, pending = {}, #repos
     for i, repo in ipairs(repos) do
-      vim.system(
-        { "git", "-C", repo, "status", "--porcelain=v2", "--branch" },
-        { text = true, timeout = opts.timeout_ms },
-        function(out) -- fast context: store only
-          raw[i] = out
-          pending = pending - 1
-          if pending == 0 then
-            vim.schedule(function()
-              local entries = {}
-              for j, r in ipairs(repos) do
-                entries[#entries + 1] = build_entry(r, raw[j])
-              end
-              table.sort(entries, M.compare_entries)
-              cb(entries, nil)
-            end)
-          end
+      scan_repo(repo, opts, function(entry)
+        entries[i] = entry
+        pending = pending - 1
+        if pending == 0 then
+          table.sort(entries, M.compare_entries)
+          cb(entries, nil)
         end
-      )
+      end)
     end
   end)
 end

@@ -418,6 +418,61 @@ assert(core.refresh_repo(rrepo, { roots = {}, depth = 2, timeout_ms = 5000, repo
 end) == false, "debounced drop inside window")
 eq(dropped, 0, "debounced call never runs")
 
+-- A clean feature branch still exposes files committed since it diverged from
+-- the repository's default branch.
+local croot = vim.fn.tempname()
+vim.fn.mkdir(croot, "p")
+sh({ "git", "-C", croot, "init", "-q", "-b", "main" })
+vim.fn.writefile({ "base" }, croot .. "/base.txt")
+sh({ "git", "-C", croot, "add", "." })
+sh({ "git", "-C", croot, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base" })
+sh({ "git", "-C", croot, "switch", "-q", "-c", "feature" })
+vim.fn.writefile({ "committed" }, croot .. "/committed.txt")
+sh({ "git", "-C", croot, "add", "." })
+sh({ "git", "-C", croot, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "feature" })
+
+local committed_entry
+assert(core.refresh_repo(croot, ropts, function(entry)
+  committed_entry = entry
+end), "committed feature refresh accepted")
+assert(vim.wait(5000, function()
+  return committed_entry ~= nil
+end, 10), "committed feature refresh completed")
+eq(
+  committed_entry.files,
+  { { path = "committed.txt", commit_status = "A" } },
+  "clean feature branch keeps committed file"
+)
+
+vim.fn.writefile({ "pending" }, croot .. "/committed.txt")
+vim.fn.writefile({ "untracked" }, croot .. "/untracked.txt")
+local pending_entry
+assert(core.refresh_repo(croot, ropts, function(entry)
+  pending_entry = entry
+end), "pending precedence refresh accepted")
+assert(vim.wait(5000, function()
+  return pending_entry ~= nil
+end, 10), "pending precedence refresh completed")
+eq(pending_entry.files, {
+  { path = "committed.txt", xy = ".M" },
+  { path = "untracked.txt", xy = "??" },
+}, "pending state overrides committed state by path")
+
+local orphan = vim.fn.tempname()
+vim.fn.mkdir(orphan, "p")
+sh({ "git", "-C", orphan, "init", "-q", "-b", "topic" })
+vim.fn.writefile({ "staged" }, orphan .. "/only.txt")
+sh({ "git", "-C", orphan, "add", "." })
+local orphan_entry
+assert(core.refresh_repo(orphan, ropts, function(entry)
+  orphan_entry = entry
+end), "no-base refresh accepted")
+assert(vim.wait(5000, function()
+  return orphan_entry ~= nil
+end, 10), "no-base refresh completed")
+eq(orphan_entry.files, { { path = "only.txt", xy = "A." } }, "no-base repository preserves pending files")
+assert(orphan_entry.err == nil, "no-base repository does not report a status error")
+
 -- error path: a broken repo yields an err entry via the scoped path too
 local rbad = rwork .. "/bad_scoped"
 vim.fn.mkdir(rbad .. "/.git", "p")
