@@ -2,7 +2,7 @@
 ## "Terminal with an editor" — not an editor with a terminal
 
 The build-ready plan for **Sprite**, reflecting the most recent decisions
-(2026-07-17). Historical decisions that were evaluated and discarded live in
+(2026-08-09). Historical decisions that were evaluated and discarded live in
 **Addendum A** at the bottom — the main document describes only what is being
 built and why.
 
@@ -10,416 +10,485 @@ built and why.
 
 ## 1. The Thesis
 
-Build a **terminal-first environment** where:
-- Real terminal tools (tmux, ssh, htop, lazygit) are first-class citizens
-- Neovim renders as a **native, pixel-controlled surface** — per-element padding,
-  custom line-height, rounded corners — the layout control VSCode/Zed have but no
-  terminal can give
-- Panes can be **aware of each other** (e.g. a Claude Code pane knows which file
-  the Neovim pane has open)
-- The whole thing stays backwards-compatible with every VT100 program
+Build a **terminal-first development environment** as two independent products:
 
-The inversion matters: Zed is *an editor that contains a terminal*. This is
-*a terminal that contains an editor surface*. What's first-class is different.
+1. **Sprite Terminal** — a fast, correct, general-purpose terminal for macOS and
+   Linux. Real terminal programs (ssh, tmux, htop, lazygit, Neovim, Croft) remain
+   first-class citizens. Sprite is useful without the IDE and the IDE never
+   becomes a dependency of the terminal.
+2. **The Croft fork** — a separately maintained Rust IDE that runs inside any
+   capable terminal but treats Sprite as its best host. Its north star is to be
+   **visually and functionally indistinguishable from VS Code in normal use**,
+   while starting faster, responding faster, using fewer resources, and adopting
+   the best product and architecture ideas proven by Zed.
+
+The inversion still matters: VS Code and Zed are editors that contain terminals.
+Sprite is a terminal that can host a complete IDE without ceasing to be a
+terminal. Croft does not get linked into Sprite; it remains an ordinary child
+process with a standards-based TUI fallback.
+
+"Indistinguishable" is a product goal with two measurable meanings:
+
+- **Visual parity:** supported reference layouts, themes, icons, spacing,
+  interaction states, and motion should survive side-by-side screenshot and
+  interaction comparisons. The product must use its own name and legally safe
+  assets; similarity must not imply Microsoft sponsorship.
+- **Functional parity:** a VS Code user should be able to complete the same
+  editing, navigation, terminal, source-control, task, debug, settings,
+  workspace, and extension-driven workflows without learning a reduced
+  substitute. This includes a compatible extension-host/API strategy. Microsoft-
+  exclusive services and assets are excluded unless their licenses explicitly
+  permit use outside Microsoft's VS Code distribution.
+
+Performance is part of parity, not a later polish task. Sprite and the Croft fork
+will benchmark startup time, input-to-paint latency, idle CPU, memory, workspace
+search, and LSP responsiveness against a defined VS Code reference build. "Faster"
+must be demonstrated by repeatable measurements, not asserted from implementation
+language.
 
 ### Answer to "why not just use Zed?"
-Zed is fast and has a terminal — for most people that's the right answer.
-This project exists because of three specific requirements Zed structurally
-can't meet: (a) **Neovim** specifically (modal editing, plugin ecosystem, muscle
-memory), not another editor; (b) with **VSCode-level layout control**; (c) in a
-**terminal-first** environment where terminal tools aren't bolted on. This is a
-tool for an unusual set of requirements — justified by fit, not by beating Zed.
+
+Zed is the performance and product-design reference, not the substrate. Sprite
+keeps terminal programs first-class and the Croft fork pursues VS Code workflow
+and extension compatibility. Zed's best ideas — native-speed interaction,
+coalesced rendering, responsive project-wide tools, collaboration, command-
+driven UI, and disciplined background work — are candidates to adopt when they
+improve measured user outcomes. Zed does not become a dependency.
 
 ---
 
-## 2. The Core Technical Problem (and why it's hard)
+## 2. The Core Technical Problems (and why they are hard)
 
-**The grid ceiling.** Terminals speak VT100: "put character X at row Y, col Z."
-There is no escape sequence for "pad this element by 12px." So:
-- Terminal-level padding (Kitty `window_padding_width`, Alacritty `padding`,
-  Ghostty, Neovide `neovide_padding_*`) is always **global, around the whole
-  grid** — never per-element
-- Kitty has `modify_font cell_height` for line-height; Alacritty has nothing;
-  Neovide has `linespace` — all still uniform, grid-wide
-- No config in any terminal can pad Neovim's gutter separately from its text
-  area, or give a floating window its own padding
+There are now two independent ceilings.
 
-**The escape hatch.** Neovim has a second UI protocol besides VT100: msgpack-RPC
-(`nvim --embed`, `nvim --listen`). It streams structured UI state — grid
-contents, cursor, highlight IDs, per-window multigrid data — and any process can
-render that however it wants. This is how Neovide works. Neovim tells you *what*
-(content + semantic highlight classification); the frontend owns *where and how
-it looks* (pixels + layout). Colors are trivial to match to VSCode (map theme
-hex values via `nvim_set_hl`); layout control requires owning the renderer.
+**The terminal grid ceiling.** Croft's normal UI is rendered through `ratatui`
+and `crossterm` into terminal cells. It augments those cells with Kitty/iTerm2/
+sixel graphics for icons, previews, and the minimap. Sprite can host that path
+exceptionally well, but cells still constrain typography, spacing, rounded
+geometry, popovers, animation, and arbitrary pixel placement. A custom ratatui
+backend would still receive cells; it would not create a native widget tree.
 
-**A corollary discovered in practice (fork evaluation, 2026-07):** RPC-rendered
-GUI mode *severs terminal graphics protocols* — a headless Neovim behind a
-multigrid UI has no TTY, so Kitty-graphics plugins (SVG icons, image.nvim)
-cannot work. The Neovim UI protocol has no image vocabulary. Consequence:
-**image/icon rendering must be a native renderer feature** (Phase 3), not a
-terminal-protocol passthrough.
+**The VS Code compatibility ceiling.** Croft is an independent IDE, not a VS
+Code frontend. It already implements a large editor/LSP/DAP/Git/terminal stack,
+but its extension manifests and MCP sidecars are not the VS Code extension API.
+Functional indistinguishability therefore requires an explicit compatibility
+program: settings and keybinding semantics, workspace behavior, commands and
+contribution points, extension-host isolation, API/version compatibility, and a
+legally usable extension registry such as Open VSX. This is the largest product
+risk and must not be hidden behind a generic "extensions" checkbox.
 
-**Conclusion:** you cannot get per-element layout from any existing terminal
-config. You need a renderer that consumes Neovim's RPC protocol natively while
-still hosting real VT100 grid panes alongside it.
+**The nested-terminal boundary.** When Croft runs inside Sprite, Sprite owns the
+outer PTY and libghostty terminal state, while Croft's TERMINAL panel allocates
+another PTY and emulates it with `alacritty_terminal`. That is valid and useful,
+but it means Croft's internal terminal does not automatically inherit
+libghostty's behavior. Unifying those surfaces later requires a deliberate
+Sprite/Croft protocol; it is not a side effect of running Croft in Sprite.
 
----
+**The escape path is progressive enhancement:**
 
-## 3. Architecture (three layers)
+1. Croft must remain a correct standalone TUI in ordinary terminals.
+2. Sprite Phase 1 must fully support the standard Kitty keyboard and graphics
+   protocols Croft already uses.
+3. The fork may later advertise optional Sprite capabilities through a
+   versioned, capability-negotiated side channel.
+4. If screenshot tests prove the grid makes visual parity impossible, only then
+   extract a renderer seam or add a Sprite-native pixel surface. Croft's domain
+   model must remain independent of that renderer so terminal fallback survives.
 
-1. **Terminal core (Layer 1)** — correct VT100/escape-sequence emulation.
-   NEVER build this yourself; it's the "hard 20% that took Ghostty years"
-   (Unicode/grapheme edge cases, decades of de-facto standards, Kitty protocols).
-   Reuse `libghostty-vt` — Ghostty's core, extracted as a zero-dependency
-   library, explicitly designed for embedding. Mitchell Hashimoto: "libghostty
-   has no opinion about the renderer or GUI framework."
-
-2. **Editor frontend (Layer 2)** — behind an `EditorPanel` trait
-   (`render`, `handle_input`, `cursor_position`, plus whatever state the
-   chrome needs: selections, diagnostics, gutter), so `Surface::Panel`
-   (Layer 3) never talks to a specific editor, only the interface.
-   **`NeovimPanel`** is the only implementation being built (Phase 2):
-   `nvim --embed` + msgpack-RPC client, digesting `redraw` events
-   (`grid_line`, `hl_attr_define`, `grid_cursor_goto`, `win_viewport`) into
-   plain state structs; `ext_*` UI options (ext_popupmenu, ext_cmdline,
-   ext_messages) pull popups/cmdline out of the grid as native widgets.
-   A second implementation is a reserved, unscheduled slot behind the same
-   trait — see §5 for whether/when that's worth building.
-
-3. **Compositor (Layer 3)** — owns the window + GPU. Holds a list of surfaces:
-   `Surface::Grid` (a VT100 pane — tmux/ssh/htop live here, unchanged) and
-   `Surface::Panel` (any `EditorPanel` impl, with its own `Layout { padding: [4],
-   line_height_extra, corner_radius }`). Per-surface pixel layout is the whole
-   point. Plus a **side-channel protocol** so a pane can request promotion to
-   a native panel at runtime (Unix socket per pane; programs that don't know it
-   exists just render in the grid normally).
-
-Key threading constraint (from libghostty-vt Rust bindings): all handles are
-`!Send + !Sync`. One Terminal per thread; pass owned `Send` snapshots over
-channels to the render thread.
+This preserves a usable product at every step and avoids turning a native
+renderer rewrite into a prerequisite for learning whether the Croft foundation
+actually satisfies the day-to-day IDE goal.
 
 ---
 
-## 4. Stack Decisions (current, 2026-07-17)
+## 3. Architecture (independent products, explicit boundary)
 
-- **Language: Rust.** The compositor/RPC-frontend half of this project is
-  Zed-shaped (concurrent, shared state) — Rust's home turf. The Zig-fork
-  alternative was evaluated in depth and discarded (Addendum A.1).
-- **UI/renderer: GPUI** (Zed's framework) — Metal-native, battle-tested on
-  macOS, cross-platform trajectory.
-- **Starting point: `gpui-ghostty`** (Xuanwo, Apache-2.0) — Ghostty VT core +
-  GPUI renderer with working PTY, splits, IME, scrollback. Covers Layers 1 & 3
-  scaffolding; contains zero Neovim/multigrid code (Layer 2 is Sprite's work).
-- **VT core: `libghostty-vt`, pinned to Ghostty release tags only** — upgrade
-  deliberately at tags, never track tip (lesson from the fork merge-burden
-  audit: upstream runs ~500 commits/month through the files that matter).
-- **RPC: `nvim-rs`** for the Neovim client; **never rewrite Neovim itself** —
-  the RPC boundary makes its implementation language irrelevant, and the Lua
-  plugin ecosystem is the asset (Xi-editor is the cautionary tale).
-- **Reference implementation: ghostty-pixel-scroll** (the Ghostty fork) stays
-  installed as **daily driver + executable spec** — its ~7,300-line
-  `neovim_gui/` is the porting reference for Phase 2. It is NOT forked
-  (Addendum A.1). Its `collab/` subsystem is **never ported** — it contains an
-  unauthenticated LAN remote-write security hole.
+1. **`sprite-term` — terminal engine adapter.** Owns one PTY/libghostty terminal
+   per terminal thread and exposes owned render snapshots, input commands,
+   selection, scrolling, Kitty graphics placements, and terminal events. It
+   contains no GPUI, Croft, Neovim, or product-level pane logic. Current
+   `libghostty-rs` handles are `!Send + !Sync`; only owned snapshots cross to the
+   UI thread.
+
+2. **`sprite-app` — GPUI application and compositor.** Owns native windows,
+   tabs, split trees, focus, font shaping, GPU rendering, IME, configuration,
+   menus, packaging, and platform integration. It consumes `sprite-term` rather
+   than reaching through it to libghostty internals. The terminal renderer must
+   support Kitty image textures and z-layers, not only text cells.
+
+3. **Croft fork — separate repository and process.** Starts from upstream Croft
+   under its MIT license, keeps an upstream remote, and initially changes as
+   little architecture as possible. It continues to run in other terminals.
+   Sprite sets honest capability identifiers; the fork recognizes Sprite
+   directly instead of pretending it is Ghostty or mutating Ghostty config.
+
+4. **Optional Sprite enhancement protocol.** Added only after the standard TUI
+   path is characterized. The protocol is versioned, capability-negotiated, and
+   has a clean cell-rendered fallback. Candidate messages include semantic pane
+   metadata, context, hit regions, native sub-terminal requests, and eventually
+   higher-level drawing primitives. It must never become an undocumented path
+   that makes the fork unusable elsewhere.
+
+5. **VS Code compatibility subsystem inside the Croft fork.** Owns the
+   compatibility matrix for user settings, keybindings, commands, workspaces,
+   extension manifests, contribution points, extension-host lifecycle, and API
+   versions. It is isolated from Croft's editor model and renderer so extensions
+   cannot run on the input/render hot path or destabilize the terminal host.
+
+The outer terminal and the IDE communicate as processes, not Rust crate
+dependencies. This is the primary dependency-control and failure-isolation seam.
+
+---
+
+## 4. Stack Decisions (current, 2026-08-09)
+
+- **Language: Rust.** Both Sprite and Croft are Rust projects, but they remain
+  separate binaries and repositories.
+- **Sprite UI/renderer: GPUI.** Use GPUI for the native window, compositor,
+  text/image rendering, and platform integration. Zed remains an architectural
+  and performance reference, not a linked dependency.
+- **VT core: Ghostty through `libghostty-rs`.** Adapt the current safe
+  `libghostty-rs` interface to a `phase_1/vendor/ghostty` git submodule pinned to
+  the newest tested stable Ghostty release tag. Builds are reproducible: they do
+  not silently follow `main`. An automated update job may propose the next
+  stable tag, but CI and compatibility tests must pass before the pin moves.
+- **`gpui-ghostty`: reference only, not a dependency or wholesale base.** Reuse
+  selected rendering, IME, and input ideas after understanding them. Its current
+  terminal view is too monolithic, its examples are prototype-shaped, and its
+  wrapper/session layers duplicate behavior now exposed more deeply by
+  `libghostty-rs`.
+- **`tty7`: reference only.** Its GPUI tabs, split-tree, configuration, and
+  packaging patterns are useful; its Alacritty terminal engine and dependency
+  surface are not Sprite's foundation.
+- **PTY dependency:** `portable-pty` is acceptable for the first cross-platform
+  implementation. Hide it behind `sprite-term` so it can be replaced without
+  changing `sprite-app`.
+- **Croft: fork after Phase 1 validation.** Croft remains an external process
+  and never becomes a Sprite crate dependency. Preserve its standalone TUI
+  fallback and upstream relationship.
+- **VS Code behavior reference: Code - OSS plus the supported VS Code product.**
+  Use open code and documented behavior where licenses allow. Do not ship the
+  Microsoft product name, logo, proprietary services, or Marketplace access
+  without explicit permission. Prefer an open extension registry strategy.
+- **Platforms:** macOS and Linux from Phase 1. Arch Linux/Omarchy is the primary
+  Linux development and daily-driver environment, but Sprite has no Omarchy
+  runtime dependency. Ship a macOS `.app`, Linux desktop entry and icons, and an
+  Arch-friendly package path.
+- **Dependency policy:** dependencies are accepted only when they replace a
+  correctness-hard subsystem or provide clear cross-platform leverage. Croft's
+  large dependency tree stays quarantined in the Croft repository.
 - **Name: Sprite** — double meaning: spirit/ghost (Ghostty lineage) + the 2D
-  pixel-rendering primitive (what the renderer does). Known cost: generic-word
-  SEO. **TODO before first public artifact: availability check** (GitHub org,
-  crates.io `sprite`/`sprite-term`, Homebrew, domains). Prior candidates:
-  Addendum A.4.
+  pixel-rendering primitive. **TODO before first public artifact:** availability
+  check (GitHub org, crates.io, Homebrew, package names, domains). Croft-fork
+  product naming remains a separate decision.
 
 ---
 
 ## 5. Ecosystem — current roles
 
-- **gpui-ghostty (Xuanwo)** — Apache-2.0, THE Phase-1 base. Crates:
-  `ghostty_vt_sys` / `ghostty_vt` / `gpui_ghostty_terminal`; `split_pty_terminal`
-  example already does two PTYs in split panes. Pinned Ghostty v1.2.3 /
-  Zig 0.14.1 as of 2026-07; no releases published; no Neovim anything.
-- **libghostty-vt Rust crate** — v0.2.0 on crates.io, MIT/Apache, min Rust 1.90.
-  `Terminal`, `RenderState`, `KeyEncoder`, `MouseEncoder`. VT semantics ONLY —
-  bring `portable-pty`, windowing, fonts yourself (GPUI supplies most of this).
-- **ghostling-rs** — ~1000-line single-file terminal on libghostty-vt; the
-  Rosetta Stone for the PTY → Terminal → RenderState → draw loop.
-- **ghostty-pixel-scroll (parkers0405)** — MIT. The executable spec. What it
-  proves works (all portable concepts for Phase 2/3): multigrid per-window
-  rendering with scroll springs; SDF rounded corners + pixel gaps as config;
-  OSC mode-switch (`nvim-gui`); slide-out spring-animated panels; "idle cost
-  kinda zero" event-driven animation timers; an RPC image side-channel
-  (`ghostty_image`) proving custom Neovim→renderer channels compose.
-  Quality audit (2026-07-16, full detail Addendum A.1): core B-grade — port the
-  `gui_adapter` renderer-agnostic seam and `animation.zig` (with its
-  frame-rate-independence tests) as-is in spirit; renderer delta C+ (entangled,
-  don't imitate its structure); tests D (4 blocks — Sprite must do better);
-  collab F (security hole, never port). Its Metal frame pacing measured
-  EXCELLENT live (locked 120Hz, vsync, max 9.4ms under load) — that's the bar.
-- **WispTerm** (Zig + libghostty-vt) — closest philosophical competitor
-  ("terminal as main workspace", panels). Does NOT do native Neovim rendering
-  or per-element layout. Also why the name Wisp was abandoned.
-- **Ecosystem trend**: many terminal+AI workspaces appearing (AiyuTerm, Mux0,
-  moai-studio, codmate...) — mostly macOS-only; GPUI+libghostty-vt is becoming
-  the cross-platform stack. Individual ingredients all exist; **nobody has
-  assembled this combination** (native Neovim panel + VSCode layout + multi-repo
-  git radar + context-aware panes). Differentiation = integration.
-- **Ghostty performance context**: 480–500 FPS stress; known weak point ≤~64
-  unique styles on screen. **Open test item:** heavy Tree-sitter highlighting
-  stress test (the closest real-world match to the pathological case) — run it
-  against both the fork and Sprite Phase 2.
+- **Croft (`vitali87/croft`)** — the chosen IDE foundation after Phase 1, under
+  MIT. Current source audit (2026-08-09, main at v0.1.701): about 181k Rust
+  lines, 137 Rust modules, ~3,100 tests, 64 direct Cargo dependencies, and 459
+  locked packages. It already contains editor, LSP, DAP, Git, testing, tasks,
+  remote sessions, collaboration, and an embedded terminal.
+- **Croft's strengths:** unusually broad working feature surface; real PTYs;
+  deliberate low-latency/coalesced-rendering tenets; macOS/Linux/Termux support;
+  Kitty keyboard and graphics integration; extensive tests and active CI.
+- **Croft's risks:** young and rapidly moving; primarily one maintainer; no VS
+  Code extension-host compatibility; terminal-cell rendering; duplicated inner
+  terminal engine; and tight UI/state coupling. About 50 modules reference
+  `ratatui`; the central `App` module is ~34k lines and the editor module ~18k
+  lines, with no existing renderer abstraction suitable for a native GPUI port.
+- **`libghostty-rs` (`Uzaaft/libghostty-rs`)** — chosen Rust interface to
+  Ghostty's VT library. It exposes terminal/render state, input encoders, and
+  Kitty graphics storage, decoded pixels, placements, geometry, generations,
+  and z-layers. Sprite must still implement the GPUI texture/rendering side.
+- **`gpui-ghostty`** — selective source reference for GPUI text rendering, IME,
+  and input patterns. It is neither a dependency nor the repository to fork.
+- **`tty7`** — selective reference for pane trees, tabs, configuration, and
+  Linux/macOS packaging. Its VT engine and dependency graph are not adopted.
+- **ghostty-pixel-scroll** — historical executable spec for pixel scrolling,
+  animation quality, and native Neovim rendering. It remains useful research,
+  but it no longer defines the product architecture or build sequence.
+- **Code - OSS / VS Code** — behavior, layout, and extension-API compatibility
+  reference. The open repository and Microsoft's branded distribution are not
+  license-equivalent; the fork must keep its own identity.
+- **Zed** — benchmark and idea source for responsiveness, collaboration,
+  project-scale navigation, command UI, and architecture. Evaluate each idea by
+  user value and measured cost rather than cloning Zed wholesale.
 
-### Deferred: a `HelixPanel` second `EditorPanel` implementation
+### Deferred research: native Neovim and Helix panels
 
-Explored 2026-07-22 via a historical analysis (Vim/Emacs→Neovim,
-Sublime/Atom→VSCode transitions) applied to Neovim-vs-Helix. Verdict:
-**deferred, not scheduled** — build only if a trigger below fires.
+The former roadmap centered on a native GPUI `NeovimPanel`, with a possible
+`HelixPanel` behind the same abstraction. Croft's discovery superseded that
+scheduled work: Neovim remains a first-class terminal program, while the Croft
+fork becomes the IDE product. A native editor panel returns to the roadmap only
+after the Croft fork reaches daily-driver quality and a measured grid limitation
+cannot be solved by standards-based graphics or progressive enhancement.
 
-Why: the pattern behind both historical overtakings required (a) a
-structural, unretrofittable capability gap, (b) a protocol-standardization
-moment leveling the extension ecosystem, (c) either corporate bootstrapping
-muscle or an incumbent-side forcing crisis (abandonment/stagnation). Applied
-to Helix vs. Neovim: (a) is weak — Helix's edge is zero-config LSP/Tree-sitter
-*packaging*, which Neovim's distro layer (LazyVim/NvChad/AstroNvim) has
-largely closed, the same way Vim 8.0 partially closed Neovim's async gap;
-(b) is neutral — both already have LSP, no unilateral timing wedge like
-Neovim had over Vim for 5+ years; (c) is absent on both counts — Neovim is
-actively governed and thriving (no crisis), Helix has no VSCode-style
-corporate sponsor. The closest real analogy is Vim→Neovim itself (same
-niche, no corporate sponsor either side, no forcing crisis) — and that
-transition, with a *stronger* structural case, still hasn't overtaken its
-parent after 12 years (Neovim 14% vs Vim 24%, SO 2025). Helix's case is
-weaker on every axis except editing-model taste (selection-first modal
-editing — real, but contestable, not a settled capability gap).
-
-Estimate: P(Helix meaningfully overtakes Neovim specifically, 10–15yr
-horizon) ~10–15%; P(Helix becomes "the dominant editor," i.e. overtakes
-VSCode-scale share) low single digits. Wildcard: AI-native tooling on
-VSCode's substrate (Cursor, 17.9% and rising per SO 2025) is the
-fastest-growing force in the current market — a bigger disruption vector to
-this whole niche than either modal editor poses to the other.
-
-**Revisit triggers, refined 2026-07-22** — the estimate above assumes
-incremental feature catch-up, the slow Vim→Neovim-shaped path (base rate:
-"healthy minority" after a decade, not overtaking). A real overtake almost
-certainly needs 2+ of these firing *together*, not one at a time. Split by
-how much each would actually move the needle:
-
-*Necessary but modest — gets Helix to "credible alternative" only (closes
-ecosystem-critical-mass, ingredient D):*
-1. Steel merges upstream AND reaches rough parity with Neovim's
-   LSP/completion/picker/git workflows (not just "exists").
-2. A single, wildly popular curated starter config emerges for Helix — the
-   LazyVim-equivalent on-ramp. Raw plugin count matters less than a
-   one-command path to "90% of the good stuff."
-
-*High-leverage — could change the trajectory, not just the score:*
-3. **Helix ships an external UI protocol designed pixel-native from the
-   start** (per maintainers' stated openness). This is the single most
-   powerful lever, and Sprite-relevant specifically: Neovim's multigrid
-   protocol is still grid-shaped — the reason Sprite/Neovide/ghostty-pixel-
-   scroll all need springs and SDF overlays to fake pixel-native chrome onto
-   a cell grid. A Helix protocol built with a decade's hindsight could skip
-   that ceiling entirely — a genuine structural advantage *for* Helix, not
-   parity. Also collapses the fork-vs-embed cost analysis (§ above) to
-   Neovim-shaped for a `HelixPanel` specifically.
-4. **A well-funded AI-native editor company adopts Helix as its substrate**
-   instead of forking VSCode/Electron — the wedge being that AI agents doing
-   bulk simultaneous edits ("apply this pattern across N locations, review
-   each") map more naturally onto Helix's native multi-selection primitive
-   than onto Vim's single-cursor-plus-macros model. This is the one path
-   structurally analogous to what actually worked historically (corporate
-   engineering muscle + fast distribution), arriving via a *new* use case
-   rather than competing with Neovim on Neovim's own turf.
-5. Neovim's own governance/maintenance visibly stalls (no sign of this as of
-   2026) — removes the one thing Vim never lost either: a working,
-   non-abandoned incumbent.
-
-**The plausible fast-overtake scenario is these compounding**: (3) enables a
-funded AI-native product built for (4)'s bulk-edit UX → that product's
-success pulls Steel contributors/funding in fast (1)-(2) closed quickly
-instead of organically over a decade → Neovim's grid ceiling becomes a
-visible, fork-required weakness by comparison. Three ingredients firing in
-sequence — the only shape, in either historical precedent, that moved at
-VSCode-speed (3–5yr) rather than Neovim-speed (12yr+, still minority).
-
-None of the above raises the base-rate estimate on its own — no trigger
-currently shows real signal (Steel unmerged, no protocol proposal exists, no
-sponsor has surfaced). They describe the conditional worlds where the
-estimate would jump, worth monitoring, not evidence it's happening.
-
-Until a trigger fires: `EditorPanel` (§3) has exactly one implementation,
-`NeovimPanel`. No `HelixPanel` work is scheduled.
+No `NeovimPanel` or `HelixPanel` implementation is scheduled. Revisit only if a
+pixel-native editor protocol creates a clear structural advantage, or the Croft
+path fails a defined daily-driver requirement. The detailed 2026-07-22 Helix
+overtake analysis is historical context and no longer drives the build plan.
 
 ---
 
-## 6. THE BUILD PLAN (dependency spine: 0 ∥ 1 → 2 → {3, 4} → 5)
+## 6. THE BUILD PLAN (dependency spine: 0 ∥ 1 → 2 → 3 → 4 → 5)
 
-### Phase 0 — Portable plugins (START NOW; pure Lua; runs in the fork today)
-Daily value immediately; insurance against attrition. Logic strictly separated
-from rendering (Principle 4) so both port to native panels by swapping one
-render function.
+### Phase 0 — Portable Neovim plugins (existing independent track)
+
+Daily value immediately; insurance against attrition. These plugins remain
+useful in Neovim inside Sprite, but they are not prerequisites for the Croft
+fork and no longer imply a later native-panel port.
 - **0.1 Multi-repo source control plugin** — the validated gap (see §7):
   overview + quick actions; delegate depth to lazygit.
 - **0.2 File tree plugin** — bare `nvim_create_buf` + `nvim_open_win` shell
   (~50 lines, no framework dep); pluggable icon layer (glyphs today → svgtree
   in terminal mode → native quads in Sprite).
 
-### Phase 1 — Terminal core (Rust: libghostty-vt + GPUI)
-Deliverable: a plain terminal you could live in.
-- 1.1 Workspace: `sprite-term` (VT surface), `sprite-app` (window/compositor);
-  vendored libghostty-vt pinned to a Ghostty release tag
-- 1.2 PTY + login shells, tabs/splits, scrollback
-- 1.3 Pixel scroll in terminal mode (port the fork's accumulate-and-wrap +
-  sub-line offset; its locked-120Hz cadence is the quality bar)
-- 1.4 Kitty keyboard protocol; shell integration; reserve a Sprite OSC for
-  runtime control (the fork's OSC 1338 pattern)
-- 1.5 Config system with hot-reload from day one
+### Phase 1 — Sprite Terminal core (Rust: libghostty-rs + GPUI)
 
-### Phase 2 — Neovim native-render engine (THE CRUX; spec = fork's neovim_gui/)
-- 2.1 RPC client (`nvim-rs`); spawn management with explicit binary resolution
-  (fix the fork's PATH/Dock-launch flaw) and user/managed config profiles
-- 2.2 Multigrid state machine (`ext_multigrid` + `ext_linegrid` → plain state
-  structs) behind a **renderer-agnostic adapter seam** (port of the fork's
-  `gui_adapter.zig` — its best architecture)
-- 2.3 Per-window critically damped scroll springs — port `animation.zig`
-  including its frame-rate-independence tests
-- 2.4 Window chrome in GPUI: SDF rounded corners, pixel gaps, per-element
-  padding (replaces the fork's hand-maintained dual GLSL+Metal shader ABI)
-- 2.5 Floating windows: z-order, clipping, position/opacity springs
-- 2.6 `ext_popupmenu` / `ext_cmdline` / `ext_messages` as native GPUI widgets
-- 2.7 OSC mode switch (surface promotes to Neovim panel); **cursor springs OFF
-  by default** (the streak effect was disliked in daily use)
-- **Testing discipline:** characterization tests for the RPC decode path and
-  grid sync BEFORE features — the fork's D-grade coverage is the anti-pattern.
+Deliverable: an independent terminal suitable for daily use on Arch Linux and
+macOS. Croft is an acceptance-test application, not a dependency.
 
-### Phase 3 — Icons, images, panels, context
-- 3.1 **Native icon rendering**: SVG → rasterized quads at grid coordinates,
-  riding window scroll offsets; svgtree pack format (VSCode/Material) as icon
-  source; re-rasterize on DPI/zoom change (impossible over Kitty graphics)
-- 3.2 Kitty graphics protocol in terminal-mode surfaces (image.nvim etc. keep
-  working)
-- 3.3 **Slide-out panel system**: grid shrinks (split, not overlay),
-  spring-animated; panels host terminal surfaces (lazygit, htop)
-- 3.4 **Pane context side-channel**: compositor already knows Neovim's active
-  file/cursor via RPC → expose via Unix socket per pane; a Claude Code pane
-  subscribes. (Mechanism validated in practice: the fork's `--listen` socket
-  was used live to inspect/drive a running GUI session exactly this way.)
+- **1.1 Repository/workspace:** `phase_1` is its own repo containing
+  `sprite-term` (terminal adapter) and `sprite-app` (GPUI product). Add
+  `phase_1/vendor/ghostty` as a git submodule pinned to the newest tested stable
+  Ghostty release tag; adapt `libghostty-rs` to build against that source.
+- **1.2 Terminal lifecycle:** PTY + login shell, correct resize, shutdown and
+  child reaping, tabs, recursive split tree, focus navigation, scrollback,
+  selection, clipboard, search, hyperlinks, and working-directory inheritance.
+- **1.3 Rendering/input:** font shaping and fallback, IME, mouse, bracketed
+  paste, Kitty keyboard protocol, cursor styles/blink, alternate screen, shell
+  integration, and a reserved/versioned Sprite control namespace.
+- **1.4 Pixel scrolling:** fractional/sub-line terminal scrolling with event-
+  driven redraw and frame pacing tested on high-refresh displays.
+- **1.5 Kitty graphics:** enable Ghostty image storage and PNG decoding; upload
+  decoded images to GPUI textures; implement placement geometry, clipping,
+  scrolling, generations/cache invalidation, deletion, and below-background /
+  below-text / above-text z-layers.
+- **1.6 Configuration:** documented config with hot reload, platform defaults,
+  themes, fonts, keybindings, shell selection, and no Omarchy-specific runtime
+  assumptions.
+- **1.7 Packaging:** macOS `.app` with icon, menu integration, PATH-safe login-
+  shell behavior, and universal/relevant-architecture builds; Linux binary,
+  desktop entry, icon, and Arch-friendly `PKGBUILD` path. CI builds and tests on
+  macOS and Linux.
+- **1.8 Croft compatibility gate:** unmodified upstream Croft launches and its
+  keyboard, mouse, paste, resize, alternate screen, icons, minimap, image/PDF
+  previews, and internal terminal work on both target platforms. Sprite must
+  identify its capabilities honestly; do not claim `TERM_PROGRAM=ghostty`.
 
-### Phase 4 — Theming framework ("looks like VSCode, structured like Zed")
-- 4.1 Two-section schema — see §8 for the full design
-- 4.2 `colors` → Neovim via `nvim_set_hl` (or passive mode: read back any
-  colorscheme via `hl_attr_define`)
-- 4.3 `layout`/`chrome` → renderer only (padding per element, line-height,
-  corner radius, popup/panel styling)
-- 4.4 Hot-reload; one palette feeds buffer text and native chrome
+### Phase 2 — Croft qualification and minimal fork
 
-### Phase 5 — The VSCode experience
-- 5.1 **Sprite Dark+ theme**: VSCode's *capability* (spacing/layout control) in
-  its aesthetic — per-element padding, roomy tree rows (the thing terminal-wide
-  `adjust-cell-height` could only fake globally)
-- 5.2 Port Phase-0 plugins to native panels (swap the render function)
-- 5.3 Editor-surface features, payoff order: rich markdown hover cards →
-  native command palette (`nvim_get_commands` + workspace symbols, fuzzy) →
-  sticky scroll + breadcrumbs (Tree-sitter node data) → minimap (real scaled
-  render) → git gutter/blame decorations
-- 5.4 Optional: distro packaging (decide product-vs-shared-config then)
+- **2.1 Freeze a baseline:** record the audited upstream commit, license,
+  dependency graph, supported platforms, feature inventory, startup/resource
+  measurements, and known failures in Sprite. Do not fork from a moving branch
+  without a reproducible baseline.
+- **2.2 Create a separate fork repository:** preserve `upstream`, keep Sprite-
+  specific commits narrow, and establish a repeatable upstream-sync and release
+  process. The fork is never added to the Sprite Cargo workspace.
+- **2.3 Characterize before changing:** add end-to-end tests for startup, editor,
+  LSP, DAP, Git, testing, tasks, remote sessions, collaboration, embedded
+  terminal, Kitty graphics, and session persistence on Linux and macOS.
+- **2.4 Sprite compatibility:** recognize Sprite capability identifiers; remove
+  the need for `croft setup-ghostty` when running under Sprite; preserve normal
+  behavior under Ghostty, Kitty, WezTerm, iTerm2, and other supported terminals.
+- **2.5 Establish deep seams before feature growth:** split the central App into
+  bounded application services and separate editor state from cell rendering.
+  Introduce interfaces only where the fork's visual-parity or extension-host
+  work requires them; avoid a speculative full rewrite.
+- **2.6 Branding and configuration:** choose a distinct product name and assets,
+  centralize design tokens, and retain Croft attribution and MIT notices.
+
+### Phase 3 — VS Code visual parity
+
+- **3.1 Reference corpus:** define supported VS Code layouts, resolutions,
+  themes, zoom levels, states, menus, popups, editor tabs, sidebars, panel tabs,
+  status bar, terminal, source-control, settings, and debug views. Capture
+  repeatable reference screenshots with licensed/legal fixtures.
+- **3.2 Tokenize the UI:** one semantic token system for colors, spacing,
+  typography, borders, icons, focus/hover/selection states, and motion. Map the
+  tokens onto Croft's ratatui path first.
+- **3.3 Close the TUI gap:** use Kitty graphics for crisp legal/open icons,
+  minimap and image surfaces; refine cell metrics, Unicode width behavior,
+  pointer hit targets, and transitions. Preserve the plain-cell fallback.
+- **3.4 Visual regression harness:** render deterministic workspaces and compare
+  them against the reference corpus. Record intentional platform/font variance
+  explicitly instead of accepting subjective "looks close" review.
+- **3.5 Grid-ceiling gate:** if defined parity states cannot pass because cells
+  cannot express the required geometry, design the smallest versioned Sprite
+  enhancement protocol or renderer extraction that closes those specific gaps.
+  A native GPUI Croft renderer is a last resort, not the default Phase 3 plan.
+
+### Phase 4 — VS Code functional and extension compatibility
+
+- **4.1 Compatibility matrix:** enumerate VS Code user workflows and APIs by
+  version. Mark each supported, partially supported, intentionally unsupported,
+  or blocked by licensing. "Functional parity" is the matrix, not a slogan.
+- **4.2 Core workbench parity:** settings and Settings UI, JSON-compatible
+  keybindings and chords, commands, workspace/folder behavior, search/replace,
+  tasks, terminals, Git/SCM, LSP language features, DAP debugging, testing,
+  profiles, snippets, and state restoration.
+- **4.3 Extension host:** run extensions out of process; implement the stable
+  VS Code API and contribution points in versioned slices; enforce capability,
+  resource, crash, and latency boundaries. Extension work may never block the
+  render/input loop.
+- **4.4 Registry/install path:** use a legally permitted open registry and allow
+  local VSIX installation. Do not assume the Microsoft Visual Studio Marketplace
+  can be used by a non-Microsoft distribution.
+- **4.5 Compatibility tests:** execute representative open-source extensions and
+  upstream API fixtures in hermetic workspaces. Track pass rates and regressions
+  by API version and extension category.
+- **4.6 Migration experience:** import safe settings, keybindings, themes,
+  snippets, and extension lists with an explicit preview; never modify or delete
+  the user's VS Code profile.
+
+### Phase 5 — Performance, Zed-derived improvements, and release quality
+
+- **5.1 Benchmark continuously:** compare cold/warm startup, first editable
+  frame, input-to-paint latency, memory, idle CPU, large-file editing, workspace
+  search, Git refresh, LSP completion, and extension-host overhead against the
+  selected VS Code reference and prior Croft release.
+- **5.2 Profile before optimizing:** instrument frame scheduling, terminal I/O,
+  syntax/highlight work, search, LSP/DAP traffic, Git polling, and extension IPC.
+  Every optimization needs a reproducible workload and regression test.
+- **5.3 Adopt Zed ideas selectively:** evaluate collaboration UX, project-wide
+  navigation, command-driven interaction, multibuffer workflows, responsive
+  background services, and low-latency rendering. Reimplement only the ideas
+  that improve Sprite's defined workflows; do not copy branding or add Zed as a
+  dependency.
+- **5.4 Reliability and security:** crash recovery, extension isolation,
+  workspace trust, remote boundary hardening, fuzz/property tests for protocol
+  parsers, dependency auditing, signed releases, and rollback-capable upgrades.
+- **5.5 Distribution:** versioned Sprite and Croft-fork releases for macOS and
+  Linux, with Arch packaging first-class. The two products can be installed and
+  updated independently, plus an optional bundle that installs compatible
+  versions together.
 
 ### Ongoing / cross-cutting
-- **Daily-drive the fork**; every bug found becomes a Sprite test case. Two
-  unreproduced fork bugs on the books: scroll flicker (instrumentation ruled
-  out frame pacing) and a "weird line + broken scroll" in normal Neovim — if
-  either reappears: freeze the screen, capture logs (`GHOSTTY_ANIMATION_LOG=1`
-  + `log stream`) and the nvim socket state.
-- Fork-vs-Sprite parity harness: same nvim session rendered in both, diffed
-- CI (macOS + Linux) from Phase 1 — the Rust/GPUI path needs no Xcode
-- **Explicitly deferred forever:** CRDT collaborative editing (requires forking
-  Neovim's buffer model); collab networking of any kind
+- Daily-drive Sprite from Phase 1 and the Croft fork from Phase 2; every defect
+  becomes a minimal reproduction and regression test in the owning repo.
+- Maintain three distinct harnesses: terminal-protocol conformance, visual
+  parity, and VS Code workflow/extension compatibility.
+- CI on macOS and Linux from Phase 1. Arch/Omarchy is a supported development
+  environment, not a special product mode.
+- Keep upstream Ghostty, libghostty-rs, Croft, Code - OSS, and Zed reference
+  versions recorded with every benchmark result.
+- Treat accessibility, keyboard-only operation, screen-reader feasibility,
+  localization, high-DPI behavior, and reduced-motion settings as architecture
+  concerns rather than end-stage polish.
+- Collaboration is no longer deferred forever: Croft already contains a
+  collaboration system and Zed demonstrates its product value. It must still
+  pass an explicit security and ownership audit before public exposure.
 
 ### Probability-of-success framing (honest)
-Core pipeline working: ~60–70%. Daily-driver quality: ~30–40%. Polished public
-product: ~5–10%. **Biggest risk is attrition, not technical walls** — every
-piece has working precedent (most of them running in the fork on this machine).
-Mitigation: each phase leaves a usable artifact; the original motivating pain
-(Neovim spacing) is addressed from Phase 2 onward, not at the end.
+
+Sprite Terminal reaching daily-driver quality is the bounded, high-confidence
+part: Ghostty provides the terminal semantics and multiple GPUI terminals prove
+the windowing/rendering path. Croft visual parity is plausible but may require a
+native enhancement once the cell ceiling is measured. Functional VS Code parity,
+especially extension compatibility, is the dominant risk and a multi-phase
+product program. Beating VS Code performance while adding compatibility is a
+separate empirical challenge.
+
+The plan therefore preserves stop points: Phase 1 is useful alone; Phase 2 is a
+usable Croft fork; Phase 3 can succeed without extension parity; and every Phase
+4 API slice can ship independently. Attrition and uncontrolled fork divergence
+remain larger risks than any single known protocol problem.
 
 ---
 
-## 7. Source Control: best of lazygit + VSCode (Phase 0.1 → 5.2)
+## 7. Source Control: Croft workbench + optional lazygit depth
 
-**The gap (validated):** lazygit is deliberately single-repo; multi-repo
-overview is its top-requested missing feature — the exact pain of microservices
-work. VSCode's panel has the overview but lacks lazygit's depth (interactive
-rebase, hunk-level staging as keystrokes). Ecosystem answer so far: separate
-overview TUIs (git-scope) that explicitly *complement* lazygit.
+Croft already implements the Source Control panel, change lists, hunk staging,
+commit graph, branches, remotes, stashes, tags, blame, and background status.
+The Croft fork should deepen and test that implementation rather than porting
+the Phase-0 Neovim plugin into a new native panel.
 
-**Design: build the missing layer, orchestrate the existing one.**
-- **Build** (overview): scan root for `.git` dirs; per-repo branch, ahead/behind,
-  dirty state, change counts; commit graph. Data via shelling to `git` (or
-  `gix` in Rust — expect ~90% coverage, shell out for the rest)
-- **Build** (quick actions): stage/unstage, commit, push/pull, branch switch
-- **Delegate** (depth): keybinding opens lazygit `cd`'d into the selected repo —
-  in a terminal pane (Phase 0) or a Sprite slide-out panel (Phase 5.2). Don't
-  reimplement interactive rebase.
+The validated multi-repository gap still matters. Add a workspace-level repo
+overview above Croft's existing per-repo operations: branch, ahead/behind,
+dirty/change counts, failing checks, and quick actions for each repository.
+Keep `git` as the behavioral authority; use a library only where it demonstrably
+reduces work without narrowing Git compatibility.
 
-**Neovim ecosystem check:** gitsigns/fugitive/diffview/git.nvim are all
-single-repo. The multi-repo overview niche is genuinely open.
+Deep interactive operations that lazygit already solves well may open lazygit in
+Croft's embedded terminal, with the selected repository as its working directory.
+Do not reimplement interactive rebase merely to claim feature ownership.
 
-**Plugin form (Phase 0.1):** toggleable sidebar; plain `nvim_create_buf` +
-`nvim_open_win` + valid-handle toggle (~50 lines, no framework dependency) so
-the git-logic core stays cleanly separable from rendering — critical for the
-later native-panel port.
+The Phase-0 Neovim plugin remains a useful standalone tool and prototype for
+multi-repo interaction, but it has no build-time relationship to Croft.
 
 ---
 
-## 8. Theme System design (Phase 4)
+## 8. Theme and visual-parity system (Phase 3)
 
-**Key insight:** VSCode theme JSON only carries *colors* (CSS does its layout).
-Zed's theme format also describes *UI chrome* — closer to what a custom
-renderer needs. So: **own schema, Zed-inspired, two sections, two consumers**:
+The previous goal reframe — "VS Code capability in your aesthetic, not pixel-
+identical" — is superseded. Visual indistinguishability is now an explicit
+target, while the fork retains its own name and legally safe assets.
 
-1. `colors` → pushed INTO Neovim via `nvim_set_hl()` per highlight group
-   (`Function`, `Comment`, `@variable`...). Neovim applies them to tokens it
-   classifies (its Tree-sitter engine's job — never reimplement highlighting)
-   and echoes results back via `hl_attr_define` redraw events. Alternative
-   mode: let any normal colorscheme run and just read what comes back.
-2. `layout` + `chrome` → consumed ONLY by the renderer (padding per element,
-   line-height, corner radius, popup/breadcrumb/minimap styling). Neovim never
-   sees these — it has no concept of pixels.
+Use one semantic design-token model for the Croft fork:
 
-Same palette feeds both buffer text (via Neovim) and native chrome (directly) —
-that consistency is what makes it read as one coherent app.
+1. **Color and syntax tokens:** workbench surfaces, editor tokens, terminal ANSI
+   palette, diagnostics, Git, debug/testing states, focus, hover, selection,
+   disabled and contrast states.
+2. **Geometry tokens:** spacing, row heights, panel and activity-bar widths,
+   borders, radii, typography metrics, scrollbar geometry, popup placement, and
+   motion. The ratatui renderer may approximate tokens that cannot map to cells;
+   the visual harness records those gaps.
+3. **Icon tokens:** semantic icon identifiers mapped to open/licensed assets.
+   Never couple behavior to a particular glyph or Microsoft-branded asset.
+4. **Platform/font profiles:** pin the reference font and raster conditions for
+   visual tests, while keeping production fallback and accessibility settings.
 
-**Goal reframe:** not "pixel-identical to VSCode" (unwinnable moving target —
-different text engine, their update cadence) but "VSCode's *capability* —
-spacing/layout control — in your aesthetic."
+Sprite Terminal has its own terminal theme and font configuration. The Croft
+fork may request or recommend a compatible palette, but must not mutate Sprite's
+configuration silently. Deterministic screenshot fixtures and interaction-state
+tests are the authority for visual parity.
 
 ---
 
-## 9. Claude Code Integration (Phase 3.4)
+## 9. Claude Code and agent integration
 
-**Want:** left pane = Neovim, right pane = Claude Code; right side "sees" what
-file is open on the left. (Motivated by frustration with the Claude Neovim
+**Want:** right pane = editor, left pane = Claude Code; the left side sees the
+file, selection, diagnostics, task/debug state, and relevant workspace context
+on the right. (Originally motivated by frustration with the Claude Neovim
 plugin: modal-input friction, broken keybindings, hard to type prompts.)
 
-**Key realization:** Claude Code in its *own pane* with normal input handling
-IS the fix for the input friction — the file-awareness then comes from context
-sharing, not from embedding Claude inside Neovim.
+**Key realization:** Claude Code in its own pane with normal input handling fixes
+the input friction. Context sharing should use explicit, inspectable data rather
+than scraping terminal contents or embedding prompt input inside the editor.
 
-- **Works today (any terminal):** `nvim --listen /tmp/nvim-left.sock`; a
-  wrapper queries the socket for current file/cursor/selection and feeds it to
+- **Works today for Neovim (any terminal):**
+  `nvim --listen /tmp/nvim-right.sock`; a wrapper queries the socket for current
+  file/cursor/selection and feeds it to
   Claude Code as context. A shim, but functional — and **validated in practice**:
   during the fork evaluation, a live `nvim-gui` session was inspected, driven,
   and debugged entirely from outside via `nvim --server <sock> --remote-expr`.
-- **Clean version (Sprite):** the compositor already speaks RPC to Neovim
-  (that's how it renders it), so it already *knows* the active file — expose
-  that through the side-channel to any subscribing pane. Only possible because
-  the terminal is simultaneously Neovim's frontend and the other pane's host.
-  This feature is itself an argument for the project.
-- **Open question:** how Claude Code best *receives* live context (hooks? MCP?
-  prompt construction by wrapper?) — check Claude Code's extension mechanisms.
+- **Croft-fork version:** Croft already owns the editor/workspace model and
+  includes MCP/collaboration and resident-pair machinery. Expose a small,
+  permissioned context service from that model, with user-visible scope and no
+  implicit writes. Keep the Claude process out of the render/input hot path.
+- **Sprite version:** a terminal pane may publish only coarse process/pane
+  metadata through the optional Sprite protocol. Sprite must not inspect or
+  reinterpret arbitrary terminal contents as trusted editor context.
+- **Open design work:** choose the receiving contract (MCP, hooks, or another
+  explicit local protocol), permission model, context freshness, and audit UI.
 - Note: an existing personal script opens the Neovim buffer for files Claude is
   writing — setup details not recorded here; worth retrieving and building on.
 
 ---
 
-## 10. Current Machine/Toolchain State (M5 MacBook, 2026-07-17)
+## 10. Target platforms and current toolchain state (2026-08-09)
+
+- **Current implementation workspace:** Arch Linux under Omarchy, repository at
+  `~/Projects/Sprite`; `phase_1/` is the intended standalone Sprite Terminal
+  repo. Arch is the primary Linux development and daily-driver target.
+- **Target matrix:** Arch and distribution-neutral Linux packages plus macOS
+  `.app` support. Omarchy integration is optional user configuration, never a
+  runtime dependency or platform abstraction.
+- **macOS state below was last recorded 2026-07-17** and must be revalidated
+  before Phase 1 packaging work:
 
 - **Nix installed** (multi-user/daemon mode), flakes enabled. Fork source
   cached at `/nix/store/77k2h4paa7zgam5zsziz42aa2fi49k9n-source`.
@@ -438,26 +507,37 @@ sharing, not from embedding Claude inside Neovim.
   to Sprite (Rust/GPUI path), fatal to local fork builds (Addendum A.1).
 - Fork clone at `~/Projects/ghostty-pixel-scroll` (has an `upstream` remote
   and a stray local `v0.1.0` tag from debugging — both harmless).
-- The Arch/Hyprland ThinkPad remains the second daily driver; Sprite targets
-  both platforms via GPUI.
+- The Arch/Hyprland machine and M5 MacBook are the two daily-driver validation
+  systems; CI must cover Linux and macOS independently of either configuration.
 
 ---
 
 ## 11. Principles That Shape Every Decision
 
-1. **Reuse the correctness-hard parts** (terminal emulation, git rebase, Neovim
-   core); build only what doesn't exist (the integration, the layout layer).
+1. **Reuse the correctness-hard parts** (Ghostty terminal semantics, Croft's
+   existing IDE behavior, Git, language servers, debug adapters); build only
+   the missing compatibility, integration, rendering, and product layers.
 2. **Each phase must leave a usable artifact** — attrition is the real risk.
-3. **The RPC boundary is a feature** — never fork what you can talk to.
-4. **Data/logic separated from rendering** — everything built for the grid
-   should port to the native panel by swapping one render function.
+3. **The process boundary is a feature** — Sprite and the Croft fork install,
+   run, fail, update, and remain useful independently.
+4. **Data/logic separated from rendering** — Croft's current coupling is debt to
+   reduce where parity work touches it; new domain behavior cannot depend on
+   terminal cells or GPUI.
 5. **Evaluate before building** — an evening using someone's working code beats
-   a month of architecture. (This principle found ghostty-pixel-scroll, and the
-   fork evaluation is what de-risked every Phase-2 line item.)
-6. **Stop if satisfied** — if the fork + plugins deliver 90% of the want, the
-   rational move is to enjoy that, not finish the grand plan out of momentum.
+   a month of architecture. This principle found both ghostty-pixel-scroll and
+   Croft, and changed the plan twice.
+6. **Measure product claims** — visual parity, functional parity, compatibility,
+   and performance all require named fixtures, baselines, and regression tests.
+7. **Dependencies must earn their place** — prefer the standard library and
+   native platform features; accept a dependency when it replaces a hard,
+   maintained subsystem and keep it behind a narrow seam.
+8. **Fallbacks are product features** — Sprite remains a normal terminal and
+   the Croft fork remains a normal TUI when their optional integration is absent.
+9. **Upstream relationships are maintained assets** — pin reproducibly, record
+   provenance, keep changes reviewable, and make upgrades deliberate.
+10. **Stop if satisfied** — if a bounded phase delivers the actual daily need,
+    enjoying it is more rational than finishing the grand plan from momentum.
 
----
 ---
 
 # ADDENDUM A — Decisions Made and Discarded
@@ -513,7 +593,8 @@ Step-1 gate evaluation (2026-07-11 → 07-16) reversed this. Evidence:
   flicker and a "weird line" in normal Neovim were never reproduced.
 
 **Outcome:** fork demoted from "foundation" to **daily driver + executable
-spec**. All its proven concepts are Phase 2/3 line items in the main plan.
+spec**. Its proven concepts became Phase 2/3 line items at the time; the later
+Croft decision superseded that scheduled native-Neovim work (A.8).
 
 ## A.2 Original language decision (Zig fork + Rust satellites): SUPERSEDED
 
@@ -539,10 +620,12 @@ Designed 2026-07-11 as the "first fork feature": a custom RPC notification
 (precedent: the fork's `ghostty_image` handler, `io_thread.zig:1370`) carrying
 icon pixels to be drawn as textured quads riding scroll-spring offsets, with a
 new transport backend in the personal `svgtree.nvim` plugin (its `raster.lua`
-is transport-agnostic). Discarded with Path A; **reborn as Phase 3.1 native
-icon rendering** in Sprite, where it's first-class instead of a bolt-on. The
-architectural analysis (why Kitty graphics can't work in RPC GUI mode; why the
-renderer must own icons) moved into the main doc §2.
+is transport-agnostic). Discarded with Path A. At the time it was **reborn as
+Phase 3.1 native icon rendering** in Sprite, where it would have been first-class
+instead of a bolt-on. The architectural analysis (why Kitty graphics cannot work
+in RPC GUI mode; why the renderer must own icons) informed the old native-Neovim
+plan. That plan was later deferred by A.8; terminal-mode Kitty graphics moved
+into current Phase 1.
 
 ## A.4 Naming history
 
@@ -570,4 +653,119 @@ first-run Lazy.nvim float swallows keystrokes (looked like broken keybinds);
 managed-NvChad default surprises (`neovim-gui-config-mode` fixed to `user`);
 fork resolves `nvim` via PATH so Dock/Spotlight launches would fail to spawn
 it (shell launches fine) — the origin of Phase 2.1's explicit-binary-resolution
-requirement.
+requirement. The later `gpui-ghostty` foundation decision was itself superseded
+by A.6.
+
+## A.6 `gpui-ghostty` as the Phase-1 foundation: SUPERSEDED (2026-08-09)
+
+The 2026-07 plan named `gpui-ghostty` as "THE Phase-1 base." A current source
+audit found useful GPUI rendering, IME, and input work, but not a foundation to
+adopt wholesale:
+
+- its Rust wrapper was comparatively shallow and duplicated terminal modes and
+  OSC behavior now available through deeper `libghostty-rs` interfaces;
+- its main GPUI terminal view concentrated rendering, input, PTY, and product UI
+  responsibilities in one large type;
+- its split example was fixed/prototype-shaped rather than a reusable pane-tree
+  product architecture;
+- its validation and packaging did not cover the Linux/macOS product matrix
+  Sprite requires.
+
+`libghostty-rs` was the stronger source foundation: it exposes safe terminal,
+render-state, key/mouse, and Kitty graphics APIs, while accurately preserving
+Ghostty's `!Send + !Sync` ownership constraints. `tty7` provided better reference
+patterns for tabs, pane trees, configuration, and packaging, but carried an
+Alacritty VT engine and dependency graph Sprite does not want.
+
+**Decision:** build a clean two-crate Sprite workspace. Adapt `libghostty-rs` to
+a pinned Ghostty stable-release submodule; selectively port understood ideas
+from `gpui-ghostty` and `tty7`; depend on neither project. This reduces inherited
+coupling and keeps `sprite-term` a deep boundary around all terminal internals.
+
+## A.7 "Always build the latest libghostty": REJECTED AS A BUILD POLICY (2026-08-09)
+
+Following Ghostty development is desirable; resolving "latest" during every
+build is not. An unpinned tip makes builds non-reproducible, can change ABI or
+behavior without a Sprite commit, and turns upstream breakage into user-facing
+breakage.
+
+**Decision:** pin the Ghostty submodule to the newest stable release tag that has
+passed Sprite's terminal and Croft compatibility suites. Automation may detect
+and propose newer stable tags, but a reviewed commit moves the pin only after CI
+passes. This provides timely updates without surrendering reproducibility.
+
+## A.8 Native Neovim as the scheduled Phase-2 core: SUPERSEDED/DEFERRED (2026-08-09)
+
+The prior phases 2–5 centered on a GPUI `NeovimPanel`: consume Neovim multigrid
+RPC, port the pixel-scroll fork's animations/chrome, then build native panels and
+a VS Code-like theme around it. That path remains technically plausible and the
+research is preserved, but discovering Croft changed the product economics.
+
+Croft already supplies the larger workbench the old roadmap would have needed to
+assemble: editor, LSP, DAP, source control, testing, tasks, terminal, remote
+sessions, collaboration, command UI, minimap, and VS Code-shaped layout. Building
+the Neovim frontend first would now duplicate years of IDE surface before testing
+whether Croft satisfies the actual daily workflow.
+
+**Decision:** Phase 0 Neovim plugins survive as independent tools, and Neovim
+remains first-class inside Sprite Terminal. The native `NeovimPanel` and possible
+`HelixPanel` are unscheduled research. They return only after the Croft fork
+reaches daily-driver quality and a measured requirement cannot be met through
+Croft or standards-based terminal capabilities.
+
+## A.9 Croft adoption: ACCEPTED AS A SEPARATE FORK, NOT A DEPENDENCY (2026-08-09)
+
+Croft was audited at upstream main v0.1.701. It is a real Rust IDE rather than a
+theme or thin frontend: approximately 181k Rust lines across 137 modules, about
+3,100 tests, 64 direct Cargo dependencies, and 459 locked packages. Its current
+architecture uses ratatui/crossterm for the workbench and portable-pty plus
+`alacritty_terminal` for its embedded terminal. Around 50 modules touch ratatui;
+the central App and editor modules are large and combine state with rendering.
+
+The audit supports four conclusions:
+
+1. Running unmodified Croft inside Sprite is highly feasible. Croft already
+   targets Ghostty/Kitty keyboard and graphics behavior.
+2. A visually convincing VS Code-like fork is feasible within the TUI, but exact
+   pixel parity may eventually require a Sprite enhancement protocol or renderer
+   extraction because a custom ratatui backend still receives cells.
+3. Functional VS Code parity is not present. Croft's extension manifests and MCP
+   sidecars are not a VS Code extension host/API.
+4. Linking Croft into Sprite would import a large, fast-moving IDE and duplicate
+   failure domains. Running it as a child process preserves both products.
+
+**Decision:** complete Sprite Phase 1 first and use upstream Croft as a terminal
+compatibility gate. Then create a separate, minimally divergent Croft fork with
+its own releases and upstream-sync process. Add a versioned Sprite protocol only
+in response to measured gaps, always with a normal-terminal fallback.
+
+## A.10 Meaning of "indistinguishable from VS Code": EXPANDED (2026-08-09)
+
+The old theme goal explicitly rejected pixel identity as an unwinnable moving
+target and instead sought "VS Code's capability in your aesthetic." That is no
+longer the product requirement.
+
+**Decision:** pursue both visual and functional indistinguishability in normal
+supported workflows, while materially improving speed and adopting the best
+ideas from Zed. Visual parity is governed by deterministic reference screenshots
+and interaction states. Functional parity is governed by a versioned workflow
+and extension-API compatibility matrix. Performance is governed by repeatable
+VS Code comparison benchmarks.
+
+This is a north star, not permission to make untestable claims. The fork keeps
+its own name and assets. Code - OSS is MIT, but Microsoft's branded VS Code
+distribution includes protected names/assets and proprietary services; Visual
+Studio Marketplace access and Microsoft-exclusive extensions are treated as
+license-gated rather than assumed. Zed is an idea and benchmark source, never a
+dependency or branding template.
+
+## A.11 Platform and packaging scope: EXPANDED (2026-08-09)
+
+The original Phase 1 description did not make distribution artifacts or the
+current Arch environment explicit.
+
+**Decision:** Linux and macOS are Phase-1 targets. Arch Linux under Omarchy is
+the primary Linux development/daily-driver environment, with no Omarchy runtime
+dependency. Phase 1 includes a macOS `.app`, Linux desktop integration and icons,
+an Arch-friendly package path, and CI on both operating systems. Croft compatibility
+is tested on both before its fork begins.
