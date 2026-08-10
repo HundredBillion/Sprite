@@ -147,11 +147,13 @@ dependencies. This is the primary dependency-control and failure-isolation seam.
 - **Sprite UI/renderer: GPUI.** Use GPUI for the native window, compositor,
   text/image rendering, and platform integration. Zed remains an architectural
   and performance reference, not a linked dependency.
-- **VT core: Ghostty through `libghostty-rs`.** Adapt the current safe
-  `libghostty-rs` interface to a `phase_1/vendor/ghostty` git submodule pinned to
-  the newest tested stable Ghostty release tag. Builds are reproducible: they do
-  not silently follow `main`. An automated update job may propose the next
-  stable tag, but CI and compatibility tests must pass before the pin moves.
+- **VT core: Ghostty through `libghostty-rs`.** Use the current safe
+  `libghostty-rs` interface with a `phase_1/vendor/ghostty` git submodule pinned
+  to the exact Ghostty commit that interface targets. The initial compatibility
+  pin is `ab0b9da9e88fcb4b0533a1854e84628f663930af`; Ghostty v1.3.1 predates the
+  terminal/render C interface and cannot satisfy the binding. Builds remain
+  reproducible and never silently follow `main`. Move back to reviewed stable
+  release tags as soon as one contains the required interface.
 - **`gpui-ghostty`: reference only, not a dependency or wholesale base.** Reuse
   selected rendering, IME, and input ideas after understanding them. Its current
   terminal view is too monolithic, its examples are prototype-shaped, and its
@@ -254,10 +256,12 @@ macOS. Croft is an acceptance-test application, not a dependency.
 - **1.1 Repository/workspace:** the `phase_1` directory contains its own Rust
   workspace within the Sprite repository, with `sprite-term` (terminal adapter)
   and `sprite-app` (GPUI product). Add
-  `phase_1/vendor/ghostty` as a git submodule pinned to the newest tested stable
-  Ghostty release tag; adapt `libghostty-rs` to build against that source. Pin
-  official GPUI releases exactly, beginning with `0.2.2`, and upgrade only after
-  the platform/compatibility suite passes.
+  `phase_1/vendor/ghostty` as a git submodule pinned to exact compatibility
+  commit `ab0b9da9e88fcb4b0533a1854e84628f663930af`; configure
+  `libghostty-rs` to build against that source. Return to a reviewed stable tag
+  when Ghostty releases the required terminal/render C interface. Pin official
+  GPUI releases exactly, beginning with `0.2.2`, and upgrade only after the
+  platform/compatibility suite passes.
 - **1.2 Terminal lifecycle:** PTY + login shell, correct resize, shutdown and
   child reaping, tabs, recursive split tree, focus navigation, scrollback,
   selection, clipboard, search, hyperlinks, and working-directory inheritance.
@@ -692,10 +696,12 @@ Ghostty's `!Send + !Sync` ownership constraints. `tty7` provided better referenc
 patterns for tabs, pane trees, configuration, and packaging, but carried an
 Alacritty VT engine and dependency graph Sprite does not want.
 
-**Decision:** build a clean two-crate Sprite workspace. Adapt `libghostty-rs` to
-a pinned Ghostty stable-release submodule; selectively port understood ideas
-from `gpui-ghostty` and `tty7`; depend on neither project. This reduces inherited
-coupling and keeps `sprite-term` a deep boundary around all terminal internals.
+**Decision:** build a clean two-crate Sprite workspace. Use `libghostty-rs`
+against an exact compatible Ghostty source pin; selectively port understood
+ideas from `gpui-ghostty` and `tty7`; depend on neither project. This reduces
+inherited coupling and keeps `sprite-term` a deep boundary around all terminal
+internals. Addendum A.13 replaces the original assumption that the first pin
+could be a stable release tag.
 
 ## A.7 "Always build the latest libghostty": REJECTED AS A BUILD POLICY (2026-08-09)
 
@@ -704,10 +710,12 @@ build is not. An unpinned tip makes builds non-reproducible, can change ABI or
 behavior without a Sprite commit, and turns upstream breakage into user-facing
 breakage.
 
-**Decision:** pin the Ghostty submodule to the newest stable release tag that has
-passed Sprite's terminal and Croft compatibility suites. Automation may detect
-and propose newer stable tags, but a reviewed commit moves the pin only after CI
-passes. This provides timely updates without surrendering reproducibility.
+**Decision:** prefer the newest compatible stable release tag that has passed
+Sprite's terminal and Croft compatibility suites. When no stable release exposes
+the required library interface, pin the exact upstream commit used by the
+reviewed binding instead. Automation may propose newer stable tags, but a
+reviewed commit moves any pin only after CI passes. This provides timely updates
+without surrendering reproducibility.
 
 ## A.8 Native Neovim as the scheduled Phase-2 core: SUPERSEDED/DEFERRED (2026-08-09)
 
@@ -789,11 +797,17 @@ is tested on both before its fork begins.
 
 The approved Phase-1 PRD was stress-tested with documentation side effects. Its
 five checkpoints now extend one permanent architecture: an internal-but-strict
-`sprite-term` interface, one owner thread and one child process per Pane,
-coherent owned projections, and a GPUI application that composes tabs and
-recursive splits.
-Render Snapshots and shell-facing Pane Snapshots are separate views of the same
-terminal generation so observation does not freeze renderer internals.
+`sprite-term` interface, one terminal-owner worker and one child process per
+Pane, coherent owned projections, and a GPUI application that composes tabs and
+recursive splits. A Pane may also use one blocking PTY I/O-pump thread that only
+waits on PTY readiness plus an explicit cancellation socket, copies bytes into
+the bounded worker queue, and remains joinable even when a descendant keeps the
+PTY open. One small child-waiter thread detects quiet exits without polling or
+relying on PTY EOF; neither helper owns or mutates libghostty. Lossless
+lifecycle events and one-slot latest-only render snapshots travel on separate
+streams. Render Snapshots and shell-facing Pane
+Snapshots are separate views of the same terminal generation so observation
+does not freeze renderer internals.
 
 Pane Observation was added to Phase 1 as a general terminal capability, not an
 AI integration or dependency. `sprite panes snapshot` returns versioned JSON
@@ -814,6 +828,66 @@ faults remain an accepted in-process risk for Phase 1.
 Unlike Ghostty, GPUI, and build inputs, Croft deliberately remains unpinned for
 the Phase-1 compatibility gate. Pull requests, merges, nightly CI, checkpoints,
 and release candidates resolve upstream Croft `main` anew and record the exact
-commit. This knowingly trades stable day-to-day acceptance inputs for immediate
-pressure against terminal compatibility staleness; local Rust tests remain
-offline and deterministic.
+commit. Before Checkpoint 4 the gate blocks regressions only in capabilities the
+completed checkpoint claims and reports the remaining matrix as expected
+missing; the complete matrix becomes merge-blocking at Checkpoint 4. This
+knowingly trades stable day-to-day acceptance inputs for immediate pressure
+against terminal compatibility staleness; local Rust tests remain offline and
+deterministic.
+
+## A.13 Ghostty v1.3.1 as the initial library source: SUPERSEDED (2026-08-09)
+
+Planning against the real source found that Ghostty v1.3.1 was released before
+the terminal and render-state C interface consumed by `libghostty-rs` 0.2.1.
+Between v1.3.1 and the binding's source commit, the relevant public VT headers
+changed by roughly 8,300 lines across 33 files. Backporting that surface would
+make Sprite carry a large Ghostty library fork before Checkpoint 1 and would
+contradict the rule that Sprite patches only expose small pieces of behavior.
+
+**Decision:** initially pin `phase_1/vendor/ghostty` to exact upstream commit
+`ab0b9da9e88fcb4b0533a1854e84628f663930af`, the commit declared by
+`libghostty-rs` 0.2.1, and force the binding build to use that submodule. This is
+a compatibility pin, not a moving-main policy. Sprite will replace it with the
+first reviewed stable Ghostty release that contains the required interface and
+passes the full compatibility suite.
+
+## A.14 Checkpoint-1 technical grill: EXPANDED (2026-08-10)
+
+The Checkpoint-1 TSP was stress-tested against the exact libghostty 0.2.1 and
+GPUI 0.2.2 APIs before implementation. The permanent public seam now accepts
+owned GPUI key facts, performs state-aware encoding inside Terminal Core, and
+exposes separate lossless lifecycle and one-slot latest-only snapshot streams.
+Snapshot construction and delivery both coalesce without a timer. Sixteen
+standard-library output permits reserve one non-output slot in the bounded
+worker queue, structurally limiting output waiting ahead of input to 256 KiB;
+the benchmark also records input latency during sustained output. Application
+input and libghostty's synchronous terminal-generated replies share one
+worker-local PTY writer, with reply-write failures surfaced immediately after
+terminal mutation.
+
+The initial blocking-reader plan could hang when a descendant retained the PTY.
+The revised Unix adapter waits on PTY readiness and a cancellation socket, using
+the already-transitive exact `nix =0.28.0` package rather than an async runtime.
+Sprite directly enables poll/process/signal; Cargo also retains the term/fs
+features already requested by portable-pty.
+One terminal-owner worker remains the only libghostty owner, a child waiter
+performs the one reap, and Checkpoint 1 implements the bounded HUP/TERM/KILL
+process-group lifecycle. Shutdown requests use an atomic flag plus the existing
+bounded queue so dropping a live session is nonblocking even when that queue is
+full.
+
+Build acquisition is now an explicit network step followed by locked offline
+Cargo checks. Rust 1.97.1, Zig 0.16.0, GPUI, libghostty, portable-pty,
+async-channel, nix, and Ghostty source are exact inputs. The matching
+`xterm-ghostty` terminfo is generated from the pinned Ghostty source during
+bootstrap. Checkpoint 1 measures GPUI's actual logical cell geometry and converts
+it with the window scale factor for physical PTY/libghostty pixel reports. It
+treats a partial PTY/libghostty resize failure as pane-fatal instead of claiming
+rollback and requires real Arch Wayland/X11 and macOS evidence before Checkpoint
+2.
+
+Croft remains unmodified and network-explicit. Checkpoint 1 will add an external
+wrapper that resolves moving `main`, records its SHA, and runs an ignored
+public-session smoke for the capabilities Checkpoint 1 actually claims. Normal
+Rust tests never fetch Croft; the complete visual/graphics interaction matrix
+becomes merge-blocking when Checkpoint 4 introduces those capabilities.

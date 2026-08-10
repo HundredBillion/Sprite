@@ -43,11 +43,15 @@ events and immutable render snapshots. No libghostty handle crosses a thread or
 appears in the application API. The PTY implementation is similarly hidden so
 `portable-pty` can be replaced without changing the application.
 
-Ghostty source is vendored as a git submodule pinned to the newest tested stable
-release tag. The initial target is Ghostty v1.3.1. Sprite adapts the audited
-`libghostty-rs` interface to that pinned source rather than depending on
-`gpui-ghostty` or resolving an upstream tip during builds. Updates arrive as
-reviewed pin changes after the compatibility suite passes.
+Ghostty source is vendored as a git submodule pinned to an exact reviewed source
+revision. The initial compatibility pin is
+`ab0b9da9e88fcb4b0533a1854e84628f663930af`, the Ghostty commit declared by
+`libghostty-rs` 0.2.1. Ghostty v1.3.1 predates the terminal/render C interface
+that binding consumes, so backporting the interface would create a large Sprite-
+maintained fork. Sprite forces the binding to build against the submodule rather
+than depending on `gpui-ghostty` or resolving an upstream tip during builds. The
+pin returns to a reviewed stable release tag as soon as one exposes the required
+interface and passes the compatibility suite.
 
 Sprite identifies itself honestly with `TERM_PROGRAM=Sprite` and a Sprite
 version. Phase 1 implements the capabilities represented by `xterm-ghostty`,
@@ -247,8 +251,9 @@ restarts the affected soak or daily-use gate.
   a login shell in one window. It establishes one coherent terminal generation
   and owned projection seam later used by rendering and Pane Observation.
 - Before Checkpoint 2 begins, Checkpoint 1 runs the benchmark harness against
-  the pinned Ghostty release on the same Arch and macOS validation machines and
-  records numerical performance budgets in version control.
+  Ghostty built from the identical pinned source commit on the same Arch and
+  macOS validation machines and records numerical performance budgets in
+  version control.
 - Checkpoint 2 deepens that same terminal module with correct text, input,
   mouse, selection, scrolling, shell integration, lifecycle behavior, active-
   screen history, observation metadata, and focused-pane accessibility state.
@@ -301,6 +306,19 @@ restarts the affected soak or daily-use gate.
 - Each terminal session owns one dedicated worker thread containing the PTY
   reader/writer coordination, mutable libghostty terminal, render state, input
   encoders, and Kitty graphics storage access.
+- Because `portable-pty` exposes a blocking reader, a Terminal Session also owns
+  one I/O-pump thread. On the supported Unix platforms it blocks in the native
+  readiness primitive on both the PTY and a cancellation socket, then sends
+  owned byte chunks into the bounded worker queue. This makes every reader
+  joinable even if a descendant keeps the PTY open, without a periodic polling
+  loop or async runtime. The pump never receives application commands or
+  touches libghostty; the dedicated worker remains the sole terminal owner.
+  Phase 1 measures per-Pane thread memory in resource tests.
+- A second small helper thread blocks in the child-wait operation and reports
+  one owned exit status to the terminal owner. It detects quiet child exits
+  without polling and without waiting for PTY EOF, which a descendant process
+  may keep open. The I/O pump and child waiter use explicitly small stacks and
+  never touch libghostty.
 - libghostty values remain on their owner thread because the audited bindings
   are `!Send + !Sync`. Sprite will not add unsafe `Send` or `Sync`
   implementations to bypass that constraint.
@@ -310,12 +328,31 @@ restarts the affected soak or daily-use gate.
 - GPUI remains on the application thread. Communication uses bounded channels
   and coalesces redundant render invalidations so heavy output cannot starve
   input or grow an unbounded queue.
+- The shared worker queue reserves capacity for non-output work. The PTY pump
+  may have at most sixteen 16-KiB output messages outstanding in a 17-slot
+  queue, enforced by standard-library permits returned after the worker applies
+  or discards each output message. Keyboard input therefore cannot lose every
+  newly freed slot to a busy output producer, and no more than 256 KiB of output
+  waits ahead of it.
+- Lifecycle events and snapshots use separate bounded delivery paths. Ready,
+  exit, and error events remain ordered and lossless. Snapshots use one
+  latest-only slot; after the consumer drains it, the stream requests another
+  capture only when the terminal generation advanced. This coalesces snapshot
+  construction as well as delivery without a timer.
 - PTY output bytes are never dropped and are applied to terminal state in order.
   At most the newest complete Render Snapshot generation is needed by GPUI;
   obsolete intermediate snapshots and repeated invalidations are coalesced.
+- Terminal-generated replies and application input share the sole PTY writer on
+  the terminal-owner worker. libghostty's synchronous `on_pty_write` callback
+  borrows that worker-local writer, and any callback write failure is surfaced
+  immediately after `vt_write` as a pane-local error and shutdown.
 - Keyboard/paste input is ordered and never dropped. Large paste is chunked,
   while repeated resize commands coalesce to the newest dimensions without
   reordering input relative to terminal-mode changes.
+- The internal raw-input command accepts at most 16 KiB per message, and a
+  terminal grid may contain at most 1,000,000 cells. Larger requests fail before
+  entering the worker or mutating a backend; paste is chunked through the same
+  input limit.
 - When bounded queues and coalescing cannot absorb sustained output, Sprite lets
   the operating system PTY buffer backpressure the child rather than allocating
   unbounded application memory.
@@ -383,7 +420,8 @@ restarts the affected soak or daily-use gate.
   new release, but the pin moves only after Linux Wayland/X11, macOS, rendering,
   input, packaging, and Pane Observation suites pass.
 - Ghostty source is a git submodule under the Phase 1 vendor area, initially
-  pinned to stable tag v1.3.1.
+  pinned to exact compatibility commit
+  `ab0b9da9e88fcb4b0533a1854e84628f663930af`.
 - Sprite carries or adapts the audited `libghostty-rs` safe interface against
   the pinned Ghostty source. It does not use `gpui-ghostty` as a Cargo dependency
   or repository template.
@@ -397,10 +435,24 @@ restarts the affected soak or daily-use gate.
 - Cargo resolves exact transitive versions through a committed lockfile. The
   Rust toolchain is explicitly documented and pinned for CI/release builds.
 - An automated job may report a newer stable Ghostty tag and open an update
-  change. No build resolves "latest" dynamically and no pin moves without the
-  full terminal and Croft compatibility suites.
+  change. Sprite moves from a compatibility commit back to a stable tag when
+  that tag exposes the required library interface. No build resolves "latest"
+  dynamically and no pin moves without the full terminal and Croft
+  compatibility suites.
 - Every new direct dependency must document which correctness-hard or cross-
   platform capability it replaces. Convenience alone is insufficient.
+- The owned worker queue uses the standard library's bounded synchronous
+  channel for ordered commands/output and shutdown deadlines. The worker-to-GPUI
+  event/snapshot seam uses exact `async-channel =2.5.0` for bounded terminal-side
+  delivery and awaitable GPUI consumption; a standard channel there would
+  require application polling or a bridge thread. GPUI already resolves this
+  package transitively, but Sprite declares it because the Terminal Session
+  interface uses it directly.
+- On Unix, Sprite declares exact `nix =0.28.0` and directly requests only
+  poll/process/signal. `portable-pty` already resolves that package with term/fs,
+  so Cargo's resolved union contains all five features. Direct use supplies
+  cancelable PTY readiness and bounded process-group shutdown without adding
+  another package, an async runtime, or an unjoinable helper.
 - `phase_1/DEPENDENCIES.md` is the required direct-dependency ledger. Each entry
   records capability, rejected standard-library/existing options, enabled
   features, license/source, and update policy; adding a direct dependency
@@ -414,6 +466,10 @@ restarts the affected soak or daily-use gate.
 - `sprite-app` shapes text and renders terminal cells from owned snapshots. The
   renderer owns font discovery/fallback, glyph caches, cell geometry, clipping,
   selection overlays, cursor drawing, decorations, and GPU resources.
+- Grid rows and columns are calculated from GPUI logical bounds and shaped
+  logical cell metrics. PTY/libghostty pixel fields use those cell metrics
+  converted with the current window scale factor to physical device pixels, and
+  are refreshed when a window moves between differently scaled displays.
 - A snapshot distinguishes default colors from explicit colors and preserves
   complete cell style flags, grapheme content, wide-cell occupancy, cursor
   state, terminal dimensions, dirty generation, and image-placement generation.
@@ -740,11 +796,12 @@ restarts the affected soak or daily-use gate.
 
 ### Performance decisions
 
-- Before optimization, Phase 1 records repeatable baselines for cold launch to
-  prompt, input-to-render scheduling, PTY throughput, scroll/frame cadence, idle
-  CPU, memory, and graphics-memory reclamation.
-- Checkpoint 1 freezes measured budgets for those metrics before Checkpoint 2.
-  Later checkpoints may strengthen them but cannot silently weaken them; an
+- Before optimization, Phase 1 records repeatable baselines as each capability
+  becomes real. Checkpoint 1 freezes cold launch to prompt, idle and
+  sustained-output input-to-snapshot latency, PTY throughput, full-snapshot
+  capture, idle CPU, and memory before Checkpoint 2. Checkpoint 2 adds
+  scroll/frame cadence; Checkpoint 4 adds graphics-memory reclamation. Later
+  checkpoints may strengthen budgets but cannot silently weaken them; an
   unexplained regression greater than 10% requires investigation and explicit
   user approval.
 - Ghostty is the terminal-behavior/performance reference, while the prior pixel-
@@ -803,19 +860,23 @@ restarts the affected soak or daily-use gate.
   generations, partial errors, the 500-millisecond deadline, the 16 MiB cap,
   key rejection, window isolation, kill/re-enable behavior, and the absence of
   all mutation operations.
-- Croft is an external acceptance suite. The test launches upstream Croft
-  `main` as resolved at the start of each run and exercises startup,
+- Croft is an external acceptance suite. Every checkpoint launches upstream
+  Croft `main` as resolved at the start of the run without Sprite-specific
+  patches. Before Checkpoint 4, the merge-blocking smoke covers only capabilities
+  that checkpoint claims and records the remaining matrix as expected missing,
+  never as passes. Starting at Checkpoint 4, the complete suite covers startup,
   editor input, mouse hit testing, resize, alternate screen, Kitty activity
   icons, minimap, preview overlays, menu clipping, and the embedded terminal.
-  Sprite-specific Croft patches are not permitted in this Phase 1 gate.
 - Croft compatibility deliberately has no permanent pinned baseline. Every run
   records the exact resolved Croft commit in logs and artifacts for diagnosis,
   but the next run resolves moving `main` again so upstream changes surface
   immediately rather than allowing compatibility to grow stale.
-- The moving Croft suite is required on every pull request and merge, every
-  checkpoint/release candidate, and a nightly schedule even when Sprite does not
-  change. A failure blocks merging and release until triage determines whether
-  Sprite must adapt or Croft `main` itself is broken.
+- The capability-appropriate moving Croft suite is required on every pull
+  request and merge, every checkpoint/release candidate, and a nightly schedule
+  even when Sprite does not change. A regression in an already claimed
+  capability blocks merging and release until triage determines whether Sprite
+  must adapt or Croft `main` itself is broken; the complete matrix becomes
+  merge-blocking at Checkpoint 4.
 - Ordinary local `cargo test` remains offline and deterministic; the external
   Croft suite is an explicit CI/acceptance command rather than a hidden network
   side effect of the Rust test suite.

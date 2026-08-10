@@ -8,5 +8,9 @@ failure can still be reproduced and diagnosed, and Sprite-specific Croft patches
 remain forbidden in the acceptance gate.
 
 The moving suite is required for pull requests, merges, checkpoints, release
-candidates, and a nightly schedule. Local `cargo test` remains offline; Croft is
-an explicit external acceptance command rather than an implicit test download.
+candidates, and a nightly schedule. Before Checkpoint 4 it is staged to the
+capabilities Sprite already claims, while all known missing cases are reported
+explicitly. The complete Croft matrix becomes merge-blocking at Checkpoint 4,
+when Sprite first claims Kitty graphics and the required richer interactions.
+Local `cargo test` remains offline; Croft is an explicit external acceptance
+command rather than an implicit test download.
