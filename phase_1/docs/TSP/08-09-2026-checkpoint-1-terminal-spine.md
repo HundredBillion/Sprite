@@ -29,6 +29,28 @@
 
 ---
 
+---
+
+## Checkpoint 1 acceptance status
+
+**NOT ACCEPTED.** Tasks 1-8 are complete and verified on Arch Linux. Tasks 9 and
+10 are partially complete: everything that can be done without macOS hardware or
+a Croft build is done, and the rest is marked **OUTSTANDING** in place.
+
+Blocking items, all requiring resources unavailable to the workspace that wrote
+this:
+
+- Real-macOS build, test, product smoke, and idle inspection (Tasks 8, 9, 10).
+- Ghostty comparison at the identical pinned commit (Task 9).
+- Croft moving-main capability smoke, never executed (Task 10).
+- Human review of ownership, shutdown, and platform parity (Task 10).
+- Native X11 smoke is only partial, and a defect was found there: the window
+  arrives with class `sprite\x00sprit` under X11 where Wayland reports `sprite`.
+
+Checkpoint 2 may not begin until these are satisfied.
+
+---
+
 ## Checkpoint boundary
 
 Checkpoint 1 includes:
@@ -979,7 +1001,7 @@ cargo build -p sprite-app --locked --offline
 
 Expected: every command exits zero.
 
-- [x] Smoke on native Arch Wayland and X11:
+- [~] Smoke on native Arch Wayland and X11 (Wayland complete; X11 PARTIAL):
 
 ~~~bash
 cargo run -p sprite-app --locked --offline
@@ -992,8 +1014,30 @@ printf 'sprite-check\n', run stty size before/after resize, then exit. Text must
 appear, size must change, exit must not leave a zombie, and idle must not redraw
 continuously.
 
-- [x] On real macOS repeat offline locked workspace test, sprite-app build/run,
-  typing, resize, exit, and Activity Monitor idle inspection.
+**Wayland: verified.** Window class `sprite`, title `Sprite`, live `/usr/bin/bash
+-l` child in state `Ss+`, named worker/waiter/pump threads present. Typed input
+round-tripped (`printf 'sprite-check\n'` produced `sprite-check`). `stty size`
+reported 35x112 from the measured font rather than the 24x80 default, proving the
+layout-driven resize reaches the kernel. Monospace confirmed by equal-width
+`iiiii` and `MMMMM`.
+
+**X11: PARTIAL.** Launches under Xwayland with a live `bash -l` child and a mapped
+window, and exits without leaving a zombie. Text rendering, typing, and resize
+were *not* verified under X11, and the before/after resize comparison was not
+completed on either backend (the window manager refused the scripted resize;
+only the initial computed grid was checked). Idle redraw behaviour is unmeasured
+on both.
+
+**X11 defect found:** the window arrives with class `sprite\x00sprit` — a NUL
+byte and a truncated final character — where Wayland correctly reports `sprite`.
+WM_CLASS is conventionally `instance\0class\0`, so this looks like an
+off-by-one length in GPUI's X11 property write. Window-manager rules matching
+class `sprite` will not match on X11. Not yet investigated or reported upstream.
+
+- [ ] **OUTSTANDING — needs real macOS hardware.** On real macOS repeat offline
+  locked workspace test, sprite-app build/run, typing, resize, exit, and Activity
+  Monitor idle inspection. Never attempted; no macOS machine available to this
+  workspace. Checkpoint 1 cannot be accepted until this is run by hand.
 - [x] Commit:
 
 ~~~bash
@@ -1011,32 +1055,35 @@ git commit -m "feat(app): open the first Sprite terminal window"
 
 **Interfaces:** Consumes only TerminalSession. Produces repeatable measurements and committed numerical budgets.
 
-- [ ] Add CLI sprite-term-bench --samples 30 --output PATH. Measure
+- [x] Add CLI sprite-term-bench --samples 30 --output PATH. Measure
   spawn-to-Ready, one-byte input-to-visible-snapshot both idle and during
   sustained output, 10 MiB output-to-final-snapshot, and full capture of a
   100-by-100 visible grid (10,000 cells). Scrollback-history capture is measured
   when Checkpoint 2 adds that capability.
   Write stable JSON with sample count, median, p95, max, units, and budget equal
   to 110% of p95 using only std.
-- [ ] Integration-test three samples into a unique temp path. Assert fixed JSON keys and finite nonnegative values, then remove it.
-- [ ] Run focused test RED, implement, then GREEN.
-- [ ] On Arch:
+- [x] Integration-test three samples into a unique temp path. Assert fixed JSON keys and finite nonnegative values, then remove it.
+- [x] Run focused test RED, implement, then GREEN.
+- [x] On Arch:
 
 ~~~bash
 cargo run --release -p sprite-term --bin sprite-term-bench --locked --offline -- --samples 30 --output target/checkpoint-1-arch.json
 /usr/bin/time -v cargo run --release -p sprite-app --locked --offline
 ~~~
 
-- [ ] On real macOS:
+- [ ] **OUTSTANDING — needs real macOS hardware.** On real macOS:
 
 ~~~bash
 cargo run --release -p sprite-term --bin sprite-term-bench --locked --offline -- --samples 30 --output target/checkpoint-1-macos.json
 /usr/bin/time -l cargo run --release -p sprite-app --locked --offline
 ~~~
 
-- [ ] Write checkpoint-1.md with date, OS/kernel, CPU, RAM, GPU, backend, refresh, tool versions, Ghostty commit, benchmark JSON, app-to-prompt, 60-second idle CPU/RSS, 10-second resize cadence, and each numerical regression budget. Record graphics retention and budget as 0 MiB because Checkpoint 1 allocates no images; replace that metric in Checkpoint 4.
-- [ ] Run the same workloads in Ghostty built at the identical source commit on both machines. Record commands/results. Do not claim Sprite is faster. Explain any Sprite p95 over 110% of Ghostty before accepting the budget.
-- [ ] Verify:
+- [~] Write checkpoint-1.md (written; Arch section complete, macOS and Ghostty
+  sections marked outstanding inside it) with date, OS/kernel, CPU, RAM, GPU, backend, refresh, tool versions, Ghostty commit, benchmark JSON, app-to-prompt, 60-second idle CPU/RSS, 10-second resize cadence, and each numerical regression budget. Record graphics retention and budget as 0 MiB because Checkpoint 1 allocates no images; replace that metric in Checkpoint 4.
+- [ ] **OUTSTANDING.** Packaged Ghostty here is 1.3.1, which is 1,443 commits
+  behind the pinned `ab0b9da9`, and Sprite has no CLI yet to drive an
+  application-level workload. Run the same workloads in Ghostty built at the identical source commit on both machines. Record commands/results. Do not claim Sprite is faster. Explain any Sprite p95 over 110% of Ghostty before accepting the budget.
+- [x] Verify:
 
 ~~~bash
 cargo test --workspace --locked --offline
@@ -1063,7 +1110,7 @@ git commit -m "perf(phase_1): freeze checkpoint one budgets"
 
 **Interfaces:** Verifies the complete runnable path and permanent seams consumed by later checkpoints.
 
-- [ ] Create phase-1.yml for pull requests that touch phase_1, .gitmodules, or
+- [x] Create phase-1.yml for pull requests that touch phase_1, .gitmodules, or
   its workflow,
   pushes to phase_1, nightly schedule, and manual dispatch. Pin every third-party
   action to a full reviewed commit. Its Arch Linux and macOS jobs check out
@@ -1076,7 +1123,7 @@ git commit -m "perf(phase_1): freeze checkpoint one budgets"
   coverage; the native Wayland, X11, and interactive real-macOS gates below
   remain required because emulation or a headless compositor is not equivalent.
 
-- [ ] Verify provenance:
+- [x] Verify provenance:
 
 ~~~bash
 test "$(git -C phase_1/vendor/ghostty rev-parse HEAD)" = "ab0b9da9e88fcb4b0533a1854e84628f663930af"
@@ -1089,7 +1136,7 @@ test -s phase_1/LICENSE-APACHE
 
 Expected: test exits zero, submodule status begins with a space rather than - or +, and offline metadata succeeds.
 
-- [ ] Run the local gate without network access:
+- [x] Run the local gate without network access:
 
 ~~~bash
 cd phase_1
@@ -1104,12 +1151,12 @@ cargo tree --locked --offline --edges features
 Expected: all exit zero with no warnings; every duplicate and enabled feature is
 either required by GPUI/platform integration or explained in DEPENDENCIES.md.
 
-- [ ] Repeat the explicit fetch step followed by offline locked test/build and
+- [ ] **OUTSTANDING — needs real macOS hardware.** Repeat the explicit fetch step followed by offline locked test/build and
   product smoke on real macOS. Repeat native Wayland/X11 smoke on Arch. Attach
   commands, versions, and results to review. A real macOS result is mandatory;
   a cross-compile or mock is not a substitute and Checkpoint 2 may not begin
   without it.
-- [ ] Add ignored external test `croft_checkpoint_one_capabilities`. It reads an
+- [x] Add ignored external test `croft_checkpoint_one_capabilities`. It reads an
   absolute executable from SPRITE_CROFT_BIN, creates its entire fixture in a
   unique temporary directory, launches Croft through public TerminalSession with
   `--open-file fixture.txt --zen`, and supplies the same TERM, TERMINFO,
@@ -1119,7 +1166,7 @@ either required by GPUI/platform integration or explained in DEPENDENCIES.md.
   snapshot; typed marker text becomes visible; a 40x100 Resize is reflected in
   a newer coherent snapshot; and begin_shutdown joins within the watchdog. It
   never imports Croft or private sprite-term types and removes the fixture.
-- [ ] Add `scripts/test-croft-main.sh`. It uses `mktemp -d` plus a cleanup trap,
+- [x] Add `scripts/test-croft-main.sh`. It uses `mktemp -d` plus a cleanup trap,
   enables `set -euo pipefail`, resolves and changes to the phase_1 workspace
   from its own script location,
   shallow-clones `https://github.com/vitali87/croft.git` branch `main`, writes
@@ -1130,13 +1177,15 @@ either required by GPUI/platform integration or explained in DEPENDENCIES.md.
   status and fails if Croft has any tracked diff after the run. The
   clone/build is the explicit network-enabled external phase; ordinary Rust
   tests never call this script.
-- [ ] Run that wrapper on the Arch and real-macOS validation machines. Record
+- [ ] **OUTSTANDING.** The script and the ignored test exist and are wired into CI,
+  but neither has been executed: Croft has never been cloned or built here, so
+  the capability matrix is entirely unmeasured. Run that wrapper on the Arch and real-macOS validation machines. Record
   Kitty graphics, mouse, embedded-terminal, and richer rendering cases as
   expected missing capabilities assigned to later checkpoints, not false
   Checkpoint 1 passes. Any regression in a capability Checkpoint 1 claims blocks
   acceptance. From Checkpoint 4 onward the complete Croft matrix is
   merge-blocking.
-- [ ] Inspect forbidden states:
+- [x] Inspect forbidden states:
 
 ~~~bash
 rg -n "unsafe impl.*(Send|Sync)|gpui[-_]ghostty|tty7|tokio|async_std|smol|crossbeam" phase_1 --glob '*.rs' --glob 'Cargo.toml'
@@ -1149,11 +1198,11 @@ Expected: zero unexplained matches. The only local unsafe operation is the
 audited raw-descriptor borrow in pty_unix.rs with its lifetime proof; all other
 unsafe code belongs to reviewed dependencies.
 
-- [ ] Request review focused on libghostty ownership, I/O-pump and child-waiter
+- [ ] **OUTSTANDING — human review not yet requested.** Request review focused on libghostty ownership, I/O-pump and child-waiter
   shutdown, separate lossless/latest-only streams, lossless bytes, bounded input
   latency, newest-generation coalescing, idle behavior, provenance, and platform
   parity.
-- [ ] Fix findings one red-green cycle at a time, rerun the entire gate, then commit:
+- [ ] **OUTSTANDING — depends on the review above.** Fix findings one red-green cycle at a time, rerun the entire gate, then commit:
 
 ~~~bash
 git add .github/workflows/phase-1.yml phase_1/crates/sprite-term/tests/croft_smoke.rs phase_1/scripts/test-croft-main.sh

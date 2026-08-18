@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "sample_count": 30,
+  "metrics": {
+    "spawn_to_ready": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.629592,
+      "p95": 0.772403,
+      "max": 0.983353,
+      "budget": 0.849643
+    },
+    "input_to_snapshot_idle": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.113632,
+      "p95": 0.129126,
+      "max": 0.134563,
+      "budget": 0.142039
+    },
+    "input_to_snapshot_under_load": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 9.949043,
+      "p95": 13.001458,
+      "max": 13.837578,
+      "budget": 14.301604
+    },
+    "output_10mib_to_final_snapshot": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 1179.414971,
+      "p95": 1403.533682,
+      "max": 1584.289310,
+      "budget": 1543.887050
+    },
+    "capture_100x100_grid": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.033262,
+      "p95": 0.126022,
+      "max": 0.126781,
+      "budget": 0.138624
+    }
+  }
+}

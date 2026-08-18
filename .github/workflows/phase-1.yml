@@ -1,0 +1,211 @@
+name: phase-1
+
+# Hosted CI is compile and headless coverage only. The native Wayland, X11, and
+# interactive real-macOS gates in the TSP remain required: a headless
+# compositor or an emulated display is not equivalent to the real thing.
+
+on:
+  pull_request:
+    paths:
+      - "phase_1/**"
+      - ".gitmodules"
+      - ".github/workflows/phase-1.yml"
+  push:
+    branches: [phase_1]
+  schedule:
+    # Nightly, so a moving upstream is caught without waiting for a change here.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.97.1"
+  ZIG_VERSION: "0.16.0"
+  GHOSTTY_COMMIT: "ab0b9da9e88fcb4b0533a1854e84628f663930af"
+
+jobs:
+  arch:
+    name: arch linux
+    runs-on: ubuntu-latest
+    container:
+      # Pinned by digest: a moving tag would silently change the toolchain
+      # underneath a build whose whole point is reproducibility.
+      image: archlinux@sha256:714acd1eef9ae997d95691b1c5220ada0076185b77857c1813f02de0fa83cf7b
+    steps:
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed \
+            base-devel git curl ncurses \
+            "zig=${ZIG_VERSION}" \
+            wayland libxkbcommon libx11 libxcb libxkbcommon-x11 \
+            mesa vulkan-icd-loader vulkan-headers \
+            fontconfig freetype2 openssl alsa-lib
+          tic -V
+          zig version | grep -qx "${ZIG_VERSION}"
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+
+      - name: Verify the pinned Ghostty commit
+        run: |
+          set -euo pipefail
+          test "$(git -C phase_1/vendor/ghostty rev-parse HEAD)" = "${GHOSTTY_COMMIT}"
+
+      - name: Install the exact Rust toolchain
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+              --component clippy --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch dependencies (the only network-enabled build stage)
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
+          export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
+          # `--fetch=all` is required: plain `--fetch` leaves the lazily
+          # resolved packages (notably aro) unfetched, and the Cargo build
+          # script then reaches the network during the offline gate below.
+          (cd vendor/ghostty && zig build --fetch=all \
+            -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none)
+
+      - name: Generate terminfo from the pinned source
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
+          export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
+          mkdir -p target/terminfo
+          zig build-exe -lc -femit-bin=target/gen-terminfo \
+            --dep ghostty_terminfo \
+            -Mroot=scripts/gen-terminfo.zig \
+            -Mghostty_terminfo=vendor/ghostty/src/terminfo/ghostty.zig
+          ./target/gen-terminfo > target/ghostty.terminfo
+          tic -x -o target/terminfo target/ghostty.terminfo
+          infocmp -A target/terminfo xterm-ghostty > /dev/null
+
+      - name: Offline locked gate
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+          cargo test --workspace --locked --offline
+          cargo build --workspace --locked --offline
+          cargo tree --locked --offline --duplicates
+          cargo tree --locked --offline --edges features
+
+      - name: Forbidden states
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          ! grep -rnE "unsafe impl.*(Send|Sync)|gpui[-_]ghostty|tty7|tokio|async_std|smol|crossbeam" \
+            --include='*.rs' --include='Cargo.toml' crates
+          ! grep -rn "libghostty\|portable_pty" --include='*.rs' crates/sprite-app
+          ! grep -rnE "thread::sleep|Timer::after|request_animation_frame" \
+            --include='*.rs' crates/sprite-app
+
+  macos:
+    name: macos
+    runs-on: macos-latest
+    steps:
+      - name: Record the runner image
+        run: |
+          set -euo pipefail
+          sw_vers
+          echo "ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
+          uname -m
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+
+      - name: Verify the pinned Ghostty commit
+        run: test "$(git -C phase_1/vendor/ghostty rev-parse HEAD)" = "${GHOSTTY_COMMIT}"
+
+      - name: Install exact toolchains
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+              --component clippy --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # Homebrew's zig tracks latest; the exact version is asserted below
+          # rather than assumed.
+          brew install zig
+          zig version | grep -qx "${ZIG_VERSION}"
+
+      - name: Fetch dependencies (the only network-enabled build stage)
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
+          export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
+          (cd vendor/ghostty && zig build --fetch=all \
+            -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none)
+
+      - name: Generate terminfo from the pinned source
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
+          export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
+          mkdir -p target/terminfo
+          zig build-exe -lc -femit-bin=target/gen-terminfo \
+            --dep ghostty_terminfo \
+            -Mroot=scripts/gen-terminfo.zig \
+            -Mghostty_terminfo=vendor/ghostty/src/terminfo/ghostty.zig
+          ./target/gen-terminfo > target/ghostty.terminfo
+          tic -x -o target/terminfo target/ghostty.terminfo
+          infocmp -A target/terminfo xterm-ghostty > /dev/null
+
+      - name: Offline locked gate
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+          cargo test --workspace --locked --offline
+          cargo build --workspace --locked --offline
+
+  croft:
+    name: croft moving main
+    runs-on: ubuntu-latest
+    # Croft is an external acceptance application built from its own moving
+    # `main`, so this job is deliberately network-enabled and separate from the
+    # offline gate above.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+
+      - name: Install the exact Rust toolchain
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build Croft from main and run the capability smoke
+        run: ./phase_1/scripts/test-croft-main.sh
+
+      - name: Upload Croft evidence
+        # Uploaded even on failure: the resolved SHA is what makes a red run
+        # reproducible.
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: croft-main-evidence
+          path: |
+            phase_1/target/croft-main-commit.txt
+            phase_1/target/croft-main.log
+          if-no-files-found: warn
