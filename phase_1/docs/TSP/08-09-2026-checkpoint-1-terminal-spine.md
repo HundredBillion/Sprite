@@ -532,15 +532,15 @@ TerminalCommand is declared completely, but no public command is handled here;
 lifecycle remains exclusively behind begin_shutdown rather than exposing a
 second shutdown path.
 
-- [ ] Write one external-interface test: spawn /bin/sh with arguments -c and
+- [x] Write one external-interface test: spawn /bin/sh with arguments -c and
   exit 7, take EventStream once, await Ready, then Exited, and assert ChildExit
   has code Some(7), no signal, and requested false. tests/support/mod.rs moves the taken stream
   into a helper thread that calls next_blocking, returns the event through
   std::sync::mpsc, and uses recv_timeout for a five-second watchdog.
-- [ ] Add a launch-failure test for a nonexistent absolute executable. It must
+- [x] Add a launch-failure test for a nonexistent absolute executable. It must
   receive Error with operation spawn_child, never receive Ready, and terminate
   its worker cleanly.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cd phase_1
@@ -549,8 +549,8 @@ cargo test -p sprite-term --test lifecycle --locked --offline child_exit_is_repo
 
 Expected RED: unresolved Terminal Session types.
 
-- [ ] Add the exact public types above. Implement Display and Error for SessionError without a dependency.
-- [ ] Implement the worker queue with `std::sync::mpsc::sync_channel(17)` and
+- [x] Add the exact public types above. Implement Display and Error for SessionError without a dependency.
+- [x] Implement the worker queue with `std::sync::mpsc::sync_channel(17)` and
   lifecycle/latest-snapshot streams with async-channel capacities 32 and 1. The
   seventeenth worker slot is reserved for application/lifecycle work by the
   output-permit rule introduced in Task 3. The standard queue supplies
@@ -560,11 +560,11 @@ Expected RED: unresolved Terminal Session types.
   child, drops the parent slave, and sends Ready. Task 3 adds libghostty
   initialization and the I/O pump before Ready without changing the public
   lifecycle.
-- [ ] On the supported Unix targets, require both Child::process_id and
+- [x] On the supported Unix targets, require both Child::process_id and
   MasterPty::as_raw_fd immediately after spawn. A missing/invalid value emits a
   startup Error and cleans up rather than weakening process-group or pump
   cancellation guarantees.
-- [ ] Move the Child handle into one named waiter thread with a 256 KiB stack
+- [x] Move the Child handle into one named waiter thread with a 256 KiB stack
   and block in Child::wait. The waiter sends one
   private ChildExited message containing the owned status, so quiet exits are
   reaped without any timer and descendants holding the PTY open cannot hide the
@@ -573,14 +573,14 @@ Expected RED: unresolved Terminal Session types.
   otherwise set code to Some(`exit_code()`) and signal to None. The terminal
   owner keeps only the validated process/session IDs; it does not duplicate
   child ownership.
-- [ ] Share one `Arc<AtomicBool>` shutdown flag. The worker checks it after every
+- [x] Share one `Arc<AtomicBool>` shutdown flag. The worker checks it after every
   message and immediately before a blocking receive. begin_shutdown and Drop set
   it and `try_send(Shutdown)` only as a wake-up; `Full` is safe because the active
   worker will observe the flag, and `Disconnected` means it already ended.
   begin_shutdown takes the join handle once even when the queue is disconnected:
   the first call returns Some(handle), later calls return None. Reject new sends
   after the flag is set and map a worker panic to operation join_worker.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cargo test -p sprite-term --test lifecycle --locked --offline
@@ -588,7 +588,7 @@ cargo test -p sprite-term --test lifecycle --locked --offline
 
 Expected GREEN: the child exit test passes.
 
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add phase_1/crates/sprite-term/src phase_1/crates/sprite-term/tests
