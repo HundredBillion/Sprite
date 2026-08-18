@@ -452,6 +452,11 @@ impl TerminalSession {
                 ),
             ));
         }
+        // Validated at the seam, so neither the PTY nor libghostty is asked to
+        // allocate or mutate for a grid Sprite would refuse anyway.
+        if let TerminalCommand::Resize(size) = &command {
+            size.validate("resize")?;
+        }
         self.commands
             .send(worker::Message::Command(command))
             .map_err(|_| SessionError::new("send", "the terminal worker ended"))
@@ -480,5 +485,56 @@ impl Drop for TerminalSession {
     /// `begin_shutdown` and `ShutdownHandle::wait`.
     fn drop(&mut self) {
         self.request_shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn size(rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) -> TerminalSize {
+        TerminalSize {
+            rows,
+            cols,
+            cell_width_px,
+            cell_height_px,
+        }
+    }
+
+    #[test]
+    fn pixel_totals_multiply_in_u64_and_saturate_once() {
+        // Exactly u16::MAX still fits and must not be clamped early.
+        assert_eq!(size(1, u16::MAX, 1, 1).pixel_width(), u16::MAX);
+        assert_eq!(size(u16::MAX, 1, 1, 1).pixel_height(), u16::MAX);
+
+        // One past the boundary saturates, rather than wrapping as it would if
+        // the multiplication happened in u16.
+        assert_eq!(size(1, 65_535, 2, 1).pixel_width(), u16::MAX);
+        assert_eq!(size(65_535, 1, 1, 2).pixel_height(), u16::MAX);
+
+        // A product far beyond u16 still saturates rather than truncating.
+        assert_eq!(size(1, u16::MAX, u32::MAX, 1).pixel_width(), u16::MAX);
+    }
+
+    #[test]
+    fn degenerate_dimensions_are_rejected() {
+        assert!(size(0, 80, 8, 16).validate("test").is_err());
+        assert!(size(24, 0, 8, 16).validate("test").is_err());
+        assert!(size(24, 80, 0, 16).validate("test").is_err());
+        assert!(size(24, 80, 8, 0).validate("test").is_err());
+    }
+
+    #[test]
+    fn the_cell_limit_is_inclusive() {
+        // 1,000,000 cells exactly is the largest accepted grid.
+        assert!(size(1_000, 1_000, 8, 16).validate("test").is_ok());
+        assert!(size(1_000, 1_001, 8, 16).validate("test").is_err());
+    }
+
+    #[test]
+    fn the_default_size_is_valid() {
+        assert!(TerminalSize::DEFAULT.validate("test").is_ok());
+        assert_eq!(TerminalSize::DEFAULT.pixel_width(), 640);
+        assert_eq!(TerminalSize::DEFAULT.pixel_height(), 384);
     }
 }

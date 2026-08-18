@@ -100,7 +100,7 @@ pub(crate) fn run(
     };
     let write_error: PtyWriteError = Rc::new(RefCell::new(None));
 
-    let size = config.size;
+    let mut size = config.size;
     let mut terminal = match Terminal::new(TerminalOptions {
         cols: size.cols,
         rows: size.rows,
@@ -239,8 +239,24 @@ pub(crate) fn run(
                         }
                     }
                 }
-                // Task 5 handles resize.
-                TerminalCommand::Resize(_) => {}
+                TerminalCommand::Resize(requested) => {
+                    match apply_resize(master.as_ref(), &mut terminal, requested) {
+                        Ok(()) => {
+                            // Published only once both backends agree, so the
+                            // application never sees a size one of them refused.
+                            size = requested;
+                            generation += 1;
+                            dirty = true;
+                        }
+                        // The two external mutations cannot be rolled back
+                        // together, so an uncertain pair is never presented as
+                        // coherent: keep the last published size and close.
+                        Err(error) => {
+                            let _ = events.send_blocking(TerminalEvent::Error(error));
+                            break;
+                        }
+                    }
+                }
                 TerminalCommand::Capture => dirty = true,
             },
             Message::ChildExited(status) => {
@@ -443,6 +459,35 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             requested,
         },
     }
+}
+
+/// Applies one resize to both backends in a fixed order.
+///
+/// The kernel is told the total pixel size it reports to the child, while
+/// libghostty is given the per-cell metrics it uses for image protocols and
+/// size reports; the two are different numbers describing the same window.
+fn apply_resize(
+    master: &(dyn MasterPty + Send),
+    terminal: &mut Terminal<'_, '_>,
+    size: TerminalSize,
+) -> Result<(), SessionError> {
+    master
+        .resize(PtySize {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: size.pixel_width(),
+            pixel_height: size.pixel_height(),
+        })
+        .map_err(|error| SessionError::new("resize_pty", error))?;
+
+    terminal
+        .resize(
+            size.cols,
+            size.rows,
+            size.cell_width_px,
+            size.cell_height_px,
+        )
+        .map_err(|error| SessionError::new("resize_terminal", error))
 }
 
 /// One ordered write operation, flushed so the child sees it immediately.

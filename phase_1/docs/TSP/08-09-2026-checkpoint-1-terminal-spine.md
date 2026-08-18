@@ -774,19 +774,19 @@ git commit -m "feat(term): route ordered terminal input"
 
 **Interfaces:** Consumes Resize. Produces one snapshot at the new cell/pixel dimensions after both PTY and libghostty accept it.
 
-- [ ] Test u64 multiplication followed by u16 saturation at the exact boundary.
+- [x] Test u64 multiplication followed by u16 saturation at the exact boundary.
   Reject zero rows, columns, or cell dimensions and grids above 1,000,000 cells
   before either backend allocates or mutates. Test the exact 1,000,000-cell
   acceptance boundary and the first larger grid.
-- [ ] Spawn a shell that reports stty size after input. Resize to 40x100 cells at 9x18 pixels, send newline, and await both pane text 40 100 and the exact TerminalSize.
-- [ ] Run focused test and confirm RED.
-- [ ] Validate at the public seam. Call MasterPty::resize first with total
+- [x] Spawn a shell that reports stty size after input. Resize to 40x100 cells at 9x18 pixels, send newline, and await both pane text 40 100 and the exact TerminalSize.
+- [x] Run focused test and confirm RED.
+- [x] Validate at the public seam. Call MasterPty::resize first with total
   pixels, then Terminal::resize with per-cell pixels. Only after both succeed
   publish the new current size, increment generation, and capture. The two
   external mutations cannot be rolled back atomically: on either failure keep
   the prior *published* size, emit Error, and begin pane-local shutdown so an
   uncertain PTY/terminal pair is never presented as coherent.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cargo test -p sprite-term --test session_io --locked --offline resize_updates_pty_and_snapshot -- --exact
@@ -795,7 +795,7 @@ cargo test -p sprite-term --locked --offline
 
 Expected GREEN: PTY output and snapshot dimensions agree.
 
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add phase_1/crates/sprite-term/src/lib.rs phase_1/crates/sprite-term/src/worker.rs phase_1/crates/sprite-term/tests/session_io.rs

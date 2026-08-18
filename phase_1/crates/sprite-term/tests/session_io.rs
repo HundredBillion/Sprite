@@ -168,3 +168,86 @@ fn input_survives_sustained_output() {
     });
     assert!(pane_text(&bundle).contains("MARKER:ping"));
 }
+
+/// One resize reaches both backends: the kernel's window size (which the child
+/// reads with `stty size`) and the terminal grid the snapshot describes.
+#[test]
+fn resize_updates_pty_and_snapshot() {
+    let mut session = session("stty -echo; while read line; do stty size; done");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    let resized = sprite_term::TerminalSize {
+        rows: 40,
+        cols: 100,
+        cell_width_px: 9,
+        cell_height_px: 18,
+    };
+    session
+        .send(TerminalCommand::Resize(resized))
+        .expect("send resize");
+    session
+        .send(TerminalCommand::Input(b"\n".to_vec()))
+        .expect("ask the child for its size");
+
+    let bundle = snapshots.wait_for("the child's view of the new size", |bundle| {
+        pane_text(bundle).contains("40 100")
+    });
+
+    assert_eq!(
+        bundle.render.size, resized,
+        "the render projection reports the new size"
+    );
+    assert_eq!(
+        bundle.pane.size, resized,
+        "the pane projection reports the same size"
+    );
+    assert_eq!(bundle.render.rows.len(), 40, "the grid actually grew");
+}
+
+#[test]
+fn degenerate_and_oversized_resizes_are_refused() {
+    let mut session = session("sleep 30");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    events.expect_ready();
+
+    let base = sprite_term::TerminalSize::DEFAULT;
+
+    for (label, size) in [
+        ("zero rows", sprite_term::TerminalSize { rows: 0, ..base }),
+        (
+            "zero columns",
+            sprite_term::TerminalSize { cols: 0, ..base },
+        ),
+        (
+            "zero cell width",
+            sprite_term::TerminalSize {
+                cell_width_px: 0,
+                ..base
+            },
+        ),
+        (
+            "too many cells",
+            sprite_term::TerminalSize {
+                rows: 1000,
+                cols: 1001,
+                ..base
+            },
+        ),
+    ] {
+        let error = session
+            .send(TerminalCommand::Resize(size))
+            .expect_err(label);
+        assert_eq!(error.operation, "resize", "{label} is refused at the seam");
+    }
+
+    // The exact acceptance boundary is one million cells.
+    session
+        .send(TerminalCommand::Resize(sprite_term::TerminalSize {
+            rows: 1000,
+            cols: 1000,
+            ..base
+        }))
+        .expect("a one-million-cell grid is allowed");
+}
