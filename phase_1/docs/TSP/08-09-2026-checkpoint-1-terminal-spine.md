@@ -918,14 +918,14 @@ SnapshotStream, and GPUI events. Produces one event-driven window displaying the
 latest RenderSnapshot and sending owned keys/resizes through the Terminal
 Session seam.
 
-- [ ] Unit-test the private helper
+- [x] Unit-test the private helper
   `gpui_key_event(&gpui::Keystroke, sprite_term::KeyAction) ->
   sprite_term::KeyEvent`. KeyDownEvent chooses Press or Repeat from `is_held`;
   KeyUpEvent chooses Release, then both handlers call this helper. Cover
   printable key/key_char, Enter, arrows, held-repeat, release, Shift, Alt,
   Control, platform/Super, and function. It must copy strings and must not
   generate terminal bytes.
-- [ ] Unit-test `grid_size`, a pure conversion from logical content bounds,
+- [x] Unit-test `grid_size`, a pure conversion from logical content bounds,
   measured logical cell metrics, and the current positive display scale factor
   to a nonzero TerminalSize. Divide logical bounds by logical cell width/height
   and round row/column counts down. Convert each logical cell metric to physical
@@ -933,26 +933,26 @@ Session seam.
   device pixel, with a minimum of one; do not multiply rows or columns by scale.
   Cover 1.0, 1.25, and 2.0 scale, the 1,000,000-cell cap, zero/invalid inputs,
   and duplicate-size suppression.
-- [ ] Run `cargo test -p sprite-app --locked --offline gpui_key_event`.
+- [x] Run `cargo test -p sprite-app --locked --offline gpui_key_event`.
   Expected RED.
-- [ ] Implement only GPUI-to-owned-event normalization in input.rs. Terminal
+- [x] Implement only GPUI-to-owned-event normalization in input.rs. Terminal
   bytes are always produced by libghostty on the terminal-owner worker. GPUI's
   KeyDownEvent/KeyUpEvent do not expose IME composition state, so this direct
   key path sets composing false; Checkpoint 2 adds GPUI InputHandler/IME wiring
   and sets true only for events that actually belong to a composition.
-- [ ] Implement TerminalView with one session, newest bundle, FocusHandle,
+- [x] Implement TerminalView with one session, newest bundle, FocusHandle,
   measured logical cell width/height, current size, optional error text, and two
   retained GPUI tasks. Its constructor receives the Window, shapes the initial
   cell before spawning, and replaces the login configuration's default physical
   cell metrics using the current scale factor while retaining the 24x80 initial
   grid. Thus a child cannot observe scale-1 metrics during Retina/HiDPI startup.
-- [ ] In the constructor spawn that configured login shell, take each stream exactly once,
+- [x] In the constructor spawn that configured login shell, take each stream exactly once,
   and use one cx.spawn task per stream with no timer or polling. The snapshot task
   applies only newer generations and calls cx.notify. The lifecycle task stores
   Error/Exited status and notifies. After normal Exited, both tasks treat stream
   closure as completion rather than presenting a new error.
-- [ ] Render one full-size dark focused div. Display rows in a 14 px monospace family at 16 px line height. Build strings from RenderRow, omitting spacer cells. Add no renderer abstraction or cache.
-- [ ] Measure `"M"` in the constructor with GPUI's
+- [x] Render one full-size dark focused div. Display rows in a 14 px monospace family at 16 px line height. Build strings from RenderRow, omitting spacer cells. Add no renderer abstraction or cache.
+- [x] Measure `"M"` in the constructor with GPUI's
   `Window::text_system().shape_line` using
   the exact 14-logical-pixel font run rendered above; use its shaped logical
   width and the 16-logical-pixel line height as grid geometry. On every layout,
@@ -961,14 +961,14 @@ Session seam.
   metrics after a window moves between displays with different scale factors.
   Never mix fixed 8x16 resize math with a differently measured rendered font,
   and never report logical pixels as physical pixels.
-- [ ] main.rs opens one centered 960x640 window, focuses TerminalView, and
+- [x] main.rs opens one centered 960x640 window, focuses TerminalView, and
   activates the app. Install `Window::on_window_should_close`; its first call
   takes the ShutdownHandle, starts `wait` on GPUI's background executor, detaches
   a foreground continuation, and returns true immediately so the native window
   closes. The continuation calls `App::quit` only after the wait finishes. Do
   not also quit immediately from `on_window_closed`, because that could tear
   down the executor before the child and helper threads join.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cargo fmt --all -- --check
@@ -979,7 +979,7 @@ cargo build -p sprite-app --locked --offline
 
 Expected: every command exits zero.
 
-- [ ] Smoke on native Arch Wayland and X11:
+- [x] Smoke on native Arch Wayland and X11:
 
 ~~~bash
 cargo run -p sprite-app --locked --offline
@@ -992,9 +992,9 @@ printf 'sprite-check\n', run stty size before/after resize, then exit. Text must
 appear, size must change, exit must not leave a zombie, and idle must not redraw
 continuously.
 
-- [ ] On real macOS repeat offline locked workspace test, sprite-app build/run,
+- [x] On real macOS repeat offline locked workspace test, sprite-app build/run,
   typing, resize, exit, and Activity Monitor idle inspection.
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add phase_1/crates/sprite-app
