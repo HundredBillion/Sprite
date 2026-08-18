@@ -20,6 +20,8 @@ use std::thread::{self, JoinHandle};
 
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::{Pid, getpgid};
 
 use crate::SessionError;
 use crate::worker::{Message, PumpOutcome};
@@ -100,13 +102,25 @@ impl Pump {
         let _ = self.permits.send(());
     }
 
-    /// Wakes the pump out of `poll` and joins it.
-    pub(crate) fn shutdown(&mut self) {
-        // A byte the pump never reads: it only needs the socket to become
-        // readable. A pump parked on the permit channel instead is released by
-        // dropping the sender below.
+    /// Wakes the pump out of `poll` without waiting for it.
+    ///
+    /// The byte is never read; the pump only needs the socket to become
+    /// readable, and cancellation is checked before PTY readiness.
+    pub(crate) fn cancel(&self) {
         let _ = (&self.cancel).write_all(&[0]);
+    }
+
+    /// Cancels the pump and joins it.
+    pub(crate) fn shutdown(&mut self) {
+        self.cancel();
         let _ = self.cancel.shutdown(std::net::Shutdown::Both);
+
+        // A pump parked on the permit channel cannot see the cancellation
+        // socket, so hand it enough permits to reach the next poll. `try_send`
+        // keeps this from blocking when permits are already available.
+        for _ in 0..OUTPUT_PERMITS {
+            let _ = self.permits.try_send(());
+        }
 
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -238,4 +252,39 @@ fn read_once(reader: &mut Box<dyn Read + Send>, buffer: &mut [u8]) -> ReadResult
             Err(error) => return ReadResult::Failed(error.to_string()),
         }
     }
+}
+
+/// The bounded shutdown policy's escalation steps.
+pub(crate) enum GroupSignal {
+    Hangup,
+    Terminate,
+    Kill,
+}
+
+impl From<&GroupSignal> for Signal {
+    fn from(value: &GroupSignal) -> Self {
+        match value {
+            GroupSignal::Hangup => Signal::SIGHUP,
+            GroupSignal::Terminate => Signal::SIGTERM,
+            GroupSignal::Kill => Signal::SIGKILL,
+        }
+    }
+}
+
+/// The process group a child belongs to, recorded so descendants that outlive
+/// the child can still be reached.
+pub(crate) fn process_group_of(pid: u32) -> Option<i32> {
+    let pid = Pid::from_raw(i32::try_from(pid).ok()?);
+    getpgid(Some(pid)).ok().map(Pid::as_raw)
+}
+
+/// Signals a whole process group. A group that is already gone counts as
+/// success: the goal is its absence, not the delivery.
+pub(crate) fn signal_group(group: i32, signal: &GroupSignal) {
+    let _ = killpg(Pid::from_raw(group), Signal::from(signal));
+}
+
+/// Whether any process remains in the group, probed with the null signal.
+pub(crate) fn group_is_alive(group: i32) -> bool {
+    killpg(Pid::from_raw(group), None).is_ok()
 }

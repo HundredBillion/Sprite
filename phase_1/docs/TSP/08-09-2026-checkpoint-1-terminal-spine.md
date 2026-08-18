@@ -852,22 +852,22 @@ git commit -m "feat(term): launch an identified login shell"
 bounded HUP/TERM/KILL process-group policy, a canceled pump, a reaped child, and
 a joined owner worker.
 
-- [ ] Spawn a shell that prints its PID then execs sleep 60. Capture the PID,
+- [x] Spawn a shell that prints its PID then execs sleep 60. Capture the PID,
   begin shutdown twice, wait on the first returned handle, and verify /bin/kill
   -0 PID exits nonzero. The second call returns None.
-- [ ] Add a five-second test for dropping after a shutdown request.
-- [ ] Add a regression test whose shell starts a background descendant that
+- [x] Add a five-second test for dropping after a shutdown request.
+- [x] Add a regression test whose shell starts a background descendant that
   inherits the PTY and ignores HUP and TERM, prints the shell PID plus `$!`, and
   then exits. Assert cleanup reaches KILL, Exited arrives only afterward, the
   pump and waiter have joined, `/bin/kill -0` fails for the descendant, and the
   five-second watchdog does not time out even though PTY EOF alone would not
   have arrived.
-- [ ] Run and confirm RED.
-- [ ] Implement one explicit Running-to-Closing worker transition. Closing
+- [x] Run and confirm RED.
+- [x] Implement one explicit Running-to-Closing worker transition. Closing
   rejects application commands, drops libghostty and its PTY callback, writes
   the pump cancellation byte, and drains/discards already queued PtyOutput so a
   pump blocked on the bounded queue can send PumpStopped and return.
-- [ ] Record the Unix session/process-group ID at spawn. Immediately before
+- [x] Record the Unix session/process-group ID at spawn. Immediately before
   shutdown, also query MasterPty::process_group_leader for the current foreground
   group. Deduplicate and signal both known groups so an interactive foreground
   program and the original shell group receive the policy. On requested shutdown,
@@ -882,13 +882,13 @@ a joined owner worker.
   Use nix's safe process/signal API; platform calls remain private to
   pty_unix.rs. Checkpoint 2 adds foreground-process identification and the
   close-confirmation UI, not a replacement lifecycle.
-- [ ] Normal shutdown emits no Error. Exited occurs at most once. All helper
+- [x] Normal shutdown emits no Error. Exited occurs at most once. All helper
   threads and libghostty objects end before the terminal-owner worker returns.
   Publish Exited only after the pump and waiter are joined and the descendant
   cleanup policy has finished, then return from the worker. Exited sets
   requested true whenever the atomic shutdown flag caused the close, so its
   eventual signal is never presented as an unexpected child failure.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cargo test -p sprite-term --test lifecycle --locked --offline
@@ -897,7 +897,7 @@ cargo test -p sprite-term --locked --offline
 
 Expected GREEN without watchdog timeout.
 
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add phase_1/crates/sprite-term/src/pty_unix.rs phase_1/crates/sprite-term/src/worker.rs phase_1/crates/sprite-term/tests/lifecycle.rs

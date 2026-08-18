@@ -11,8 +11,10 @@ use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use libghostty_vt::Terminal;
 use libghostty_vt::key;
@@ -20,7 +22,8 @@ use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::terminal::Options as TerminalOptions;
 use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
-use crate::pty_unix::Pump;
+use crate::pty_unix;
+use crate::pty_unix::{GroupSignal, Pump};
 use crate::snapshot;
 use crate::{
     ChildExit, KeyAction, KeyEvent, KeyModifiers, SessionConfig, SessionError, SnapshotBundle,
@@ -37,6 +40,19 @@ type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
 
 /// Helper threads get a small explicit stack; they hold no terminal state.
 const HELPER_STACK_BYTES: usize = 256 * 1024;
+
+/// The bounded shutdown policy, measured from the start of Closing. HUP goes
+/// out immediately; a process group that ignores it gets TERM and then KILL.
+const TERM_AFTER: Duration = Duration::from_secs(2);
+const KILL_AFTER: Duration = Duration::from_secs(3);
+
+/// Cleanup stops waiting here even if a group somehow survives KILL, so a
+/// worker can never hang forever.
+const GIVE_UP_AFTER: Duration = Duration::from_secs(4);
+
+/// Short enough that escalation deadlines are re-checked promptly even under
+/// continuous output.
+const CLOSING_SLICE: Duration = Duration::from_millis(50);
 
 /// How the PTY pump stopped.
 pub(crate) enum PumpOutcome {
@@ -63,6 +79,10 @@ struct Started {
     master: Box<dyn MasterPty + Send>,
     master_fd: RawFd,
     reader: Box<dyn Read + Send>,
+    /// Recorded at spawn so descendants can still be reached after the child
+    /// itself is gone and its own process id means nothing.
+    process_group: Option<i32>,
+    waiter: JoinHandle<()>,
 }
 
 pub(crate) fn run(
@@ -87,6 +107,8 @@ pub(crate) fn run(
         master,
         master_fd,
         reader,
+        process_group,
+        waiter,
     } = started;
 
     // Declared before the terminal so they outlive the callback it holds.
@@ -175,8 +197,9 @@ pub(crate) fn run(
     let mut generation = 0_u64;
     // The child waiter and the PTY pump stop independently; the session closes
     // once both have been accounted for.
-    let mut child_reported = false;
+    let mut exit_status: Option<Result<ExitStatus, String>> = None;
     let mut pump_stopped = false;
+    let mut fatal: Option<SessionError> = None;
     let mut dirty = !publish(
         generation,
         size,
@@ -209,7 +232,7 @@ pub(crate) fn run(
                 // is collected here and ends this pane rather than silently
                 // dropping terminal answers.
                 if let Some(error) = write_error.borrow_mut().take() {
-                    let _ = events.send_blocking(TerminalEvent::Error(error));
+                    fatal = Some(error);
                     break;
                 }
             }
@@ -218,7 +241,7 @@ pub(crate) fn run(
                 TerminalCommand::Input(bytes) => {
                     // Trusted, already-encoded bytes: one command, one write.
                     if let Err(error) = write_all(&writer, &bytes) {
-                        let _ = events.send_blocking(TerminalEvent::Error(error));
+                        fatal = Some(error);
                         break;
                     }
                 }
@@ -226,7 +249,7 @@ pub(crate) fn run(
                     match encode_key(&mut encoder, &terminal, &event) {
                         Ok(bytes) => {
                             if let Err(error) = write_all(&writer, &bytes) {
-                                let _ = events.send_blocking(TerminalEvent::Error(error));
+                                fatal = Some(error);
                                 break;
                             }
                         }
@@ -252,7 +275,7 @@ pub(crate) fn run(
                         // together, so an uncertain pair is never presented as
                         // coherent: keep the last published size and close.
                         Err(error) => {
-                            let _ = events.send_blocking(TerminalEvent::Error(error));
+                            fatal = Some(error);
                             break;
                         }
                     }
@@ -260,32 +283,25 @@ pub(crate) fn run(
                 TerminalCommand::Capture => dirty = true,
             },
             Message::ChildExited(status) => {
-                // Reported straight away so a descendant holding the PTY open
-                // cannot hide the child's exit, but the loop keeps draining so
-                // output already in flight still reaches the application.
-                let requested = shutdown.load(Ordering::SeqCst);
-                let event = match status {
-                    Ok(status) => TerminalEvent::Exited(child_exit(&status, requested)),
-                    Err(error) => TerminalEvent::Error(SessionError::new("wait_child", error)),
-                };
-                child_reported = true;
-                if events.send_blocking(event).is_err() || pump_stopped {
+                // Recorded, not published: Exited is only sent once descendant
+                // cleanup has finished, so its signal is never presented as an
+                // unexpected failure.
+                exit_status = Some(status);
+                if pump_stopped {
                     break;
                 }
                 continue;
             }
             Message::PumpStopped(outcome) => {
                 if let PumpOutcome::ReadError(error) = outcome {
-                    let _ = events
-                        .send_blocking(TerminalEvent::Error(SessionError::new("pty_read", error)));
+                    fatal.get_or_insert_with(|| SessionError::new("pty_read", error));
                 }
                 pump_stopped = true;
-                // End of output usually means the child is already gone, and
-                // its waiter is about to say so. Closing the session here would
-                // race that report and swallow the exit status, so the loop
-                // stays open for it; shutdown and a dropped session still end
-                // it immediately.
-                if child_reported {
+                // End of output usually means the child is already gone and its
+                // waiter is about to say so. Closing here would race that report
+                // and swallow the exit status, so the loop stays open for it;
+                // shutdown and a dropped session still end it immediately.
+                if exit_status.is_some() {
                     break;
                 }
                 continue;
@@ -325,8 +341,124 @@ pub(crate) fn run(
         let _ = snapshots.force_send(Arc::new(bundle));
     }
 
+    // ---- Closing ----
+    //
+    // Every libghostty value goes first, which also removes the PTY-write
+    // callback: from here the terminal can neither be mutated nor generate a
+    // reply, and application commands are read only to be discarded.
+    drop(cells);
+    drop(rows);
+    drop(render_state);
+    drop(encoder);
+    drop(terminal);
+
+    // The pump may be parked on a PTY that a descendant keeps open forever, so
+    // it is woken now rather than waited on.
+    pump.cancel();
+
+    let groups = process_groups(master.as_ref(), process_group);
+    let closing_started = Instant::now();
+
+    // A hangup is the polite request every well-behaved program honours.
+    signal_groups(&groups, &GroupSignal::Hangup);
+    let mut escalation = 1_u8;
+
+    loop {
+        // Read the flag every pass: a session may be told to shut down after
+        // its child has already exited on its own.
+        let requested = shutdown.load(Ordering::SeqCst);
+        let elapsed = closing_started.elapsed();
+
+        // Checked before every receive, so continuous output cannot postpone
+        // escalation past its deadline.
+        if requested {
+            if elapsed >= KILL_AFTER && escalation < 3 {
+                signal_groups(&groups, &GroupSignal::Kill);
+                escalation = 3;
+            } else if elapsed >= TERM_AFTER && escalation < 2 {
+                signal_groups(&groups, &GroupSignal::Terminate);
+                escalation = 2;
+            }
+        }
+
+        let settled = exit_status.is_some() && pump_stopped;
+        // A requested shutdown is not finished while anything the pane started
+        // is still running; a natural exit only owes the single hangup above.
+        let descendants_gone = !requested || groups.iter().all(|group| !group_is_alive(*group));
+        if (settled && descendants_gone) || elapsed >= GIVE_UP_AFTER {
+            break;
+        }
+
+        match inbox.recv_timeout(CLOSING_SLICE) {
+            Ok(Message::ChildExited(status)) => exit_status = Some(status),
+            Ok(Message::PumpStopped(outcome)) => {
+                if let PumpOutcome::ReadError(error) = outcome {
+                    fatal.get_or_insert_with(|| SessionError::new("pty_read", error));
+                }
+                pump_stopped = true;
+            }
+            // Discarded, but the permit still goes back: a pump blocked on the
+            // bounded queue has to be able to reach its own stop report.
+            Ok(Message::PtyOutput(_)) => pump.return_permit(),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    // Both helpers have reported, so joining them cannot block.
     pump.shutdown();
+    if exit_status.is_some() {
+        let _ = waiter.join();
+    }
+
+    // Only now, with every helper thread finished and the descendant policy
+    // complete, does the application hear how the session ended.
+    if let Some(error) = fatal {
+        let _ = events.send_blocking(TerminalEvent::Error(error));
+    }
+    let requested = shutdown.load(Ordering::SeqCst);
+    match exit_status {
+        Some(Ok(status)) => {
+            let _ = events.send_blocking(TerminalEvent::Exited(child_exit(&status, requested)));
+        }
+        Some(Err(error)) => {
+            let _ =
+                events.send_blocking(TerminalEvent::Error(SessionError::new("wait_child", error)));
+        }
+        None => {}
+    }
+
+    drop(writer);
     drop(master);
+}
+
+/// The process groups descendant cleanup must reach.
+///
+/// The group recorded at spawn covers the shell and anything it started; the
+/// current foreground group covers an interactive program that moved itself
+/// into its own group since.
+fn process_groups(master: &(dyn MasterPty + Send), recorded: Option<i32>) -> Vec<i32> {
+    let mut groups = Vec::with_capacity(2);
+    if let Some(group) = recorded {
+        groups.push(group);
+    }
+    if let Some(foreground) = master.process_group_leader()
+        && !groups.contains(&foreground)
+    {
+        groups.push(foreground);
+    }
+    groups
+}
+
+fn signal_groups(groups: &[i32], signal: &GroupSignal) {
+    for group in groups {
+        pty_unix::signal_group(*group, signal);
+    }
+}
+
+fn group_is_alive(group: i32) -> bool {
+    pty_unix::group_is_alive(group)
 }
 
 /// Builds one coherent bundle and delivers it. Returns whether it was sent.
@@ -397,12 +529,16 @@ fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Start
     // Both identifiers must exist before the child is handed off: process-group
     // shutdown and pump cancellation depend on them, and discovering a missing
     // one later would mean weakening either guarantee.
-    if child.process_id().is_none() {
+    let Some(child_pid) = child.process_id() else {
         return Err(SessionError::new(
             "spawn_child",
             "the child reported no process id",
         ));
-    }
+    };
+    // Recorded now, while the child is certainly alive: once it exits, its
+    // process id no longer resolves to a group, and descendants that outlive it
+    // would become unreachable.
+    let process_group = pty_unix::process_group_of(child_pid);
     let Some(master_fd) = pair.master.as_raw_fd() else {
         return Err(SessionError::new(
             "open_pty",
@@ -419,12 +555,14 @@ fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Start
     // child's exit.
     drop(pair.slave);
 
-    spawn_child_waiter(child, commands.clone())?;
+    let waiter = spawn_child_waiter(child, commands.clone())?;
 
     Ok(Started {
         master: pair.master,
         master_fd,
         reader,
+        process_group,
+        waiter,
     })
 }
 
@@ -433,7 +571,7 @@ fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Start
 fn spawn_child_waiter(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     commands: SyncSender<Message>,
-) -> Result<(), SessionError> {
+) -> Result<JoinHandle<()>, SessionError> {
     thread::Builder::new()
         .name("sprite-term-child-waiter".to_owned())
         .stack_size(HELPER_STACK_BYTES)
@@ -441,7 +579,6 @@ fn spawn_child_waiter(
             let status = child.wait().map_err(|error| error.to_string());
             let _ = commands.send(Message::ChildExited(status));
         })
-        .map(|_| ())
         .map_err(|error| SessionError::new("spawn_child_waiter", error))
 }
 
