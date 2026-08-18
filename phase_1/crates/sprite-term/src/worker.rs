@@ -5,14 +5,17 @@
 //! report to it through the same ordered queue and never touch terminal state
 //! themselves.
 
-use std::io::Read;
+use std::cell::RefCell;
+use std::io::{Read, Write};
 use std::os::fd::RawFd;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread;
 
 use libghostty_vt::Terminal;
+use libghostty_vt::key;
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::terminal::Options as TerminalOptions;
 use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
@@ -20,9 +23,17 @@ use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_sy
 use crate::pty_unix::Pump;
 use crate::snapshot;
 use crate::{
-    ChildExit, SessionConfig, SessionError, SnapshotBundle, TerminalCommand, TerminalEvent,
-    TerminalSize,
+    ChildExit, KeyAction, KeyEvent, KeyModifiers, SessionConfig, SessionError, SnapshotBundle,
+    TerminalCommand, TerminalEvent, TerminalSize,
 };
+
+/// The one ordered PTY-write path. Worker-local: it never crosses a thread or
+/// the public interface, so no `Arc`, writer thread, or extra channel exists.
+type PtyWriter = Rc<RefCell<Box<dyn Write + Send>>>;
+
+/// The first failure from the terminal's own reply callback, which cannot
+/// return an error of its own.
+type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
 
 /// Helper threads get a small explicit stack; they hold no terminal state.
 const HELPER_STACK_BYTES: usize = 256 * 1024;
@@ -37,9 +48,7 @@ pub(crate) enum PumpOutcome {
 /// Messages the worker accepts. Application commands and helper-thread reports
 /// share one queue so their order is defined.
 pub(crate) enum Message {
-    /// Task 4 is the first to read the payload; Task 3 only proves it is
-    /// carried in order alongside helper-thread reports.
-    Command(#[allow(dead_code)] TerminalCommand),
+    Command(TerminalCommand),
     /// One chunk of PTY output, carrying one output permit.
     PtyOutput(Vec<u8>),
     /// The consumer took a snapshot and is ready for the next one.
@@ -80,6 +89,17 @@ pub(crate) fn run(
         reader,
     } = started;
 
+    // Declared before the terminal so they outlive the callback it holds.
+    let writer: PtyWriter = match master.take_writer() {
+        Ok(writer) => Rc::new(RefCell::new(writer)),
+        Err(error) => {
+            let _ =
+                events.send_blocking(TerminalEvent::Error(SessionError::new("pty_writer", error)));
+            return;
+        }
+    };
+    let write_error: PtyWriteError = Rc::new(RefCell::new(None));
+
     let size = config.size;
     let mut terminal = match Terminal::new(TerminalOptions {
         cols: size.cols,
@@ -90,6 +110,40 @@ pub(crate) fn run(
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
                 "create_terminal",
+                error,
+            )));
+            return;
+        }
+    };
+
+    // Terminal-generated replies (device status reports and the like) take the
+    // same ordered write path as keyboard input.
+    let registered = terminal.on_pty_write({
+        let writer = Rc::clone(&writer);
+        let write_error = Rc::clone(&write_error);
+        move |_terminal: &Terminal<'_, '_>, data: &[u8]| {
+            if let Err(error) = write_all(&writer, data) {
+                let mut slot = write_error.borrow_mut();
+                // Keep the first failure: later ones are consequences.
+                if slot.is_none() {
+                    *slot = Some(error);
+                }
+            }
+        }
+    });
+    if let Err(error) = registered {
+        let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
+            "on_pty_write",
+            error,
+        )));
+        return;
+    }
+
+    let mut encoder = match key::Encoder::new() {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
+                "create_key_encoder",
                 error,
             )));
             return;
@@ -119,6 +173,10 @@ pub(crate) fn run(
     // A silent long-running child must still give the application dimensions
     // and cursor state, so generation 0 is published before any output.
     let mut generation = 0_u64;
+    // The child waiter and the PTY pump stop independently; the session closes
+    // once both have been accounted for.
+    let mut child_reported = false;
+    let mut pump_stopped = false;
     let mut dirty = !publish(
         generation,
         size,
@@ -146,8 +204,45 @@ pub(crate) fn run(
                 generation += 1;
                 dirty = true;
                 pump.return_permit();
+
+                // The reply callback cannot fail loudly, so its first failure
+                // is collected here and ends this pane rather than silently
+                // dropping terminal answers.
+                if let Some(error) = write_error.borrow_mut().take() {
+                    let _ = events.send_blocking(TerminalEvent::Error(error));
+                    break;
+                }
             }
             Message::CaptureRequested => {}
+            Message::Command(command) => match command {
+                TerminalCommand::Input(bytes) => {
+                    // Trusted, already-encoded bytes: one command, one write.
+                    if let Err(error) = write_all(&writer, &bytes) {
+                        let _ = events.send_blocking(TerminalEvent::Error(error));
+                        break;
+                    }
+                }
+                TerminalCommand::Key(event) => {
+                    match encode_key(&mut encoder, &terminal, &event) {
+                        Ok(bytes) => {
+                            if let Err(error) = write_all(&writer, &bytes) {
+                                let _ = events.send_blocking(TerminalEvent::Error(error));
+                                break;
+                            }
+                        }
+                        // An unencodable key is reported but does not end the
+                        // session; the next keystroke may well work.
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Task 5 handles resize.
+                TerminalCommand::Resize(_) => {}
+                TerminalCommand::Capture => dirty = true,
+            },
             Message::ChildExited(status) => {
                 // Reported straight away so a descendant holding the PTY open
                 // cannot hide the child's exit, but the loop keeps draining so
@@ -157,7 +252,8 @@ pub(crate) fn run(
                     Ok(status) => TerminalEvent::Exited(child_exit(&status, requested)),
                     Err(error) => TerminalEvent::Error(SessionError::new("wait_child", error)),
                 };
-                if events.send_blocking(event).is_err() {
+                child_reported = true;
+                if events.send_blocking(event).is_err() || pump_stopped {
                     break;
                 }
                 continue;
@@ -167,11 +263,18 @@ pub(crate) fn run(
                     let _ = events
                         .send_blocking(TerminalEvent::Error(SessionError::new("pty_read", error)));
                 }
-                break;
+                pump_stopped = true;
+                // End of output usually means the child is already gone, and
+                // its waiter is about to say so. Closing the session here would
+                // race that report and swallow the exit status, so the loop
+                // stays open for it; shutdown and a dropped session still end
+                // it immediately.
+                if child_reported {
+                    break;
+                }
+                continue;
             }
             Message::Shutdown => break,
-            // Task 4 onward handle application commands here.
-            Message::Command(_) => {}
         }
 
         // Capture only against an empty slot: building a projection that a
@@ -339,5 +442,209 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             signal: None,
             requested,
         },
+    }
+}
+
+/// One ordered write operation, flushed so the child sees it immediately.
+fn write_all(writer: &PtyWriter, bytes: &[u8]) -> Result<(), SessionError> {
+    let mut writer = writer.borrow_mut();
+    writer
+        .write_all(bytes)
+        .map_err(|error| SessionError::new("pty_write", error))?;
+    writer
+        .flush()
+        .map_err(|error| SessionError::new("pty_write", error))
+}
+
+/// Encodes one owned platform-neutral key event against live terminal state.
+///
+/// Encoder options are refreshed immediately before every encode, so a mode
+/// the child changed a moment ago (cursor-application mode, Kitty flags) is
+/// already reflected.
+fn encode_key(
+    encoder: &mut key::Encoder<'_>,
+    terminal: &Terminal<'_, '_>,
+    event: &KeyEvent,
+) -> Result<Vec<u8>, SessionError> {
+    let mut encoded = key::Event::new().map_err(|error| SessionError::new("key_event", error))?;
+
+    encoded.set_key(logical_key(&event.logical_key));
+    encoded.set_mods(modifiers(&event.modifiers));
+    encoded.set_action(match event.action {
+        KeyAction::Press => key::Action::Press,
+        KeyAction::Repeat => key::Action::Repeat,
+        KeyAction::Release => key::Action::Release,
+    });
+    encoded.set_composing(event.composing);
+
+    // libghostty requires the text field to be free of control codepoints;
+    // named control and function keys carry their meaning in the key value.
+    if let Some(text) = &event.text
+        && is_encodable_text(text)
+    {
+        encoded.set_utf8(Some(text.clone()));
+    }
+
+    let mut characters = event.logical_key.chars();
+    if let (Some(single), None) = (characters.next(), characters.next()) {
+        encoded.set_unshifted_codepoint(single);
+    }
+
+    encoder.set_options_from_terminal(terminal);
+
+    let mut bytes = Vec::new();
+    encoder
+        .encode_to_vec(&encoded, &mut bytes)
+        .map_err(|error| SessionError::new("key_encode", error))?;
+    Ok(bytes)
+}
+
+/// GPUI's `function` modifier has no libghostty `Mods` bit, so it is preserved
+/// in the owned event but never invented as a terminal modifier.
+fn modifiers(value: &KeyModifiers) -> key::Mods {
+    let mut mods = key::Mods::empty();
+    mods.set(key::Mods::SHIFT, value.shift);
+    mods.set(key::Mods::ALT, value.alt);
+    mods.set(key::Mods::CTRL, value.control);
+    mods.set(key::Mods::SUPER, value.platform);
+    mods
+}
+
+fn is_encodable_text(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            // C0, DEL, and the macOS private-use function-key block.
+            .all(|character| !character.is_control() && !is_private_use(character))
+}
+
+fn is_private_use(character: char) -> bool {
+    ('\u{f700}'..='\u{f8ff}').contains(&character)
+}
+
+const LETTER_KEYS: [key::Key; 26] = [
+    key::Key::A,
+    key::Key::B,
+    key::Key::C,
+    key::Key::D,
+    key::Key::E,
+    key::Key::F,
+    key::Key::G,
+    key::Key::H,
+    key::Key::I,
+    key::Key::J,
+    key::Key::K,
+    key::Key::L,
+    key::Key::M,
+    key::Key::N,
+    key::Key::O,
+    key::Key::P,
+    key::Key::Q,
+    key::Key::R,
+    key::Key::S,
+    key::Key::T,
+    key::Key::U,
+    key::Key::V,
+    key::Key::W,
+    key::Key::X,
+    key::Key::Y,
+    key::Key::Z,
+];
+
+const DIGIT_KEYS: [key::Key; 10] = [
+    key::Key::Digit0,
+    key::Key::Digit1,
+    key::Key::Digit2,
+    key::Key::Digit3,
+    key::Key::Digit4,
+    key::Key::Digit5,
+    key::Key::Digit6,
+    key::Key::Digit7,
+    key::Key::Digit8,
+    key::Key::Digit9,
+];
+
+const FUNCTION_KEYS: [key::Key; 25] = [
+    key::Key::F1,
+    key::Key::F2,
+    key::Key::F3,
+    key::Key::F4,
+    key::Key::F5,
+    key::Key::F6,
+    key::Key::F7,
+    key::Key::F8,
+    key::Key::F9,
+    key::Key::F10,
+    key::Key::F11,
+    key::Key::F12,
+    key::Key::F13,
+    key::Key::F14,
+    key::Key::F15,
+    key::Key::F16,
+    key::Key::F17,
+    key::Key::F18,
+    key::Key::F19,
+    key::Key::F20,
+    key::Key::F21,
+    key::Key::F22,
+    key::Key::F23,
+    key::Key::F24,
+    key::Key::F25,
+];
+
+/// Maps an owned GPUI logical key name onto a libghostty key.
+///
+/// This table is extended in place as GPUI platform tests reveal more names; it
+/// is never replaced by an encoder living in the application.
+fn logical_key(name: &str) -> key::Key {
+    match name {
+        "enter" => key::Key::Enter,
+        "tab" => key::Key::Tab,
+        "space" => key::Key::Space,
+        "backspace" => key::Key::Backspace,
+        "delete" => key::Key::Delete,
+        "escape" => key::Key::Escape,
+        "up" => key::Key::ArrowUp,
+        "down" => key::Key::ArrowDown,
+        "left" => key::Key::ArrowLeft,
+        "right" => key::Key::ArrowRight,
+        "home" => key::Key::Home,
+        "end" => key::Key::End,
+        "pageup" => key::Key::PageUp,
+        "pagedown" => key::Key::PageDown,
+        "insert" => key::Key::Insert,
+        "-" => key::Key::Minus,
+        "=" => key::Key::Equal,
+        "[" => key::Key::BracketLeft,
+        "]" => key::Key::BracketRight,
+        "\\" => key::Key::Backslash,
+        ";" => key::Key::Semicolon,
+        "'" => key::Key::Quote,
+        "," => key::Key::Comma,
+        "." => key::Key::Period,
+        "/" => key::Key::Slash,
+        "`" => key::Key::Backquote,
+        other => function_or_character(other),
+    }
+}
+
+fn function_or_character(name: &str) -> key::Key {
+    if let Some(number) = name.strip_prefix('f')
+        && let Ok(index) = number.parse::<usize>()
+        && (1..=FUNCTION_KEYS.len()).contains(&index)
+    {
+        return FUNCTION_KEYS[index - 1];
+    }
+
+    let mut characters = name.chars();
+    let (Some(single), None) = (characters.next(), characters.next()) else {
+        // Unknown names still reach the terminal through their UTF-8 text.
+        return key::Key::Unidentified;
+    };
+
+    match single {
+        'a'..='z' => LETTER_KEYS[single as usize - 'a' as usize],
+        '0'..='9' => DIGIT_KEYS[single as usize - '0' as usize],
+        _ => key::Key::Unidentified,
     }
 }

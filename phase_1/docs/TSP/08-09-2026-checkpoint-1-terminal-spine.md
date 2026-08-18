@@ -700,16 +700,16 @@ git commit -m "feat(term): publish coherent Ghostty snapshots"
 **Interfaces:** Consumes Key events and raw Input bytes. Produces state-aware
 libghostty key encodings, ordered PTY writes, and terminal-generated PTY replies.
 
-- [ ] Test /bin/sh -c with a read followed by printf got:%s. Send the letters
+- [x] Test /bin/sh -c with a read followed by printf got:%s. Send the letters
   in sprite as Key events plus an Enter Key event and await got:sprite. Add a
   second assertion that ArrowUp differs between normal and cursor-application
   mode after the child changes that terminal mode.
-- [ ] Test a child that prints CSI 5 n, reads exactly four response bytes, and
+- [x] Test a child that prints CSI 5 n, reads exactly four response bytes, and
   pipes them through `/usr/bin/od -An -tx1`. Assert a final pane row contains
   `1b 5b 30 6e` (CSI 0 n). Do not print the raw reply for the assertion, because
   the terminal parser would correctly consume it as another control sequence.
-- [ ] Run both and confirm RED.
-- [ ] Keep the sole `MasterPty::take_writer` result on the terminal-owner worker
+- [x] Run both and confirm RED.
+- [x] Keep the sole `MasterPty::take_writer` result on the terminal-owner worker
   in worker-local `Rc<RefCell<Box<dyn Write + Send>>>`; it never crosses a
   thread or public interface. Before Ready, register `Terminal::on_pty_write`
   with a clone of that `Rc` and have the synchronous callback call `write_all`
@@ -719,7 +719,7 @@ libghostty key encodings, ordered PTY writes, and terminal-generated PTY replies
   handle that error by emitting one Error and beginning pane-local shutdown.
   Keyboard and trusted raw Input writes use the same writer, preserving one
   ordered PTY-write path without `Arc`, a writer thread, or another channel.
-- [ ] Create one libghostty key Encoder on the owner worker. Map owned logical
+- [x] Create one libghostty key Encoder on the owner worker. Map owned logical
   GPUI names `enter`, `tab`, `space`, `backspace`, `delete`, `escape`, `up`,
   `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `insert`, and
   `f1` through `f25` to their libghostty Key variants; map single ASCII
@@ -736,19 +736,19 @@ libghostty key encodings, ordered PTY writes, and terminal-generated PTY replies
   GPUI's resulting key name/text still determine the encoded key.
   This mapper is extended in place as GPUI platform tests reveal more key names;
   it is not replaced by an application encoder.
-- [ ] Handle raw Input with write_all and flush for trusted pre-encoded bytes
+- [x] Handle raw Input with write_all and flush for trusted pre-encoded bytes
   and deterministic byte-level tests. Reject payloads over 16 KiB before
   enqueueing; test that rejection leaves the live session usable. Each accepted
   Key or Input command is one ordered write operation. Do not route clipboard
   text through Input in Checkpoint 1; Checkpoint 2 adds state-aware Paste
   encoding and chunks it through this same limit.
-- [ ] Add a public-session stress test whose child produces sustained output in
+- [x] Add a public-session stress test whose child produces sustained output in
   one process while another reads input. Send a marker after output starts,
   stop the producer when the marker arrives, and assert the marker reaches a
   visible snapshot within the five-second watchdog with no lost output or input.
   This proves the 16-output-message/256-KiB permit bound prevents starvation;
   Task 9 gives the same path a numerical latency budget.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cargo test -p sprite-term --test session_io --locked --offline
@@ -757,7 +757,7 @@ cargo test -p sprite-term --locked --offline
 
 Expected GREEN: input, terminal reply, output, and lifecycle tests pass.
 
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add phase_1/crates/sprite-term/src/worker.rs phase_1/crates/sprite-term/tests/session_io.rs

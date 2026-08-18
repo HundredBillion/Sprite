@@ -33,6 +33,10 @@ const SNAPSHOT_CAPACITY: usize = 1;
 /// The largest grid Sprite will allocate, in cells.
 const MAX_CELLS: u64 = 1_000_000;
 
+/// The largest accepted raw `Input` payload. Checkpoint 2 chunks paste through
+/// this same limit rather than raising it.
+const MAX_INPUT_BYTES: usize = 16 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalSize {
     pub rows: u16,
@@ -433,6 +437,19 @@ impl TerminalSession {
             return Err(SessionError::new(
                 "send",
                 "the terminal session is shutting down",
+            ));
+        }
+        // Rejected before it reaches the queue, so an oversized payload never
+        // occupies a worker slot and never partially reaches the child.
+        if let TerminalCommand::Input(bytes) = &command
+            && bytes.len() > MAX_INPUT_BYTES
+        {
+            return Err(SessionError::new(
+                "send",
+                format!(
+                    "input of {} bytes exceeds the {MAX_INPUT_BYTES} byte limit",
+                    bytes.len()
+                ),
             ));
         }
         self.commands
