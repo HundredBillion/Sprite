@@ -608,13 +608,13 @@ git commit -m "feat(term): own PTY and child lifecycle"
 **Interfaces:** Consumes ordered PTY output. Produces the complete owned snapshot
 types through latest-only SnapshotStream, independently of lifecycle events.
 
-- [ ] Add a test that spawns /bin/sh and prints red ANSI text, the wide character 界, and e plus U+0301. Await a Pane Snapshot containing red wide:界 combining:é. Assert equal generations, a red styled render cell, Wide followed by SpacerTail, and no ANSI bytes in pane text.
-- [ ] Run the focused test. Expected RED: SnapshotStream yields no snapshot.
-- [ ] Create Terminal, RenderState, RowIterator, and CellIterator on the terminal-owner worker before Ready. Use SessionConfig dimensions and scrollback.
-- [ ] Immediately after Ready, publish one coherent blank generation-0 bundle
+- [x] Add a test that spawns /bin/sh and prints red ANSI text, the wide character 界, and e plus U+0301. Await a Pane Snapshot containing red wide:界 combining:é. Assert equal generations, a red styled render cell, Wide followed by SpacerTail, and no ANSI bytes in pane text.
+- [x] Run the focused test. Expected RED: SnapshotStream yields no snapshot.
+- [x] Create Terminal, RenderState, RowIterator, and CellIterator on the terminal-owner worker before Ready. Use SessionConfig dimensions and scrollback.
+- [x] Immediately after Ready, publish one coherent blank generation-0 bundle
   before processing PTY output. A silent long-running child must still provide
   dimensions and cursor state without a timer or synthetic mutation.
-- [ ] In pty_unix.rs, start one named PTY I/O-pump thread with a 256 KiB stack.
+- [x] In pty_unix.rs, start one named PTY I/O-pump thread with a 256 KiB stack.
   Give it the stable master raw descriptor and one end of a
   `UnixStream::pair`; the worker retains the master and the cancellation writer
   until after the pump joins. Create a standard-library synchronous permit
@@ -641,7 +641,7 @@ types through latest-only SnapshotStream, independently of lifecycle events.
   Error followed by close. Keep any raw-descriptor borrowing in this one audited Unix
   module, with a safety invariant proving the master outlives the pump and is
   not closed before join; never add unsafe Send/Sync and never touch libghostty.
-- [ ] Each output chunk calls Terminal::vt_write once and increments generation
+- [x] Each output chunk calls Terminal::vt_write once and increments generation
   once. Capture immediately only when the one-slot snapshot channel is empty;
   otherwise mark the worker snapshot-dirty without building an obsolete
   projection. After SnapshotStream returns a snapshot to its consumer, the
@@ -651,7 +651,7 @@ types through latest-only SnapshotStream, independently of lifecycle events.
   fits and wakes it. The worker then captures the newest dirty generation, if
   any. This coalesces both construction and delivery without ever blocking GPUI
   or using a timer.
-- [ ] Snapshot capture uses:
+- [x] Snapshot capture uses:
 
 ~~~rust
 fn capture(
@@ -664,16 +664,16 @@ fn capture(
 ) -> Result<SnapshotBundle, SessionError>;
 ~~~
 
-- [ ] Call `RenderState::update`, keep its returned borrowed Snapshot alive
+- [x] Call `RenderState::update`, keep its returned borrowed Snapshot alive
   while updating RowIterator and CellIterator, and copy all borrowed fields.
   Map Ghostty raw/style colors, underline, `Cell::wide`, `Row::is_wrapped`,
   cursor, active screen, dimensions, and defaults. Construct render and pane
   rows during one traversal but allocate independent owned fields.
-- [ ] After the complete owned bundle is built, set every visited row dirty flag
+- [x] After the complete owned bundle is built, set every visited row dirty flag
   to false and the borrowed render Snapshot to `Dirty::Clean`. Send into the one-slot
   snapshot channel; never place a snapshot in EventStream and never block the
   terminal owner on an obsolete projection.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cargo test -p sprite-term --test session_output --locked --offline
@@ -682,7 +682,7 @@ cargo test -p sprite-term --locked --offline
 
 Expected GREEN: projection and lifecycle tests pass.
 
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add phase_1/crates/sprite-term/src phase_1/crates/sprite-term/tests/session_output.rs

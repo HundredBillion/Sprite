@@ -5,6 +5,9 @@
 //! the Sprite application. No libghostty pointer, borrowed row or cell,
 //! allocator, iterator, or PTY handle appears in this crate's public interface.
 
+#[cfg(unix)]
+mod pty_unix;
+mod snapshot;
 mod worker;
 
 use std::ffi::OsString;
@@ -314,15 +317,30 @@ impl EventStream {
 /// The latest-only snapshot stream. Single-owner by construction.
 pub struct SnapshotStream {
     receiver: async_channel::Receiver<Arc<SnapshotBundle>>,
+    requests: SyncSender<worker::Message>,
 }
 
 impl SnapshotStream {
     pub async fn next(&mut self) -> Result<Arc<SnapshotBundle>, SessionError> {
-        self.receiver.recv().await.map_err(Self::ended)
+        let bundle = self.receiver.recv().await.map_err(Self::ended)?;
+        self.request_capture();
+        Ok(bundle)
     }
 
     pub fn next_blocking(&mut self) -> Result<Arc<SnapshotBundle>, SessionError> {
-        self.receiver.recv_blocking().map_err(Self::ended)
+        let bundle = self.receiver.recv_blocking().map_err(Self::ended)?;
+        self.request_capture();
+        Ok(bundle)
+    }
+
+    /// Tells the worker the slot is free again, without ever blocking the
+    /// consumer. A full queue already holds a mutation that will wake the
+    /// worker, and the worker rechecks for pending work after every message;
+    /// an idle worker has room for this request.
+    fn request_capture(&self) {
+        match self.requests.try_send(worker::Message::CaptureRequested) {
+            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+        }
     }
 
     fn ended(_: async_channel::RecvError) -> SessionError {
@@ -382,11 +400,13 @@ impl TerminalSession {
             })
             .map_err(|error| SessionError::new("spawn_worker", error))?;
 
+        let requests = commands.clone();
         Ok(Self {
             commands,
             events: Some(EventStream { receiver: event_rx }),
             snapshots: Some(SnapshotStream {
                 receiver: snapshot_rx,
+                requests,
             }),
             shutdown,
             worker: Some(worker),
