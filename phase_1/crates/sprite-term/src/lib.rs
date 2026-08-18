@@ -7,6 +7,7 @@
 
 #[cfg(unix)]
 mod pty_unix;
+mod shell;
 mod snapshot;
 mod worker;
 
@@ -118,6 +119,12 @@ impl SessionConfig {
             size: TerminalSize::DEFAULT,
             max_scrollback: 10_000,
         }
+    }
+
+    /// The user's login shell, in the current directory, carrying Sprite's
+    /// terminal identity.
+    pub fn login_shell() -> Result<Self, SessionError> {
+        shell::login_shell()
     }
 }
 

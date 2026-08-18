@@ -815,17 +815,17 @@ the bootstrapped local TERMINFO directory when available, TERM_PROGRAM=Sprite,
 TERM_PROGRAM_VERSION=0.1.0, and a PATH beginning with the running executable
 directory.
 
-- [ ] Table-test a private pure resolver accepting Option<&OsStr>. An absolute executable SHELL wins. Invalid SHELL falls back to /bin/zsh on macOS, /bin/bash on Linux, then /bin/sh. The result must be absolute and executable.
-- [ ] Test identity variables, `infocmp xterm-ghostty`, and the first PATH entry
+- [x] Table-test a private pure resolver accepting Option<&OsStr>. An absolute executable SHELL wins. Invalid SHELL falls back to /bin/zsh on macOS, /bin/bash on Linux, then /bin/sh. The result must be absolute and executable.
+- [x] Test identity variables, `infocmp xterm-ghostty`, and the first PATH entry
   through a real Terminal Session. Cargo supplies SPRITE_TERMINFO_DIR from the
   workspace config; SessionConfig sets the child's TERMINFO to that directory.
-- [ ] Run and confirm RED.
-- [ ] Implement login_shell with -l, current directory, TerminalSize::DEFAULT, and 10,000 scrollback lines. Do not inspect or modify dotfiles.
-- [ ] Apply Sprite identity after user environment entries. Prepend PATH with split_paths and join_paths, never a literal colon.
-- [ ] If SPRITE_TERMINFO_DIR names the bootstrapped directory, override any user
+- [x] Run and confirm RED.
+- [x] Implement login_shell with -l, current directory, TerminalSize::DEFAULT, and 10,000 scrollback lines. Do not inspect or modify dotfiles.
+- [x] Apply Sprite identity after user environment entries. Prepend PATH with split_paths and join_paths, never a literal colon.
+- [x] If SPRITE_TERMINFO_DIR names the bootstrapped directory, override any user
   TERMINFO for this child with that exact path. If it is absent, rely on the
   packaged/system terminfo search; Checkpoint 5 supplies the packaged path.
-- [ ] Run:
+- [x] Run:
 
 ~~~bash
 cargo test -p sprite-term --locked --offline
@@ -834,7 +834,7 @@ cargo clippy -p sprite-term --all-targets --locked --offline -- -D warnings
 
 Expected GREEN with no warnings.
 
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add phase_1/crates/sprite-term/src/lib.rs phase_1/crates/sprite-term/src/shell.rs phase_1/crates/sprite-term/tests/lifecycle.rs
