@@ -1,0 +1,19 @@
+[package]
+name = "sprite-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sprite"
+path = "src/main.rs"
+
+[dependencies]
+sprite-term = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { workspace = true }

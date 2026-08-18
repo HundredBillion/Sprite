@@ -1,0 +1,5 @@
+[env]
+GHOSTTY_SOURCE_DIR = { value = "vendor/ghostty", relative = true, force = true }
+SPRITE_TERMINFO_DIR = { value = "target/terminfo", relative = true, force = true }
+ZIG_GLOBAL_CACHE_DIR = { value = "target/zig-global-cache", relative = true, force = true }
+ZIG_LOCAL_CACHE_DIR = { value = "target/zig-local-cache", relative = true, force = true }

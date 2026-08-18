@@ -411,7 +411,7 @@ sprite-term is the deep module. worker.rs, snapshot.rs, and shell.rs are private
 bootstrap, and an offline locked verification contract. No product behavior is
 introduced.
 
-- [ ] Add the exact source submodule from the Sprite repository root:
+- [x] Add the exact source submodule from the Sprite repository root:
 
 ~~~bash
 git submodule add https://github.com/ghostty-org/ghostty.git phase_1/vendor/ghostty
@@ -421,7 +421,7 @@ git add .gitmodules phase_1/vendor/ghostty
 
 Expected: git -C phase_1/vendor/ghostty rev-parse HEAD prints exactly ab0b9da9e88fcb4b0533a1854e84628f663930af.
 
-- [ ] Create phase_1/Cargo.toml:
+- [x] Create phase_1/Cargo.toml:
 
 ~~~toml
 [workspace]
@@ -443,7 +443,7 @@ portable-pty = { version = "=0.9.0", default-features = false }
 sprite-term = { path = "crates/sprite-term" }
 ~~~
 
-- [ ] Create phase_1/.cargo/config.toml:
+- [x] Create phase_1/.cargo/config.toml:
 
 ~~~toml
 [env]
@@ -453,29 +453,38 @@ ZIG_GLOBAL_CACHE_DIR = { value = "target/zig-global-cache", relative = true, for
 ZIG_LOCAL_CACHE_DIR = { value = "target/zig-local-cache", relative = true, force = true }
 ~~~
 
-- [ ] Pin Rust 1.97.1 with minimal profile, clippy, and rustfmt. Add the unmodified standard MIT and Apache-2.0 texts. Give both crates workspace package metadata. In sprite-app's manifest, declare `[[bin]]` with `name = "sprite"` and `path = "src/main.rs"`; the shipped and development executable is never named `sprite-app`.
-- [ ] Add `/phase_1/target/` to the root .gitignore. Do not ignore Cargo.lock,
+- [x] Pin Rust 1.97.1 with minimal profile, clippy, and rustfmt. Add the unmodified standard MIT and Apache-2.0 texts. Give both crates workspace package metadata. In sprite-app's manifest, declare `[[bin]]` with `name = "sprite"` and `path = "src/main.rs"`; the shipped and development executable is never named `sprite-app`.
+- [x] Add `/phase_1/target/` to the root .gitignore. Do not ignore Cargo.lock,
   the Ghostty submodule entry, licenses, performance evidence, or docs.
-- [ ] Add async-channel, libghostty-vt, and portable-pty to sprite-term. On Unix,
+- [x] Add async-channel, libghostty-vt, and portable-pty to sprite-term. On Unix,
   declare exact nix 0.28.0 and directly request only poll/process/signal;
   portable-pty already resolves that package with term/fs, so Cargo's resolved
   union has all five features. This adds audited APIs/features rather than
   another package. Add sprite-term to sprite-app. Add target-specific GPUI
   dependencies: wayland and x11 features on Linux; no features on macOS.
-- [ ] Run zig version and require exactly 0.16.0 before the native check. Record
+- [x] Run zig version and require exactly 0.16.0 before the native check. Record
   Zig as a build tool in DEPENDENCIES.md, not a runtime dependency. Stop with an
   actionable prerequisite error if Zig is absent or is not exactly 0.16.0.
-- [ ] Run `tic -V` and require an extended-capability ncurses implementation.
+- [x] Run `tic -V` and require an extended-capability ncurses implementation.
   Record `tic` as a build/packaging tool, not a runtime dependency.
-- [ ] Expand DEPENDENCIES.md into full entries for all five direct external
+- [x] Expand DEPENDENCIES.md into full entries for all five direct external
   crates. Record capability, rejected std/existing option, direct and resolved
   features,
   license/source, and update policy. Explain that async-channel replaces an app
   polling loop or extra bridge thread, while the already-transitive nix package
   makes PTY reads cancelable and process-group shutdown bounded without an async
   runtime or detached thread.
-- [ ] Run one explicit network bootstrap, then prove that compilation no longer
-  needs the network:
+- [x] Run one explicit network bootstrap, then prove that compilation no longer
+  needs the network. Two corrections to the original plan, found while executing
+  it against the pinned commit: `zig build --fetch` alone does not resolve the
+  lazily-fetched packages the libghostty-vt build needs (notably `aro`), so the
+  Cargo build script would reach the network during an offline `cargo check`;
+  and `zig run src/main_build_data.zig` fails at this commit because that entry
+  point imports the `help_strings` module only Ghostty's own `build.zig`
+  constructs. `scripts/gen-terminfo.zig` imports the pinned
+  `src/terminfo/ghostty.zig` directly, which depends on nothing but `std` and
+  its sibling `Source.zig`. No Ghostty source is patched, so ADR 0003 review is
+  not triggered.
 
 ~~~bash
 cd phase_1
@@ -483,9 +492,13 @@ cargo generate-lockfile
 cargo fetch --locked
 export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
 export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
-(cd vendor/ghostty && zig build --fetch)
+(cd vendor/ghostty && zig build --fetch=all -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none)
 mkdir -p target/terminfo
-zig run -lc vendor/ghostty/src/main_build_data.zig -- +terminfo > target/ghostty.terminfo
+zig build-exe -lc -femit-bin=target/gen-terminfo \
+  --dep ghostty_terminfo \
+  -Mroot=scripts/gen-terminfo.zig \
+  -Mghostty_terminfo=vendor/ghostty/src/terminfo/ghostty.zig
+./target/gen-terminfo > target/ghostty.terminfo
 tic -x -o target/terminfo target/ghostty.terminfo
 infocmp -A target/terminfo xterm-ghostty >/dev/null
 cargo metadata --locked --offline --format-version 1 --no-deps
@@ -497,7 +510,7 @@ the lock/fetch commands are the only network-enabled steps, the terminfo check f
 the entry generated from the pinned Ghostty source, and the offline check ends
 with Finished. A clean CI job uses the same fetch-then-offline boundary.
 
-- [ ] Commit:
+- [x] Commit:
 
 ~~~bash
 git add .gitignore .gitmodules phase_1/.cargo phase_1/Cargo.toml phase_1/Cargo.lock phase_1/rust-toolchain.toml phase_1/crates/sprite-app phase_1/crates/sprite-term phase_1/DEPENDENCIES.md phase_1/LICENSE-APACHE phase_1/LICENSE-MIT phase_1/vendor/ghostty

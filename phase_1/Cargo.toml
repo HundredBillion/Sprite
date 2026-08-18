@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/sprite-app", "crates/sprite-term"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+async-channel = "=2.5.0"
+gpui = { version = "=0.2.2", default-features = false }
+libghostty-vt = { version = "=0.2.1", default-features = false }
+nix = { version = "=0.28.0", default-features = false, features = ["poll", "process", "signal"] }
+portable-pty = { version = "=0.9.0", default-features = false }
+sprite-term = { path = "crates/sprite-term" }

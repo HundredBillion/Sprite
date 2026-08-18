@@ -18,44 +18,152 @@ much maintained complexity the dependency removes from Sprite.
 
 ## Current direct dependencies
 
-None. Phase 1 currently contains design documentation and no Cargo workspace.
+Five direct external crates, all pinned to exact versions in
+`phase_1/Cargo.toml` and locked in `phase_1/Cargo.lock`.
 
-## Approved capability choices
+### `gpui` `=0.2.2`
 
-These decisions authorize a capability, not an unreviewed crate or feature set.
-They become full ledger entries when the workspace manifest is created.
+**Capability.** The cross-platform application shell: window and event loop,
+GPU-accelerated rendering, input, and the accessibility tree Sprite exposes in
+later checkpoints.
 
-- Official GPUI crate, initially exact version `=0.2.2`, for the cross-platform
-  application, rendering, input, and accessibility framework.
-- `async-channel`, initially exact version `=2.5.0`, for bounded lifecycle-event
-  and latest-snapshot delivery from Terminal Core to GPUI. It provides
-  lossless producer backpressure for lifecycle events and awaitable GUI
-  consumption without polling or an additional application bridge thread.
-  The internal ordered command/output queue uses the standard library's
-  `sync_channel` instead. GPUI already resolves `async-channel` transitively,
-  but Sprite declares and audits it because Sprite uses its interface directly.
-- Ghostty source pinned to compatibility commit
-  `ab0b9da9e88fcb4b0533a1854e84628f663930af` plus exact
-  `libghostty-vt =0.2.1` for terminal semantics. Ghostty v1.3.1 lacks the
-  terminal/render C interface used by that binding; Sprite returns to stable
-  tags when a compatible release passes qualification. `gpui-ghostty` and
-  `tty7` remain references only.
-- `portable-pty`, hidden behind the Terminal Core seam, for Linux/macOS PTY
-  portability.
-- `nix`, initially exact version `=0.28.0`, with Sprite directly requesting only
-  `poll`, `process`, and `signal` on Unix, for an interruptible PTY-read wait and
-  bounded process-group shutdown. `portable-pty` already resolves this package
-  and requests `term` and `fs`, so Cargo's actual resolved feature union is
-  `poll`, `process`, `signal`, `term`, and `fs`. Sprite's direct declaration
-  exposes the missing audited OS operations without adding another package, an
-  async runtime, periodic polling, or an unjoinable reader thread.
-- A maintained TOML parser for the user configuration contract.
-- An audited cross-platform filesystem watcher for transactional config reload.
-- JSON serialization support for the versioned Pane Snapshot contract.
+**Why not std.** The standard library has no windowing, GPU, input, or
+accessibility surface. The alternative is per-platform integration against
+Wayland, X11, and AppKit plus a renderer, which is the single largest block of
+correctness-hard code Sprite would otherwise own.
+
+**Features.** `default-features = false`, which drops `font-kit` and
+`windows-manifest`. Linux re-enables `wayland` and `x11`; each transitively
+enables `blade-graphics`, `blade-macros`, `blade-util`, `bytemuck`,
+`cosmic-text`, `font-kit`, `xkbcommon`, `open`, and its own protocol crates.
+macOS enables no features, so `font-kit` stays off there; Task 8 must confirm
+that the macOS backend loads a monospaced face without it and re-enable the
+feature in this ledger if it does not.
+
+**License and source.** Apache-2.0. <https://github.com/zed-industries/zed>.
+
+**Pin policy.** Exact `=0.2.2`. GPUI is pre-1.0 and publishes breaking changes
+between patch releases; updates require a deliberate review of window, input,
+and accessibility behavior on both platforms.
+
+### `libghostty-vt` `=0.2.1`
+
+**Capability.** Terminal semantics: VT parsing, screen and scrollback state,
+styling, and key encoding, matching Ghostty's own behavior.
+
+**Why not std.** A correct VT implementation is the highest-risk subsystem in a
+terminal. Reimplementing parsing, wide-character and grapheme handling, and
+mode/state machines against std alone would duplicate years of Ghostty work and
+guarantee divergence from the emulator Sprite is measured against.
+
+**Features.** `default-features = false`, which disables `kitty-graphics`.
+Checkpoint 1 allocates no images and records a 0 MiB graphics budget;
+Checkpoint 4 re-enables `kitty-graphics` and updates this entry. `log`,
+`tracing`, `png`, `allocator_api`, and `link-dynamic` stay off.
+
+**License and source.** MIT OR Apache-2.0.
+<https://github.com/uzaaft/libghostty-rs>.
+
+**Pin policy.** Exact `=0.2.1`, paired with the exact Ghostty source commit
+below. The pair moves together and only through ADR 0003 review.
+
+### `portable-pty` `=0.9.0`
+
+**Capability.** PTY allocation, child spawn, and window-size control across
+Linux and macOS, hidden behind the Terminal Core seam.
+
+**Why not std.** `std::process` cannot allocate a controlling terminal, so a
+shell launched through it never reaches interactive mode. The remaining option
+is direct `openpty`/`ioctl`/`setsid` work per platform.
+
+**Features.** `default-features = false`; the crate's only optional feature,
+`serde_support`, stays off.
+
+**License and source.** MIT. <https://github.com/wezterm/wezterm>.
+
+**Pin policy.** Exact `=0.9.0`. The public seam hides this crate, so a
+replacement is an internal change, but version moves still require the full PTY
+lifecycle and reaping suite.
+
+### `nix` `=0.28.0`
+
+**Capability.** An interruptible PTY-read wait (`poll` on the PTY plus a
+cancellation socket) and bounded process-group shutdown (`signal`, `process`).
+
+**Why not std.** `std` offers no way to wake a blocking read on another
+descriptor and no process-group signalling. Without it the PTY reader is
+unjoinable whenever a descendant holds the PTY open, and the only alternatives
+are periodic polling, a detached thread, or an async runtime — all rejected by
+ADR 0011 and the Phase 1 threading model.
+
+**Features.** Sprite directly declares `default-features = false` with `poll`,
+`process`, and `signal`, on Unix targets only. `portable-pty` already resolves
+this same package and requests `default`, `term`, and `fs`, so Cargo's resolved
+union is `default`, `fs`, `poll`, `process`, `signal`, and `term`. The direct
+declaration therefore adds audited OS operations rather than another package.
+
+**License and source.** MIT. <https://github.com/nix-rust/nix>.
+
+**Pin policy.** Exact `=0.28.0`, matching the version `portable-pty` already
+resolves so the tree holds one copy. Moving `nix` ahead of `portable-pty` would
+duplicate it and is not allowed without a ledger note.
+
+### `async-channel` `=2.5.0`
+
+**Capability.** Bounded lifecycle-event and latest-snapshot delivery from
+Terminal Core to GPUI: lossless producer backpressure for lifecycle events and
+awaitable consumption on the GUI side.
+
+**Why not std.** `std::sync::mpsc` cannot be awaited, so a GPUI consumer would
+need a polling loop or an extra bridge thread. Sprite keeps the ordered internal
+command/output queue on `std::sync::mpsc::sync_channel` and uses
+`async-channel` only at the GUI boundary, per ADR 0010.
+
+**Features.** Default features (`std`) only; `portable-atomic` stays off.
+
+**License and source.** Apache-2.0 OR MIT.
+<https://github.com/smol-rs/async-channel>.
+
+**Pin policy.** Exact `=2.5.0`. GPUI already resolves this version
+transitively, but Sprite declares and audits it because Sprite uses its
+interface directly.
+
+## Pinned source and build tools
+
+These are not runtime Rust dependencies.
+
+- **Ghostty source**, submodule `phase_1/vendor/ghostty` pinned to
+  `ab0b9da9e88fcb4b0533a1854e84628f663930af`. `libghostty-vt-sys 0.2.1` defaults
+  to a different commit (`a887df42c56f6de86c0fe6da9c4eeca37931e083`);
+  `.cargo/config.toml` forces `GHOSTTY_SOURCE_DIR` to the submodule so the pin
+  in this ledger is what actually compiles. Ghostty v1.3.1 lacks the
+  terminal/render C interface the binding uses; Sprite returns to stable tags
+  when a compatible release passes qualification. `gpui-ghostty` and `tty7`
+  remain references only.
+- **Zig 0.16.0**, exactly. Required by `libghostty-vt-sys`'s build script to
+  compile libghostty-vt, and by the terminfo generator. Not invoked by a running
+  Sprite terminal session.
+- **ncurses `tic`/`infocmp`** with extended-capability support (`tic -x`),
+  verified at 6.6. Build and packaging tools only. The bootstrap generates
+  `xterm-ghostty` terminfo from the exact pinned Ghostty source; neither tool is
+  invoked at runtime.
+- **Zig package pre-fetch.** `zig build --fetch=all -Demit-lib-vt=true
+  -Demit-xcframework=false -Dapp-runtime=none` inside the submodule populates
+  the Zig cache, including lazily-resolved packages such as `aro`. Plain
+  `zig build --fetch` does not, and the Cargo build script then attempts a
+  network fetch during an otherwise offline `cargo check`.
+
+## Duplicate versions
+
+`cargo tree --duplicates` reports 106 duplicated packages. Every one is reached
+only through GPUI's dependency tree — for example `async-channel 1.9.0` via
+`async-std`, alongside `async-channel 2.5.0` via `smol` and `zbus`. Sprite's own
+five direct dependencies contribute no duplicates, and Sprite declares
+`async-channel` at the version GPUI already resolves. These are accepted as
+GPUI/platform-integration duplicates rather than enumerated individually; a
+duplicate introduced by a Sprite direct dependency is a review finding and
+needs its own entry here.
 
 Croft, Neovim, tmux, Omarchy, AI providers, `gpui-ghostty`, and `tty7` are not
-runtime dependencies.
-
-Zig 0.16.0 and ncurses `tic`/`infocmp` are build tools. The bootstrap generates
-and compiles `xterm-ghostty` terminfo directly from the exact pinned Ghostty
-source; neither tool is invoked by a running Sprite terminal session.
+runtime dependencies. GPUI resolves `async-std`, `smol`, and `tokio`
+transitively; Sprite declares no async runtime and uses none directly.
