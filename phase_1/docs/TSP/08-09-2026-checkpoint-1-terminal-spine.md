@@ -44,8 +44,9 @@ this:
 - Ghostty comparison at the identical pinned commit (Task 9).
 - Croft moving-main capability smoke, never executed (Task 10).
 - Human review of ownership, shutdown, and platform parity (Task 10).
-- Native X11 smoke is only partial, and a defect was found there: the window
-  arrives with class `sprite\x00sprit` under X11 where Wayland reports `sprite`.
+- Native X11 smoke is only partial, and two upstream GPUI defects were found
+  there: an unterminated `WM_CLASS`, and `HasWindowHandle` being
+  `unimplemented!()`. Neither is fixable from Sprite; see Task 8 for detail.
 
 Checkpoint 2 may not begin until these are satisfied.
 
@@ -1028,11 +1029,41 @@ completed on either backend (the window manager refused the scripted resize;
 only the initial computed grid was checked). Idle redraw behaviour is unmeasured
 on both.
 
-**X11 defect found:** the window arrives with class `sprite\x00sprit` — a NUL
-byte and a truncated final character — where Wayland correctly reports `sprite`.
-WM_CLASS is conventionally `instance\0class\0`, so this looks like an
-off-by-one length in GPUI's X11 property write. Window-manager rules matching
-class `sprite` will not match on X11. Not yet investigated or reported upstream.
+**Two upstream GPUI 0.2.2 defects found on X11. Neither is fixable from
+Sprite; both need an upstream change.**
+
+1. *Unterminated `WM_CLASS`.* ICCCM requires two consecutive NUL-**terminated**
+   strings, `instance\0class\0`. `X11Window::set_app_id` writes the separator
+   but omits the final terminator:
+
+   ~~~rust
+   let mut data = Vec::with_capacity(app_id.len() * 2 + 1);
+   data.extend(app_id.bytes()); // instance
+   data.push(b'\0');
+   data.extend(app_id.bytes()); // class   <- no trailing NUL
+   ~~~
+
+   Lenient readers cope — `xprop` reports `"sprite", "sprite"` correctly — but
+   readers that trust the terminator drop the final byte. Hyprland/wlroots
+   therefore reports the class as `sprite\x00sprit`, and no window rule matching
+   `sprite` applies to a Sprite window under X11 or XWayland. Wayland is
+   unaffected: it sets the app id through the toplevel protocol. The upstream
+   fix is one line.
+
+2. *`HasWindowHandle` panics.* `impl rwh::HasWindowHandle for X11Window` is
+   `unimplemented!()` (`src/platform/linux/x11/window.rs:316`), as is
+   `HasDisplayHandle`. Any call panics the process. Wayland implements both.
+
+**A local workaround was attempted and reverted.** Reading the X11 window id
+through `raw-window-handle` to rewrite the property ourselves is the obvious
+fix, but defect 2 makes it impossible: the call panics before it can return an
+id, turning a cosmetic class problem into a hard crash on X11. The alternative —
+enumerating `_NET_CLIENT_LIST` and matching `_NET_WM_PID` — needs a retry loop
+because the window is not listed immediately, and `thread::sleep` in
+`sprite-app` is a forbidden state under Task 10. Both routes are closed, so
+Sprite carries no workaround and the defects stay recorded here.
+
+Neither has been reported upstream yet.
 
 - [ ] **OUTSTANDING — needs real macOS hardware.** On real macOS repeat offline
   locked workspace test, sprite-app build/run, typing, resize, exit, and Activity
