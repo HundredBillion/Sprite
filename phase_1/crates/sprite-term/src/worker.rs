@@ -142,6 +142,9 @@ pub(crate) fn run(
     // The callback runs inside the parser and must not block on a channel, so
     // accepted writes are collected here and drained after `vt_write`.
     let clipboard_pending: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    // Lifecycle notices raised from inside the parser. Same reason as the
+    // clipboard: a callback must not block on a channel.
+    let notices: Rc<RefCell<Vec<TerminalEvent>>> = Rc::new(RefCell::new(Vec::new()));
 
     let mut size = config.size;
     let mut terminal = match Terminal::new(TerminalOptions {
@@ -177,6 +180,59 @@ pub(crate) fn run(
     if let Err(error) = registered {
         let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
             "on_pty_write",
+            error,
+        )));
+        return;
+    }
+
+    let registered_bell = terminal.on_bell({
+        let notices = Rc::clone(&notices);
+        move |_terminal: &Terminal<'_, '_>| {
+            notices.borrow_mut().push(TerminalEvent::Bell);
+        }
+    });
+    if let Err(error) = registered_bell {
+        let _ = events.send_blocking(TerminalEvent::Error(SessionError::new("on_bell", error)));
+        return;
+    }
+
+    let registered_title = terminal.on_title_changed({
+        let notices = Rc::clone(&notices);
+        move |terminal: &Terminal<'_, '_>| {
+            let title = terminal
+                .title()
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            notices
+                .borrow_mut()
+                .push(TerminalEvent::TitleChanged(title));
+        }
+    });
+    if let Err(error) = registered_title {
+        let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
+            "on_title_changed",
+            error,
+        )));
+        return;
+    }
+
+    let registered_pwd = terminal.on_pwd_changed({
+        let notices = Rc::clone(&notices);
+        move |terminal: &Terminal<'_, '_>| {
+            let pwd = terminal
+                .pwd()
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            notices
+                .borrow_mut()
+                .push(TerminalEvent::WorkingDirectoryChanged(pwd));
+        }
+    });
+    if let Err(error) = registered_pwd {
+        let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
+            "on_pwd_changed",
             error,
         )));
         return;
@@ -305,6 +361,15 @@ pub(crate) fn run(
                 if let Some(error) = write_error.borrow_mut().take() {
                     fatal = Some(error);
                     break;
+                }
+
+                // Lifecycle notices raised during parsing are delivered here,
+                // outside the callback that cannot block.
+                let raised: Vec<TerminalEvent> = notices.borrow_mut().drain(..).collect();
+                for notice in raised {
+                    if events.send_blocking(notice).is_err() {
+                        break;
+                    }
                 }
 
                 // Accepted clipboard writes are delivered here rather than from

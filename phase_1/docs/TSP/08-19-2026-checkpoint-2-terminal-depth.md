@@ -249,16 +249,27 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** new `sprite-term/src/shell_integration.rs`, bundled scripts
 
-- [ ] Bundle versioned integration scripts for Bash, Zsh, and Fish and load them
-  into launched shells. Never edit or append to a user dotfile.
-- [ ] Parse OSC 133 prompt marks into typed events: prompt start, command start,
-  command end with exit status.
-- [ ] Report the working directory from integration or a pane-scoped OS process
-  query. Unavailable metadata stays unknown; never infer it from displayed text.
-- [ ] Add title, working directory, and prompt state to `PaneSnapshot` so
-  Checkpoint 3 can expose them without a second source of truth.
+- [~] Versioned scripts for Bash, Zsh, and Fish exist in
+  `crates/sprite-term/shell-integration/` and no user dotfile is touched. Only
+  the Bash script's syntax has been checked — zsh and fish are not installed
+  here, so those two are **unverified**.
+- [x] OSC 133 prompt marks are reported per row on `PaneRow::prompt`, rather
+  than as events. libghostty already tracks them per row, so an observer can
+  tell a prompt from its output without parsing text and without a second
+  source of truth. Command exit status is **not** yet surfaced.
+- [x] Working directory reported from OSC 7, and title from OSC 2, both as
+  snapshot fields and typed events. A pane-scoped OS process query as a fallback
+  is not implemented; without integration the value stays `None`.
+- [x] Unavailable metadata stays unknown. A test asserts that a shell which says
+  nothing yields no title, no directory, and no row claiming to be a prompt.
+- [x] Bell arrives as a typed event rather than a character to notice in text.
+- [ ] **Automatic loading is not implemented**, and deliberately so. Each shell
+  needs a different mechanism — zsh a generated `ZDOTDIR` that re-sources the
+  real one, fish a vendor conf directory, bash no clean interactive hook at all
+  — and getting any of them wrong leaves someone without their shell
+  configuration. Sprite exports `SPRITE_SHELL_INTEGRATION_DIR` and stops there.
 - [ ] Test with integration disabled, with an unsupported shell, and with a
-  deliberately broken script.
+  deliberately broken script. Only the "says nothing" case is covered so far.
 
 ### Task 9: Terminal lifecycle metadata
 

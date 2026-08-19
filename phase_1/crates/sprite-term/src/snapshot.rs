@@ -14,7 +14,7 @@ use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::style::{RgbColor, StyleColor, Underline};
 
 use crate::{
-    CellStyle, CellWidth, CursorSnapshot, PaneRow, PaneSnapshot, RenderCell, RenderRow,
+    CellStyle, CellWidth, CursorSnapshot, PaneRow, PaneSnapshot, PromptKind, RenderCell, RenderRow,
     RenderSnapshot, Rgb, ScreenKind, SessionError, SnapshotBundle, SnapshotColor, TerminalSize,
     UnderlineStyle, Viewport,
 };
@@ -48,6 +48,17 @@ pub(crate) fn capture<'vt>(
     let mouse_tracking = terminal
         .is_mouse_tracking()
         .map_err(vt("is_mouse_tracking"))?;
+    // Empty means the child never set one; that is unknown, not a title.
+    let title = terminal
+        .title()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let working_directory = terminal
+        .pwd()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let viewport = Viewport {
         total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),
         offset: usize::try_from(scrollbar.offset).unwrap_or(0),
@@ -69,6 +80,14 @@ pub(crate) fn capture<'vt>(
         while row_iteration.next().is_some() {
             let raw_row = row_iteration.raw_row().map_err(vt("raw_row"))?;
             let wrapped = raw_row.is_wrapped().map_err(vt("row_is_wrapped"))?;
+            let prompt = match raw_row
+                .semantic_prompt()
+                .map_err(vt("row_semantic_prompt"))?
+            {
+                libghostty_vt::screen::RowSemanticPrompt::None => PromptKind::None,
+                libghostty_vt::screen::RowSemanticPrompt::Prompt => PromptKind::Prompt,
+                libghostty_vt::screen::RowSemanticPrompt::Continuation => PromptKind::Continuation,
+            };
 
             let mut row_cells: Vec<RenderCell> = Vec::with_capacity(usize::from(size.cols));
             let mut row_text = String::with_capacity(usize::from(size.cols));
@@ -146,6 +165,7 @@ pub(crate) fn capture<'vt>(
             pane_rows.push(PaneRow {
                 text: row_text,
                 wrapped,
+                prompt,
             });
         }
     }
@@ -173,6 +193,8 @@ pub(crate) fn capture<'vt>(
             screen,
             rows: pane_rows,
             cursor,
+            title,
+            working_directory,
         }),
     })
 }

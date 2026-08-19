@@ -20,6 +20,12 @@ const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Where the bootstrap writes the compiled terminfo database.
 const TERMINFO_DIR_VAR: &str = "SPRITE_TERMINFO_DIR";
 
+/// Where Sprite's shell-integration scripts live, if they have been installed.
+///
+/// Exported to children so a shell can source the matching script. Sprite does
+/// not yet inject it automatically — see `integration_directory`.
+const INTEGRATION_DIR_VAR: &str = "SPRITE_SHELL_INTEGRATION_DIR";
+
 /// Tried in order when `SHELL` is unusable.
 #[cfg(target_os = "macos")]
 const FALLBACK_SHELLS: [&str; 2] = ["/bin/zsh", "/bin/sh"];
@@ -97,6 +103,19 @@ fn identity_environment() -> Vec<(OsString, OsString)> {
         entries.push((OsString::from("TERMINFO"), directory.into_os_string()));
     }
 
+    // Advertised, not injected. Automatic loading differs per shell and each
+    // mechanism can break a user's configuration if it is wrong: zsh needs a
+    // generated ZDOTDIR that re-sources the real one, bash has no clean
+    // interactive hook at all, and getting either wrong leaves someone without
+    // their shell. Sprite exports the location and leaves the last step to a
+    // deliberate, per-shell implementation.
+    if let Some(directory) = integration_directory() {
+        entries.push((
+            OsString::from(INTEGRATION_DIR_VAR),
+            directory.into_os_string(),
+        ));
+    }
+
     if let Some(path) = executable_directory()
         .and_then(|directory| prepend_path(&directory, env::var_os("PATH").as_deref()))
     {
@@ -104,6 +123,12 @@ fn identity_environment() -> Vec<(OsString, OsString)> {
     }
 
     entries
+}
+
+/// The installed shell-integration directory, if one is configured and present.
+fn integration_directory() -> Option<PathBuf> {
+    let directory = PathBuf::from(env::var_os(INTEGRATION_DIR_VAR)?);
+    directory.is_dir().then_some(directory)
 }
 
 fn bootstrapped_terminfo() -> Option<PathBuf> {

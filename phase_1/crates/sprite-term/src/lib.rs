@@ -407,10 +407,23 @@ pub struct RenderSnapshot {
     pub default_background: Rgb,
 }
 
+/// Whether a row is part of a shell prompt, as reported by OSC 133.
+///
+/// This is what lets an observer tell a prompt from its output without parsing
+/// the text. A shell that emits no marks leaves every row `None`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PromptKind {
+    #[default]
+    None,
+    Prompt,
+    Continuation,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaneRow {
     pub text: String,
     pub wrapped: bool,
+    pub prompt: PromptKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -421,6 +434,13 @@ pub struct PaneSnapshot {
     pub screen: ScreenKind,
     pub rows: Vec<PaneRow>,
     pub cursor: CursorSnapshot,
+    /// The title the child set, if it set one.
+    ///
+    /// `None` means unknown, never a guess: Sprite does not infer a title from
+    /// whatever happens to be on screen.
+    pub title: Option<String>,
+    /// The working directory the child reported through OSC 7, if any.
+    pub working_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -444,6 +464,12 @@ pub enum TerminalEvent {
     /// The text of the current selection, in answer to `CopySelection`. Empty
     /// when nothing is selected.
     SelectionCopied(String),
+    /// The child rang the bell.
+    Bell,
+    /// The child set a new title.
+    TitleChanged(Option<String>),
+    /// The child reported a new working directory.
+    WorkingDirectoryChanged(Option<String>),
     /// A child asked to put text on the clipboard and policy allowed it.
     ///
     /// Only delivered for a write the secure defaults accepted; a denied write

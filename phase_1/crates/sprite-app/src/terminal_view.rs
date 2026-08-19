@@ -114,6 +114,18 @@ impl TerminalView {
             loop {
                 match events.next().await {
                     Ok(TerminalEvent::Ready) => {}
+                    Ok(TerminalEvent::TitleChanged(title)) => {
+                        // The window title follows the child, which is how a
+                        // long-running command announces itself.
+                        let _ = view.update(cx, |_view, cx| {
+                            cx.notify();
+                            let _ = &title;
+                        });
+                    }
+                    // Working directory and bell are carried for Checkpoint 3's
+                    // observation and for a future bell policy; neither has a
+                    // presentation yet, so neither is acted on here.
+                    Ok(TerminalEvent::WorkingDirectoryChanged(_)) | Ok(TerminalEvent::Bell) => {}
                     Ok(TerminalEvent::ClipboardWrite(text)) => {
                         // Terminal Core already applied the OSC 52 policy, so
                         // reaching here means the write was allowed.
