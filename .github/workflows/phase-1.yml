@@ -91,20 +91,34 @@ jobs:
           tic -x -o target/terminfo target/ghostty.terminfo
           infocmp -A target/terminfo xterm-ghostty > /dev/null
 
-      # Diagnostic: the identity test's `infocmp xterm-ghostty` fails in this
-      # container while the workflow's own `infocmp -A` succeeds, so the
-      # difference is how TERMINFO is resolved rather than the database itself.
+      # This container runs as root, and ncurses built with
+      # --disable-root-environ ignores $TERMINFO for privileged processes. That
+      # is why the identity test's `infocmp xterm-ghostty` fails here while
+      # `infocmp -A <dir>` on the same database succeeds. The step below proves
+      # it by repeating the lookup as an unprivileged user.
       - name: Diagnose terminfo resolution
         working-directory: phase_1
         continue-on-error: true
         run: |
           set -x
-          infocmp -V
-          ls -R target/terminfo | head -20
+          id -u
           TERMINFO="$PWD/target/terminfo" infocmp xterm-ghostty > /dev/null \
-            && echo "TERMINFO env: OK" || echo "TERMINFO env: FAILED"
-          infocmp -A "$PWD/target/terminfo" xterm-ghostty > /dev/null \
-            && echo "-A flag: OK" || echo "-A flag: FAILED"
+            && echo "root + TERMINFO env: OK" || echo "root + TERMINFO env: FAILED"
+          chmod -R a+rX "$PWD/target/terminfo"
+          setpriv --reuid=65534 --regid=65534 --clear-groups \
+            env TERMINFO="$PWD/target/terminfo" infocmp xterm-ghostty > /dev/null \
+            && echo "nonroot + TERMINFO env: OK" || echo "nonroot + TERMINFO env: FAILED"
+
+      # Sprite sets TERMINFO for its children, which is correct and works for
+      # ordinary users. It cannot work for a root process, so the container gets
+      # the same generated entry installed system-wide instead. The entry is
+      # still the one built from the pinned Ghostty source.
+      - name: Install the generated terminfo system-wide (root container only)
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          tic -x target/ghostty.terminfo
+          infocmp xterm-ghostty > /dev/null
 
       - name: Offline locked gate
         working-directory: phase_1
