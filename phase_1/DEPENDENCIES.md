@@ -24,8 +24,14 @@ Five direct external crates, all pinned to exact versions in
 ### `gpui` `=0.2.2`
 
 **Capability.** The cross-platform application shell: window and event loop,
-GPU-accelerated rendering, input, and the accessibility tree Sprite exposes in
-later checkpoints.
+GPU-accelerated rendering, and input.
+
+**Not provided.** GPUI 0.2.2 has no accessibility surface at all — no AccessKit,
+no AT-SPI, no NSAccessibility, no public API. An earlier version of this entry
+claimed it supplied "the accessibility tree Sprite exposes in later
+checkpoints"; that was copied from the PRD and never verified, and it is wrong.
+Upstream `main` has since added AccessKit integration, so this is a gap in the
+pinned release rather than in the framework. See ADR 0012.
 
 **Why not std.** The standard library has no windowing, GPU, input, or
 accessibility surface. The alternative is per-platform integration against

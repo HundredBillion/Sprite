@@ -487,10 +487,18 @@ restarts the affected soak or daily-use gate.
   the current viewport.
 - Font or DPI changes rebuild layout and caches, send updated pixel/cell sizes to
   the terminal, and preserve the PTY and pane tree.
-- Sprite maps owned terminal snapshots into GPUI's platform accessibility tree.
-  It exposes tab/pane labels, focus, the focused Pane's visible text, cursor and
+- Sprite maps owned terminal snapshots into a platform accessibility tree,
+  exposing tab/pane labels, focus, the focused Pane's visible text, cursor and
   selection state, and announcements for bells, process exits, and important
   errors; Pane Observation is not an accessibility substitute.
+- **Blocked, and previously misstated.** This decision assumed GPUI supplied
+  that accessibility tree. The pinned GPUI `=0.2.2` provides no accessibility
+  surface whatsoever. Upstream `main` has added AccessKit integration, but it is
+  unpublished, and `0.2.2` has been the latest release for roughly ten months.
+  Story 62 therefore cannot be delivered on the pinned version by any means
+  short of building an accessibility backend from scratch. It is deferred until
+  a GPUI release ships accessibility; see ADR 0012 for the decision and its
+  revisit criteria.
 - Accessibility updates are damage/event driven and coalesced so high-volume
   terminal output does not flood assistive technology.
 - Sprite prefers GPUI hardware rendering. When GPUI can launch through its
