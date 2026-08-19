@@ -1066,6 +1066,33 @@ Sprite carries no workaround and the defects stay recorded here.
 
 Neither has been reported upstream yet.
 
+**Observed rendering limitation, confirmed against a real application.**
+Croft running inside Sprite renders correctly but with visibly uneven spacing.
+The cause is architectural and intended for Checkpoint 1: the view joins each
+row's cells into one string and hands it to GPUI as ordinary text
+(`.children(rows.into_iter().map(|row| div().child(row)))`), so GPUI lays the
+string out with its own text engine and gives every glyph its **natural advance
+width** rather than the cell width.
+
+Plain ASCII is unaffected, which is why a shell prompt looks correct. Croft's
+interface is full of box-drawing characters and Nerd Font glyphs (`⑂`, `⊗`, `⚠`,
+its `cr◇ft` logo); each one whose advance differs from the measured cell shifts
+everything after it on that row. Two lesser contributors: a wide character's
+`SpacerTail` is dropped, so a row can hold fewer characters than it has columns;
+and `row_text` calls `trim_end`, so a row's background cannot paint to the right
+edge.
+
+This is what the checkpoint boundary means by not claiming "the text shaping
+… assigned to later checkpoints", and what this task means by "add no renderer
+abstraction or cache". It is recorded here as a concrete case for Checkpoint 2's
+renderer to design against, not as a Checkpoint 1 defect.
+
+Checkpoint 2's renderer must therefore position each cell on the grid rather
+than flowing text: paint per cell at computed coordinates with its own
+foreground, background, and style; give a `Wide` cell exactly two columns and
+draw nothing for its `SpacerTail`; and stop trimming trailing blanks so row
+backgrounds reach the edge.
+
 - [ ] **OUTSTANDING — needs real macOS hardware.** On real macOS repeat offline
   locked workspace test, sprite-app build/run, typing, resize, exit, and Activity
   Monitor idle inspection. Never attempted; no macOS machine available to this
