@@ -200,6 +200,38 @@ pub enum SelectionMode {
     Line,
 }
 
+/// Which mouse button an event carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+/// What the mouse did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseAction {
+    Press,
+    Release,
+    Motion,
+}
+
+/// One owned, platform-neutral mouse event.
+///
+/// Position is in visible cells, not pixels: the application already knows its
+/// own cell geometry, and keeping the seam in cells means a change of font or
+/// scale cannot desynchronise the two sides.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MouseEvent {
+    pub position: CellPosition,
+    /// `None` for motion with no button held.
+    pub button: Option<MouseButton>,
+    pub action: MouseAction,
+    pub shift: bool,
+    pub alt: bool,
+    pub control: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerminalCommand {
     Key(KeyEvent),
@@ -219,6 +251,10 @@ pub enum TerminalCommand {
     ClearSelection,
     /// Ask for the selected text. Answered with `SelectionCopied`.
     CopySelection,
+    /// A mouse event for the child, if it is reporting and the override
+    /// modifier is not held. Terminal Core decides, so the application cannot
+    /// deliver the same event to both the child and its own selection.
+    Mouse(MouseEvent),
     Capture,
 }
 
@@ -340,6 +376,13 @@ pub struct RenderSnapshot {
     pub generation: u64,
     pub size: TerminalSize,
     pub viewport: Viewport,
+    /// Whether the child has mouse reporting on.
+    ///
+    /// The application needs this to decide whether a drag is its own selection
+    /// gesture. It does *not* decide whether the child receives the event —
+    /// Terminal Core does, from the same terminal state, so the two cannot
+    /// deliver one event to both consumers.
+    pub mouse_tracking: bool,
     pub rows: Vec<RenderRow>,
     pub cursor: CursorSnapshot,
     pub default_foreground: Rgb,

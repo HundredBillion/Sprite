@@ -26,8 +26,9 @@ use crate::pty_unix;
 use crate::pty_unix::{GroupSignal, Pump};
 use crate::snapshot;
 use crate::{
-    CellPosition, ChildExit, KeyAction, KeyEvent, KeyModifiers, Scroll, SelectionMode,
-    SessionConfig, SessionError, SnapshotBundle, TerminalCommand, TerminalEvent, TerminalSize,
+    CellPosition, ChildExit, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton,
+    MouseEvent, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle,
+    TerminalCommand, TerminalEvent, TerminalSize,
 };
 
 /// The one ordered PTY-write path. Worker-local: it never crosses a thread or
@@ -162,6 +163,17 @@ pub(crate) fn run(
         )));
         return;
     }
+
+    let mut mouse_encoder = match libghostty_vt::mouse::Encoder::new() {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
+                "create_mouse_encoder",
+                error,
+            )));
+            return;
+        }
+    };
 
     let mut encoder = match key::Encoder::new() {
         Ok(encoder) => encoder,
@@ -341,6 +353,27 @@ pub(crate) fn run(
                     };
                     if events.send_blocking(event).is_err() {
                         break;
+                    }
+                }
+                TerminalCommand::Mouse(event) => {
+                    // Routed here, never in the application: the terminal owns
+                    // the reporting mode, so it is the only place that can
+                    // decide without the two sides disagreeing.
+                    match encode_mouse(&mut mouse_encoder, &terminal, &event, size) {
+                        Ok(Some(bytes)) => {
+                            if let Err(error) = write_all(&writer, &bytes) {
+                                fatal = Some(error);
+                                break;
+                            }
+                        }
+                        // Withheld: the child is not reporting, or the override
+                        // modifier claimed it for Sprite's own selection.
+                        Ok(None) => {}
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
                 TerminalCommand::Capture => dirty = true,
@@ -672,6 +705,72 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             requested,
         },
     }
+}
+
+/// Encodes one mouse event, or withholds it.
+///
+/// Returns `None` when the event belongs to Sprite rather than the child:
+/// either the child never enabled reporting, or the override modifier is held.
+/// Exactly one of the two consumers gets it, which is why this decision cannot
+/// live in the application.
+fn encode_mouse(
+    encoder: &mut libghostty_vt::mouse::Encoder<'_>,
+    terminal: &Terminal<'_, '_>,
+    event: &MouseEvent,
+    size: TerminalSize,
+) -> Result<Option<Vec<u8>>, SessionError> {
+    use libghostty_vt::mouse::{Action, Button, EncoderSize, Event, Position};
+
+    let tracking = terminal
+        .is_mouse_tracking()
+        .map_err(|error| SessionError::new("mouse_tracking", error))?;
+    // Shift is the override: it takes the event back for Sprite's selection
+    // even while the child is reporting.
+    if !tracking || event.shift {
+        return Ok(None);
+    }
+
+    let mut encoded = Event::new().map_err(|error| SessionError::new("mouse_event", error))?;
+    encoded.set_action(match event.action {
+        MouseAction::Press => Action::Press,
+        MouseAction::Release => Action::Release,
+        MouseAction::Motion => Action::Motion,
+    });
+    encoded.set_button(event.button.map(|button| match button {
+        MouseButton::Left => Button::Left,
+        MouseButton::Middle => Button::Middle,
+        MouseButton::Right => Button::Right,
+    }));
+
+    let mut mods = key::Mods::empty();
+    mods.set(key::Mods::ALT, event.alt);
+    mods.set(key::Mods::CTRL, event.control);
+    encoded.set_mods(mods);
+
+    // The seam speaks in cells; libghostty wants surface pixels, so the cell is
+    // converted here using the same metrics the PTY was told about.
+    encoded.set_position(Position {
+        x: f32::from(event.position.column) * size.cell_width_px as f32,
+        y: f32::from(event.position.row) * size.cell_height_px as f32,
+    });
+
+    encoder.set_options_from_terminal(terminal);
+    encoder.set_size(EncoderSize {
+        screen_width: u32::from(size.cols) * size.cell_width_px,
+        screen_height: u32::from(size.rows) * size.cell_height_px,
+        cell_width: size.cell_width_px,
+        cell_height: size.cell_height_px,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    });
+
+    let mut bytes = Vec::new();
+    encoder
+        .encode_to_vec(&encoded, &mut bytes)
+        .map_err(|error| SessionError::new("mouse_encode", error))?;
+    Ok(Some(bytes))
 }
 
 /// Installs a selection described in viewport coordinates.

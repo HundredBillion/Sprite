@@ -310,3 +310,120 @@ mod scroll_tests {
         assert_eq!(accumulator.accumulate(1.0, px(16.0)), 0);
     }
 }
+
+/// Converts a window position into the cell under it.
+///
+/// Positions outside the grid are clamped rather than rejected: a drag that
+/// leaves the window should keep selecting to the edge, which is what every
+/// terminal does.
+pub(crate) fn cell_at(
+    position: gpui::Point<Pixels>,
+    origin: gpui::Point<Pixels>,
+    cell_width: Pixels,
+    cell_height: Pixels,
+    size: sprite_term::TerminalSize,
+) -> Option<sprite_term::CellPosition> {
+    let width = f32::from(cell_width);
+    let height = f32::from(cell_height);
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+
+    let x = (f32::from(position.x) - f32::from(origin.x)) / width;
+    let y = (f32::from(position.y) - f32::from(origin.y)) / height;
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+
+    let column = x.floor().clamp(0.0, f32::from(size.cols.saturating_sub(1)));
+    let row = y.floor().clamp(0.0, f32::from(size.rows.saturating_sub(1)));
+
+    Some(sprite_term::CellPosition {
+        row: row as u16,
+        column: column as u16,
+    })
+}
+
+#[cfg(test)]
+mod hit_tests {
+    use super::*;
+    use gpui::point;
+    use sprite_term::TerminalSize;
+
+    fn size() -> TerminalSize {
+        TerminalSize {
+            rows: 24,
+            cols: 80,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        }
+    }
+
+    #[test]
+    fn a_position_maps_to_the_cell_under_it() {
+        let cell = cell_at(
+            point(px(25.0), px(35.0)),
+            point(px(0.0), px(0.0)),
+            px(10.0),
+            px(16.0),
+            size(),
+        )
+        .expect("a cell");
+        assert_eq!(cell.column, 2);
+        assert_eq!(cell.row, 2);
+    }
+
+    #[test]
+    fn the_origin_offsets_the_grid() {
+        let cell = cell_at(
+            point(px(105.0), px(35.0)),
+            point(px(100.0), px(32.0)),
+            px(10.0),
+            px(16.0),
+            size(),
+        )
+        .expect("a cell");
+        assert_eq!(cell.column, 0);
+        assert_eq!(cell.row, 0);
+    }
+
+    /// A drag that leaves the window keeps selecting to the edge.
+    #[test]
+    fn positions_outside_the_grid_clamp_to_it() {
+        let far = cell_at(
+            point(px(100_000.0), px(100_000.0)),
+            point(px(0.0), px(0.0)),
+            px(10.0),
+            px(16.0),
+            size(),
+        )
+        .expect("a cell");
+        assert_eq!(far.column, 79);
+        assert_eq!(far.row, 23);
+
+        let before = cell_at(
+            point(px(-50.0), px(-50.0)),
+            point(px(0.0), px(0.0)),
+            px(10.0),
+            px(16.0),
+            size(),
+        )
+        .expect("a cell");
+        assert_eq!(before.column, 0);
+        assert_eq!(before.row, 0);
+    }
+
+    #[test]
+    fn degenerate_metrics_map_to_nothing() {
+        assert!(
+            cell_at(
+                point(px(10.0), px(10.0)),
+                point(px(0.0), px(0.0)),
+                px(0.0),
+                px(16.0),
+                size()
+            )
+            .is_none()
+        );
+    }
+}

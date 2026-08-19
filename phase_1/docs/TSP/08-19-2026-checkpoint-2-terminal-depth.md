@@ -179,15 +179,25 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** `sprite-term/src/worker.rs`, `sprite-app/src/input.rs`
 
-- [ ] Add an owned `Mouse` command: position in cells, button, action,
+- [x] Add an owned `Mouse` command: position in cells, button, action,
   modifiers. `sprite-term` encodes it through libghostty against live mouse
-  modes; no encoded bytes cross the seam.
-- [ ] Test that a child enabling mouse reporting receives events, and that one
-  disabling it does not.
-- [ ] When reporting is inactive, drag performs Sprite selection. When active,
-  events go exclusively to the child; Shift overrides for selection. Assert no
-  event ever reaches both paths.
-- [ ] Make the override modifier configurable, defaulting to Shift.
+  modes; no encoded bytes cross the seam. Position is carried in cells rather
+  than pixels so a font or scale change cannot desynchronise the two sides.
+- [x] Test that a child enabling mouse reporting receives events, and that one
+  disabling it does not. Both assert against the encoded bytes the child reads
+  back, not against internals.
+- [x] Exclusivity: Terminal Core alone decides, returning `None` when the child
+  is not reporting or the override is held. `RenderSnapshot::mouse_tracking`
+  tells the application whether a drag is its own gesture, but never decides
+  delivery — both sides read the same terminal state. A test asserts a child
+  that never enabled reporting receives nothing at all.
+- [x] Drag-to-select wired: press anchors, motion extends, release copies.
+- [ ] **Unverified by machine:** drag-to-select in the window. The hit test and
+  routing have unit and integration tests, but no mouse-injection tool is
+  available here, so the GPUI listeners themselves have been read, not
+  exercised. Same gap as Task 3's scroll wheel, which turned out to work.
+- [ ] Make the override modifier configurable. It is Shift, but hardcoded;
+  configuration arrives with the TOML work.
 
 ### Task 6: Complete the key protocol
 

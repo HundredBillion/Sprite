@@ -9,15 +9,17 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     ClipboardItem, Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight,
-    KeyDownEvent, KeyUpEvent, Pixels, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Size,
-    Task, TextRun, Window, div, px, rgb,
+    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Size, Task, TextRun, Window, div, point, px,
+    rgb,
 };
 use sprite_term::{
-    CellStyle, KeyAction, Rgb, Scroll, SessionConfig, ShutdownHandle, SnapshotBundle,
-    SnapshotColor, TerminalCommand, TerminalEvent, TerminalSession, TerminalSize,
+    CellPosition, CellStyle, KeyAction, MouseAction, MouseEvent, Rgb, Scroll, SelectionMode,
+    SessionConfig, ShutdownHandle, SnapshotBundle, SnapshotColor, TerminalCommand, TerminalEvent,
+    TerminalSession, TerminalSize,
 };
 
-use crate::grid::{PositionedCell, ScrollAccumulator, lay_out_row};
+use crate::grid::{PositionedCell, ScrollAccumulator, cell_at, lay_out_row};
 use crate::input::gpui_key_event;
 
 /// The rendered font size, in logical pixels.
@@ -68,6 +70,8 @@ pub struct TerminalView {
     status: Option<SharedString>,
     /// Sub-row scroll remainder, so trackpad gestures are not rounded away.
     scroll: ScrollAccumulator,
+    /// Where a drag began, while a selection is being dragged out.
+    drag_anchor: Option<CellPosition>,
     _events: Task<()>,
     _snapshots: Task<()>,
 }
@@ -185,6 +189,7 @@ impl TerminalView {
             size: Some(initial_size),
             status: None,
             scroll: ScrollAccumulator::default(),
+            drag_anchor: None,
             _events: event_task,
             _snapshots: snapshot_task,
         }
@@ -209,6 +214,7 @@ impl TerminalView {
             size: None,
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
+            drag_anchor: None,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
         }
@@ -217,6 +223,40 @@ impl TerminalView {
     /// Hands over the worker so the window can wait for it off the GPUI thread.
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
         self.session.begin_shutdown().ok().flatten()
+    }
+
+    /// The cell under a window position, using the grid this view drew.
+    fn cell_under(&self, position: gpui::Point<Pixels>) -> Option<CellPosition> {
+        let size = self.size?;
+        cell_at(
+            position,
+            point(px(0.0), px(0.0)),
+            self.cell_width,
+            self.cell_height,
+            size,
+        )
+    }
+
+    /// Hands the event to Terminal Core, which decides whether the child is
+    /// reporting. Returns whether Sprite should treat it as its own gesture.
+    fn route_mouse(&mut self, cell: CellPosition, action: MouseAction, shift: bool) -> bool {
+        let reporting = self
+            .bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.render.mouse_tracking);
+
+        self.send(TerminalCommand::Mouse(MouseEvent {
+            position: cell,
+            button: Some(sprite_term::MouseButton::Left),
+            action,
+            shift,
+            alt: false,
+            control: false,
+        }));
+
+        // Exactly the condition Terminal Core uses to withhold the event, so
+        // the two sides cannot disagree about who owns it.
+        !reporting || shift
     }
 
     fn send(&mut self, command: TerminalCommand) {
@@ -469,6 +509,57 @@ impl Render for TerminalView {
                 view.scroll.reset();
                 view.send(TerminalCommand::Key(key));
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
+                    let Some(cell) = view.cell_under(event.position) else {
+                        return;
+                    };
+                    let shift = event.modifiers.shift;
+                    if view.route_mouse(cell, MouseAction::Press, shift) {
+                        view.drag_anchor = Some(cell);
+                        view.send(TerminalCommand::Select {
+                            anchor: cell,
+                            head: cell,
+                            mode: SelectionMode::Character,
+                            rectangle: false,
+                        });
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, _cx| {
+                let Some(cell) = view.cell_under(event.position) else {
+                    return;
+                };
+                if event.pressed_button.is_none() {
+                    return;
+                }
+                if let Some(anchor) = view.drag_anchor {
+                    view.send(TerminalCommand::Select {
+                        anchor,
+                        head: cell,
+                        mode: SelectionMode::Character,
+                        rectangle: false,
+                    });
+                } else {
+                    view.route_mouse(cell, MouseAction::Motion, event.modifiers.shift);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, event: &MouseUpEvent, _window, _cx| {
+                    let Some(cell) = view.cell_under(event.position) else {
+                        return;
+                    };
+                    if view.drag_anchor.take().is_some() {
+                        // A completed drag copies, which is what a terminal
+                        // user expects from a selection gesture.
+                        view.send(TerminalCommand::CopySelection);
+                    } else {
+                        view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
+                    }
+                }),
+            )
             .on_scroll_wheel(cx.listener(|view, event: &ScrollWheelEvent, _window, _cx| {
                 // A wheel notch reports in lines; a trackpad reports in pixels.
                 // Both become whole terminal rows through the same accumulator.

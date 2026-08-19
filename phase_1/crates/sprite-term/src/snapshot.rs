@@ -45,6 +45,9 @@ pub(crate) fn capture<'vt>(
     // sits over the scrollable area, which is how history is reported without
     // copying it.
     let scrollbar = terminal.scrollbar().map_err(vt("scrollbar"))?;
+    let mouse_tracking = terminal
+        .is_mouse_tracking()
+        .map_err(vt("is_mouse_tracking"))?;
     let viewport = Viewport {
         total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),
         offset: usize::try_from(scrollbar.offset).unwrap_or(0),
@@ -157,6 +160,7 @@ pub(crate) fn capture<'vt>(
             generation,
             size,
             viewport,
+            mouse_tracking,
             rows: render_rows,
             cursor,
             default_foreground: rgb(colors.foreground),
