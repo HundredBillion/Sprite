@@ -42,7 +42,8 @@ this:
 
 - Real-macOS build, test, product smoke, and idle inspection (Tasks 8, 9, 10).
 - Ghostty comparison at the identical pinned commit (Task 9).
-- Croft moving-main capability smoke, never executed (Task 10).
+- Croft moving-main capability smoke on macOS (Task 10). The Arch run passed on
+  2026-08-19 against Croft `62c6af3d`.
 - Human review of ownership, shutdown, and platform parity (Task 10).
 - Native X11 smoke is only partial, and two upstream GPUI defects were found
   there: an unterminated `WM_CLASS`, and `HasWindowHandle` being
@@ -1208,9 +1209,21 @@ either required by GPUI/platform integration or explained in DEPENDENCIES.md.
   status and fails if Croft has any tracked diff after the run. The
   clone/build is the explicit network-enabled external phase; ordinary Rust
   tests never call this script.
-- [ ] **OUTSTANDING.** The script and the ignored test exist and are wired into CI,
-  but neither has been executed: Croft has never been cloned or built here, so
-  the capability matrix is entirely unmeasured. Run that wrapper on the Arch and real-macOS validation machines. Record
+- [~] **Arch: PASSED. macOS: OUTSTANDING.** Run that wrapper on the Arch and real-macOS validation machines.
+
+  Arch run, 2026-08-19: upstream Croft `main` at
+  `62c6af3d11ba151878187804fff1074418fb639c`, cloned fresh and built unmodified
+  with its own committed lockfile, launched through the public `TerminalSession`
+  with `--open-file fixture.txt --zen`. `croft_checkpoint_one_capabilities`
+  passed in 0.12s: nonempty Alternate-screen snapshot, typed marker visible,
+  40x100 resize reflected in a newer coherent bundle, and `begin_shutdown`
+  joined within the watchdog. Croft's tree had no tracked diff afterwards. The
+  result is real rather than vacuous — a Croft that failed to launch or draw
+  would have hung the alternate-screen predicate until the five-second watchdog.
+
+  Kitty graphics, mouse, embedded-terminal, and richer rendering remain expected
+  missing capabilities assigned to later checkpoints, not Checkpoint 1 passes.
+  From Checkpoint 4 onward the complete Croft matrix is merge-blocking. Record
   Kitty graphics, mouse, embedded-terminal, and richer rendering cases as
   expected missing capabilities assigned to later checkpoints, not false
   Checkpoint 1 passes. Any regression in a capability Checkpoint 1 claims blocks
