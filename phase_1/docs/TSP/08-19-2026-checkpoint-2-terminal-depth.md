@@ -203,17 +203,28 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** `sprite-term/src/worker.rs`, `sprite-app/src/input.rs`
 
-- [ ] Negotiate Kitty keyboard flags from terminal state; test that the same
-  keystroke encodes differently as flags change, as Checkpoint 1 did for
-  cursor-application mode.
-- [ ] Implement bracketed paste: wrap pasted text per terminal state, chunk it
-  through the existing 16 KiB `Input` limit, and never let paste content be
-  interpreted as commands.
-- [ ] Wire GPUI's `InputHandler` for IME. Composition displays at the cursor
-  without mutating terminal state until commit; `KeyEvent::composing` becomes
-  true only for events genuinely part of a composition.
-- [ ] Add focus reporting driven by terminal state.
-- [ ] Route application shortcuts before the terminal, with explicit precedence.
+- [x] Kitty keyboard flags **already worked** — the encoder refreshes from
+  terminal state before every encode, so negotiation needed no code. A test now
+  pins it: `a` is `61` legacily and `1b 5b 39 37 75` once the child sends
+  `CSI > 8 u`.
+- [x] Bracketed paste, chunked through the 16 KiB write bound. libghostty's
+  `paste::encode` does the dangerous part: it strips control bytes, so a payload
+  containing `ESC [ 201 ~` cannot close the bracket early and inject a command.
+  Tested with exactly that payload.
+- [x] Focus reporting driven by terminal state: `CSI I` reaches only a child
+  that enabled mode 1004.
+- [x] Route application shortcuts before the terminal, with explicit precedence.
+  Ctrl+Shift+C and Ctrl+Shift+V are the whole table; everything else is the
+  child's, and a claimed binding is never also typed.
+- [ ] **IME is not done.** GPUI's `InputHandler` wiring is substantial and
+  deserves its own pass rather than being tacked onto this task.
+  `KeyEvent::composing` therefore remains always false, as Checkpoint 1 left it.
+- [ ] **Paste protection is owed.** An unbracketed paste containing newlines
+  still executes, and no conversion can prevent it: Sprite writes a carriage
+  return, but the line discipline rewrites it back to a newline unless `icrnl`
+  is off. That is inherent to terminals and is why bracketed paste exists.
+  `paste::is_safe` is available and detects exactly this case; what is missing
+  is the confirmation step before performing such a paste.
 
 ### Task 7: Clipboard and OSC 52
 

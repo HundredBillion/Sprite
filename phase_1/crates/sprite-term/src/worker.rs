@@ -39,6 +39,16 @@ type PtyWriter = Rc<RefCell<Box<dyn Write + Send>>>;
 /// return an error of its own.
 type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
 
+/// One paste is written in chunks of this size, matching the accepted `Input`
+/// limit so a large paste bounds its writes the same way typed input does.
+const PASTE_CHUNK_BYTES: usize = 16 * 1024;
+
+/// DEC private mode 2004: bracketed paste.
+const MODE_BRACKETED_PASTE: u16 = 2004;
+
+/// DEC private mode 1004: focus reporting.
+const MODE_FOCUS_EVENT: u16 = 1004;
+
 /// Helper threads get a small explicit stack; they hold no terminal state.
 const HELPER_STACK_BYTES: usize = 256 * 1024;
 
@@ -376,6 +386,45 @@ pub(crate) fn run(
                         }
                     }
                 }
+                TerminalCommand::Paste(text) => {
+                    match encode_paste(&terminal, &text) {
+                        Ok(bytes) => {
+                            // Written in chunks so one enormous paste cannot
+                            // monopolise the PTY, while still arriving intact.
+                            for chunk in bytes.chunks(PASTE_CHUNK_BYTES) {
+                                if let Err(error) = write_all(&writer, chunk) {
+                                    fatal = Some(error);
+                                    break;
+                                }
+                            }
+                            if fatal.is_some() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                TerminalCommand::Focus(gained) => {
+                    match encode_focus(&terminal, gained) {
+                        Ok(Some(bytes)) => {
+                            if let Err(error) = write_all(&writer, &bytes) {
+                                fatal = Some(error);
+                                break;
+                            }
+                        }
+                        // The child never asked for focus reports.
+                        Ok(None) => {}
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
                 TerminalCommand::Capture => dirty = true,
             },
             Message::ChildExited(status) => {
@@ -705,6 +754,68 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             requested,
         },
     }
+}
+
+/// Prepares clipboard text for the PTY.
+///
+/// libghostty does the dangerous part: it strips control bytes, neutralises a
+/// payload's attempt to close bracketed paste early, and converts newlines to
+/// carriage returns when the child is not bracketing. Sprite must not
+/// reimplement any of that.
+fn encode_paste(terminal: &Terminal<'_, '_>, text: &str) -> Result<Vec<u8>, SessionError> {
+    use libghostty_vt::paste;
+    use libghostty_vt::terminal::{Mode, ModeKind};
+
+    let bracketed = terminal
+        .mode(Mode::new(MODE_BRACKETED_PASTE, ModeKind::Dec))
+        .map_err(|error| SessionError::new("paste_mode", error))?;
+
+    let mut data = text.as_bytes().to_vec();
+    // Bracketing adds a prefix and suffix, and stripping never grows the text,
+    // so a generous margin is enough for one attempt.
+    let mut buffer = vec![0_u8; data.len() + 64];
+    match paste::encode(&mut data, bracketed, &mut buffer) {
+        Ok(written) => {
+            buffer.truncate(written);
+            Ok(buffer)
+        }
+        Err(libghostty_vt::Error::OutOfSpace { required }) => {
+            let mut data = text.as_bytes().to_vec();
+            let mut buffer = vec![0_u8; required];
+            let written = paste::encode(&mut data, bracketed, &mut buffer)
+                .map_err(|error| SessionError::new("paste_encode", error))?;
+            buffer.truncate(written);
+            Ok(buffer)
+        }
+        Err(error) => Err(SessionError::new("paste_encode", error)),
+    }
+}
+
+/// Encodes a focus change, or withholds it when the child never asked.
+fn encode_focus(
+    terminal: &Terminal<'_, '_>,
+    gained: bool,
+) -> Result<Option<Vec<u8>>, SessionError> {
+    use libghostty_vt::focus;
+    use libghostty_vt::terminal::{Mode, ModeKind};
+
+    let reporting = terminal
+        .mode(Mode::new(MODE_FOCUS_EVENT, ModeKind::Dec))
+        .map_err(|error| SessionError::new("focus_mode", error))?;
+    if !reporting {
+        return Ok(None);
+    }
+
+    let event = if gained {
+        focus::Event::Gained
+    } else {
+        focus::Event::Lost
+    };
+    let mut buffer = [0_u8; 8];
+    let written = event
+        .encode(&mut buffer)
+        .map_err(|error| SessionError::new("focus_encode", error))?;
+    Ok(Some(buffer[..written].to_vec()))
 }
 
 /// Encodes one mouse event, or withholds it.

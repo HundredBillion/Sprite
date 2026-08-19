@@ -259,6 +259,22 @@ impl TerminalView {
         !reporting || shift
     }
 
+    fn perform(&mut self, shortcut: Shortcut, cx: &mut Context<Self>) {
+        match shortcut {
+            Shortcut::Copy => self.send(TerminalCommand::CopySelection),
+            Shortcut::Paste => {
+                // Read only on an explicit request, never speculatively.
+                let text = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    self.send(TerminalCommand::Paste(text));
+                }
+            }
+        }
+    }
+
     fn send(&mut self, command: TerminalCommand) {
         if let Err(error) = self.session.send(command) {
             self.status = Some(error.to_string().into());
@@ -311,6 +327,29 @@ impl TerminalView {
                 },
             ),
         }
+    }
+}
+
+/// An application binding, resolved before anything reaches the terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Shortcut {
+    Copy,
+    Paste,
+}
+
+/// The application's own bindings.
+///
+/// Deliberately tiny and explicit: every key not listed here belongs to the
+/// child, and a binding claimed here is never also typed.
+fn application_shortcut(keystroke: &gpui::Keystroke) -> Option<Shortcut> {
+    let modifiers = &keystroke.modifiers;
+    if !(modifiers.control && modifiers.shift) || modifiers.alt || modifiers.platform {
+        return None;
+    }
+    match keystroke.key.as_str() {
+        "c" => Some(Shortcut::Copy),
+        "v" => Some(Shortcut::Paste),
+        _ => None,
     }
 }
 
@@ -496,7 +535,15 @@ impl Render for TerminalView {
             .text_size(FONT_SIZE)
             .line_height(LINE_HEIGHT)
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _window, _cx| {
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
+                // Application shortcuts are resolved first and explicitly. Only
+                // what they do not claim reaches the terminal, so a binding can
+                // never also be typed into the child.
+                if let Some(shortcut) = application_shortcut(&event.keystroke) {
+                    view.perform(shortcut, cx);
+                    return;
+                }
+
                 let action = if event.is_held {
                     KeyAction::Repeat
                 } else {

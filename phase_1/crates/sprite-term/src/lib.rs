@@ -255,6 +255,16 @@ pub enum TerminalCommand {
     /// modifier is not held. Terminal Core decides, so the application cannot
     /// deliver the same event to both the child and its own selection.
     Mouse(MouseEvent),
+    /// Paste text as data.
+    ///
+    /// Terminal Core wraps it in bracketed paste when the child has that mode
+    /// on, strips control bytes, and converts newlines to carriage returns when
+    /// it does not — so clipboard content cannot become a command. Size is
+    /// bounded by chunking, not by refusing the paste.
+    Paste(String),
+    /// Window focus changed. Reaches the child only if it enabled focus
+    /// reporting.
+    Focus(bool),
     Capture,
 }
 

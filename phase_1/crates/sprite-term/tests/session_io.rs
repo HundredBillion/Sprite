@@ -251,3 +251,38 @@ fn degenerate_and_oversized_resizes_are_refused() {
         }))
         .expect("a one-million-cell grid is allowed");
 }
+
+/// The Kitty keyboard protocol changes how the same keystroke encodes. The
+/// encoder refreshes from terminal state before every encode, so this follows
+/// the child's negotiation with no application involvement at all.
+#[test]
+fn kitty_keyboard_flags_change_the_encoding() {
+    fn encoding_of(setup: &str, bytes: usize, marker: &str) -> String {
+        let script = format!(
+            "stty -icanon -icrnl -echo min {bytes} time 0; {setup} printf 'READY\\n'; \
+             head -c {bytes} | od -An -tx1"
+        );
+        let mut session = session(&script);
+        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        events.expect_ready();
+        snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+        session.send(plain("a", Some("a"))).expect("send a key");
+
+        let bundle = snapshots.wait_for("the encoded key", |b| pane_text(b).contains(marker));
+        pane_text(&bundle)
+    }
+
+    // Without negotiation, `a` is the bare byte 0x61.
+    let legacy = encoding_of("", 1, "61");
+    assert!(legacy.contains("61"), "legacy is one byte, got:\n{legacy}");
+
+    // Flag 8 asks for every key as an escape code, so the same key becomes
+    // CSI 97 u — 1b 5b 39 37 75.
+    let kitty = encoding_of("printf '\\033[>8u';", 5, "1b 5b");
+    assert!(
+        kitty.contains("1b 5b 39 37 75"),
+        "the Kitty protocol encodes `a` as CSI 97 u, got:\n{kitty}"
+    );
+}
