@@ -43,6 +43,14 @@ pub(crate) fn default_scrollback_bytes() -> usize {
     DEFAULT_SCROLLBACK_BYTES
 }
 
+/// The OSC 52 size bound, in decoded bytes.
+pub(crate) fn max_clipboard_bytes() -> usize {
+    MAX_CLIPBOARD_BYTES
+}
+
+/// The largest OSC 52 payload accepted from a child, after decoding.
+const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+
 /// The largest accepted raw `Input` payload. Checkpoint 2 chunks paste through
 /// this same limit rather than raising it.
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -436,6 +444,12 @@ pub enum TerminalEvent {
     /// The text of the current selection, in answer to `CopySelection`. Empty
     /// when nothing is selected.
     SelectionCopied(String),
+    /// A child asked to put text on the clipboard and policy allowed it.
+    ///
+    /// Only delivered for a write the secure defaults accepted; a denied write
+    /// is silent. The application performs the write, so Terminal Core never
+    /// touches the system clipboard itself.
+    ClipboardWrite(String),
     Error(SessionError),
 }
 

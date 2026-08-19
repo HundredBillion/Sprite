@@ -130,3 +130,23 @@ pub fn pane_text(bundle: &SnapshotBundle) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+impl EventPump {
+    /// Looks for a clipboard write within a short window.
+    ///
+    /// A denied write is silence, so this cannot block indefinitely; but pure
+    /// `try_recv` would race the pump thread that forwards events, so it waits
+    /// briefly and only then concludes nothing arrived.
+    pub fn try_next_clipboard(&self) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_millis(750);
+        while Instant::now() < deadline {
+            match self.receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(TerminalEvent::ClipboardWrite(text))) => return Some(text),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+        None
+    }
+}

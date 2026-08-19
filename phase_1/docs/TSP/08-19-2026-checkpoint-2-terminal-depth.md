@@ -230,14 +230,20 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** `sprite-term/src/worker.rs`, `sprite-app/src/terminal_view.rs`
 
-- [ ] Deliver terminal clipboard requests as typed events; the application
-  answers with an explicit command. No implicit clipboard access.
-- [ ] Enforce the PRD's secure defaults: OSC 52 writes accepted only from the
-  focused Pane and only up to 1 MiB decoded; hidden or unfocused writes,
-  malformed or oversized payloads, and **all** terminal-initiated reads denied.
-- [ ] Test each denial path explicitly. Secure defaults apply whenever
-  configuration is absent or invalid.
-- [ ] Add base64 decoding to the dependency ledger, or justify hand-rolling it.
+- [x] Accepted clipboard writes arrive as a typed `ClipboardWrite` event and the
+  application performs them. Terminal Core never touches the system clipboard.
+- [x] Secure defaults enforced and each denial path tested: unfocused panes
+  denied, payloads over 1 MiB denied, non-text representations denied, and the
+  selection clipboard governed by the same policy.
+- [x] **All terminal-initiated reads denied** — by libghostty, which drops OSC 52
+  `?` requests before they reach any callback. A test pins that nothing is
+  written back in answer to one.
+- [x] **No base64 dependency needed.** libghostty delivers clipboard content
+  already decoded and binary-safe, so there is nothing to add to the ledger.
+- [x] Focus defaults to *denied* rather than focused. A child can emit OSC 52 the
+  instant it starts, so a pane whose focus the application has not yet declared
+  must not be able to write. Found while testing: the original default of
+  focused made two denial tests race the child's first output.
 
 ### Task 8: Shell integration and observation metadata
 

@@ -134,6 +134,14 @@ pub(crate) fn run(
         }
     };
     let write_error: PtyWriteError = Rc::new(RefCell::new(None));
+    // Deny until the application declares focus. A pane that has never been
+    // focused cannot take the clipboard, which matters because a child can emit
+    // OSC 52 the instant it starts — before the application has said anything
+    // about where focus is.
+    let focused = Rc::new(std::cell::Cell::new(false));
+    // The callback runs inside the parser and must not block on a channel, so
+    // accepted writes are collected here and drained after `vt_write`.
+    let clipboard_pending: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
 
     let mut size = config.size;
     let mut terminal = match Terminal::new(TerminalOptions {
@@ -169,6 +177,45 @@ pub(crate) fn run(
     if let Err(error) = registered {
         let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
             "on_pty_write",
+            error,
+        )));
+        return;
+    }
+
+    // OSC 52. libghostty has already decoded the payload and dropped every
+    // read request before this is called, so the policy here is only about
+    // whether a *write* is allowed.
+    let registered_clipboard = terminal.on_clipboard_write({
+        let focused = Rc::clone(&focused);
+        let pending = Rc::clone(&clipboard_pending);
+        move |_terminal: &Terminal<'_, '_>, write: libghostty_vt::terminal::ClipboardWrite<'_>| {
+            if !focused.get() {
+                return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
+            }
+
+            let mut text = String::new();
+            for content in write.contents() {
+                // Only plain text is honoured; a richer representation is not
+                // something Sprite can vouch for.
+                if content.mime.is_empty() || content.mime.starts_with("text/") {
+                    text.push_str(content.data);
+                }
+            }
+
+            if text.is_empty() {
+                return Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported);
+            }
+            if text.len() > crate::max_clipboard_bytes() {
+                return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
+            }
+
+            pending.borrow_mut().push(text);
+            Ok(())
+        }
+    });
+    if let Err(error) = registered_clipboard {
+        let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
+            "on_clipboard_write",
             error,
         )));
         return;
@@ -258,6 +305,19 @@ pub(crate) fn run(
                 if let Some(error) = write_error.borrow_mut().take() {
                     fatal = Some(error);
                     break;
+                }
+
+                // Accepted clipboard writes are delivered here rather than from
+                // inside the parser callback, which must not block on a channel.
+                let accepted: Vec<String> = clipboard_pending.borrow_mut().drain(..).collect();
+                for text in accepted {
+                    if events
+                        .send_blocking(TerminalEvent::ClipboardWrite(text))
+                        .is_err()
+                    {
+                        fatal = None;
+                        break;
+                    }
                 }
             }
             Message::CaptureRequested => {}
@@ -409,6 +469,7 @@ pub(crate) fn run(
                     }
                 }
                 TerminalCommand::Focus(gained) => {
+                    focused.set(gained);
                     match encode_focus(&terminal, gained) {
                         Ok(Some(bytes)) => {
                             if let Err(error) = write_all(&writer, &bytes) {

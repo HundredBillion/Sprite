@@ -114,6 +114,19 @@ impl TerminalView {
             loop {
                 match events.next().await {
                     Ok(TerminalEvent::Ready) => {}
+                    Ok(TerminalEvent::ClipboardWrite(text)) => {
+                        // Terminal Core already applied the OSC 52 policy, so
+                        // reaching here means the write was allowed.
+                        if !text.is_empty()
+                            && view
+                                .update(cx, |_view, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                })
+                                .is_err()
+                        {
+                            return;
+                        }
+                    }
                     Ok(TerminalEvent::SelectionCopied(text)) => {
                         // User-initiated copy needs no policy: the person asked
                         // for it. Task 7's policy governs OSC 52, where the
