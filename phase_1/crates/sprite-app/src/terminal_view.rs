@@ -114,6 +114,23 @@ impl TerminalView {
             loop {
                 match events.next().await {
                     Ok(TerminalEvent::Ready) => {}
+                    Ok(TerminalEvent::Hyperlink { uri: Some(uri), .. }) => {
+                        // Terminal Core already applied the scheme policy, so
+                        // reaching here means the target is allowed. The parsed
+                        // URI goes straight to the platform opener: Sprite never
+                        // builds a command line from terminal-provided text.
+                        if view
+                            .update(cx, |_view, cx| {
+                                cx.open_url(&uri);
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    // No link, or a refused scheme. Indistinguishable on
+                    // purpose, and nothing is opened either way.
+                    Ok(TerminalEvent::Hyperlink { uri: None, .. }) => {}
                     Ok(TerminalEvent::TitleChanged(title)) => {
                         // The window title follows the child, which is how a
                         // long-running command announces itself.
@@ -587,6 +604,13 @@ impl Render for TerminalView {
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
+                    // Ctrl+Click asks about a link rather than selecting. The
+                    // answer arrives as an event, and only then is anything
+                    // opened — the click itself never carries a destination.
+                    if event.modifiers.control {
+                        view.send(TerminalCommand::ResolveHyperlink(cell));
+                        return;
+                    }
                     let shift = event.modifiers.shift;
                     if view.route_mouse(cell, MouseAction::Press, shift) {
                         view.drag_anchor = Some(cell);

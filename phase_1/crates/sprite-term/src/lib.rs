@@ -48,6 +48,59 @@ pub(crate) fn max_clipboard_bytes() -> usize {
     MAX_CLIPBOARD_BYTES
 }
 
+/// Whether a hyperlink target may be offered to the application.
+///
+/// Compares the scheme case-insensitively and requires the `://` form, so a
+/// value like `javascript:` or a bare path is refused rather than guessed at.
+pub(crate) fn is_allowed_link(uri: &str) -> bool {
+    let Some((scheme, rest)) = uri.split_once(':') else {
+        return false;
+    };
+    if !rest.starts_with("//") {
+        return false;
+    }
+    ALLOWED_LINK_SCHEMES
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::is_allowed_link;
+
+    #[test]
+    fn ordinary_web_links_are_allowed() {
+        assert!(is_allowed_link("https://example.com/page"));
+        assert!(is_allowed_link("http://example.com"));
+        assert!(is_allowed_link("HTTPS://example.com"));
+    }
+
+    #[test]
+    fn everything_else_is_refused() {
+        for refused in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<script>",
+            "vscode://open",
+            "/etc/passwd",
+            "example.com",
+            "",
+            "https:/example.com",
+            "https:example.com",
+        ] {
+            assert!(!is_allowed_link(refused), "{refused} must be refused");
+        }
+    }
+}
+
+/// Schemes a hyperlink may use.
+///
+/// Deliberately tiny. `file:`, bare paths, and application schemes stay out
+/// until someone trusts them explicitly: an escape sequence is untrusted input,
+/// and opening a local path or a custom handler on its say-so is how a terminal
+/// becomes an execution vector.
+const ALLOWED_LINK_SCHEMES: [&str; 2] = ["https", "http"];
+
 /// The largest OSC 52 payload accepted from a child, after decoding.
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
@@ -273,6 +326,12 @@ pub enum TerminalCommand {
     /// Window focus changed. Reaches the child only if it enabled focus
     /// reporting.
     Focus(bool),
+    /// Ask what OSC 8 hyperlink, if any, a cell carries.
+    ///
+    /// Resolved on demand rather than carried in every snapshot: a link lookup
+    /// is per cell, so resolving a full screen each capture would mean
+    /// thousands of calls a second for information almost never used.
+    ResolveHyperlink(CellPosition),
     Capture,
 }
 
@@ -470,6 +529,15 @@ pub enum TerminalEvent {
     TitleChanged(Option<String>),
     /// The child reported a new working directory.
     WorkingDirectoryChanged(Option<String>),
+    /// The answer to `ResolveHyperlink`.
+    ///
+    /// `None` means the cell carries no link, or that its scheme is not
+    /// allowed. The value is always the parsed target — never the label, which
+    /// is chosen by whatever wrote the link and may impersonate anything.
+    Hyperlink {
+        position: CellPosition,
+        uri: Option<String>,
+    },
     /// A child asked to put text on the clipboard and policy allowed it.
     ///
     /// Only delivered for a write the secure defaults accepted; a denied write

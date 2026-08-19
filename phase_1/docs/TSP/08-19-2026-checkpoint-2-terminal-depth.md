@@ -275,13 +275,21 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** `sprite-term/src/worker.rs`
 
-- [ ] Emit title changes, bells, and working-directory changes as typed events.
-- [ ] Surface hyperlink metadata on snapshot cells. Allow only configured
-  schemes, defaulting to `https` and `http`; `file`, bare paths, and custom
-  schemes stay disabled unless explicitly trusted.
-- [ ] Opening requires Ctrl+Click on Linux. Pass the parsed URI to the platform
-  opener; never build or execute a shell command from terminal-provided text.
-- [ ] Test that a hostile label cannot influence what is opened.
+- [x] Title, bell, and working-directory changes emit as typed events (landed
+  with Task 8).
+- [x] Hyperlinks are **resolved on demand rather than carried on snapshot
+  cells.** A link lookup is per cell, so resolving a full screen every capture
+  would mean thousands of calls a second for information almost never used.
+  `ResolveHyperlink` asks about one cell and `Hyperlink` answers.
+- [x] Only `https` and `http` are allowed. `file:`, bare paths, `data:`,
+  `javascript:`, and application schemes are refused, and a refusal is
+  indistinguishable from "no link" so a caller cannot act on the difference.
+  Nine cases table-tested.
+- [x] Opening requires Ctrl+Click. The parsed URI goes straight to the platform
+  opener; Sprite never builds a command line from terminal-provided text.
+- [x] A hostile label cannot influence what is opened: the test uses a link
+  whose visible text impersonates a bank while targeting somewhere else, and
+  asserts the parsed target is what resolves.
 
 ### Task 10: Freeze Checkpoint 2 budgets and review
 

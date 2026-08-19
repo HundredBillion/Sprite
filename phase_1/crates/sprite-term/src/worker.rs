@@ -551,6 +551,15 @@ pub(crate) fn run(
                         }
                     }
                 }
+                TerminalCommand::ResolveHyperlink(position) => {
+                    let uri = resolve_hyperlink(&terminal, position);
+                    if events
+                        .send_blocking(TerminalEvent::Hyperlink { position, uri })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 TerminalCommand::Capture => dirty = true,
             },
             Message::ChildExited(status) => {
@@ -880,6 +889,31 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             requested,
         },
     }
+}
+
+/// The allowed hyperlink target at a cell, if any.
+///
+/// Returns `None` for a cell with no link and for any target the scheme policy
+/// refuses, so a caller cannot distinguish "no link" from "denied" and act on
+/// the difference.
+fn resolve_hyperlink(terminal: &Terminal<'_, '_>, position: CellPosition) -> Option<String> {
+    use libghostty_vt::terminal::{Point, PointCoordinate};
+
+    let grid_ref = terminal
+        .grid_ref(Point::Viewport(PointCoordinate {
+            x: position.column,
+            y: u32::from(position.row),
+        }))
+        .ok()?;
+
+    let mut buffer = [0_u8; 2048];
+    let written = grid_ref.hyperlink_uri(&mut buffer).ok()?;
+    if written == 0 {
+        return None;
+    }
+
+    let uri = std::str::from_utf8(&buffer[..written]).ok()?;
+    crate::is_allowed_link(uri).then(|| uri.to_owned())
 }
 
 /// Prepares clipboard text for the PTY.
