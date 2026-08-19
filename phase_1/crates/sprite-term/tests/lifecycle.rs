@@ -266,7 +266,11 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
         "/bin/sh",
         args(&[
             "-c",
-            "( trap '' HUP TERM; sleep 60 ) & printf 'PID''S:%s:%s\\n' \"$$\" \"$!\"; exit 0",
+            // The shell stays alive until shutdown is requested. Were it to exit
+            // here, Closing would cancel the pump and finish before the request
+            // arrived: a natural exit owes only a single hangup, so there would
+            // be nothing left to escalate and the test would race its subject.
+            "( trap '' HUP TERM; sleep 60 ) & printf 'PID''S:%s:%s\\n' \"$$\" \"$!\"; sleep 30",
         ]),
     ))
     .expect("spawn session");

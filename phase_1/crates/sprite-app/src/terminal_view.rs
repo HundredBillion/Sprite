@@ -9,13 +9,14 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent,
-    KeyUpEvent, Pixels, SharedString, Size, Task, TextRun, Window, div, px, rgb,
+    KeyUpEvent, Pixels, Rgba, SharedString, Size, Task, TextRun, Window, div, px, rgb,
 };
 use sprite_term::{
-    KeyAction, RenderRow, SessionConfig, ShutdownHandle, SnapshotBundle, TerminalCommand,
-    TerminalEvent, TerminalSession, TerminalSize,
+    CellStyle, KeyAction, Rgb, SessionConfig, ShutdownHandle, SnapshotBundle, SnapshotColor,
+    TerminalCommand, TerminalEvent, TerminalSession, TerminalSize,
 };
 
+use crate::grid::{PositionedCell, lay_out_row};
 use crate::input::gpui_key_event;
 
 /// The rendered font size, in logical pixels.
@@ -224,31 +225,64 @@ impl TerminalView {
         self.send(TerminalCommand::Resize(size));
     }
 
-    fn rows(&self) -> Vec<SharedString> {
+    /// The visible grid as positioned cells, one vector per row.
+    fn laid_out_rows(&self) -> Vec<Vec<PositionedCell>> {
         let Some(bundle) = &self.bundle else {
             return Vec::new();
         };
-        bundle
-            .render
-            .rows
-            .iter()
-            .map(|row| SharedString::from(row_text(row)))
-            .collect()
+        bundle.render.rows.iter().map(lay_out_row).collect()
+    }
+
+    fn default_colors(&self) -> (Rgb, Rgb) {
+        match &self.bundle {
+            Some(bundle) => (
+                bundle.render.default_foreground,
+                bundle.render.default_background,
+            ),
+            None => (
+                Rgb {
+                    r: 0xd8,
+                    g: 0xd8,
+                    b: 0xe0,
+                },
+                Rgb {
+                    r: 0x10,
+                    g: 0x10,
+                    b: 0x14,
+                },
+            ),
+        }
     }
 }
 
-/// Joins one row's cells into a drawable string, dropping the spacer cells that
-/// exist only to reserve a wide character's second column.
-fn row_text(row: &RenderRow) -> String {
-    let mut text = String::with_capacity(row.cells.len());
-    for cell in &row.cells {
-        if cell.text.is_empty() {
-            continue;
-        }
-        text.push_str(&cell.text);
+/// Resolves a snapshot colour against the terminal's current defaults.
+///
+/// The 256-colour palette is not carried in the snapshot yet, so an indexed
+/// colour falls back to the default foreground rather than being guessed at.
+/// Checkpoint 2's palette work replaces this.
+fn resolve(color: SnapshotColor, default: Rgb, palette_fallback: Rgb) -> Rgba {
+    match color {
+        SnapshotColor::Default => rgb(pack(default)),
+        SnapshotColor::Rgb(value) => rgb(pack(value)),
+        SnapshotColor::Palette(_) => rgb(pack(palette_fallback)),
     }
-    // Trailing blanks would otherwise stretch every line to the full grid.
-    text.trim_end().to_owned()
+}
+
+fn pack(color: Rgb) -> u32 {
+    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+}
+
+/// A cell's drawn colours, honouring inverse and invisible.
+fn cell_colors(style: &CellStyle, default_fg: Rgb, default_bg: Rgb) -> (Rgba, Rgba) {
+    let mut foreground = resolve(style.foreground, default_fg, default_fg);
+    let mut background = resolve(style.background, default_bg, default_bg);
+    if style.inverse {
+        std::mem::swap(&mut foreground, &mut background);
+    }
+    if style.invisible {
+        foreground = background;
+    }
+    (foreground, background)
 }
 
 fn describe_exit(exit: &sprite_term::ChildExit) -> String {
@@ -387,12 +421,15 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.synchronise_size(window);
 
-        let rows = self.rows();
+        let rows = self.laid_out_rows();
+        let (default_fg, default_bg) = self.default_colors();
+        let cell_width = self.cell_width;
+        let cell_height = self.cell_height;
+        let cursor = self.bundle.as_ref().map(|bundle| bundle.render.cursor);
         let status = self.status.clone();
 
         div()
-            .flex()
-            .flex_col()
+            .relative()
             .size_full()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(FOREGROUND))
@@ -413,8 +450,51 @@ impl Render for TerminalView {
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);
                 view.send(TerminalCommand::Key(key));
             }))
-            .children(rows.into_iter().map(|row| div().child(row)))
-            .children(status.map(|status| div().text_color(rgb(STATUS)).child(status)))
+            // Every cell is placed by its grid column, so a glyph that renders
+            // wider than its cell is clipped instead of displacing the rest of
+            // the row.
+            .children(rows.into_iter().enumerate().map(|(index, cells)| {
+                let row_top = px(index as f32 * f32::from(cell_height));
+                let on_cursor = cursor.filter(|c| c.visible && usize::from(c.row) == index);
+
+                div()
+                    .absolute()
+                    .top(row_top)
+                    .left(px(0.0))
+                    .h(cell_height)
+                    .w_full()
+                    .children(cells.into_iter().map(move |cell| {
+                        let (foreground, background) =
+                            cell_colors(&cell.style, default_fg, default_bg);
+                        let is_cursor = on_cursor.is_some_and(|c| c.column == cell.column);
+
+                        let mut element = div()
+                            .absolute()
+                            .left(cell.left(cell_width))
+                            .w(cell.width(cell_width))
+                            .h(cell_height)
+                            .overflow_hidden()
+                            .bg(if is_cursor { foreground } else { background })
+                            .text_color(if is_cursor { background } else { foreground });
+
+                        if cell.style.bold {
+                            element = element.font_weight(FontWeight::BOLD);
+                        }
+                        if cell.style.italic {
+                            element = element.italic();
+                        }
+
+                        element.child(SharedString::from(cell.text))
+                    }))
+            }))
+            .children(status.map(|status| {
+                div()
+                    .absolute()
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .text_color(rgb(STATUS))
+                    .child(status)
+            }))
     }
 }
 
