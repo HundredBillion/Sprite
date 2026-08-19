@@ -33,23 +33,37 @@
 
 ## Checkpoint 1 acceptance status
 
-**NOT ACCEPTED.** Tasks 1-8 are complete and verified on Arch Linux. Tasks 9 and
-10 are partially complete: everything that can be done without macOS hardware or
-a Croft build is done, and the rest is marked **OUTSTANDING** in place.
+**ACCEPTED ON LINUX (2026-08-19).** Tasks 1-10 are complete and verified on Arch
+Linux: 42 tests green, `cargo fmt --check`, `clippy -D warnings`, the offline
+locked `test`/`build` gate, provenance and forbidden-state inspection, the
+frozen Arch performance budgets, and the Croft moving-main capability gate
+against unmodified upstream `62c6af3d`.
 
-Blocking items, all requiring resources unavailable to the workspace that wrote
-this:
+Accepted under the Linux-first posture the PRD now records. The following are
+**deferred to the macOS acceptance milestone**, which must pass before Phase 1
+is complete:
 
-- Real-macOS build, test, product smoke, and idle inspection (Tasks 8, 9, 10).
-- Ghostty comparison at the identical pinned commit (Task 9).
-- Croft moving-main capability smoke on macOS (Task 10). The Arch run passed on
-  2026-08-19 against Croft `62c6af3d`.
-- Human review of ownership, shutdown, and platform parity (Task 10).
-- Native X11 smoke is only partial, and two upstream GPUI defects were found
-  there: an unterminated `WM_CLASS`, and `HasWindowHandle` being
-  `unimplemented!()`. Neither is fixable from Sprite; see Task 8 for detail.
+- macOS interactive product smoke: build, run, typing, resize, exit, and
+  Activity Monitor idle inspection (Tasks 8, 10).
+- macOS benchmark baselines (Task 9).
+- macOS Croft capability run (Task 10). The Arch run passed against Croft
+  `62c6af3d`.
+- Ghostty comparison at the identical pinned commit (Task 9), additionally
+  blocked on Sprite gaining a CLI in Checkpoint 5.
 
-Checkpoint 2 may not begin until these are satisfied.
+Held in CI rather than deferred: macOS compilation, tests, and lint run on a
+hosted runner for every change. A known exposure to watch is `font-kit` being
+disabled on macOS; see the PRD's platform posture.
+
+Still open regardless of platform:
+
+- Human review of libghostty ownership, shutdown, and platform parity (Task 10).
+- Native X11 smoke is partial, and two upstream GPUI defects were found there:
+  an unterminated `WM_CLASS` (PR submitted upstream) and `HasWindowHandle` being
+  `unimplemented!()` (already fixed on GPUI `main`). Neither is fixable from
+  Sprite; see Task 8.
+
+Checkpoint 2 may begin.
 
 ---
 

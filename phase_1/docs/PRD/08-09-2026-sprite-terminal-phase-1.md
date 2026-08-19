@@ -271,6 +271,32 @@ restarts the affected soak or daily-use gate.
   pass. Phase 1 is complete only when all five checkpoints and the full
   acceptance suite pass together.
 
+### Platform posture: Linux first (amended 2026-08-19)
+
+Phase 1 originally required every checkpoint to pass on Arch Linux and macOS
+together. It does not. Sprite is developed and accepted on Arch Linux first,
+because finishing one platform properly beats carrying two half-verified ones,
+and because no macOS hardware is available to the people building it.
+
+macOS is deferred, not dropped. The split is deliberate:
+
+- **Held continuously in CI.** Compilation, the full test suite, and lint run on
+  a hosted macOS runner for every change, exactly as they do for Linux. macOS
+  drift is a build failure the day it appears, never a discovery months later.
+- **Deferred to a macOS acceptance milestone.** Everything needing a human at a
+  Mac: the interactive product smoke, resize and typing by hand, Activity
+  Monitor idle inspection, benchmark baselines, the Ghostty comparison, the
+  Croft capability run, and packaging. This milestone must pass before Phase 1
+  is complete.
+
+A checkpoint may therefore be accepted on Linux while its macOS milestone items
+remain open. Phase 1 itself may not.
+
+One known macOS exposure already exists and is why CI parity is not optional:
+`sprite-app` enables no GPUI features on macOS, so `font-kit` is disabled there
+while Linux re-enables it transitively through `wayland`/`x11`. Sprite may not
+render text on macOS at all. The macOS CI job is expected to settle this.
+
 ### Primary module and test seam
 
 - The primary seam is the terminal-session workspace API owned by
