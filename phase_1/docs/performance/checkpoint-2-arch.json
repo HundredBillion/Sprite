@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "sample_count": 30,
+  "metrics": {
+    "spawn_to_ready": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.637463,
+      "p95": 0.790874,
+      "max": 0.867612,
+      "budget": 0.869961
+    },
+    "input_to_snapshot_idle": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.126691,
+      "p95": 0.147354,
+      "max": 0.150128,
+      "budget": 0.162089
+    },
+    "input_to_snapshot_under_load": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 9.461511,
+      "p95": 12.318479,
+      "max": 13.909144,
+      "budget": 13.550327
+    },
+    "output_10mib_to_final_snapshot": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 1187.958500,
+      "p95": 1552.978549,
+      "max": 1560.561067,
+      "budget": 1708.276404
+    },
+    "capture_100x100_grid": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.041853,
+      "p95": 0.088470,
+      "max": 0.108061,
+      "budget": 0.097317
+    },
+    "capture_with_full_scrollback": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.253823,
+      "p95": 0.979976,
+      "max": 1.175558,
+      "budget": 1.077974
+    },
+    "scroll_round_trip": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.259254,
+      "p95": 0.656837,
+      "max": 0.815726,
+      "budget": 0.722521
+    },
+    "select_full_screen": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.126199,
+      "p95": 0.133495,
+      "max": 0.136259,
+      "budget": 0.146845
+    }
+  }
+}

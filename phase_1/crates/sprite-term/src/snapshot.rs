@@ -31,6 +31,7 @@ use crate::{
 pub(crate) fn capture<'vt>(
     generation: u64,
     size: TerminalSize,
+    has_selection: bool,
     terminal: &Terminal<'vt, '_>,
     render_state: &mut RenderState<'vt>,
     rows: &mut RowIterator<'vt>,
@@ -110,11 +111,17 @@ pub(crate) fn capture<'vt>(
                         .graphemes_utf8(&mut grapheme)
                         .map_err(vt("cell_graphemes"))?;
                     let style = cell_iteration.style().map_err(vt("cell_style"))?;
-                    // Reported by libghostty only when the terminal holds the
-                    // selection, which is why selection is owned there.
-                    let selected = cell_iteration
-                        .is_selected()
-                        .map_err(vt("cell_is_selected"))?;
+                    // One FFI call per cell, so it is skipped entirely when
+                    // nothing is selected — the common case. Measured at ~1,900
+                    // calls per capture on a default grid, which was most of a
+                    // 30% regression in keystroke-to-snapshot latency.
+                    let selected = if has_selection {
+                        cell_iteration
+                            .is_selected()
+                            .map_err(vt("cell_is_selected"))?
+                    } else {
+                        false
+                    };
 
                     // A spacer renders nothing and contributes no text: the
                     // wide character before it already occupies both columns.

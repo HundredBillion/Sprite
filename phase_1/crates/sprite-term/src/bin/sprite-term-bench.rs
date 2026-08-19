@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::process;
 use std::time::{Duration, Instant};
 
-use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession, TerminalSize};
+use sprite_term::{
+    CellPosition, Scroll, SelectionMode, SessionConfig, TerminalCommand, TerminalEvent,
+    TerminalSession, TerminalSize,
+};
 
 /// A regression budget leaves this much headroom above today's p95.
 const BUDGET_MULTIPLIER: f64 = 1.10;
@@ -57,6 +60,13 @@ fn main() {
             options.samples,
             capture_100x100_grid,
         ),
+        Measurement::collect(
+            "capture_with_full_scrollback",
+            options.samples,
+            capture_with_full_scrollback,
+        ),
+        Measurement::collect("scroll_round_trip", options.samples, scroll_round_trip),
+        Measurement::collect("select_full_screen", options.samples, select_full_screen),
     ];
 
     if let Err(error) = write_report(&options.output, options.samples, &measurements) {
@@ -404,6 +414,128 @@ fn capture_100x100_grid() -> Duration {
 
     finish(session);
     elapsed
+}
+
+/// Capture cost once history is deep. Capture is meant to be proportional to
+/// the visible screen, not to retained scrollback, so this should track
+/// `capture_100x100_grid` rather than growing with history.
+fn capture_with_full_scrollback() -> Duration {
+    let mut session = TerminalSession::spawn(shell("seq 1 20000; sleep 30"))
+        .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
+    let _events = await_ready(&mut session);
+    let mut snapshots = session
+        .take_snapshot_stream()
+        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+
+    let warmup = Instant::now();
+    let deep = wait_for_predicate(&mut snapshots, warmup, |bundle| {
+        bundle.render.viewport.scrollback_rows() > 5_000
+    });
+    let generation = deep;
+
+    let started = Instant::now();
+    session
+        .send(TerminalCommand::Capture)
+        .unwrap_or_else(|error| fatal(&format!("capture: {error}")));
+    let elapsed = wait_for_generation(&mut snapshots, generation, started);
+
+    finish(session);
+    elapsed
+}
+
+/// One scroll command to the snapshot that reflects it.
+fn scroll_round_trip() -> Duration {
+    let mut session = TerminalSession::spawn(shell("seq 1 5000; sleep 30"))
+        .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
+    let _events = await_ready(&mut session);
+    let mut snapshots = session
+        .take_snapshot_stream()
+        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+
+    let warmup = Instant::now();
+    let generation = wait_for_predicate(&mut snapshots, warmup, |bundle| {
+        bundle.render.viewport.scrollback_rows() > 1_000
+    });
+
+    let started = Instant::now();
+    session
+        .send(TerminalCommand::Scroll(Scroll::Delta(-50)))
+        .unwrap_or_else(|error| fatal(&format!("scroll: {error}")));
+    let elapsed = wait_for_generation(&mut snapshots, generation, started);
+
+    finish(session);
+    elapsed
+}
+
+/// Selecting a whole visible screen, to the snapshot that marks it.
+fn select_full_screen() -> Duration {
+    let mut session = TerminalSession::spawn(shell("seq 1 200; sleep 30"))
+        .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
+    let _events = await_ready(&mut session);
+    let mut snapshots = session
+        .take_snapshot_stream()
+        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+
+    let warmup = Instant::now();
+    let generation = wait_for_predicate(&mut snapshots, warmup, |bundle| {
+        bundle.render.rows.iter().any(|row| !row.cells.is_empty())
+    });
+    let size = TerminalSize::DEFAULT;
+
+    let started = Instant::now();
+    session
+        .send(TerminalCommand::Select {
+            anchor: CellPosition { row: 0, column: 0 },
+            head: CellPosition {
+                row: size.rows - 1,
+                column: size.cols - 1,
+            },
+            mode: SelectionMode::Character,
+            rectangle: false,
+        })
+        .unwrap_or_else(|error| fatal(&format!("select: {error}")));
+    let elapsed = wait_for_generation(&mut snapshots, generation, started);
+
+    finish(session);
+    elapsed
+}
+
+/// Waits for a bundle satisfying `predicate`, returning its generation.
+fn wait_for_predicate(
+    snapshots: &mut sprite_term::SnapshotStream,
+    started: Instant,
+    predicate: impl Fn(&sprite_term::SnapshotBundle) -> bool,
+) -> u64 {
+    let deadline = started + SAMPLE_TIMEOUT;
+    loop {
+        match snapshots.next_blocking() {
+            Ok(bundle) if predicate(&bundle) => return bundle.generation,
+            Ok(_) => {}
+            Err(error) => fatal(&format!("snapshot stream ended: {error}")),
+        }
+        if Instant::now() > deadline {
+            fatal("timed out waiting for a snapshot");
+        }
+    }
+}
+
+/// Waits for a bundle newer than `generation`.
+fn wait_for_generation(
+    snapshots: &mut sprite_term::SnapshotStream,
+    generation: u64,
+    started: Instant,
+) -> Duration {
+    let deadline = started + SAMPLE_TIMEOUT;
+    loop {
+        match snapshots.next_blocking() {
+            Ok(bundle) if bundle.generation > generation => return started.elapsed(),
+            Ok(_) => {}
+            Err(error) => fatal(&format!("snapshot stream ended: {error}")),
+        }
+        if Instant::now() > deadline {
+            fatal("timed out waiting for a newer generation");
+        }
+    }
 }
 
 /// Waits until `needle` is visible in a snapshot, returning the time since

@@ -322,6 +322,8 @@ pub(crate) fn run(
     // A silent long-running child must still give the application dimensions
     // and cursor state, so generation 0 is published before any output.
     let mut generation = 0_u64;
+    // Skips a per-cell FFI query on every capture while nothing is selected.
+    let mut has_selection = false;
     // The child waiter and the PTY pump stop independently; the session closes
     // once both have been accounted for.
     let mut exit_status: Option<Result<ExitStatus, String>> = None;
@@ -330,6 +332,7 @@ pub(crate) fn run(
     let mut dirty = !publish(
         generation,
         size,
+        has_selection,
         &terminal,
         &mut render_state,
         &mut rows,
@@ -458,6 +461,7 @@ pub(crate) fn run(
                 } => {
                     match apply_selection(&terminal, anchor, head, mode, rectangle) {
                         Ok(()) => {
+                            has_selection = true;
                             generation += 1;
                             dirty = true;
                         }
@@ -472,6 +476,7 @@ pub(crate) fn run(
                     }
                 }
                 TerminalCommand::ClearSelection => {
+                    has_selection = false;
                     if let Err(error) = terminal
                         .set_selection(None)
                         .map_err(|error| SessionError::new("clear_selection", error))
@@ -596,6 +601,7 @@ pub(crate) fn run(
             dirty = !publish(
                 generation,
                 size,
+                has_selection,
                 &terminal,
                 &mut render_state,
                 &mut rows,
@@ -612,6 +618,7 @@ pub(crate) fn run(
         && let Ok(bundle) = snapshot::capture(
             generation,
             size,
+            has_selection,
             &terminal,
             &mut render_state,
             &mut rows,
@@ -759,6 +766,7 @@ fn group_is_alive(group: i32) -> bool {
 fn publish<'vt>(
     generation: u64,
     size: TerminalSize,
+    has_selection: bool,
     terminal: &Terminal<'vt, '_>,
     render_state: &mut RenderState<'vt>,
     rows: &mut RowIterator<'vt>,
@@ -766,7 +774,15 @@ fn publish<'vt>(
     snapshots: &async_channel::Sender<Arc<SnapshotBundle>>,
     events: &async_channel::Sender<TerminalEvent>,
 ) -> bool {
-    match snapshot::capture(generation, size, terminal, render_state, rows, cells) {
+    match snapshot::capture(
+        generation,
+        size,
+        has_selection,
+        terminal,
+        render_state,
+        rows,
+        cells,
+    ) {
         Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_ok(),
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));

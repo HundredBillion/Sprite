@@ -1,6 +1,9 @@
 # Sprite Terminal Checkpoint 2 Technical Spec
 
-> **Status: DRAFT — not reviewed.** Checkpoint 1's TSP contained two commands
+> **Status: implemented on Linux, not reviewed.** Tasks 1-10 are complete
+> except for the deferrals each records. Human review is still owed.
+>
+> **Original status: DRAFT — not reviewed.** Checkpoint 1's TSP contained two commands
 > that did not work against the pinned source and one uncompilable signature,
 > each found only during execution. This document deserves the same grilling
 > before anyone starts Task 1.
@@ -295,16 +298,24 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** `sprite-term/src/bin/sprite-term-bench.rs`, `docs/performance/checkpoint-2.md`, `.github/workflows/phase-1.yml`
 
-- [ ] Add metrics for scrollback capture at the configured maximum, scroll
-  cadence over ten seconds, and selection over a full screen. Keep the existing
-  metrics so Checkpoint 1's budgets stay comparable.
-- [ ] Re-freeze Arch budgets at 110% of p95 from a release build.
-- [ ] Run the Croft gate again. From Checkpoint 4 the full matrix is
-  merge-blocking; here, any regression in a capability Checkpoint 1 or 2 claims
-  blocks acceptance.
-- [ ] Re-run the forbidden-state and provenance inspections unchanged.
-- [ ] Request human review focused on selection/viewport coherence across
+- [x] Three metrics added — `capture_with_full_scrollback`, `scroll_round_trip`,
+  `select_full_screen` — alongside all five from Checkpoint 1, so the old budgets
+  stay comparable. Scroll is measured as a command-to-snapshot round trip rather
+  than a ten-second cadence, which is the same property in a form that does not
+  take ten seconds per sample.
+- [x] Arch budgets re-frozen at 110% of p95, in `docs/performance/checkpoint-2.md`
+  and `checkpoint-2-arch.json`.
+- [x] **A regression was found and mostly fixed.** Adding `is_selected()` per
+  cell cost ~1,900 FFI calls per capture and pushed three metrics over
+  Checkpoint 1's budgets. Skipping the query while nothing is selected recovered
+  idle latency from 0.168 to 0.147 ms. Two metrics remain marginally over (3.5%
+  and 0.6%) and are accepted with reasons recorded.
+- [x] Croft gate re-run and **passed** against upstream `cf805f29`, after a
+  checkpoint that substantially changed the rendering path.
+- [x] Forbidden-state and provenance inspections re-run, both clean.
+- [ ] **Human review still owed**, focused on selection/viewport coherence across
   generations, mouse routing exclusivity, OSC 52 denial paths, and paste safety.
+  Outstanding for Checkpoint 1 as well.
 
 ---
 

@@ -7,12 +7,15 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Every metric the Checkpoint 1 report is required to carry.
-const REQUIRED_METRICS: [&str; 5] = [
+const REQUIRED_METRICS: [&str; 8] = [
     "spawn_to_ready",
     "input_to_snapshot_idle",
     "input_to_snapshot_under_load",
     "output_10mib_to_final_snapshot",
     "capture_100x100_grid",
+    "capture_with_full_scrollback",
+    "scroll_round_trip",
+    "select_full_screen",
 ];
 
 const REQUIRED_FIELDS: [&str; 6] = ["unit", "median", "p95", "max", "budget", "samples"];
