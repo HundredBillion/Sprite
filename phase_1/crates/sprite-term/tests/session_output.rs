@@ -5,7 +5,9 @@ mod support;
 
 use std::ffi::OsString;
 
-use sprite_term::{CellWidth, ScreenKind, SessionConfig, SnapshotColor, TerminalSession};
+use sprite_term::{
+    CellWidth, ScreenKind, Scroll, SessionConfig, SnapshotColor, TerminalCommand, TerminalSession,
+};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
@@ -117,4 +119,146 @@ fn a_silent_child_still_publishes_dimensions() {
         .expect("begin_shutdown succeeds")
         .expect("the first call owns the worker");
     handle.wait().expect("the worker terminates cleanly");
+}
+
+/// History is reached by moving the viewport, not by carrying it in every
+/// snapshot. A bundle reports where the viewport sits; scrolling changes which
+/// rows the next capture returns.
+#[test]
+fn scrollback_history_is_reachable_by_scrolling() {
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "i=1; while [ $i -le 200 ]; do echo line-$i; i=$((i+1)); done; sleep 30",
+        ]),
+    );
+    let mut session = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    let live = snapshots.wait_for("the newest output", |bundle| {
+        pane_text(bundle).contains("line-200")
+    });
+
+    assert!(
+        live.render.viewport.at_bottom(),
+        "a viewport following live output sits at the bottom"
+    );
+    assert!(
+        live.render.viewport.scrollback_rows() > 0,
+        "output beyond one screen accumulates history, got {:?}",
+        live.render.viewport
+    );
+    assert!(
+        !pane_text(&live).contains("line-1\n"),
+        "the earliest line has scrolled out of the viewport"
+    );
+
+    // The earlier rows are still there; the viewport just is not over them.
+    session
+        .send(TerminalCommand::Scroll(Scroll::Top))
+        .expect("scroll to the top of history");
+
+    let history = snapshots.wait_for("the oldest output", |bundle| {
+        pane_text(bundle).contains("line-1\n")
+    });
+
+    assert!(
+        !history.render.viewport.at_bottom(),
+        "a viewport reading history is not at the bottom"
+    );
+    assert_eq!(
+        history.generation, history.pane.generation,
+        "a scrolled bundle stays coherent"
+    );
+    assert_eq!(
+        history.render.rows.len(),
+        usize::from(history.render.size.rows),
+        "a history view is still exactly one screen tall"
+    );
+
+    session
+        .send(TerminalCommand::Scroll(Scroll::Bottom))
+        .expect("return to live output");
+    let back = snapshots.wait_for("the live tail again", |bundle| {
+        bundle.render.viewport.at_bottom()
+    });
+    assert!(pane_text(&back).contains("line-200"));
+}
+
+/// The scrollback budget is a byte budget, not a line count, and zero means no
+/// history at all. That is the only precisely testable point of the contract:
+/// any nonzero value is rounded up to a page, so an exact row count is
+/// implementation-defined.
+#[test]
+fn a_zero_scrollback_budget_keeps_no_history() {
+    let mut config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "i=1; while [ $i -le 400 ]; do echo line-$i; i=$((i+1)); done; sleep 30",
+        ]),
+    );
+    config.scrollback_bytes = 0;
+
+    let mut session = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    let bundle = snapshots.wait_for("the newest output", |bundle| {
+        pane_text(bundle).contains("line-400")
+    });
+
+    assert_eq!(
+        bundle.render.viewport.scrollback_rows(),
+        0,
+        "a zero budget retains nothing, got {:?}",
+        bundle.render.viewport
+    );
+    assert!(
+        bundle.render.viewport.at_bottom(),
+        "with no history the viewport is always at the bottom"
+    );
+}
+
+/// A small budget retains dramatically less than a large one.
+///
+/// Retention is quantized: libghostty allocates scrollback in large pages, so
+/// budgets within one page step retain identically. Measured against 3,000
+/// lines, 4 KiB, 64 KiB, and 1 MiB all retained 661 rows, while 16 MiB retained
+/// all 2,977. The values below therefore straddle a real step rather than
+/// sitting inside one, and exact row counts stay implementation-defined.
+#[test]
+fn a_smaller_scrollback_budget_retains_less_history() {
+    fn retained(scrollback_bytes: usize) -> usize {
+        // Far more history than a small budget can hold, so the budget is what
+        // limits retention rather than the amount of output.
+        let mut config = SessionConfig::command("/bin/sh", args(&["-c", "seq 1 3000; sleep 30"]));
+        config.scrollback_bytes = scrollback_bytes;
+
+        let mut session = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        events.expect_ready();
+
+        let bundle = snapshots.wait_for("the newest output", |bundle| {
+            pane_text(bundle).contains("3000")
+        });
+        let rows = bundle.render.viewport.scrollback_rows();
+
+        if let Ok(Some(handle)) = session.begin_shutdown() {
+            let _ = handle.wait();
+        }
+        rows
+    }
+
+    let small = retained(4 * 1024);
+    let large = retained(16 * 1024 * 1024);
+    assert!(
+        large > small,
+        "a larger budget retains more history: {large} vs {small}"
+    );
 }

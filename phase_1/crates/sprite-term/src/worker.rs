@@ -26,8 +26,8 @@ use crate::pty_unix;
 use crate::pty_unix::{GroupSignal, Pump};
 use crate::snapshot;
 use crate::{
-    ChildExit, KeyAction, KeyEvent, KeyModifiers, SessionConfig, SessionError, SnapshotBundle,
-    TerminalCommand, TerminalEvent, TerminalSize,
+    ChildExit, KeyAction, KeyEvent, KeyModifiers, Scroll, SessionConfig, SessionError,
+    SnapshotBundle, TerminalCommand, TerminalEvent, TerminalSize,
 };
 
 /// The one ordered PTY-write path. Worker-local: it never crosses a thread or
@@ -128,7 +128,7 @@ pub(crate) fn run(
     let mut terminal = match Terminal::new(TerminalOptions {
         cols: size.cols,
         rows: size.rows,
-        max_scrollback: config.max_scrollback,
+        max_scrollback: config.scrollback_bytes,
     }) {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -281,6 +281,19 @@ pub(crate) fn run(
                             break;
                         }
                     }
+                }
+                TerminalCommand::Scroll(scroll) => {
+                    // Moving the viewport changes what is visible, so it is a
+                    // terminal mutation like any other and earns a generation.
+                    terminal.scroll_viewport(match scroll {
+                        Scroll::Top => libghostty_vt::terminal::ScrollViewport::Top,
+                        Scroll::Bottom => libghostty_vt::terminal::ScrollViewport::Bottom,
+                        Scroll::Delta(rows) => {
+                            libghostty_vt::terminal::ScrollViewport::Delta(rows as isize)
+                        }
+                    });
+                    generation += 1;
+                    dirty = true;
                 }
                 TerminalCommand::Capture => dirty = true,
             },

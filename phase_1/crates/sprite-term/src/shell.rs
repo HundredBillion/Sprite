@@ -36,7 +36,7 @@ pub(crate) fn login_shell() -> Result<SessionConfig, SessionError> {
         working_directory: env::current_dir().ok(),
         environment: identity_environment(),
         size: TerminalSize::DEFAULT,
-        max_scrollback: 10_000,
+        scrollback_bytes: crate::default_scrollback_bytes(),
     })
 }
 
@@ -211,7 +211,7 @@ mod tests {
         assert!(config.program.is_absolute());
         assert_eq!(config.args, vec![OsString::from("-l")]);
         assert_eq!(config.size, TerminalSize::DEFAULT);
-        assert_eq!(config.max_scrollback, 10_000);
+        assert!(config.scrollback_bytes > 0);
 
         let names: Vec<&OsStr> = config
             .environment

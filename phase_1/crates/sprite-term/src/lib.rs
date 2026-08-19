@@ -34,6 +34,15 @@ const SNAPSHOT_CAPACITY: usize = 1;
 /// The largest grid Sprite will allocate, in cells.
 const MAX_CELLS: u64 = 1_000_000;
 
+/// Default scrollback budget, in bytes. Ten mebibytes is the same order as
+/// Ghostty's own default and holds a long history at ordinary line lengths.
+const DEFAULT_SCROLLBACK_BYTES: usize = 10 * 1024 * 1024;
+
+/// The default scrollback budget in bytes.
+pub(crate) fn default_scrollback_bytes() -> usize {
+    DEFAULT_SCROLLBACK_BYTES
+}
+
 /// The largest accepted raw `Input` payload. Checkpoint 2 chunks paste through
 /// this same limit rather than raising it.
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -105,7 +114,14 @@ pub struct SessionConfig {
     pub working_directory: Option<PathBuf>,
     pub environment: Vec<(OsString, OsString)>,
     pub size: TerminalSize,
-    pub max_scrollback: usize,
+    /// Scrollback budget in **bytes**, not lines.
+    ///
+    /// libghostty's C header documents this as "maximum number of lines", but
+    /// its implementation treats the value as bytes and rounds it up to the
+    /// nearest page. Zero keeps no scrollback at all. Checkpoint 1 took the
+    /// header at its word and set 10,000 here believing it meant lines; it
+    /// meant ten kilobytes.
+    pub scrollback_bytes: usize,
 }
 
 impl SessionConfig {
@@ -117,7 +133,7 @@ impl SessionConfig {
             working_directory: None,
             environment: Vec::new(),
             size: TerminalSize::DEFAULT,
-            max_scrollback: 10_000,
+            scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
         }
     }
 
@@ -153,12 +169,60 @@ pub struct KeyEvent {
     pub composing: bool,
 }
 
+/// Where to move a Pane's viewport over its scrollback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Scroll {
+    /// The oldest retained history.
+    Top,
+    /// Live output, where new writes are visible as they arrive.
+    Bottom,
+    /// A relative move in rows. Negative goes back into history.
+    Delta(i32),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerminalCommand {
     Key(KeyEvent),
     Input(Vec<u8>),
     Resize(TerminalSize),
+    Scroll(Scroll),
     Capture,
+}
+
+/// Where a Pane's viewport sits over its scrollable area.
+///
+/// History is deliberately *not* carried in snapshots. A full scrollback would
+/// be tens of thousands of rows rebuilt on every capture, many times a second;
+/// instead a snapshot reports the viewport's position and scrolling changes
+/// which rows the next capture returns. Cost stays proportional to what is
+/// visible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Viewport {
+    /// Rows in the whole scrollable area, history plus the visible screen.
+    pub total_rows: usize,
+    /// Rows of history above the viewport's top edge.
+    pub offset: usize,
+    /// Rows the viewport shows.
+    pub visible_rows: usize,
+}
+
+impl Viewport {
+    /// Whether the viewport follows live output.
+    pub fn at_bottom(self) -> bool {
+        self.offset.saturating_add(self.visible_rows) >= self.total_rows
+    }
+
+    /// Retained history above the visible screen.
+    pub fn scrollback_rows(self) -> usize {
+        self.total_rows.saturating_sub(self.visible_rows)
+    }
+
+    /// Rows of history below the viewport that the reader has not scrolled to.
+    pub fn unseen_rows(self) -> usize {
+        self.total_rows
+            .saturating_sub(self.offset)
+            .saturating_sub(self.visible_rows)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,6 +304,7 @@ pub struct CursorSnapshot {
 pub struct RenderSnapshot {
     pub generation: u64,
     pub size: TerminalSize,
+    pub viewport: Viewport,
     pub rows: Vec<RenderRow>,
     pub cursor: CursorSnapshot,
     pub default_foreground: Rgb,
@@ -256,6 +321,7 @@ pub struct PaneRow {
 pub struct PaneSnapshot {
     pub generation: u64,
     pub size: TerminalSize,
+    pub viewport: Viewport,
     pub screen: ScreenKind,
     pub rows: Vec<PaneRow>,
     pub cursor: CursorSnapshot,

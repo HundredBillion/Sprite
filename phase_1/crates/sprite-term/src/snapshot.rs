@@ -16,7 +16,7 @@ use libghostty_vt::style::{RgbColor, StyleColor, Underline};
 use crate::{
     CellStyle, CellWidth, CursorSnapshot, PaneRow, PaneSnapshot, RenderCell, RenderRow,
     RenderSnapshot, Rgb, ScreenKind, SessionError, SnapshotBundle, SnapshotColor, TerminalSize,
-    UnderlineStyle,
+    UnderlineStyle, Viewport,
 };
 
 /// Builds one coherent bundle from the terminal's current state.
@@ -39,6 +39,16 @@ pub(crate) fn capture<'vt>(
     let screen = match terminal.active_screen().map_err(vt("active_screen"))? {
         Screen::Primary => ScreenKind::Primary,
         Screen::Alternate => ScreenKind::Alternate,
+    };
+
+    // Read before the borrow begins: the scrollbar describes where the viewport
+    // sits over the scrollable area, which is how history is reported without
+    // copying it.
+    let scrollbar = terminal.scrollbar().map_err(vt("scrollbar"))?;
+    let viewport = Viewport {
+        total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),
+        offset: usize::try_from(scrollbar.offset).unwrap_or(0),
+        visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows)),
     };
 
     let snapshot = render_state.update(terminal).map_err(vt("render_update"))?;
@@ -140,6 +150,7 @@ pub(crate) fn capture<'vt>(
         render: Arc::new(RenderSnapshot {
             generation,
             size,
+            viewport,
             rows: render_rows,
             cursor,
             default_foreground: rgb(colors.foreground),
@@ -148,6 +159,7 @@ pub(crate) fn capture<'vt>(
         pane: Arc::new(PaneSnapshot {
             generation,
             size,
+            viewport,
             screen,
             rows: pane_rows,
             cursor,

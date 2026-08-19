@@ -119,14 +119,17 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** `sprite-term/src/snapshot.rs`, `sprite-term/src/lib.rs`
 
-- [ ] Extend `RenderSnapshot` and `PaneSnapshot` with the scrollback rows above
-  the viewport and the total history length, keeping both projections owned and
-  coherent within one generation.
-- [ ] Test that a child printing more than one screen of output leaves earlier
+- [x] ~~Extend both projections with the scrollback rows above the viewport~~ —
+  superseded. Both projections carry `Viewport { total_rows, offset,
+  visible_rows }` instead; history is reached by moving the viewport, not by
+  copying it. See resolved open question 3.
+- [x] Test that a child printing more than one screen of output leaves earlier
   rows retrievable at the same generation as the visible ones.
-- [ ] Respect `SessionConfig::max_scrollback`; prove eviction at the boundary.
+- [x] Respect the configured scrollback budget; prove that zero keeps nothing
+  and that a larger budget retains more.
 - [ ] Measure capture cost before optimising. If per-cell `String` allocation
   dominates, replace it with a compact representation in this task, not later.
+  Deferred to Task 10's budgets: capture is unchanged in size by this task.
 
 ### Task 3: Scroll the viewport
 
@@ -250,9 +253,13 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
    in `PaneSnapshot`, which implies the terminal side owns it.
 2. **Is GPUI's clipboard sufficient**, or does OSC 52's policy need direct
    platform access? Unknown until Task 7 is attempted.
-3. **Scrollback in every snapshot may be too expensive.** An alternative is an
-   on-demand history query rather than carrying history in each bundle. Task 2
-   should measure before committing to the shape.
+3. ~~**Scrollback in every snapshot may be too expensive.**~~ **Resolved in
+   Task 2: snapshots carry no history.** libghostty already models a viewport
+   over the scrollable area, so a bundle reports `Viewport { total_rows, offset,
+   visible_rows }` from `Terminal::scrollbar()` and scrolling changes which rows
+   the next capture returns. Carrying history would have meant rebuilding tens
+   of thousands of rows, each allocating a `String` per cell, many times a
+   second. Capture stays proportional to what is visible.
 4. **How much of Checkpoint 2 is worth doing before accessibility exists?**
    Selection and viewport state are exactly what an accessibility tree would
    expose. Building them without that consumer risks designing the wrong

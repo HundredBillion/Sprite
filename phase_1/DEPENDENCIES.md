@@ -73,6 +73,19 @@ Checkpoint 4 re-enables `kitty-graphics` and updates this entry. `log`,
 **Pin policy.** Exact `=0.2.1`, paired with the exact Ghostty source commit
 below. The pair moves together and only through ADR 0003 review.
 
+**Upstream documentation defect.** `GhosttyTerminalOptions.max_scrollback` is
+documented in `include/ghostty/vt/terminal.h` as "Maximum number of lines to
+keep in scrollback history". It is not lines. `src/terminal/Screen.zig` states
+the value is "the amount of scrollback to keep in bytes… rounded UP to the
+nearest page size", and measurement confirms it. Checkpoint 1 believed the
+header and set 10,000 intending lines; it meant ten kilobytes. Sprite's field is
+now named `scrollback_bytes`.
+
+Retention is also coarsely quantized. Measured against 3,000 lines of output:
+budgets of 4 KiB, 64 KiB, and 1 MiB each retained 661 rows, while 16 MiB
+retained all 2,977. Any budget is therefore a lower bound on intent, not a row
+count, and Sprite must not present it to users as one.
+
 ### `portable-pty` `=0.9.0`
 
 **Capability.** PTY allocation, child spawn, and window-size control across
