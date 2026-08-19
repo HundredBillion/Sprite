@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent,
-    KeyUpEvent, Pixels, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Size, Task, TextRun,
-    Window, div, px, rgb,
+    ClipboardItem, Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight,
+    KeyDownEvent, KeyUpEvent, Pixels, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Size,
+    Task, TextRun, Window, div, px, rgb,
 };
 use sprite_term::{
     CellStyle, KeyAction, Rgb, Scroll, SessionConfig, ShutdownHandle, SnapshotBundle,
@@ -110,6 +110,20 @@ impl TerminalView {
             loop {
                 match events.next().await {
                     Ok(TerminalEvent::Ready) => {}
+                    Ok(TerminalEvent::SelectionCopied(text)) => {
+                        // User-initiated copy needs no policy: the person asked
+                        // for it. Task 7's policy governs OSC 52, where the
+                        // *terminal* asks on a child's behalf.
+                        if !text.is_empty()
+                            && view
+                                .update(cx, |_view, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                })
+                                .is_err()
+                        {
+                            return;
+                        }
+                    }
                     Ok(TerminalEvent::Error(error)) => {
                         if view
                             .update(cx, |view, cx| {

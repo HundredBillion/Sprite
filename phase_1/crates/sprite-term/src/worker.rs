@@ -26,8 +26,8 @@ use crate::pty_unix;
 use crate::pty_unix::{GroupSignal, Pump};
 use crate::snapshot;
 use crate::{
-    ChildExit, KeyAction, KeyEvent, KeyModifiers, Scroll, SessionConfig, SessionError,
-    SnapshotBundle, TerminalCommand, TerminalEvent, TerminalSize,
+    CellPosition, ChildExit, KeyAction, KeyEvent, KeyModifiers, Scroll, SelectionMode,
+    SessionConfig, SessionError, SnapshotBundle, TerminalCommand, TerminalEvent, TerminalSize,
 };
 
 /// The one ordered PTY-write path. Worker-local: it never crosses a thread or
@@ -302,6 +302,46 @@ pub(crate) fn run(
                     });
                     generation += 1;
                     dirty = true;
+                }
+                TerminalCommand::Select {
+                    anchor,
+                    head,
+                    mode,
+                    rectangle,
+                } => {
+                    match apply_selection(&terminal, anchor, head, mode, rectangle) {
+                        Ok(()) => {
+                            generation += 1;
+                            dirty = true;
+                        }
+                        // A selection that cannot be resolved is reported, but
+                        // it does not end the session: the next gesture may
+                        // well land somewhere valid.
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                TerminalCommand::ClearSelection => {
+                    if let Err(error) = terminal
+                        .set_selection(None)
+                        .map_err(|error| SessionError::new("clear_selection", error))
+                    {
+                        let _ = events.send_blocking(TerminalEvent::Error(error));
+                    }
+                    generation += 1;
+                    dirty = true;
+                }
+                TerminalCommand::CopySelection => {
+                    let event = match selection_text(&terminal) {
+                        Ok(text) => TerminalEvent::SelectionCopied(text),
+                        Err(error) => TerminalEvent::Error(error),
+                    };
+                    if events.send_blocking(event).is_err() {
+                        break;
+                    }
                 }
                 TerminalCommand::Capture => dirty = true,
             },
@@ -632,6 +672,66 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             requested,
         },
     }
+}
+
+/// Installs a selection described in viewport coordinates.
+///
+/// Word and line modes delegate to libghostty so Sprite agrees with Ghostty on
+/// what a word or a wrapped line is, rather than inventing its own boundaries.
+fn apply_selection(
+    terminal: &Terminal<'_, '_>,
+    anchor: CellPosition,
+    head: CellPosition,
+    mode: SelectionMode,
+    rectangle: bool,
+) -> Result<(), SessionError> {
+    use libghostty_vt::selection::{SelectLineOptions, SelectWordOptions, Selection};
+    use libghostty_vt::terminal::{Point, PointCoordinate};
+
+    let point = |position: CellPosition| {
+        Point::Viewport(PointCoordinate {
+            x: position.column,
+            y: u32::from(position.row),
+        })
+    };
+
+    let head_ref = terminal
+        .grid_ref(point(head))
+        .map_err(|error| SessionError::new("selection_grid_ref", error))?;
+
+    let selection = match mode {
+        SelectionMode::Character => {
+            let anchor_ref = terminal
+                .grid_ref(point(anchor))
+                .map_err(|error| SessionError::new("selection_grid_ref", error))?;
+            Some(Selection::new(anchor_ref, head_ref, rectangle))
+        }
+        SelectionMode::Word => terminal
+            .select_word(SelectWordOptions::new(head_ref))
+            .map_err(|error| SessionError::new("select_word", error))?,
+        SelectionMode::Line => terminal
+            .select_line(SelectLineOptions::new(head_ref))
+            .map_err(|error| SessionError::new("select_line", error))?,
+    };
+
+    terminal
+        .set_selection(selection.as_ref())
+        .map_err(|error| SessionError::new("set_selection", error))?;
+    Ok(())
+}
+
+/// The current selection as text, or empty when nothing is selected.
+fn selection_text(terminal: &Terminal<'_, '_>) -> Result<String, SessionError> {
+    use libghostty_vt::selection::FormatOptions;
+
+    let formatted = terminal
+        .format_selection_alloc(None, FormatOptions::new())
+        .map_err(|error| SessionError::new("format_selection", error))?;
+
+    let Some(bytes) = formatted else {
+        return Ok(String::new());
+    };
+    String::from_utf8(bytes.to_vec()).map_err(|error| SessionError::new("selection_utf8", error))
 }
 
 /// Pins the viewport to live output. Returns whether it actually moved, so an

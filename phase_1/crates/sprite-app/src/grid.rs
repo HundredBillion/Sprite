@@ -21,6 +21,7 @@ pub(crate) struct PositionedCell {
     pub columns: u16,
     pub text: String,
     pub style: CellStyle,
+    pub selected: bool,
 }
 
 impl PositionedCell {
@@ -55,6 +56,7 @@ pub(crate) fn lay_out_row(row: &RenderRow) -> Vec<PositionedCell> {
                     columns,
                     text: cell.text.clone(),
                     style: cell.style,
+                    selected: cell.selected,
                 });
             }
             // The wide character before it already covers this column.
@@ -93,6 +95,7 @@ mod tests {
             text: text.to_owned(),
             width,
             style: style(),
+            selected: false,
         }
     }
 

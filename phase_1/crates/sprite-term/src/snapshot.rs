@@ -88,6 +88,11 @@ pub(crate) fn capture<'vt>(
                         .graphemes_utf8(&mut grapheme)
                         .map_err(vt("cell_graphemes"))?;
                     let style = cell_iteration.style().map_err(vt("cell_style"))?;
+                    // Reported by libghostty only when the terminal holds the
+                    // selection, which is why selection is owned there.
+                    let selected = cell_iteration
+                        .is_selected()
+                        .map_err(vt("cell_is_selected"))?;
 
                     // A spacer renders nothing and contributes no text: the
                     // wide character before it already occupies both columns.
@@ -107,6 +112,7 @@ pub(crate) fn capture<'vt>(
                     row_cells.push(RenderCell {
                         text,
                         width,
+                        selected,
                         style: CellStyle {
                             foreground: color(style.fg_color),
                             background: color(style.bg_color),

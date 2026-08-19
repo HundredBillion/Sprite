@@ -159,14 +159,21 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** new `sprite-app/src/selection.rs`, `sprite-term/src/snapshot.rs`
 
-- [ ] Model selection in cell coordinates anchored to a generation, so a
-  selection survives new output arriving beneath it.
-- [ ] Support character, word, and line granularity. Table-test word boundaries
-  against wide characters and combining marks.
-- [ ] Render the selection overlay from snapshot state, not from a second copy of
-  the text.
-- [ ] Copy yields the selected text with trailing blanks stripped per row and
-  wrapped rows rejoined without an inserted newline.
+- [x] Model selection in viewport cell coordinates. `Select { anchor, head,
+  mode, rectangle }` and `ClearSelection` install it through libghostty, which
+  anchors it over the whole screen including scrollback.
+- [x] Support character, word, and line granularity, delegating word and line
+  boundaries to libghostty so Sprite agrees with Ghostty on what a word is.
+- [x] Render the selection overlay from snapshot state: `RenderCell::selected`
+  comes from the same traversal as the text, so there is no second copy.
+- [x] Copy yields the selected text through `SelectionCopied`, extracted by
+  `format_selection` because the terminal is what knows which rows were
+  soft-wrapped. Empty when nothing is selected. User-initiated copy writes
+  straight to the clipboard; OSC 52 policy remains Task 7.
+- [ ] **Not yet driven by gestures.** Selection is complete at the seam and
+  rendered, but nothing produces the commands: mouse drag arrives in Task 5.
+  Until then it is reachable only through the API.
+- [ ] Table-test word boundaries against wide characters and combining marks.
 
 ### Task 5: Mouse
 
@@ -257,10 +264,15 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 ## Open questions for review
 
-1. **Does selection belong in `sprite-app` or `sprite-term`?** This draft puts it
-   in the app, since it is a presentation concern layered over snapshots. The
-   counter-argument is that Checkpoint 3's Pane Observation wants selection state
-   in `PaneSnapshot`, which implies the terminal side owns it.
+1. ~~**Does selection belong in `sprite-app` or `sprite-term`?**~~ **Resolved in
+   Task 4: `sprite-term`, against this draft's guess.** libghostty already
+   implements `select_word`, `select_line`, `select_output` (semantic, OSC
+   133-aware), `select_all`, and `format_selection`, which rejoins soft-wrapped
+   rows. Decisively, the render iterator's `is_selected()` reports a cell as
+   selected only when the *terminal* holds the selection, so an application-side
+   model could not have used the existing render path at all. Putting it in the
+   app would have meant reimplementing word boundaries and wrap handling, and
+   diverging from Ghostty on both.
 2. **Is GPUI's clipboard sufficient**, or does OSC 52's policy need direct
    platform access? Unknown until Task 7 is attempted.
 3. ~~**Scrollback in every snapshot may be too expensive.**~~ **Resolved in

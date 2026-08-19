@@ -180,12 +180,45 @@ pub enum Scroll {
     Delta(i32),
 }
 
+/// A cell in the visible viewport. Row 0 is the top visible row, so the
+/// application can speak in what it can see without knowing where the viewport
+/// sits over history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CellPosition {
+    pub row: u16,
+    pub column: u16,
+}
+
+/// How far a selection gesture expands from where it landed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectionMode {
+    /// Exactly the cells between anchor and head.
+    Character,
+    /// The whole word under the head, using libghostty's boundaries.
+    Word,
+    /// The whole logical line, following soft wraps.
+    Line,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerminalCommand {
     Key(KeyEvent),
     Input(Vec<u8>),
     Resize(TerminalSize),
     Scroll(Scroll),
+    /// Replace the selection. Selection lives here rather than in the
+    /// application because libghostty models it over the whole screen including
+    /// scrollback, and because a cell is only reported as selected when the
+    /// terminal itself holds the selection.
+    Select {
+        anchor: CellPosition,
+        head: CellPosition,
+        mode: SelectionMode,
+        rectangle: bool,
+    },
+    ClearSelection,
+    /// Ask for the selected text. Answered with `SelectionCopied`.
+    CopySelection,
     Capture,
 }
 
@@ -284,6 +317,8 @@ pub struct RenderCell {
     pub text: String,
     pub width: CellWidth,
     pub style: CellStyle,
+    /// Whether this cell falls inside the current selection.
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -345,6 +380,9 @@ pub struct ChildExit {
 pub enum TerminalEvent {
     Ready,
     Exited(ChildExit),
+    /// The text of the current selection, in answer to `CopySelection`. Empty
+    /// when nothing is selected.
+    SelectionCopied(String),
     Error(SessionError),
 }
 
