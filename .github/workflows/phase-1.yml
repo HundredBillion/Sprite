@@ -91,6 +91,21 @@ jobs:
           tic -x -o target/terminfo target/ghostty.terminfo
           infocmp -A target/terminfo xterm-ghostty > /dev/null
 
+      # Diagnostic: the identity test's `infocmp xterm-ghostty` fails in this
+      # container while the workflow's own `infocmp -A` succeeds, so the
+      # difference is how TERMINFO is resolved rather than the database itself.
+      - name: Diagnose terminfo resolution
+        working-directory: phase_1
+        continue-on-error: true
+        run: |
+          set -x
+          infocmp -V
+          ls -R target/terminfo | head -20
+          TERMINFO="$PWD/target/terminfo" infocmp xterm-ghostty > /dev/null \
+            && echo "TERMINFO env: OK" || echo "TERMINFO env: FAILED"
+          infocmp -A "$PWD/target/terminfo" xterm-ghostty > /dev/null \
+            && echo "-A flag: OK" || echo "-A flag: FAILED"
+
       - name: Offline locked gate
         working-directory: phase_1
         run: |
@@ -194,6 +209,37 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The smoke runs Sprite's own test with --locked --offline, so Sprite's
+      # dependencies and terminfo must exist before Croft is even cloned.
+      # Without this the job fails with "no matching package named gpui".
+      - name: Install Zig and terminfo tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ncurses-bin
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+            -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig && sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+
+      - name: Fetch Sprite dependencies and generate terminfo
+        working-directory: phase_1
+        run: |
+          set -euo pipefail
+          zig version | grep -qx "${ZIG_VERSION}"
+          cargo fetch --locked
+          export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
+          export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
+          (cd vendor/ghostty && zig build --fetch=all \
+            -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none)
+          mkdir -p target/terminfo
+          zig build-exe -lc -femit-bin=target/gen-terminfo \
+            --dep ghostty_terminfo \
+            -Mroot=scripts/gen-terminfo.zig \
+            -Mghostty_terminfo=vendor/ghostty/src/terminfo/ghostty.zig
+          ./target/gen-terminfo > target/ghostty.terminfo
+          tic -x -o target/terminfo target/ghostty.terminfo
 
       - name: Build Croft from main and run the capability smoke
         run: ./phase_1/scripts/test-croft-main.sh

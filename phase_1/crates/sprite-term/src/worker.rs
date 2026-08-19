@@ -41,14 +41,16 @@ type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
 /// Helper threads get a small explicit stack; they hold no terminal state.
 const HELPER_STACK_BYTES: usize = 256 * 1024;
 
-/// The bounded shutdown policy, measured from the start of Closing. HUP goes
-/// out immediately; a process group that ignores it gets TERM and then KILL.
+/// The bounded shutdown policy, measured from the moment shutdown is actually
+/// requested — not from the start of Closing. A pane whose child exits on its
+/// own may not be asked to shut down until much later, and starting the clock
+/// at Closing would spend the whole budget before the request arrives.
 const TERM_AFTER: Duration = Duration::from_secs(2);
 const KILL_AFTER: Duration = Duration::from_secs(3);
 
 /// Cleanup stops waiting here even if a group somehow survives KILL, so a
 /// worker can never hang forever.
-const GIVE_UP_AFTER: Duration = Duration::from_secs(4);
+const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
 
 /// Short enough that escalation deadlines are re-checked promptly even under
 /// continuous output.
@@ -363,19 +365,26 @@ pub(crate) fn run(
     signal_groups(&groups, &GroupSignal::Hangup);
     let mut escalation = 1_u8;
 
+    // Set the first time the flag is observed, so every escalation deadline is
+    // relative to the request rather than to the child's exit.
+    let mut requested_at: Option<Instant> = None;
+
     loop {
         // Read the flag every pass: a session may be told to shut down after
         // its child has already exited on its own.
         let requested = shutdown.load(Ordering::SeqCst);
-        let elapsed = closing_started.elapsed();
+        if requested && requested_at.is_none() {
+            requested_at = Some(Instant::now());
+        }
 
         // Checked before every receive, so continuous output cannot postpone
         // escalation past its deadline.
-        if requested {
-            if elapsed >= KILL_AFTER && escalation < 3 {
+        if let Some(since) = requested_at {
+            let waited = since.elapsed();
+            if waited >= KILL_AFTER && escalation < 3 {
                 signal_groups(&groups, &GroupSignal::Kill);
                 escalation = 3;
-            } else if elapsed >= TERM_AFTER && escalation < 2 {
+            } else if waited >= TERM_AFTER && escalation < 2 {
                 signal_groups(&groups, &GroupSignal::Terminate);
                 escalation = 2;
             }
@@ -385,7 +394,13 @@ pub(crate) fn run(
         // A requested shutdown is not finished while anything the pane started
         // is still running; a natural exit only owes the single hangup above.
         let descendants_gone = !requested || groups.iter().all(|group| !group_is_alive(*group));
-        if (settled && descendants_gone) || elapsed >= GIVE_UP_AFTER {
+        // A pane that was never asked to shut down still may not hang forever,
+        // so an unrequested close keeps its own deadline from Closing.
+        let exhausted = match requested_at {
+            Some(since) => since.elapsed() >= GIVE_UP_AFTER,
+            None => closing_started.elapsed() >= GIVE_UP_AFTER,
+        };
+        if (settled && descendants_gone) || exhausted {
             break;
         }
 
