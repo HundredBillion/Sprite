@@ -5,7 +5,7 @@ mod support;
 
 use std::ffi::OsString;
 
-use sprite_term::{SessionConfig, TerminalCommand, TerminalSession};
+use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
@@ -74,8 +74,10 @@ fn unbracketed_paste_converts_newlines_to_carriage_returns() {
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
+    // Confirmed explicitly: this test is about the encoding, not the safety
+    // gate, and an unconfirmed unbracketed newline is now withheld by design.
     session
-        .send(TerminalCommand::Paste("a\nb".to_owned()))
+        .send(TerminalCommand::PasteConfirmed("a\nb".to_owned()))
         .expect("paste");
 
     let bundle = snapshots.wait_for("the converted paste", |b| pane_text(b).contains("61"));
@@ -143,5 +145,94 @@ fn focus_is_reported_only_when_the_child_asks() {
     assert!(
         pane_text(&bundle).contains("1b 5b 49"),
         "focus gained is CSI I"
+    );
+}
+
+/// An unbracketed paste containing a newline would execute on arrival, because
+/// the line discipline turns Sprite's carriage return back into one. Such a
+/// paste is withheld and reported, not performed.
+#[test]
+fn an_unsafe_unbracketed_paste_is_withheld_and_reported() {
+    let mut session = session(&hex_reader("", 3));
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    session
+        .send(TerminalCommand::Paste("rm -rf /\nyes".to_owned()))
+        .expect("send an unsafe paste");
+
+    let mut reported = None;
+    for _ in 0..8 {
+        match events.next() {
+            TerminalEvent::UnsafePaste(text) => {
+                reported = Some(text);
+                break;
+            }
+            TerminalEvent::Error(error) => panic!("unexpected error: {error}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        reported.as_deref(),
+        Some("rm -rf /\nyes"),
+        "the paste is handed back for confirmation, not performed"
+    );
+
+    // Nothing reached the child: `head -c 3` is still waiting.
+    session
+        .send(TerminalCommand::Capture)
+        .expect("request a capture");
+    let bundle = snapshots.wait_for("a capture", |b| b.generation > 0);
+    assert!(
+        !pane_text(&bundle).contains("72 6d"),
+        "no byte of the unsafe paste reached the child, got:\n{}",
+        pane_text(&bundle)
+    );
+}
+
+/// The same paste goes through once explicitly confirmed. Confirmation is the
+/// person's decision, and Sprite performs it without further argument.
+#[test]
+fn a_confirmed_unsafe_paste_is_performed() {
+    let mut session = session(&hex_reader("", 3));
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    session
+        .send(TerminalCommand::PasteConfirmed("a\nb".to_owned()))
+        .expect("send a confirmed paste");
+
+    let bundle = snapshots.wait_for("the performed paste", |b| pane_text(b).contains("61"));
+    assert!(
+        pane_text(&bundle).contains("61 0d 62"),
+        "the confirmed paste was written, got:\n{}",
+        pane_text(&bundle)
+    );
+}
+
+/// A bracketed paste is safe by construction, so it is never withheld even when
+/// it contains newlines: the child is told where it starts and ends.
+#[test]
+fn a_bracketed_paste_with_newlines_needs_no_confirmation() {
+    let mut session = session(&hex_reader("printf '\\033[?2004h';", 15));
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    session
+        .send(TerminalCommand::Paste("a\nb".to_owned()))
+        .expect("send a paste with a newline");
+
+    let bundle = snapshots.wait_for("the wrapped paste", |b| {
+        pane_text(b).contains("1b 5b 32 30 30 7e")
+    });
+    assert!(
+        pane_text(&bundle).contains("1b 5b 32 30 30 7e"),
+        "bracketing makes it safe, so it went through unchallenged"
     );
 }

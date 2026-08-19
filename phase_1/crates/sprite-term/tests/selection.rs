@@ -192,3 +192,125 @@ fn copying_without_a_selection_yields_nothing() {
         }
     }
 }
+
+/// A wide character is its own word.
+///
+/// libghostty treats each CJK character as a word boundary, because segmenting
+/// CJK into words needs a dictionary that a terminal has no business carrying.
+/// Sprite follows that rather than inventing a rule, and this pins the choice so
+/// nobody "fixes" it into something that disagrees with Ghostty.
+#[test]
+fn a_wide_character_is_its_own_word() {
+    // Two CJK words either side of an ASCII space. Each character occupies two
+    // columns, so a naive column-counting rule would land in the wrong place.
+    let mut session = session(
+        "stty -echo; printf '\\346\\227\\245\\346\\234\\254 \\344\\270\\255\\345\\233\\275\\n'; sleep 30",
+    );
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("the output", |bundle| pane_text(bundle).contains("日本"));
+
+    // Column 0 is the first half of 日; the word is 日本.
+    session
+        .send(TerminalCommand::Select {
+            anchor: at(0, 0),
+            head: at(0, 0),
+            mode: SelectionMode::Word,
+            rectangle: false,
+        })
+        .expect("select a word");
+
+    let bundle = snapshots.wait_for("a selected word", |bundle| {
+        bundle
+            .render
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().any(|c| c.selected))
+    });
+    let selected: String = bundle.render.rows[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.selected)
+        .map(|cell| cell.text.as_str())
+        .collect();
+    assert_eq!(
+        selected, "日",
+        "each CJK character is its own word; a two-column glyph is not split"
+    );
+}
+
+/// A combining mark belongs to the character it modifies, so selecting the
+/// word must not split the grapheme.
+#[test]
+fn word_selection_keeps_combining_marks_with_their_base() {
+    // "café" written as e + U+0301, so the accent is a separate codepoint.
+    let mut session = session("stty -echo; printf 'caf\\145\\314\\201 next\\n'; sleep 30");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("the output", |bundle| pane_text(bundle).contains("caf"));
+
+    session
+        .send(TerminalCommand::Select {
+            anchor: at(0, 1),
+            head: at(0, 1),
+            mode: SelectionMode::Word,
+            rectangle: false,
+        })
+        .expect("select a word");
+
+    let bundle = snapshots.wait_for("a selected word", |bundle| {
+        bundle
+            .render
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().any(|c| c.selected))
+    });
+    let selected: String = bundle.render.rows[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.selected)
+        .map(|cell| cell.text.as_str())
+        .collect();
+    assert_eq!(
+        selected, "cafe\u{301}",
+        "the accent stayed with the letter it modifies"
+    );
+}
+
+/// Whitespace is a boundary, not part of the word.
+#[test]
+fn a_space_is_not_part_of_a_word() {
+    let mut session = session("stty -echo; printf 'alpha beta\\n'; sleep 30");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("the output", |bundle| {
+        pane_text(bundle).contains("alpha beta")
+    });
+
+    session
+        .send(TerminalCommand::Select {
+            anchor: at(0, 0),
+            head: at(0, 0),
+            mode: SelectionMode::Word,
+            rectangle: false,
+        })
+        .expect("select a word");
+
+    let bundle = snapshots.wait_for("a selected word", |bundle| {
+        bundle
+            .render
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().any(|c| c.selected))
+    });
+    let selected: String = bundle.render.rows[0]
+        .cells
+        .iter()
+        .filter(|cell| cell.selected)
+        .map(|cell| cell.text.as_str())
+        .collect();
+    assert_eq!(selected, "alpha", "the trailing space is a boundary");
+}

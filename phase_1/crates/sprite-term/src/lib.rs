@@ -318,11 +318,15 @@ pub enum TerminalCommand {
     Mouse(MouseEvent),
     /// Paste text as data.
     ///
-    /// Terminal Core wraps it in bracketed paste when the child has that mode
-    /// on, strips control bytes, and converts newlines to carriage returns when
-    /// it does not — so clipboard content cannot become a command. Size is
-    /// bounded by chunking, not by refusing the paste.
+    /// When the child has bracketed paste on, the text is wrapped and cannot be
+    /// read as typing. When it does not, a payload containing a newline *would*
+    /// execute on arrival — the line discipline turns Sprite's carriage return
+    /// back into a newline — so such a paste is withheld and reported as
+    /// `UnsafePaste` instead of being performed.
     Paste(String),
+    /// Perform a paste the person has explicitly confirmed, skipping the safety
+    /// check. Their decision, made with the content in front of them.
+    PasteConfirmed(String),
     /// Window focus changed. Reaches the child only if it enabled focus
     /// reporting.
     Focus(bool),
@@ -523,6 +527,11 @@ pub enum TerminalEvent {
     /// The text of the current selection, in answer to `CopySelection`. Empty
     /// when nothing is selected.
     SelectionCopied(String),
+    /// A paste was withheld because it would execute on arrival.
+    ///
+    /// Carries the text back so the application can show what it is and offer
+    /// to proceed with `PasteConfirmed`. Nothing has been written to the child.
+    UnsafePaste(String),
     /// The child rang the bell.
     Bell,
     /// The child set a new title.

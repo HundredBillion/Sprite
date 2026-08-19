@@ -72,6 +72,8 @@ pub struct TerminalView {
     scroll: ScrollAccumulator,
     /// Where a drag began, while a selection is being dragged out.
     drag_anchor: Option<CellPosition>,
+    /// A paste withheld as unsafe, awaiting a second explicit request.
+    pending_unsafe_paste: Option<String>,
     _events: Task<()>,
     _snapshots: Task<()>,
 }
@@ -114,6 +116,27 @@ impl TerminalView {
             loop {
                 match events.next().await {
                     Ok(TerminalEvent::Ready) => {}
+                    Ok(TerminalEvent::UnsafePaste(text)) => {
+                        // Held, not performed. The person sees why and repeats
+                        // the paste to go ahead.
+                        let lines = text.lines().count();
+                        if view
+                            .update(cx, |view, cx| {
+                                view.pending_unsafe_paste = Some(text);
+                                view.status = Some(
+                                    format!(
+                                        "[paste held: {lines} lines would run as commands — \
+                                         press Ctrl+Shift+V again to paste anyway]"
+                                    )
+                                    .into(),
+                                );
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                     Ok(TerminalEvent::Hyperlink { uri: Some(uri), .. }) => {
                         // Terminal Core already applied the scheme policy, so
                         // reaching here means the target is allowed. The parsed
@@ -232,6 +255,7 @@ impl TerminalView {
             status: None,
             scroll: ScrollAccumulator::default(),
             drag_anchor: None,
+            pending_unsafe_paste: None,
             _events: event_task,
             _snapshots: snapshot_task,
         }
@@ -257,6 +281,7 @@ impl TerminalView {
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag_anchor: None,
+            pending_unsafe_paste: None,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
         }
@@ -305,6 +330,12 @@ impl TerminalView {
         match shortcut {
             Shortcut::Copy => self.send(TerminalCommand::CopySelection),
             Shortcut::Paste => {
+                // A second paste request confirms one that was held back.
+                if let Some(held) = self.pending_unsafe_paste.take() {
+                    self.status = None;
+                    self.send(TerminalCommand::PasteConfirmed(held));
+                    return;
+                }
                 // Read only on an explicit request, never speculatively.
                 let text = cx
                     .read_from_clipboard()

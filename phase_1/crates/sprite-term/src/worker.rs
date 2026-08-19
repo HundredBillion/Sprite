@@ -517,6 +517,18 @@ pub(crate) fn run(
                     }
                 }
                 TerminalCommand::Paste(text) => {
+                    // Bracketing is what makes a paste safe; without it a
+                    // newline is indistinguishable from pressing Enter, so the
+                    // person is asked before anything is written.
+                    if !paste_is_safe_to_perform(&terminal, &text) {
+                        if events
+                            .send_blocking(TerminalEvent::UnsafePaste(text))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     match encode_paste(&terminal, &text) {
                         Ok(bytes) => {
                             // Written in chunks so one enormous paste cannot
@@ -538,6 +550,24 @@ pub(crate) fn run(
                         }
                     }
                 }
+                TerminalCommand::PasteConfirmed(text) => match encode_paste(&terminal, &text) {
+                    Ok(bytes) => {
+                        for chunk in bytes.chunks(PASTE_CHUNK_BYTES) {
+                            if let Err(error) = write_all(&writer, chunk) {
+                                fatal = Some(error);
+                                break;
+                            }
+                        }
+                        if fatal.is_some() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                            break;
+                        }
+                    }
+                },
                 TerminalCommand::Focus(gained) => {
                     focused.set(gained);
                     match encode_focus(&terminal, gained) {
@@ -930,6 +960,23 @@ fn resolve_hyperlink(terminal: &Terminal<'_, '_>, position: CellPosition) -> Opt
 
     let uri = std::str::from_utf8(&buffer[..written]).ok()?;
     crate::is_allowed_link(uri).then(|| uri.to_owned())
+}
+
+/// Whether a paste can be performed without asking.
+///
+/// Bracketed paste is safe by construction: the child is told where the text
+/// begins and ends, so a newline inside it is data. Without bracketing, a
+/// newline arrives as if typed — Sprite writes a carriage return, but the line
+/// discipline converts it straight back — so anything libghostty considers
+/// unsafe needs a person's confirmation first.
+fn paste_is_safe_to_perform(terminal: &Terminal<'_, '_>, text: &str) -> bool {
+    use libghostty_vt::paste;
+    use libghostty_vt::terminal::{Mode, ModeKind};
+
+    let bracketed = terminal
+        .mode(Mode::new(MODE_BRACKETED_PASTE, ModeKind::Dec))
+        .unwrap_or(false);
+    bracketed || paste::is_safe(text)
 }
 
 /// Prepares clipboard text for the PTY.

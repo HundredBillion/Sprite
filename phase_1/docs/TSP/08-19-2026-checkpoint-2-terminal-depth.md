@@ -176,7 +176,11 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 - [ ] **Not yet driven by gestures.** Selection is complete at the seam and
   rendered, but nothing produces the commands: mouse drag arrives in Task 5.
   Until then it is reachable only through the API.
-- [ ] Table-test word boundaries against wide characters and combining marks.
+- [x] Word boundaries table-tested against wide characters, combining marks, and
+  whitespace. Recorded finding: libghostty treats **each CJK character as its own
+  word**, because segmenting CJK needs a dictionary a terminal has no business
+  carrying. Sprite follows Ghostty rather than inventing a rule, and the test
+  pins that so nobody "fixes" it into disagreement.
 
 ### Task 5: Mouse
 
@@ -222,12 +226,11 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 - [ ] **IME is not done.** GPUI's `InputHandler` wiring is substantial and
   deserves its own pass rather than being tacked onto this task.
   `KeyEvent::composing` therefore remains always false, as Checkpoint 1 left it.
-- [ ] **Paste protection is owed.** An unbracketed paste containing newlines
-  still executes, and no conversion can prevent it: Sprite writes a carriage
-  return, but the line discipline rewrites it back to a newline unless `icrnl`
-  is off. That is inherent to terminals and is why bracketed paste exists.
-  `paste::is_safe` is available and detects exactly this case; what is missing
-  is the confirmation step before performing such a paste.
+- [x] **Paste protection implemented.** An unbracketed paste that libghostty
+  considers unsafe is withheld and returned as `UnsafePaste`; nothing reaches
+  the child until the person repeats the paste, which sends `PasteConfirmed`.
+  A bracketed paste is safe by construction and never challenged, even with
+  newlines. Three tests cover withholding, confirming, and the bracketed case.
 
 ### Task 7: Clipboard and OSC 52
 
