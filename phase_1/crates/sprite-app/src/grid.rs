@@ -202,3 +202,108 @@ mod tests {
         assert!(lay_out_row(&row(Vec::new())).is_empty());
     }
 }
+
+/// Turns continuous scroll gestures into whole-row terminal scrolls.
+///
+/// A trackpad delivers fractional pixel deltas, but libghostty's viewport moves
+/// in whole rows. The remainder is kept here so many small gestures still add
+/// up to a row instead of being rounded away, and so a fast flick is not
+/// amplified by rounding each event independently.
+#[derive(Debug, Default)]
+pub(crate) struct ScrollAccumulator {
+    /// Sub-row remainder, in logical pixels. Positive is toward history.
+    remainder: f32,
+}
+
+impl ScrollAccumulator {
+    /// Adds one gesture and returns whole rows to scroll, negative toward
+    /// history to match `Scroll::Delta`.
+    pub fn accumulate(&mut self, delta_pixels: f32, cell_height: Pixels) -> i32 {
+        let height = f32::from(cell_height);
+        if !delta_pixels.is_finite() || !height.is_finite() || height <= 0.0 {
+            return 0;
+        }
+
+        self.remainder += delta_pixels;
+        let rows = (self.remainder / height).trunc();
+        if rows == 0.0 {
+            return 0;
+        }
+        self.remainder -= rows * height;
+        // Scrolling the wheel up moves toward history, which is a negative
+        // delta for the terminal.
+        -(rows as i32)
+    }
+
+    /// Drops any partial row, so an unrelated later gesture does not inherit it.
+    pub fn reset(&mut self) {
+        self.remainder = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn a_gesture_smaller_than_a_row_scrolls_nothing_yet() {
+        let mut accumulator = ScrollAccumulator::default();
+        assert_eq!(accumulator.accumulate(5.0, px(16.0)), 0);
+    }
+
+    #[test]
+    fn small_gestures_accumulate_into_a_row() {
+        let mut accumulator = ScrollAccumulator::default();
+        assert_eq!(accumulator.accumulate(6.0, px(16.0)), 0);
+        assert_eq!(accumulator.accumulate(6.0, px(16.0)), 0);
+        // 18 of 16 pixels: one row, with 2 left over.
+        assert_eq!(accumulator.accumulate(6.0, px(16.0)), -1);
+    }
+
+    #[test]
+    fn the_remainder_carries_rather_than_being_rounded_away() {
+        let mut accumulator = ScrollAccumulator::default();
+        // Ten gestures of 8px over a 16px row is exactly five rows, and none of
+        // it may be lost to rounding.
+        let total: i32 = (0..10).map(|_| accumulator.accumulate(8.0, px(16.0))).sum();
+        assert_eq!(total, -5);
+    }
+
+    #[test]
+    fn scrolling_down_moves_toward_live_output() {
+        let mut accumulator = ScrollAccumulator::default();
+        assert_eq!(accumulator.accumulate(-32.0, px(16.0)), 2);
+    }
+
+    #[test]
+    fn a_fast_flick_scrolls_many_rows_at_once() {
+        let mut accumulator = ScrollAccumulator::default();
+        assert_eq!(accumulator.accumulate(160.0, px(16.0)), -10);
+    }
+
+    #[test]
+    fn reversing_direction_cancels_the_pending_remainder() {
+        let mut accumulator = ScrollAccumulator::default();
+        assert_eq!(accumulator.accumulate(8.0, px(16.0)), 0);
+        assert_eq!(accumulator.accumulate(-8.0, px(16.0)), 0);
+        // The two cancelled exactly, so a full row still takes a full row.
+        assert_eq!(accumulator.accumulate(15.0, px(16.0)), 0);
+        assert_eq!(accumulator.accumulate(1.0, px(16.0)), -1);
+    }
+
+    #[test]
+    fn degenerate_inputs_scroll_nothing() {
+        let mut accumulator = ScrollAccumulator::default();
+        assert_eq!(accumulator.accumulate(100.0, px(0.0)), 0);
+        assert_eq!(accumulator.accumulate(f32::NAN, px(16.0)), 0);
+        assert_eq!(accumulator.accumulate(100.0, px(f32::NAN)), 0);
+    }
+
+    #[test]
+    fn reset_drops_the_partial_row() {
+        let mut accumulator = ScrollAccumulator::default();
+        assert_eq!(accumulator.accumulate(15.0, px(16.0)), 0);
+        accumulator.reset();
+        assert_eq!(accumulator.accumulate(1.0, px(16.0)), 0);
+    }
+}

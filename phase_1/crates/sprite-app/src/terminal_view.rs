@@ -9,14 +9,15 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent,
-    KeyUpEvent, Pixels, Rgba, SharedString, Size, Task, TextRun, Window, div, px, rgb,
+    KeyUpEvent, Pixels, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Size, Task, TextRun,
+    Window, div, px, rgb,
 };
 use sprite_term::{
-    CellStyle, KeyAction, Rgb, SessionConfig, ShutdownHandle, SnapshotBundle, SnapshotColor,
-    TerminalCommand, TerminalEvent, TerminalSession, TerminalSize,
+    CellStyle, KeyAction, Rgb, Scroll, SessionConfig, ShutdownHandle, SnapshotBundle,
+    SnapshotColor, TerminalCommand, TerminalEvent, TerminalSession, TerminalSize,
 };
 
-use crate::grid::{PositionedCell, lay_out_row};
+use crate::grid::{PositionedCell, ScrollAccumulator, lay_out_row};
 use crate::input::gpui_key_event;
 
 /// The rendered font size, in logical pixels.
@@ -65,6 +66,8 @@ pub struct TerminalView {
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<TerminalSize>,
     status: Option<SharedString>,
+    /// Sub-row scroll remainder, so trackpad gestures are not rounded away.
+    scroll: ScrollAccumulator,
     _events: Task<()>,
     _snapshots: Task<()>,
 }
@@ -167,6 +170,7 @@ impl TerminalView {
             font_family,
             size: Some(initial_size),
             status: None,
+            scroll: ScrollAccumulator::default(),
             _events: event_task,
             _snapshots: snapshot_task,
         }
@@ -190,6 +194,7 @@ impl TerminalView {
             font_family,
             size: None,
             status: Some(message.into()),
+            scroll: ScrollAccumulator::default(),
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
         }
@@ -444,7 +449,23 @@ impl Render for TerminalView {
                     KeyAction::Press
                 };
                 let key = gpui_key_event(&event.keystroke, action);
+                // The keystroke returns the Pane to live output, so a partial
+                // row left over from an earlier gesture no longer means
+                // anything.
+                view.scroll.reset();
                 view.send(TerminalCommand::Key(key));
+            }))
+            .on_scroll_wheel(cx.listener(|view, event: &ScrollWheelEvent, _window, _cx| {
+                // A wheel notch reports in lines; a trackpad reports in pixels.
+                // Both become whole terminal rows through the same accumulator.
+                let pixels = match event.delta {
+                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                    ScrollDelta::Lines(delta) => delta.y * f32::from(view.cell_height),
+                };
+                let rows = view.scroll.accumulate(pixels, view.cell_height);
+                if rows != 0 {
+                    view.send(TerminalCommand::Scroll(Scroll::Delta(rows)));
+                }
             }))
             .on_key_up(cx.listener(|view, event: &KeyUpEvent, _window, _cx| {
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);

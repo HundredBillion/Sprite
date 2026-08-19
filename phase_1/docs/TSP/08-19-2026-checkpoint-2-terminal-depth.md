@@ -135,15 +135,25 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 
 **Files:** `sprite-term/src/worker.rs`, `sprite-app/src/terminal_view.rs`
 
-- [ ] Add a `Scroll` command carrying an ordered row delta. Test that it changes
-  which rows a snapshot reports without disturbing the child.
-- [ ] Hold fractional offset as application state layered over libghostty's
-  row-based viewport: accumulated deltas cross row boundaries by issuing ordered
-  scroll commands while the remainder translates rendering.
-- [ ] A viewport at the live bottom follows new output. A viewport reading older
-  scrollback stays anchored and reports an unseen-line count.
-- [ ] Keyboard input and paste return the Pane to the live bottom. Selection,
-  copy, and search preserve the viewport. Test both.
+- [x] Add a `Scroll` command carrying an ordered row delta. Test that it changes
+  which rows a snapshot reports without disturbing the child. (Landed in Task 2.)
+- [x] Hold fractional offset as application state layered over libghostty's
+  row-based viewport. `ScrollAccumulator` keeps the sub-row remainder so trackpad
+  gestures accumulate instead of being rounded away, and emits whole-row
+  `Scroll::Delta` commands.
+- [x] A viewport at the live bottom follows new output. A viewport reading older
+  scrollback stays anchored and reports an unseen-line count. libghostty already
+  anchors; the test pins the behaviour so a future change cannot lose it.
+- [x] Keyboard input returns the Pane to the live bottom; raw `Input` does not,
+  being a transport rather than a keystroke. Both tested.
+- [ ] **Unverified by machine:** the GPUI wheel-to-accumulator wiring. The
+  accumulator has unit tests and `Scroll` has integration tests, but no scroll
+  injection tool is available here, so the few lines joining them have only been
+  read, not exercised. Confirm by hand, or with a compositor that can synthesise
+  wheel events.
+- [ ] Paste returns to the bottom — deferred with paste itself to Task 6.
+- [ ] Selection and search preserve the viewport — deferred to Task 4, which
+  introduces selection.
 
 ### Task 4: Select and copy
 

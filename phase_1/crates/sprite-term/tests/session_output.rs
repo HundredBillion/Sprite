@@ -6,7 +6,8 @@ mod support;
 use std::ffi::OsString;
 
 use sprite_term::{
-    CellWidth, ScreenKind, Scroll, SessionConfig, SnapshotColor, TerminalCommand, TerminalSession,
+    CellWidth, KeyAction, KeyEvent, KeyModifiers, ScreenKind, Scroll, SessionConfig, SnapshotColor,
+    TerminalCommand, TerminalSession,
 };
 
 use support::{EventPump, SnapshotPump, pane_text};
@@ -260,5 +261,102 @@ fn a_smaller_scrollback_budget_retains_less_history() {
     assert!(
         large > small,
         "a larger budget retains more history: {large} vs {small}"
+    );
+}
+
+/// A viewport reading history must stay where the reader put it when new output
+/// arrives, and report how much it has not seen. A viewport at the live bottom
+/// follows instead.
+#[test]
+fn a_scrolled_viewport_stays_anchored_while_output_arrives() {
+    // Prints a first burst, waits for a newline, then prints a second burst.
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; seq 1 200; read _; seq 1000 1200; sleep 30",
+        ]),
+    );
+    let mut session = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    snapshots.wait_for("the first burst", |bundle| {
+        pane_text(bundle).contains("200")
+    });
+
+    session
+        .send(TerminalCommand::Scroll(Scroll::Top))
+        .expect("scroll into history");
+    let anchored = snapshots.wait_for("the oldest output", |bundle| {
+        pane_text(bundle).contains("1\n")
+    });
+    let anchor_offset = anchored.render.viewport.offset;
+    assert!(!anchored.render.viewport.at_bottom());
+
+    // Release the second burst with raw input, which must not disturb where the
+    // reader is looking — only keyboard and paste return to the bottom.
+    session
+        .send(TerminalCommand::Input(b"\n".to_vec()))
+        .expect("release the second burst");
+
+    let after = snapshots.wait_for("output beyond the viewport", |bundle| {
+        bundle.render.viewport.unseen_rows() > anchored.render.viewport.unseen_rows()
+    });
+
+    assert_eq!(
+        after.render.viewport.offset, anchor_offset,
+        "the viewport stayed where the reader put it"
+    );
+    assert!(
+        !after.render.viewport.at_bottom(),
+        "it is still reading history"
+    );
+    assert!(
+        after.render.viewport.unseen_rows() > 0,
+        "and it reports what it has not seen"
+    );
+}
+
+/// Typing returns the Pane to live output, so the result of what you typed is
+/// visible rather than scrolled off above.
+#[test]
+fn a_keystroke_returns_the_viewport_to_live_output() {
+    let config = SessionConfig::command("/bin/sh", args(&["-c", "stty -echo; seq 1 200; cat"]));
+    let mut session = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    snapshots.wait_for("the output", |bundle| pane_text(bundle).contains("200"));
+
+    session
+        .send(TerminalCommand::Scroll(Scroll::Top))
+        .expect("scroll into history");
+    snapshots.wait_for("history", |bundle| !bundle.render.viewport.at_bottom());
+
+    session
+        .send(TerminalCommand::Key(KeyEvent {
+            logical_key: "z".to_owned(),
+            text: Some("z".to_owned()),
+            modifiers: KeyModifiers {
+                shift: false,
+                alt: false,
+                control: false,
+                platform: false,
+                function: false,
+            },
+            action: KeyAction::Press,
+            composing: false,
+        }))
+        .expect("type a key");
+
+    let back = snapshots.wait_for("the live bottom", |bundle| {
+        bundle.render.viewport.at_bottom()
+    });
+    assert!(
+        back.render.viewport.at_bottom(),
+        "a keystroke brings the reader back to where its result will appear"
     );
 }

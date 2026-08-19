@@ -242,12 +242,20 @@ pub(crate) fn run(
             Message::Command(command) => match command {
                 TerminalCommand::Input(bytes) => {
                     // Trusted, already-encoded bytes: one command, one write.
+                    // Raw input is a transport, not a keystroke, so it does not
+                    // move a reader who is looking at history.
                     if let Err(error) = write_all(&writer, &bytes) {
                         fatal = Some(error);
                         break;
                     }
                 }
                 TerminalCommand::Key(event) => {
+                    // Typing returns the Pane to live output, so the result of
+                    // the keystroke is visible rather than scrolled off above.
+                    if return_to_bottom(&mut terminal) {
+                        generation += 1;
+                        dirty = true;
+                    }
                     match encode_key(&mut encoder, &terminal, &event) {
                         Ok(bytes) => {
                             if let Err(error) = write_all(&writer, &bytes) {
@@ -624,6 +632,19 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             requested,
         },
     }
+}
+
+/// Pins the viewport to live output. Returns whether it actually moved, so an
+/// already-live Pane does not spend a generation on nothing.
+fn return_to_bottom(terminal: &mut Terminal<'_, '_>) -> bool {
+    let Ok(scrollbar) = terminal.scrollbar() else {
+        return false;
+    };
+    if scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total {
+        return false;
+    }
+    terminal.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Bottom);
+    true
 }
 
 /// Applies one resize to both backends in a fixed order.
