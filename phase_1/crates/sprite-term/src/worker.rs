@@ -383,7 +383,6 @@ pub(crate) fn run(
                         .send_blocking(TerminalEvent::ClipboardWrite(text))
                         .is_err()
                     {
-                        fatal = None;
                         break;
                     }
                 }
@@ -736,7 +735,35 @@ pub(crate) fn run(
         }
     }
 
-    // Both helpers have reported, so joining them cannot block.
+    // The loop above can exit on its deadline without having seen PumpStopped.
+    // In that case the pump may be blocked sending into a full worker queue,
+    // and joining it while nothing drains would deadlock: its send waits for
+    // room, our join waits for its send.
+    //
+    // Joining is not optional — the pump borrows the PTY descriptor, so it must
+    // finish before the master is dropped — which is exactly why the queue has
+    // to be drained first rather than the thread detached.
+    if !pump_stopped {
+        pump.cancel();
+        let drain_deadline = Instant::now() + GIVE_UP_AFTER;
+        while !pump_stopped && Instant::now() < drain_deadline {
+            match inbox.recv_timeout(CLOSING_SLICE) {
+                Ok(Message::PumpStopped(outcome)) => {
+                    if let PumpOutcome::ReadError(error) = outcome {
+                        fatal.get_or_insert_with(|| SessionError::new("pty_read", error));
+                    }
+                    pump_stopped = true;
+                }
+                // Returning the permit is what lets a blocked pump proceed to
+                // its next poll, where it sees the cancellation and stops.
+                Ok(Message::PtyOutput(_)) => pump.return_permit(),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
     pump.shutdown();
     if exit_status.is_some() {
         let _ = waiter.join();
