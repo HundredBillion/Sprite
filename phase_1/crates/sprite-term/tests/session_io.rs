@@ -286,3 +286,47 @@ fn kitty_keyboard_flags_change_the_encoding() {
         "the Kitty protocol encodes `a` as CSI 97 u, got:\n{kitty}"
     );
 }
+
+/// Text committed by an input method is typed, not pasted: it reaches the child
+/// verbatim and carries no bracketing.
+#[test]
+fn committed_input_method_text_reaches_the_child() {
+    let mut session = session("stty -echo; read line; printf 'got:%s\\n' \"$line\"");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    session
+        .send(TerminalCommand::CommitText("日本語".to_owned()))
+        .expect("commit composed text");
+    session
+        .send(TerminalCommand::Input(b"\n".to_vec()))
+        .expect("end the line");
+
+    let bundle = snapshots.wait_for("the committed text", |bundle| {
+        pane_text(bundle).contains("got:日本語")
+    });
+    assert!(pane_text(&bundle).contains("got:日本語"));
+}
+
+/// A commit returns the reader to live output, because it is typing.
+#[test]
+fn committing_returns_the_viewport_to_live_output() {
+    let mut session = session("stty -echo; seq 1 200; cat");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("the output", |b| pane_text(b).contains("200"));
+
+    session
+        .send(TerminalCommand::Scroll(sprite_term::Scroll::Top))
+        .expect("scroll into history");
+    snapshots.wait_for("history", |b| !b.render.viewport.at_bottom());
+
+    session
+        .send(TerminalCommand::CommitText("x".to_owned()))
+        .expect("commit");
+
+    let back = snapshots.wait_for("the live bottom", |b| b.render.viewport.at_bottom());
+    assert!(back.render.viewport.at_bottom());
+}

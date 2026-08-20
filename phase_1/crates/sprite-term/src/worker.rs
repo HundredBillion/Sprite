@@ -567,6 +567,18 @@ pub(crate) fn run(
                         }
                     }
                 },
+                TerminalCommand::CommitText(text) => {
+                    // Typing, so it returns the reader to where the result will
+                    // appear, exactly as a keystroke does.
+                    if return_to_bottom(&mut terminal) {
+                        generation += 1;
+                        dirty = true;
+                    }
+                    if let Err(error) = write_all(&writer, text.as_bytes()) {
+                        fatal = Some(error);
+                        break;
+                    }
+                }
                 TerminalCommand::Focus(gained) => {
                     focused.set(gained);
                     match encode_focus(&terminal, gained) {

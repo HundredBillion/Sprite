@@ -327,6 +327,12 @@ pub enum TerminalCommand {
     /// Perform a paste the person has explicitly confirmed, skipping the safety
     /// check. Their decision, made with the content in front of them.
     PasteConfirmed(String),
+    /// Text committed by an input method.
+    ///
+    /// This is typing, not pasting: it returns the viewport to live output and
+    /// carries no bracketing. A composition in progress never reaches the
+    /// child — only what the person actually committed does.
+    CommitText(String),
     /// Window focus changed. Reaches the child only if it enabled focus
     /// reporting.
     Focus(bool),

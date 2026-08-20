@@ -7,11 +7,13 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
+use std::ops::Range;
+
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight,
-    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Size, Task, TextRun, Window, div, point, px,
-    rgb,
+    Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
+    Focusable, Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollDelta, ScrollWheelEvent,
+    SharedString, Size, Task, TextRun, UTF16Selection, Window, canvas, div, point, px, rgb,
 };
 use sprite_term::{
     CellPosition, CellStyle, KeyAction, MouseAction, MouseEvent, Rgb, Scroll, SelectionMode,
@@ -74,6 +76,11 @@ pub struct TerminalView {
     drag_anchor: Option<CellPosition>,
     /// A paste withheld as unsafe, awaiting a second explicit request.
     pending_unsafe_paste: Option<String>,
+    /// Text an input method is composing.
+    ///
+    /// Shown at the cursor and deliberately *not* sent: the terminal learns
+    /// nothing about a composition until the person commits it.
+    preedit: Option<String>,
     _events: Task<()>,
     _snapshots: Task<()>,
 }
@@ -256,6 +263,7 @@ impl TerminalView {
             scroll: ScrollAccumulator::default(),
             drag_anchor: None,
             pending_unsafe_paste: None,
+            preedit: None,
             _events: event_task,
             _snapshots: snapshot_task,
         }
@@ -282,6 +290,7 @@ impl TerminalView {
             scroll: ScrollAccumulator::default(),
             drag_anchor: None,
             pending_unsafe_paste: None,
+            preedit: None,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
         }
@@ -598,6 +607,9 @@ impl Render for TerminalView {
         let cell_height = self.cell_height;
         let cursor = self.bundle.as_ref().map(|bundle| bundle.render.cursor);
         let status = self.status.clone();
+        let preedit = self.preedit.clone();
+        let focus_for_input = self.focus.clone();
+        let entity_for_input = cx.entity();
 
         div()
             .relative()
@@ -740,6 +752,35 @@ impl Render for TerminalView {
                         element.child(SharedString::from(cell.text))
                     }))
             }))
+            // Composition is drawn at the cursor and nowhere else. It is view
+            // state: the terminal has not been told anything about it.
+            .children(preedit.map(|text| {
+                div()
+                    .absolute()
+                    .top(px(
+                        f32::from(cursor.map_or(0, |c| c.row)) * f32::from(cell_height)
+                    ))
+                    .left(px(
+                        f32::from(cursor.map_or(0, |c| c.column)) * f32::from(cell_width)
+                    ))
+                    .h(cell_height)
+                    .bg(rgb(pack(default_fg)))
+                    .text_color(rgb(pack(default_bg)))
+                    .underline()
+                    .child(SharedString::from(text))
+            }))
+            // Installs the input handler during paint, which is the only point
+            // GPUI accepts one. `canvas` exists to reach paint from a `div`.
+            .child(canvas(
+                move |_bounds, _window, _cx| {},
+                move |bounds, (), window, cx| {
+                    window.handle_input(
+                        &focus_for_input,
+                        ElementInputHandler::new(bounds, entity_for_input),
+                        cx,
+                    );
+                },
+            ))
             .children(status.map(|status| {
                 div()
                     .absolute()
@@ -748,6 +789,117 @@ impl Render for TerminalView {
                     .text_color(rgb(STATUS))
                     .child(status)
             }))
+    }
+}
+
+/// Input-method support.
+///
+/// A terminal is not a text editor: there is no editable buffer to report, no
+/// selection an input method may replace, and no undo. What matters is the
+/// distinction the protocol draws between *marked* text — a composition still
+/// being formed — and *committed* text. Marked text is drawn at the cursor and
+/// never sent; only a commit becomes input the child sees.
+impl EntityInputHandler for TerminalView {
+    /// The terminal exposes no editable text for an input method to read.
+    fn text_for_range(
+        &mut self,
+        _range: Range<usize>,
+        _adjusted: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    /// A caret at the composition point, never a range: an input method must
+    /// not believe it can replace terminal content.
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let end = self.preedit.as_ref().map_or(0, |text| text.len());
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.preedit.as_ref().map(|text| 0..text.len())
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // The composition was abandoned. Nothing was ever sent, so nothing has
+        // to be undone in the terminal.
+        self.preedit = None;
+        cx.notify();
+    }
+
+    /// A commit. This is the only path by which composed text becomes input.
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.preedit = None;
+        if !text.is_empty() {
+            self.send(TerminalCommand::CommitText(text.to_owned()));
+        }
+        cx.notify();
+    }
+
+    /// A composition in progress. Held for display only.
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.preedit = if new_text.is_empty() {
+            None
+        } else {
+            Some(new_text.to_owned())
+        };
+        cx.notify();
+    }
+
+    /// Where the candidate window should appear: the cursor's cell.
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let cursor = self.bundle.as_ref()?.render.cursor;
+        Some(Bounds {
+            origin: point(
+                element_bounds.origin.x + px(f32::from(cursor.column) * f32::from(self.cell_width)),
+                element_bounds.origin.y + px(f32::from(cursor.row) * f32::from(self.cell_height)),
+            ),
+            size: gpui::size(self.cell_width, self.cell_height),
+        })
+    }
+
+    /// Terminal content is not addressable by character index for an input
+    /// method, so no mapping is offered rather than a misleading one.
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
     }
 }
 

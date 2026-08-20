@@ -223,9 +223,25 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 - [x] Route application shortcuts before the terminal, with explicit precedence.
   Ctrl+Shift+C and Ctrl+Shift+V are the whole table; everything else is the
   child's, and a claimed binding is never also typed.
-- [ ] **IME is not done.** GPUI's `InputHandler` wiring is substantial and
-  deserves its own pass rather than being tacked onto this task.
-  `KeyEvent::composing` therefore remains always false, as Checkpoint 1 left it.
+- [x] **IME implemented.** `TerminalView` implements `EntityInputHandler`, and
+  the handler is installed during paint through a `canvas` element, which is the
+  only point GPUI accepts one from inside a `div`.
+
+  A terminal is not a text editor, and the implementation says so: there is no
+  editable text to report, `selected_text_range` returns a caret rather than a
+  range so an input method cannot believe it may replace terminal content, and
+  `character_index_for_point` offers no mapping rather than a misleading one.
+  What matters is the marked/committed distinction — a composition is drawn at
+  the cursor as view state and **the terminal is never told about it**; only a
+  commit becomes input, through a new `CommitText` command that types rather
+  than pastes and returns the viewport to live output.
+
+  `KeyEvent::composing` stays false, and that is now correct rather than a gap:
+  keys belonging to a composition are consumed by the input method and reach the
+  handler, not the key path, so no key event is ever part of a composition.
+- [ ] **Unverified by machine:** composition itself. `CommitText` has integration
+  tests, but driving a real input method needs one installed and a language it
+  composes for. The handler's behaviour under an actual IME is unexercised.
 - [x] **Paste protection implemented.** An unbracketed paste that libghostty
   considers unsafe is withheld and returned as `UnsafePaste`; nothing reaches
   the child until the person repeats the paste, which sends `PasteConfirmed`.
