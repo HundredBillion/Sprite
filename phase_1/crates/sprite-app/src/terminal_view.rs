@@ -739,6 +739,10 @@ impl Render for TerminalView {
                         let (foreground, background) =
                             cell_colors(&cell.style, default_fg, default_bg);
                         let is_cursor = on_cursor.is_some_and(|c| c.column == cell.column);
+                        // Selection and cursor both invert. The cursor wins
+                        // where they overlap so it stays findable inside a
+                        // selected run.
+                        let inverted = is_cursor || cell.selected;
 
                         let mut element = div()
                             .absolute()
@@ -746,8 +750,8 @@ impl Render for TerminalView {
                             .w(cell.width(cell_width))
                             .h(cell_height)
                             .overflow_hidden()
-                            .bg(if is_cursor { foreground } else { background })
-                            .text_color(if is_cursor { background } else { foreground });
+                            .bg(if inverted { foreground } else { background })
+                            .text_color(if inverted { background } else { foreground });
 
                         if cell.style.bold {
                             element = element.font_weight(FontWeight::BOLD);
