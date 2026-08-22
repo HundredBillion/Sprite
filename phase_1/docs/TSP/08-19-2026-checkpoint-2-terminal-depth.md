@@ -199,10 +199,10 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
   delivery — both sides read the same terminal state. A test asserts a child
   that never enabled reporting receives nothing at all.
 - [x] Drag-to-select wired: press anchors, motion extends, release copies.
-- [ ] **Unverified by machine:** drag-to-select in the window. The hit test and
-  routing have unit and integration tests, but no mouse-injection tool is
-  available here, so the GPUI listeners themselves have been read, not
-  exercised. Same gap as Task 3's scroll wheel, which turned out to work.
+- [x] Drag-to-select **verified by hand**, after a fix. It did not work on first
+  use: the renderer never consulted `cell.selected`, because the edit that added
+  the inverted-cell branch silently failed to apply and no test covered drawing.
+  Press anchors, motion extends, release copies.
 - [ ] Make the override modifier configurable. It is Shift, but hardcoded;
   configuration arrives with the TOML work.
 
