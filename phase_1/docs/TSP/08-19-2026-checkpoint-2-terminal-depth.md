@@ -199,6 +199,10 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
   delivery — both sides read the same terminal state. A test asserts a child
   that never enabled reporting receives nothing at all.
 - [x] Drag-to-select wired: press anchors, motion extends, release copies.
+- [x] **Exclusivity verified by hand against Croft**, which is the case that
+  matters: clicking its file tree reaches Croft, while Shift+drag selects in
+  Sprite and Croft ignores it. One event, one consumer, in a real application
+  that knows nothing about Sprite.
 - [x] Drag-to-select **verified by hand**, after a fix. It did not work on first
   use: the renderer never consulted `cell.selected`, because the edit that added
   the inverted-cell branch silently failed to apply and no test covered drawing.
@@ -247,16 +251,23 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
   doubling it if GPUI ever declines to call the handler; the handler now commits
   only text that concludes a composition, and the key path bails while one is in
   progress. Plain typing confirmed working after the fix.
-- [ ] **Unverified by machine:** composition itself. `CommitText` has integration
-  tests and plain typing is confirmed by hand, but driving a real input method
-  needs one installed and a language it composes for. One known residual risk:
-  an input method that commits a candidate *without* first marking a composition
-  would be dropped by the rule above.
+- [ ] **Composition remains unverified, and cannot be tested on this machine.**
+  fcitx5 is installed and running but has only `keyboard-us` configured — a
+  plain layout with no composing engine — so there is nothing to compose with.
+  Testing it needs an engine installed (for example `fcitx5-chinese-addons` for
+  Pinyin) and a language that uses one.
+
+  `CommitText` has integration tests and plain typing is confirmed by hand. One
+  known residual risk stands: an input method that commits a candidate *without*
+  first marking a composition would be dropped by the rule above.
 - [x] **Paste protection implemented.** An unbracketed paste that libghostty
   considers unsafe is withheld and returned as `UnsafePaste`; nothing reaches
   the child until the person repeats the paste, which sends `PasteConfirmed`.
   A bracketed paste is safe by construction and never challenged, even with
-  newlines. Three tests cover withholding, confirming, and the bracketed case.
+  newlines. Three tests cover withholding, confirming, and the bracketed case,
+  and the flow is **verified by hand**: a three-line clipboard is held with a
+  message and pastes only on a second request, while a single word goes straight
+  through.
 
 ### Task 7: Clipboard and OSC 52
 
@@ -322,6 +333,8 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
 - [x] A hostile label cannot influence what is opened: the test uses a link
   whose visible text impersonates a bank while targeting somewhere else, and
   asserts the parsed target is what resolves.
+- [x] **Verified by hand**: Ctrl+Click on an `https` link opens the browser, and
+  Ctrl+Click on a `file://` link does nothing at all.
 
 ### Task 10: Freeze Checkpoint 2 budgets and review
 
