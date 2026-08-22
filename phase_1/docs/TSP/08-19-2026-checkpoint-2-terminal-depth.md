@@ -239,9 +239,19 @@ Three findings from Checkpoint 1 that this checkpoint must act on:
   `KeyEvent::composing` stays false, and that is now correct rather than a gap:
   keys belonging to a composition are consumed by the input method and reach the
   handler, not the key path, so no key event is ever part of a composition.
+  **Regression found in use, now fixed.** Installing the handler made GPUI
+  deliver every printable keystroke through *both* `on_key_down` and
+  `replace_text_in_range`, so each character was typed twice — the same
+  "one event, two consumers" failure the mouse routing was built to prevent.
+  The key path stays authoritative, because dropping input would be worse than
+  doubling it if GPUI ever declines to call the handler; the handler now commits
+  only text that concludes a composition, and the key path bails while one is in
+  progress. Plain typing confirmed working after the fix.
 - [ ] **Unverified by machine:** composition itself. `CommitText` has integration
-  tests, but driving a real input method needs one installed and a language it
-  composes for. The handler's behaviour under an actual IME is unexercised.
+  tests and plain typing is confirmed by hand, but driving a real input method
+  needs one installed and a language it composes for. One known residual risk:
+  an input method that commits a candidate *without* first marking a composition
+  would be dropped by the rule above.
 - [x] **Paste protection implemented.** An unbracketed paste that libghostty
   considers unsafe is withheld and returned as `UnsafePaste`; nothing reaches
   the child until the person repeats the paste, which sends `PasteConfirmed`.

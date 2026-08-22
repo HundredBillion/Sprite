@@ -629,6 +629,13 @@ impl Render for TerminalView {
                     return;
                 }
 
+                // While a composition is in progress the input method owns the
+                // keyboard. Anything still reaching here belongs to that
+                // composition and must not also be typed.
+                if view.preedit.is_some() {
+                    return;
+                }
+
                 let action = if event.is_held {
                     KeyAction::Repeat
                 } else {
@@ -841,7 +848,13 @@ impl EntityInputHandler for TerminalView {
         cx.notify();
     }
 
-    /// A commit. This is the only path by which composed text becomes input.
+    /// A commit. This is the only path by which *composed* text becomes input.
+    ///
+    /// GPUI also routes ordinary keystrokes through here, not only input-method
+    /// commits, and the key path has already encoded those against live
+    /// terminal state. Committing them again would type every character twice.
+    /// A commit is therefore only honoured when it concludes a composition,
+    /// which is the case `preedit` identifies.
     fn replace_text_in_range(
         &mut self,
         _range: Option<Range<usize>>,
@@ -849,8 +862,8 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.preedit = None;
-        if !text.is_empty() {
+        let was_composing = self.preedit.take().is_some();
+        if was_composing && !text.is_empty() {
             self.send(TerminalCommand::CommitText(text.to_owned()));
         }
         cx.notify();
