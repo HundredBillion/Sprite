@@ -1,6 +1,11 @@
 # Sprite Terminal Checkpoint 3 Technical Spec
 
-> **Status: DRAFT — not reviewed, and not ready to start.** Checkpoint 2 is
+> **Status: DRAFT — Task 1 implemented, the rest not started.** Task 1 is pure
+> logic with no security surface, taken on deliberately while review is
+> outstanding. Tasks 5 onward touch the observation surface and should not begin
+> before Checkpoints 1 and 2 are reviewed.
+>
+> **Original status: DRAFT — not reviewed, and not ready to start.** Checkpoint 2 is
 > implemented but unaccepted: human review is still owed and four items are
 > deferred. This document plans the next checkpoint; beginning it before those
 > close would repeat the pattern of carrying debt forward.
@@ -96,15 +101,23 @@ reintroduce exactly the cost Checkpoint 2 removed.
 
 **Files:** new `sprite-app/src/pane_tree.rs`
 
-- [ ] Model a tab as a recursive binary tree: leaves own a session ID, internal
-  nodes own orientation and normalised ratios. Table-test split, close, and
-  collapse of redundant internal nodes.
-- [ ] Closing a leaf chooses the nearest surviving focus target
-  deterministically. Test that the choice does not depend on creation order.
-- [ ] Focus movement is geometric — directional, from pane rectangles — not
-  creation order. Test with an asymmetric tree where the two differ.
-- [ ] Pane-tree state is separate from terminal state: resizing or moving a pane
-  must not recreate its PTY. Test that a session's identity survives both.
+- [x] A tab is a recursive binary tree: leaves own a `PaneId`, internal nodes own
+  orientation and a ratio. Split, close, and collapse are tested, including that
+  closing a sibling returns the survivor to the whole tab rather than leaving a
+  split node with one child.
+- [x] Closing chooses the nearest surviving pane by centre distance, ties broken
+  on id. The test computes the expected survivor from rectangles independently,
+  so it cannot simply mirror the implementation's traversal.
+- [x] Focus moves geometrically. A neighbour must lie in the requested direction
+  *and* share extent on the perpendicular axis, so a diagonal pane cannot steal
+  focus from one directly beside you — tested with a layout where tree shape and
+  geometry disagree.
+- [x] Pane identity is stable across splits, which is what ties a pane to its
+  session; a rearrangement that renumbered panes would silently reattach
+  terminals to the wrong ones.
+- [ ] Sessions are not attached yet, so "moving a pane does not recreate its
+  PTY" is only proved at the identity level. Task 2 attaches sessions and can
+  assert it end to end.
 
 ### Task 2: Many sessions in one window
 
