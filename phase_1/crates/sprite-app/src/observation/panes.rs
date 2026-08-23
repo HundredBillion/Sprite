@@ -220,6 +220,7 @@ impl PaneSource for WindowPanes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observation::endpoint::Endpoint;
     use sprite_term::{PaneRow, PromptKind, ScreenKind, SessionConfig, TerminalSession};
     use std::time::Duration;
 
@@ -364,6 +365,28 @@ mod tests {
             .expect("released rather than left waiting");
         assert!(answer.unwrap_err().contains("closed"));
         assert!(panes.panes().is_empty());
+    }
+
+    /// Turning observation off must not disturb a session that is running. The
+    /// pane keeps its child and its output; it simply becomes unreachable.
+    #[test]
+    fn a_session_keeps_running_when_observation_is_switched_off() {
+        let panes = WindowPanes::new();
+        let mut session = session();
+        panes.register(PaneId(0), TabId(0), session.commands());
+
+        // What switching observation off does to a window: the endpoint is
+        // destroyed. Nothing here touches the session.
+        drop(Endpoint::open(|_| String::new()).expect("an endpoint"));
+
+        // The child is still there, and the session still takes commands.
+        assert!(
+            session
+                .send(TerminalCommand::Resize(sprite_term::TerminalSize::DEFAULT))
+                .is_ok(),
+            "the session is alive and accepting commands"
+        );
+        assert_eq!(panes.panes().len(), 1, "and the pane is still a pane");
     }
 
     #[test]

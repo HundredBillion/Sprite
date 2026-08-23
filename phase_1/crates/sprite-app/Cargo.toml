@@ -9,8 +9,13 @@ license.workspace = true
 name = "sprite"
 path = "src/main.rs"
 
+[[bin]]
+name = "sprite-observation-bench"
+path = "src/bin/sprite-observation-bench.rs"
+
 [dependencies]
 serde_json = { workspace = true }
+toml = { workspace = true }
 sprite-term = { workspace = true }
 
 [dev-dependencies]

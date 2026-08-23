@@ -192,6 +192,13 @@ impl Endpoint {
         // A directory that already existed may have a laxer mode.
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
 
+        // A window that was killed rather than closed leaves its socket behind,
+        // because no destructor runs for a signal that cannot be caught. Such a
+        // file is harmless — nothing is listening, so nothing can be reached
+        // through it — but they accumulate, so each new endpoint clears the
+        // dead ones it finds.
+        sweep_dead_sockets(&directory);
+
         let key = Arc::new(ObservationKey::generate()?);
         // The filename is random, and deliberately *not* derived from the key:
         // a path appears in the environment and in process listings, so a path
@@ -382,6 +389,29 @@ where
 fn refuse(stream: &mut UnixStream) {
     let _ = writeln!(stream, "{DENIED}");
     let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// Removes socket files in `directory` that nothing is listening on.
+///
+/// A socket with a live window behind it accepts a connection and is left
+/// alone; only one that refuses is removed. That is what makes this safe to run
+/// while other windows are open.
+fn sweep_dead_sockets(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "sock") {
+            continue;
+        }
+        // Connecting is the test: a listener that is gone cannot answer, and a
+        // window that is alive is not disturbed by a connection that is
+        // immediately dropped.
+        if UnixStream::connect(&path).is_err() {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 /// The per-user runtime directory this window's socket lives in.
@@ -609,6 +639,75 @@ mod tests {
         );
         assert_eq!(answer, "ok:panes snapshot");
         drop(silent);
+    }
+
+    /// Turning observation off and on again must not revive the old endpoint.
+    /// A key captured while it was enabled would otherwise start working again
+    /// the moment someone re-enabled it.
+    #[test]
+    fn re_enabling_creates_a_new_endpoint_and_the_old_key_stays_dead() {
+        let (mut first, _) = endpoint_with_spy();
+        let captured_key = first.key_hex();
+        let captured_path = first.socket_path().to_path_buf();
+        assert_eq!(
+            ask(&captured_path, &format!("{captured_key} panes snapshot")),
+            "ok:panes snapshot"
+        );
+
+        // Disabled: the socket leaves the filesystem, not merely stops
+        // answering.
+        first.close();
+        assert!(!captured_path.exists());
+
+        // Re-enabled: a new endpoint, with a new key at a new path.
+        let (second, calls) = endpoint_with_spy();
+        assert_ne!(second.key_hex(), captured_key, "a fresh key");
+        assert_ne!(second.socket_path(), captured_path, "at a fresh path");
+
+        // The captured key is worthless against the new endpoint.
+        assert_eq!(
+            ask(
+                second.socket_path(),
+                &format!("{captured_key} panes snapshot")
+            ),
+            DENIED
+        );
+        assert!(
+            calls.0.lock().expect("lock").is_empty(),
+            "and it never reached the handler"
+        );
+
+        // Nothing about the old socket came back either.
+        assert!(UnixStream::connect(&captured_path).is_err());
+    }
+
+    /// A window killed rather than closed leaves its socket behind. The next
+    /// window clears it — without disturbing a window that is still running.
+    #[test]
+    fn a_new_endpoint_clears_dead_sockets_but_not_live_ones() {
+        let (live, _) = endpoint_with_spy();
+        let live_path = live.socket_path().to_path_buf();
+        let directory = live_path.parent().expect("a directory").to_path_buf();
+
+        // Stands in for what a killed window leaves: a socket file with nothing
+        // listening on it.
+        let abandoned = directory.join("abandoned-by-a-killed-window.sock");
+        {
+            let listener = UnixListener::bind(&abandoned).expect("bind");
+            drop(listener);
+        }
+        assert!(abandoned.exists());
+
+        let (next, _) = endpoint_with_spy();
+
+        assert!(!abandoned.exists(), "the dead socket was cleared");
+        assert!(live_path.exists(), "the live one was left alone");
+        assert_eq!(
+            ask(&live_path, &format!("{} panes snapshot", live.key_hex())),
+            "ok:panes snapshot",
+            "and still works"
+        );
+        assert!(next.socket_path().exists());
     }
 
     #[test]

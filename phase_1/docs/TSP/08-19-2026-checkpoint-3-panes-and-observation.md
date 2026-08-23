@@ -1,9 +1,19 @@
 # Sprite Terminal Checkpoint 3 Technical Spec
 
-> **Status: DRAFT — Task 1 implemented, the rest not started.** Task 1 is pure
-> logic with no security surface, taken on deliberately while review is
-> outstanding. Tasks 5 onward touch the observation surface and should not begin
-> before Checkpoints 1 and 2 are reviewed.
+> **Status: IMPLEMENTED ON LINUX (2026-08-23), NOT ACCEPTED.** All ten tasks are
+> built and tested; 226 tests pass under the locked offline gate, with clippy
+> clean and every Checkpoint 1 and 2 budget still met.
+>
+> **Three reviews are owed, and none has happened.** The general review of
+> Checkpoints 1 and 2, the general review of this checkpoint, and this
+> checkpoint's separate security review. Tasks 5 onward were written *knowing*
+> the first of those was outstanding, on the user's explicit instruction to
+> continue. That debt is now carried inside the most security-sensitive code in
+> Phase 1, and no amount of testing by the code's author substitutes for it.
+>
+> Also outstanding: macOS parity, hot configuration reload, and TSP open
+> questions 2 and 3 below, which are genuine design decisions rather than
+> oversights.
 >
 > **Original status: DRAFT — not reviewed, and not ready to start.** Checkpoint 2 is
 > implemented but unaccepted: human review is still owed and four items are
@@ -609,15 +619,59 @@ printed a plain explanation and exited 3.
 
 ### Task 10: Configuration, budgets, and review
 
-- [ ] `pane_observation.enabled = false` disables live: close the socket,
+- [x] `pane_observation.enabled = false` disables live: close the socket,
   destroy the key, reject new requests, stop injecting into new sessions. Test
-  that an in-flight session keeps running without observation access.
-- [ ] Re-enabling creates a **new** endpoint and key rather than reviving the
-  old. Test that the destroyed key stays dead.
-- [ ] Budgets for multi-pane capture, the deadline path, and response encoding.
-- [ ] Re-run Croft, forbidden-state, and provenance gates.
-- [ ] **Security review**, separately from general review, covering key
-  handling, scope enforcement, the deadline, and the exclusion list.
+  that an in-flight session keeps running without observation access. Verified
+  live: a window started with the setting off injected no `SPRITE_*` variables
+  at all and its shell ran normally. `Workspace::set_observation_enabled`
+  performs the same change on a running window.
+- [x] Re-enabling creates a **new** endpoint and key rather than reviving the
+  old. Test that the destroyed key stays dead. A captured key is refused by the
+  new endpoint, never reaches its handler, and the old socket path is gone.
+- [x] Budgets for multi-pane capture, the deadline path, and response encoding.
+  Recorded in [checkpoint-3.md](../performance/checkpoint-3.md), produced by a
+  new `sprite-observation-bench` in the same shape as the existing harness.
+- [x] Re-run Croft, forbidden-state, and provenance gates. Croft was rebuilt
+  from upstream `main` and its capability smoke passed. The forbidden-state scan
+  matches only prose. Provenance holds: the Ghostty submodule is at the pinned
+  commit, offline metadata resolves, `xterm-ghostty` is installed, both licences
+  are present, and the whole locked offline gate passes.
+- [ ] **OUTSTANDING — Security review**, separately from general review,
+  covering key handling, scope enforcement, the deadline, and the exclusion
+  list. Prepared, not performed:
+  [checkpoint-3-security-review-request.md](../review/checkpoint-3-security-review-request.md)
+  sets out each area, what it is meant to guarantee, and where to push hardest.
+  A review by the author of the code is not a review.
+
+**Configuration is a slice, not the subsystem.** What exists is the one setting
+this checkpoint owns, read once when a window opens, with defaults surviving an
+absent or invalid file and a complaint printed for anything ignored. The PRD's
+versioned schema, hot reload, filesystem watcher, and last-known-good rollback
+are **not** implemented. `toml =0.8.23` was added with a ledger entry, `parse`
+feature only; like `serde_json` it was already in the lock file, so the manifest
+change was one line.
+
+**A defect found while verifying.** A window killed rather than closed leaves
+its socket file behind — no destructor runs for a signal that cannot be caught —
+and seven had accumulated during this checkpoint's testing. Dead sockets are
+harmless, since nothing is listening, but they collect. Each new endpoint now
+clears the dead ones it finds, identified by connecting: a socket with a live
+window behind it answers and is left alone.
+
+**Budgets, release build, thirty samples:**
+
+| Metric | Median (ms) | p95 (ms) | Budget (ms) |
+|---|---:|---:|---:|
+| `collect_four_panes` | 0.001 | 0.001 | 0.001 |
+| `collect_sixteen_panes` | 0.003 | 0.003 | 0.003 |
+| `collect_with_one_stalled_pane` | 500.196 | 500.205 | 550.225 |
+| `encode_default_request` | 1.239 | 1.288 | 1.417 |
+| `encode_maximum_history` | 15.472 | 22.559 | 24.815 |
+
+The stalled-pane number is the one worth watching: it lands within a fifth of a
+millisecond of the 500 ms deadline, which is the evidence that the deadline
+bounds the whole request rather than each pane. With three healthy panes and one
+that never answers, a per-pane deadline would take four times as long.
 
 ---
 

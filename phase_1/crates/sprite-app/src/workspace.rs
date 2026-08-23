@@ -43,6 +43,7 @@ pub struct Workspace {
     /// serving threads, and the only route from a request to a pane.
     panes: Arc<WindowPanes>,
     focus: FocusHandle,
+    settings: crate::config::Settings,
     /// What every pane in this window runs instead of a login shell.
     ///
     /// Held so that a pane created later — by a split or a new tab — runs the
@@ -61,17 +62,18 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(
         command: Option<Vec<std::ffi::OsString>>,
+        settings: crate::config::Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Opened before the first session, so every session this window
         // launches — including the first — is told the key and its own pane.
         let panes = WindowPanes::new();
-        let endpoint = Endpoint::open({
-            let panes = Arc::clone(&panes);
-            move |request| respond(panes.as_ref(), &request.body)
-        })
-        .ok();
+        let endpoint = settings
+            .pane_observation
+            .enabled
+            .then(|| open_endpoint(&panes))
+            .flatten();
 
         let program = command.clone();
         let tabs = Tabs::new(|tab, pane| {
@@ -87,9 +89,39 @@ impl Workspace {
             endpoint,
             panes,
             command,
+            settings,
             focus: cx.focus_handle(),
             pending_focus,
         }
+    }
+
+    /// Turns pane observation on or off while the window is running.
+    ///
+    /// Turning it **off** destroys the endpoint outright — the socket leaves the
+    /// filesystem and the key stops being accepted — rather than leaving a
+    /// socket that refuses politely, and stops injecting credentials into
+    /// sessions started afterwards. Sessions already running keep running; they
+    /// simply hold credentials that no longer open anything.
+    ///
+    /// Turning it **on** opens a *new* endpoint with a new key and a new socket.
+    /// Reviving the old one would mean a key someone captured while observation
+    /// was enabled started working again the moment it was re-enabled.
+    pub fn set_observation_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if enabled == self.settings.pane_observation.enabled {
+            return;
+        }
+        self.settings.pane_observation.enabled = enabled;
+        if enabled {
+            self.endpoint = open_endpoint(&self.panes);
+        } else if let Some(mut endpoint) = self.endpoint.take() {
+            endpoint.close();
+        }
+        cx.notify();
+    }
+
+    /// Whether this window currently offers observation.
+    pub fn observation_enabled(&self) -> bool {
+        self.endpoint.is_some()
     }
 
     /// Hands over every pane's worker so the window can wait for all of them.
@@ -227,6 +259,12 @@ impl Workspace {
             cx.notify();
         }
     }
+}
+
+/// Opens an endpoint that answers from this window's panes.
+fn open_endpoint(panes: &Arc<WindowPanes>) -> Option<Endpoint> {
+    let panes = Arc::clone(panes);
+    Endpoint::open(move |request| respond(panes.as_ref(), &request.body)).ok()
 }
 
 /// Answers one authenticated request.

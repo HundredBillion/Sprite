@@ -18,8 +18,37 @@ much maintained complexity the dependency removes from Sprite.
 
 ## Current direct dependencies
 
-Six direct external crates, all pinned to exact versions in
+Seven direct external crates, all pinned to exact versions in
 `phase_1/Cargo.toml` and locked in `phase_1/Cargo.lock`.
+
+### `toml` `=0.8.23`
+
+**Capability.** Reading the user's configuration file.
+
+**Not provided.** The PRD requires "a maintained Rust TOML parser rather than
+creating a custom configuration language", and says comments and ordinary TOML
+editing are part of the user-facing contract — which rules out reading the one
+key Sprite needs today with a hand-rolled line parser that would then have to
+grow into a second configuration language.
+
+**Why not std.** The standard library has no TOML.
+
+**Adds nothing to the supply chain.** Already in `Cargo.lock` as a transitive
+dependency; declaring it directly changed the lock file by exactly one line, an
+edge from `sprite-app`.
+
+**Features.** `parse` only, with default features off — no serialisation, and
+no `serde` derive integration. Sprite reads a `toml::Value` and takes the fields
+it knows, so a key it does not understand is ignored rather than refused.
+
+**Scope today.** One setting, `pane_observation.enabled`, read once when a
+window opens. The versioned schema, hot reload, filesystem watcher, and
+last-known-good rollback the PRD describes are not implemented and are not
+covered by this entry.
+
+**License and source.** MIT OR Apache-2.0, crates.io.
+
+**Pin and updates.** Exact pin, updated deliberately.
 
 ### `serde_json` `=1.0.151`
 

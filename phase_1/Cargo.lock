@@ -5036,6 +5036,7 @@ dependencies = [
  "gpui",
  "serde_json",
  "sprite-term",
+ "toml 0.8.23",
 ]
 
 [[package]]

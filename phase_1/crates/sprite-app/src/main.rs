@@ -11,7 +11,9 @@ use gpui::{
     App, AppContext, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions,
     px, size,
 };
-use sprite_app::{Invocation, USAGE, WindowArgs, Workspace, parse_arguments, run_snapshot};
+use sprite_app::{
+    Invocation, Settings, USAGE, WindowArgs, Workspace, parse_arguments, run_snapshot,
+};
 
 fn main() -> ExitCode {
     match parse_arguments(std::env::args_os().skip(1)) {
@@ -43,6 +45,13 @@ fn main() -> ExitCode {
 }
 
 fn open_window(args: WindowArgs) {
+    // Read before the window exists, so a session never starts under one set of
+    // settings and is then told about another.
+    let (settings, complaints) = Settings::load();
+    for complaint in complaints.0 {
+        eprintln!("sprite: {complaint}");
+    }
+
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
         let command = args.command.clone();
@@ -61,7 +70,7 @@ fn open_window(args: WindowArgs) {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| Workspace::new(command, window, cx));
+                    let view = cx.new(|cx| Workspace::new(command, settings, window, cx));
                     window.focus(&view.focus_handle(cx));
                     view
                 },
