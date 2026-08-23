@@ -101,6 +101,12 @@ pub struct Query {
     pub pretty: bool,
 }
 
+/// The private request protocol between the bundled client and the window.
+///
+/// Versioned for mismatch diagnostics, not as a third-party contract: tools
+/// integrate through the command's JSON output, not by speaking this.
+pub const PROTOCOL: &str = "sprite-observation/1";
+
 /// Why a request was not carried out.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Refusal {
@@ -113,6 +119,10 @@ pub enum Refusal {
     /// is safe to distinguish from `Denied`: it describes the caller's own
     /// words, not the window's contents.
     Malformed(&'static str),
+    /// The caller speaks a version of the private protocol this window does
+    /// not. Distinguished so a mismatched client can say so plainly instead of
+    /// reporting its own request as nonsense.
+    UnsupportedProtocol,
 }
 
 /// One pane's answer.
@@ -172,7 +182,19 @@ pub struct Report {
 /// The grammar is deliberately tiny. Anything unrecognised is refused rather
 /// than ignored, so a client cannot smuggle a verb past a lenient parser.
 pub fn parse(body: &str) -> Result<Query, Refusal> {
-    let mut words = body.split_whitespace();
+    let mut words = body.split_whitespace().peekable();
+    // The protocol token is optional so that a client older than this window
+    // is understood rather than refused; a *newer* one names a version this
+    // window does not know, and is told so.
+    if let Some(word) = words.peek()
+        && word.starts_with("sprite-observation/")
+    {
+        let spoken = *word;
+        words.next();
+        if spoken != PROTOCOL {
+            return Err(Refusal::UnsupportedProtocol);
+        }
+    }
     match (words.next(), words.next()) {
         (Some("panes"), Some("snapshot")) => {}
         _ => return Err(Refusal::Malformed("the only request is: panes snapshot")),

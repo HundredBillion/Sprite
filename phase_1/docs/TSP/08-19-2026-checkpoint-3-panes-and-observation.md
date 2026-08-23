@@ -559,17 +559,53 @@ should not offer the combination.
 
 **Files:** `sprite-app/src/main.rs`, new `sprite-app/src/cli.rs`
 
-- [ ] Sprite gains argument parsing, which it has never had. Preserve current
-  behaviour: no arguments still opens a window.
-- [ ] `sprite panes snapshot` sends a bounded request and writes JSON to stdout,
-  diagnostics to stderr.
-- [ ] Exit zero for a syntactically valid response **even when `complete` is
+- [x] Sprite gains argument parsing, which it has never had. Preserve current
+  behaviour: no arguments still opens a window. Parsing is pure and separate
+  from acting on it, so the decisions are tested without a display; the first
+  test asserts that no arguments still means a window.
+- [x] `sprite panes snapshot` sends a bounded request and writes JSON to stdout,
+  diagnostics to stderr. A refusal never reaches stdout, where a caller parsing
+  the command's output would read it as an answer.
+- [x] Exit zero for a syntactically valid response **even when `complete` is
   false**, because healthy snapshots remain usable. Nonzero only when no valid
-  response could be produced.
-- [ ] Test outside a Sprite window: no key, so a clear diagnostic and nonzero
-  exit, never a hang.
-- [ ] This also unblocks the Ghostty performance comparison, which Checkpoint 1
-  could not run because Sprite had no way to be given a workload.
+  response could be produced. Statuses are distinct so a shell can tell the
+  cases apart: 2 usage, 3 not inside a Sprite window, 4 unreachable, 5 refused.
+- [x] Test outside a Sprite window: no key, so a clear diagnostic and nonzero
+  exit, never a hang. Tested by running the built binary with a **cleared**
+  environment, so it cannot pass merely because the machine running the tests
+  happens to be inside a Sprite window. Every step has a timeout, and the tests
+  assert the command returned rather than blocked.
+- [x] This also unblocks the Ghostty performance comparison, which Checkpoint 1
+  could not run because Sprite had no way to be given a workload. `sprite -e
+  <program> [args]` runs a program instead of a login shell, in every pane of
+  that window. Verified: the window showed the program's output with `sleep 300`
+  as its only child, no login shell involved.
+
+**The client is tested as a process, not as a function.** What is being promised
+is about a command — what reaches stdout, what reaches stderr, the exit status,
+and that it always returns — and none of that is observable from inside the
+crate. Nine tests run the real binary against a real endpoint.
+
+**The private protocol is versioned**, as the PRD asks: a request carries
+`sprite-observation/1`. The token is optional so a client older than its window
+is understood; a client naming a version the window does not know is told
+`unsupported protocol` rather than having its request reported as nonsense.
+
+**Contradictory scopes are refused by the client**, so it never sends a request
+the window will reject and then report the refusal as though the request had
+been reasonable. This is where Task 8's note landed: `--include-self` is not
+offered alongside `--window` or `--pane`.
+
+**A defect the tests caught.** `sprite panes` with no subcommand reported
+`unknown panes command: ` — an empty name — because the missing argument was
+defaulted to an empty string before being matched. It now asks for a command.
+
+**End to end, in a real window.** With two panes, `sprite panes snapshot
+--lines 3 --pretty` typed into the left pane exited zero with empty stderr and
+returned exactly the *other* pane — the default scope excluding the requester —
+carrying the text that had been typed there, `content_trust`, and
+`foreground_executable: "bash"`. Outside a Sprite window the same command
+printed a plain explanation and exited 3.
 
 ### Task 10: Configuration, budgets, and review
 

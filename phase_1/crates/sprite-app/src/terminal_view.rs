@@ -98,6 +98,7 @@ impl TerminalView {
     /// socket and key, and the pane's own identity. It is the only route by
     /// which a child learns the key.
     pub fn new(
+        command: Option<Vec<std::ffi::OsString>>,
         environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
         observation: Option<crate::observation::panes::PaneLink>,
         window: &mut Window,
@@ -113,9 +114,17 @@ impl TerminalView {
         let cell_width = measure_cell_width(window, &font_family);
         let scale_factor = window.scale_factor();
 
-        let mut config = match SessionConfig::login_shell() {
-            Ok(config) => config,
-            Err(error) => return Self::failed(error.to_string(), font_family, cx),
+        // A window told what to run gives every one of its panes the same
+        // program; otherwise a pane is a login shell, as before.
+        let mut config = match command {
+            Some(command) => {
+                let (program, arguments) = command.split_first().expect("a program to run");
+                SessionConfig::command(program, arguments.to_vec())
+            }
+            None => match SessionConfig::login_shell() {
+                Ok(config) => config,
+                Err(error) => return Self::failed(error.to_string(), font_family, cx),
+            },
         };
         // The initial 24x80 grid is kept; only the physical cell metrics are
         // corrected for the display this window opened on.

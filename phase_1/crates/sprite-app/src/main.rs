@@ -1,14 +1,51 @@
-//! The `sprite` executable: one window holding one Pane.
+//! The `sprite` executable.
+//!
+//! With no arguments it opens a window, which is all it has ever done. The
+//! command line is read before anything else starts, so `sprite panes snapshot`
+//! never touches a display, a GPU, or a terminal session — it is a small client
+//! that happens to live in the same binary.
+
+use std::process::ExitCode;
 
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions,
     px, size,
 };
-use sprite_app::Workspace;
+use sprite_app::{Invocation, USAGE, WindowArgs, Workspace, parse_arguments, run_snapshot};
 
-fn main() {
-    Application::new().run(|cx: &mut App| {
+fn main() -> ExitCode {
+    match parse_arguments(std::env::args_os().skip(1)) {
+        Ok(Invocation::Window(args)) => {
+            open_window(args);
+            ExitCode::SUCCESS
+        }
+        Ok(Invocation::Snapshot(args)) => {
+            let mut out = std::io::stdout().lock();
+            let mut errors = std::io::stderr().lock();
+            ExitCode::from(run_snapshot(&args, &mut out, &mut errors) as u8)
+        }
+        Ok(Invocation::Help) => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Ok(Invocation::Version) => {
+            println!("sprite {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("sprite: {error}");
+            eprintln!("\n{USAGE}");
+            // Two, not one: a shell can tell a misspelled option from a window
+            // that opened and then failed.
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn open_window(args: WindowArgs) {
+    Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
+        let command = args.command.clone();
         let window = cx
             .open_window(
                 WindowOptions {
@@ -24,7 +61,7 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| Workspace::new(window, cx));
+                    let view = cx.new(|cx| Workspace::new(command, window, cx));
                     window.focus(&view.focus_handle(cx));
                     view
                 },

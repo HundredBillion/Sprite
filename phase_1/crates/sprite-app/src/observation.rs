@@ -6,6 +6,7 @@
 //! route to another child process.
 
 pub mod broker;
+pub mod client;
 pub mod endpoint;
 pub mod panes;
 pub mod schema;

@@ -43,6 +43,11 @@ pub struct Workspace {
     /// serving threads, and the only route from a request to a pane.
     panes: Arc<WindowPanes>,
     focus: FocusHandle,
+    /// What every pane in this window runs instead of a login shell.
+    ///
+    /// Held so that a pane created later — by a split or a new tab — runs the
+    /// same thing the window was asked to run.
+    command: Option<Vec<std::ffi::OsString>>,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
     /// A pane created by a split has no element in the dispatch tree until the
@@ -54,7 +59,11 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        command: Option<Vec<std::ffi::OsString>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Opened before the first session, so every session this window
         // launches — including the first — is told the key and its own pane.
         let panes = WindowPanes::new();
@@ -64,10 +73,11 @@ impl Workspace {
         })
         .ok();
 
+        let program = command.clone();
         let tabs = Tabs::new(|tab, pane| {
             let environment = session_environment(endpoint.as_ref(), tab, pane);
             let link = pane_link(&panes, endpoint.as_ref(), tab, pane);
-            cx.new(|cx| TerminalView::new(environment, link, window, cx))
+            cx.new(|cx| TerminalView::new(program, environment, link, window, cx))
         });
         // The window focuses the workspace; the workspace hands the keyboard to
         // a pane, rather than leaving which pane receives typing to chance.
@@ -76,6 +86,7 @@ impl Workspace {
             tabs,
             endpoint,
             panes,
+            command,
             focus: cx.focus_handle(),
             pending_focus,
         }
@@ -105,10 +116,11 @@ impl Workspace {
         // A split starts a fresh session; panes never share one.
         let endpoint = self.endpoint.as_ref();
         let panes = &self.panes;
+        let program = self.command.clone();
         let pane = self.tabs.split(orientation, |tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(environment, link, window, cx))
+            cx.new(|cx| TerminalView::new(program, environment, link, window, cx))
         });
         self.request_focus(pane);
         cx.notify();
@@ -117,10 +129,11 @@ impl Workspace {
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let endpoint = self.endpoint.as_ref();
         let panes = &self.panes;
+        let program = self.command.clone();
         self.tabs.open(|tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(environment, link, window, cx))
+            cx.new(|cx| TerminalView::new(program, environment, link, window, cx))
         });
         self.request_focus(self.tabs.active().focus());
         cx.notify();
@@ -227,11 +240,23 @@ fn respond(panes: &WindowPanes, body: &str) -> String {
         // A malformed request describes the caller's own words and reveals
         // nothing about the window's contents, so it may say so.
         Err(Refusal::Malformed(why)) => return format!("malformed: {why}"),
+        Err(Refusal::UnsupportedProtocol) => {
+            return format!(
+                "unsupported protocol; this window speaks {}",
+                broker::PROTOCOL
+            );
+        }
         Err(Refusal::Denied) => return DENIED.to_owned(),
     };
     match broker::collect(&query, panes, broker::DEADLINE) {
         Ok(report) => schema::render(&report, query.pretty),
         Err(Refusal::Malformed(why)) => format!("malformed: {why}"),
+        Err(Refusal::UnsupportedProtocol) => {
+            format!(
+                "unsupported protocol; this window speaks {}",
+                broker::PROTOCOL
+            )
+        }
         Err(Refusal::Denied) => DENIED.to_owned(),
     }
 }
