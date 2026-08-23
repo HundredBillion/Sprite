@@ -504,14 +504,56 @@ terminator ever survives.
 
 **Files:** `sprite-app/src/observation/schema.rs`
 
-- [ ] Bound one response to 16 MiB of encoded JSON.
-- [ ] Drop the oldest history first, preserve complete Unicode rows, and mark
-  affected snapshots truncated.
-- [ ] Metadata and complete current screens outrank history. If they still do
+- [x] Bound one response to 16 MiB of encoded JSON. Measured at scale: four
+  panes each holding 5,000 rows of wide characters — about 24 MiB unshed — come
+  back as 16,246,273 bytes in **80 ms** in a release build.
+- [x] Drop the oldest history first, preserve complete Unicode rows, and mark
+  affected snapshots truncated. Rows are dropped **whole**, which is what keeps
+  Unicode intact: a row is never cut, so no character can be halved. A test
+  asserts every emitted row is byte-identical to one of the original rows.
+- [x] Metadata and complete current screens outrank history. If they still do
   not fit, omit whole snapshots rather than half a screen, set `complete` false,
-  and report `response_limit` per omission.
-- [ ] **Never emit malformed or partially cut JSON.** Test at the boundary with
-  a pane whose history alone exceeds the limit.
+  and report `response_limit` per omission. A pane that survives keeps its whole
+  current screen; a test with four screens too large to fit asserts each
+  surviving pane still has all 200 of its screen rows.
+- [x] **Never emit malformed or partially cut JSON.** Test at the boundary with
+  a pane whose history alone exceeds the limit. Also tested across nine limits
+  from 0 to 8 MB in both compact and pretty form, where parsing *is* the
+  assertion: malformed output cannot pass.
+
+**Nothing is ever cut from the encoded text.** A response is brought under the
+limit by removing whole rows and whole panes from the data and encoding again.
+Cutting encoded bytes would be the obvious implementation and would produce
+malformed JSON at exactly the moment a client is least able to cope with it.
+When the limit is smaller than an empty document, the answer is a valid document
+reporting every pane as omitted: "never malformed" outranks the size.
+
+**`complete` and `truncated` are different facts.** `complete` is about panes
+being *present*; a pane whose history was shed is still present and still whole
+in its current screen, and says so with `truncated` and `dropped_for_size`. Only
+an omitted pane makes a response incomplete.
+
+**Two defects found by the tests, both mine.**
+
+First, shedding history and omitting panes ran in one pass, and the pass planned
+from estimated row sizes with a safety margin. When all history was gone the
+margin was still positive, so the plan omitted a pane that the next encode was
+about to show fit comfortably — losing a whole screen to a rounding error. The
+phases are now separate: dropping history always returns to be re-measured, and
+a pane is only omitted after a real measurement of a response that already
+carries no history.
+
+Second, the shedding loop took the whole excess from one pane, stripping the
+last panes bare while the first kept all their history — precisely what its own
+comment claimed it avoided. It now water-fills: it finds the largest number of
+history rows every pane may keep and brings each down to it, so at the 16 MiB
+boundary all four panes gave up 1,786 rows each. A test pins that no two panes
+differ by more than one row.
+
+**A note for Task 9.** `--include-self` is rejected with `--window` and
+`--pane`, since it only modifies tab scope. The refusal is `malformed`, which
+names the caller's own words and reveals nothing about the window — but the CLI
+should not offer the combination.
 
 ### Task 9: The `sprite panes snapshot` client
 

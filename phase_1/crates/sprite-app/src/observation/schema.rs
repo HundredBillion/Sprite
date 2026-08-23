@@ -26,16 +26,67 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// What every pane's content is, stated rather than implied.
 const CONTENT_TRUST: &str = "untrusted_terminal_output";
 
+/// The most encoded JSON one response may be.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// How many times a response is re-encoded while being brought under the limit.
+///
+/// Shedding is planned from measured row sizes, so one pass is normally enough;
+/// the rest exist because a plan is an estimate and the guarantee is not.
+const SHEDDING_PASSES: usize = 8;
+
 /// Renders a report as the versioned response.
 ///
 /// `pretty` changes whitespace only: both forms carry the same fields in the
 /// same order, so a client that reads one can read the other.
 pub fn render(report: &Report, pretty: bool) -> String {
-    let document = document(report);
+    render_limited(report, pretty, MAX_RESPONSE_BYTES)
+}
+
+/// Renders a report within `limit` bytes of encoded JSON.
+///
+/// **The output is always a complete document.** Nothing is ever cut from the
+/// encoded text: a response is brought under the limit by removing whole rows
+/// and whole panes from the data and encoding again, so a client never receives
+/// half a string, half a row, or half an object. Cutting encoded bytes would be
+/// the obvious implementation and would produce malformed JSON at exactly the
+/// moment a client is least able to cope.
+///
+/// What goes first, in order:
+///
+/// 1. history, oldest first, because it is the least current thing present;
+/// 2. whole panes, because half a screen is worse than a named omission.
+///
+/// Metadata and the complete current screen outrank history, so a pane that
+/// stays is a pane a client can trust to be whole.
+pub fn render_limited(report: &Report, pretty: bool, limit: usize) -> String {
+    let mut plan = Plan::new(report);
+    for _ in 0..SHEDDING_PASSES {
+        let encoded = encode(&document(report, &plan), pretty);
+        if encoded.len() <= limit {
+            return encoded;
+        }
+        // Nothing left to remove: the floor below is all that can be offered.
+        if !plan.shed(report, encoded.len(), limit) {
+            break;
+        }
+    }
+
+    let encoded = encode(&document(report, &plan), pretty);
+    if encoded.len() <= limit {
+        return encoded;
+    }
+    // Everything has been shed and it still does not fit, which means the limit
+    // is smaller than an empty answer. A valid document that reports the
+    // failure beats a truncated one: "never malformed" outranks the size.
+    encode(&floor(report), pretty)
+}
+
+fn encode(document: &Value, pretty: bool) -> String {
     if pretty {
-        serde_json::to_string_pretty(&document)
+        serde_json::to_string_pretty(document)
     } else {
-        serde_json::to_string(&document)
+        serde_json::to_string(document)
     }
     // A document built from typed data cannot fail to serialise; an empty
     // object is still valid JSON, so even an impossible failure is never a
@@ -43,25 +94,196 @@ pub fn render(report: &Report, pretty: bool) -> String {
     .unwrap_or_else(|_| "{}".to_owned())
 }
 
-fn document(report: &Report) -> Value {
+/// The smallest honest answer: no panes, and every one of them named as omitted.
+fn floor(report: &Report) -> Value {
+    let mut root = Map::new();
+    root.insert("schema_version".to_owned(), json!(SCHEMA_VERSION));
+    root.insert("complete".to_owned(), json!(false));
+    root.insert("panes".to_owned(), Value::Array(Vec::new()));
+    root.insert(
+        "errors".to_owned(),
+        Value::Array(
+            report
+                .panes
+                .iter()
+                .map(|pane| limit_error(&pane.address))
+                .chain(report.failures.iter().map(failure))
+                .collect(),
+        ),
+    );
+    Value::Object(root)
+}
+
+/// How much of each pane a response will carry.
+struct Plan {
+    /// Per pane, how many of its oldest history rows have been dropped.
+    dropped: Vec<usize>,
+    /// Per pane, whether it has been left out entirely.
+    omitted: Vec<bool>,
+    /// Per pane, the encoded size of one row, used to plan the next pass.
+    row_cost: Vec<usize>,
+}
+
+impl Plan {
+    fn new(report: &Report) -> Self {
+        let row_cost = report
+            .panes
+            .iter()
+            .map(|pane| {
+                // Measured rather than guessed: a row of CJK text costs several
+                // times a row of ASCII, and a plan built on the wrong number
+                // simply means another pass.
+                let rows = pane.snapshot.rows.len().max(1);
+                let sampled = serde_json::to_string(&rows_value(&pane.snapshot.rows, 0))
+                    .map(|text| text.len())
+                    .unwrap_or(rows * 64);
+                (sampled / rows).max(16)
+            })
+            .collect();
+        Self {
+            dropped: vec![0; report.panes.len()],
+            omitted: vec![false; report.panes.len()],
+            row_cost,
+        }
+    }
+
+    /// Removes enough to close the gap, returning false when nothing is left.
+    ///
+    /// History and whole panes are shed in **separate passes**, never in one.
+    /// A pass plans from estimated row sizes, and an estimate that overshoots
+    /// would otherwise omit a pane that the re-encode was about to show fits
+    /// comfortably — losing a whole screen to a rounding margin. So dropping
+    /// history always returns, and a pane is only ever omitted after a real
+    /// measurement of a response that already carries no history at all.
+    fn shed(&mut self, report: &Report, encoded: usize, limit: usize) -> bool {
+        let excess = encoded.saturating_sub(limit);
+        // A small margin, because another pass costs a full encode of a
+        // response that may be megabytes.
+        let wanted = excess + excess / 16 + 64;
+
+        if self.fattest_history(report).is_some() {
+            // Water-filling: find the largest number of history rows every pane
+            // may keep such that the total freed covers the excess, then bring
+            // each pane down to it. Taking the whole excess from one pane would
+            // be simpler and would strip the last panes bare while the first
+            // kept everything — a response where some panes have full history
+            // and others none is worse than one where all are trimmed equally.
+            let remaining: Vec<usize> = (0..report.panes.len())
+                .map(|index| report.panes[index].snapshot.history_rows - self.dropped[index])
+                .collect();
+            let freed_if_capped_at = |cap: usize| -> usize {
+                remaining
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rows)| rows.saturating_sub(cap) * self.row_cost[index].max(1))
+                    .sum()
+            };
+
+            let mut low = 0;
+            let mut high = remaining.iter().copied().max().unwrap_or(0);
+            while low < high {
+                let middle = low + (high - low).div_ceil(2);
+                if freed_if_capped_at(middle) >= wanted {
+                    low = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            for (index, rows) in remaining.iter().enumerate() {
+                self.dropped[index] += rows.saturating_sub(low);
+            }
+            return true;
+        }
+
+        // No history remains anywhere and it still does not fit, so whole panes
+        // go — the last in schema order first, so the panes a client asked
+        // about most directly survive. Never half a screen.
+        let mut freed = 0;
+        let mut omitted_any = false;
+        for index in (0..report.panes.len()).rev() {
+            if self.omitted[index] {
+                continue;
+            }
+            self.omitted[index] = true;
+            omitted_any = true;
+            let rows = report.panes[index].snapshot.rows.len() - self.dropped[index];
+            freed += rows * self.row_cost[index].max(1);
+            if freed >= wanted {
+                break;
+            }
+        }
+        omitted_any
+    }
+
+    /// The pane still carrying the most history, if any does.
+    fn fattest_history(&self, report: &Report) -> Option<usize> {
+        report
+            .panes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !self.omitted[*index])
+            .map(|(index, pane)| (index, pane.snapshot.history_rows - self.dropped[index]))
+            .filter(|(_, remaining)| *remaining > 0)
+            .max_by_key(|(_, remaining)| *remaining)
+            .map(|(index, _)| index)
+    }
+}
+
+fn document(report: &Report, plan: &Plan) -> Value {
     let mut root = Map::new();
     root.insert("schema_version".to_owned(), json!(SCHEMA_VERSION));
     // A multi-pane answer captures each pane independently and never pauses the
     // window, so panes may differ by a few milliseconds. Saying so is why each
     // pane carries its own capture time and the response claims no instant.
-    root.insert("complete".to_owned(), json!(report.complete));
+    let omitted: Vec<&PaneReport> = report
+        .panes
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| plan.omitted[*index])
+        .map(|(_, pane)| pane)
+        .collect();
+    // A response that left something out is not complete, whatever the panes
+    // that survived say.
+    root.insert(
+        "complete".to_owned(),
+        json!(report.complete && omitted.is_empty()),
+    );
     root.insert(
         "panes".to_owned(),
-        Value::Array(report.panes.iter().map(pane).collect()),
+        Value::Array(
+            report
+                .panes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !plan.omitted[*index])
+                .map(|(index, report)| pane(report, plan.dropped[index]))
+                .collect(),
+        ),
     );
     root.insert(
         "errors".to_owned(),
-        Value::Array(report.failures.iter().map(failure).collect()),
+        Value::Array(
+            report
+                .failures
+                .iter()
+                .map(failure)
+                .chain(omitted.iter().map(|pane| limit_error(&pane.address)))
+                .collect(),
+        ),
     );
     Value::Object(root)
 }
 
-fn pane(report: &PaneReport) -> Value {
+fn limit_error(address: &crate::observation::broker::PaneAddress) -> Value {
+    json!({
+        "pane": address.pane.0,
+        "tab": address.tab.0,
+        "error": "response_limit",
+        "detail": "omitted whole rather than returned in part, to keep the response within its size limit",
+    })
+}
+
+fn pane(report: &PaneReport, dropped: usize) -> Value {
     let snapshot = &report.snapshot;
     let address = &report.address;
 
@@ -113,14 +335,19 @@ fn pane(report: &PaneReport) -> Value {
             sprite_term::ScreenKind::Alternate => "alternate",
         }),
     );
+    let dropped = dropped.min(snapshot.history_rows);
     object.insert(
         "history".to_owned(),
         json!({
             "requested": snapshot.requested,
-            "returned": snapshot.history_rows,
+            "returned": snapshot.history_rows - dropped,
             "available": snapshot.available,
+            "dropped_for_size": dropped,
         }),
     );
+    // Stated rather than left to be inferred from arithmetic: a client reading
+    // a truncated pane should not have to work out that it is one.
+    object.insert("truncated".to_owned(), json!(dropped > 0));
     object.insert("generation".to_owned(), json!(snapshot.generation));
     object.insert(
         "captured_at_unix_ms".to_owned(),
@@ -142,28 +369,31 @@ fn pane(report: &PaneReport) -> Value {
         optional(snapshot.foreground.as_deref()),
     );
 
-    object.insert(
-        "rows".to_owned(),
-        Value::Array(
-            snapshot
-                .rows
-                .iter()
-                .map(|row| {
-                    json!({
-                        "text": row.text,
-                        "wrapped": row.wrapped,
-                        "prompt": match row.prompt {
-                            sprite_term::PromptKind::None => "none",
-                            sprite_term::PromptKind::Prompt => "prompt",
-                            sprite_term::PromptKind::Continuation => "continuation",
-                        },
-                    })
-                })
-                .collect(),
-        ),
-    );
+    // Whole rows only. Dropping happens at row boundaries, which is also what
+    // keeps every emitted row's Unicode intact: a row is never cut, so no
+    // character can be halved.
+    object.insert("rows".to_owned(), rows_value(&snapshot.rows, dropped));
 
     Value::Object(object)
+}
+
+fn rows_value(rows: &[sprite_term::PaneRow], dropped: usize) -> Value {
+    Value::Array(
+        rows.iter()
+            .skip(dropped)
+            .map(|row| {
+                json!({
+                    "text": row.text,
+                    "wrapped": row.wrapped,
+                    "prompt": match row.prompt {
+                        sprite_term::PromptKind::None => "none",
+                        sprite_term::PromptKind::Prompt => "prompt",
+                        sprite_term::PromptKind::Continuation => "continuation",
+                    },
+                })
+            })
+            .collect(),
+    )
 }
 
 fn failure(failure: &Failure) -> Value {
@@ -426,6 +656,7 @@ mod tests {
                 "tab",
                 "tab_title",
                 "title",
+                "truncated",
                 "viewport",
                 "working_directory",
             ]
@@ -506,5 +737,278 @@ mod tests {
             value["panes"][0].get("injected").is_none(),
             "and invents no field"
         );
+    }
+
+    // ---- response limiting ----------------------------------------------
+
+    /// A snapshot with `history` rows of history in front of `screen` rows of
+    /// current screen, each row `width` characters wide.
+    fn bulky(history: usize, screen: usize, width: usize, fill: char) -> Arc<HistorySnapshot> {
+        let mut base = (*snapshot("placeholder")).clone();
+        base.rows = (0..history + screen)
+            .map(|index| PaneRow {
+                text: std::iter::repeat_n(fill, width)
+                    .chain(format!("{index}").chars())
+                    .collect(),
+                wrapped: false,
+                prompt: PromptKind::None,
+            })
+            .collect();
+        base.history_rows = history;
+        base.available = history;
+        base.requested = history;
+        Arc::new(base)
+    }
+
+    fn one_pane(snapshot: Arc<HistorySnapshot>) -> Report {
+        report_of(
+            vec![PaneReport {
+                address: address(0, 0, 0, 0.0, 0.0),
+                snapshot,
+            }],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn a_response_within_the_limit_is_untouched() {
+        let report = one_pane(bulky(10, 5, 20, 'a'));
+        let value = parse(&render_limited(&report, false, MAX_RESPONSE_BYTES));
+
+        assert_eq!(value["panes"][0]["truncated"], json!(false));
+        assert_eq!(value["panes"][0]["history"]["dropped_for_size"], json!(0));
+        assert_eq!(
+            value["panes"][0]["rows"].as_array().expect("rows").len(),
+            15
+        );
+        assert_eq!(value["complete"], json!(true));
+    }
+
+    /// The boundary the task names: a pane whose history alone exceeds the
+    /// limit. The screen must survive whole, and the JSON must still parse.
+    #[test]
+    fn a_pane_whose_history_exceeds_the_limit_keeps_its_screen() {
+        let report = one_pane(bulky(4_000, 24, 200, 'x'));
+        let limit = 64 * 1024;
+
+        let rendered = render_limited(&report, false, limit);
+        assert!(
+            rendered.len() <= limit,
+            "the response is within its limit: {} > {limit}",
+            rendered.len()
+        );
+        let value = parse(&rendered);
+
+        let pane = &value["panes"][0];
+        assert_eq!(pane["truncated"], json!(true));
+        assert!(
+            pane["history"]["dropped_for_size"]
+                .as_u64()
+                .expect("a count")
+                > 0,
+            "history was what went"
+        );
+        let rows = pane["rows"].as_array().expect("rows");
+        assert!(
+            rows.len() >= 24,
+            "the whole current screen survived: {} rows",
+            rows.len()
+        );
+        // The rows kept are the newest, because the oldest go first.
+        let last = rows.last().expect("a last row")["text"]
+            .as_str()
+            .expect("text");
+        assert!(last.ends_with(&format!("{}", 4_000 + 24 - 1)));
+    }
+
+    /// Rows are dropped whole, so no character is ever halved — the reason
+    /// shedding happens in the data rather than in the encoded bytes.
+    #[test]
+    fn shedding_never_cuts_a_row_or_a_character() {
+        // Wide characters, so a byte-wise cut would leave broken UTF-8.
+        let report = one_pane(bulky(2_000, 24, 120, '界'));
+        let rendered = render_limited(&report, false, 96 * 1024);
+        let value = parse(&rendered);
+
+        let original = &report.panes[0].snapshot.rows;
+        let dropped = value["panes"][0]["history"]["dropped_for_size"]
+            .as_u64()
+            .expect("a count") as usize;
+        for (offset, row) in value["panes"][0]["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                row["text"].as_str().expect("text"),
+                original[dropped + offset].text,
+                "every emitted row is one of the original rows, entire"
+            );
+        }
+    }
+
+    /// When even the screens do not fit, whole panes are left out and named —
+    /// never half a screen.
+    #[test]
+    fn panes_are_omitted_whole_and_reported_as_response_limit() {
+        let panes: Vec<PaneReport> = (0..4)
+            .map(|index| PaneReport {
+                address: address(0, 0, index, index as f32 / 10.0, 0.0),
+                snapshot: bulky(0, 200, 300, 'y'),
+            })
+            .collect();
+        let report = report_of(panes, Vec::new());
+
+        let limit = 96 * 1024;
+        let rendered = render_limited(&report, false, limit);
+        assert!(rendered.len() <= limit, "within the limit");
+        let value = parse(&rendered);
+
+        let kept = value["panes"].as_array().expect("panes");
+        assert!(!kept.is_empty(), "something survived");
+        assert!(kept.len() < 4, "and something did not");
+        for pane in kept {
+            assert_eq!(
+                pane["rows"].as_array().expect("rows").len(),
+                200,
+                "a pane that survived kept its whole screen"
+            );
+        }
+        assert_eq!(value["complete"], json!(false));
+
+        let errors = value["errors"].as_array().expect("errors");
+        assert_eq!(errors.len(), 4 - kept.len(), "every omission is named");
+        for error in errors {
+            assert_eq!(error["error"], json!("response_limit"));
+        }
+        // The panes that survive are the first in schema order.
+        let surviving: Vec<u64> = kept
+            .iter()
+            .map(|pane| pane["pane"].as_u64().expect("id"))
+            .collect();
+        assert_eq!(surviving, (0..kept.len() as u64).collect::<Vec<_>>());
+    }
+
+    /// The guarantee that outranks every other: whatever the limit, the output
+    /// parses.
+    #[test]
+    fn the_output_is_valid_json_at_every_limit() {
+        let report = report_of(
+            vec![
+                PaneReport {
+                    address: address(0, 0, 0, 0.0, 0.0),
+                    snapshot: bulky(500, 40, 80, 'z'),
+                },
+                PaneReport {
+                    address: address(0, 0, 1, 0.5, 0.0),
+                    snapshot: bulky(500, 40, 80, '界'),
+                },
+            ],
+            vec![Failure {
+                address: address(0, 0, 2, 0.9, 0.0),
+                kind: FailureKind::Timeout,
+                reason: "the pane did not answer within the deadline".to_owned(),
+            }],
+        );
+
+        for limit in [0, 1, 40, 200, 1_000, 8_000, 64_000, 512_000, 8_000_000] {
+            for pretty in [false, true] {
+                let rendered = render_limited(&report, pretty, limit);
+                // Parsing is the assertion: malformed output cannot pass.
+                let value = parse(&rendered);
+                assert_eq!(value["schema_version"], json!(SCHEMA_VERSION));
+                assert!(
+                    value["panes"].is_array() && value["errors"].is_array(),
+                    "the shape survives at limit {limit}"
+                );
+                // Below the size of an empty document nothing can be promised
+                // except that it is valid JSON, which is what was just checked.
+                if limit >= 4_000 {
+                    assert!(
+                        rendered.len() <= limit,
+                        "limit {limit} pretty={pretty}: got {} bytes",
+                        rendered.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The real limit, at the scale it exists for: several panes each holding
+    /// the maximum history, which together far exceed 16 MiB.
+    #[test]
+    fn the_real_limit_holds_at_the_scale_it_exists_for() {
+        let panes: Vec<PaneReport> = (0..4)
+            .map(|index| PaneReport {
+                address: address(0, 0, index, index as f32 / 10.0, 0.0),
+                // 5,000 history rows of wide characters, each row 400 columns:
+                // about 6 MiB of encoded JSON per pane, so four cannot fit.
+                snapshot: bulky(5_000, 40, 400, '界'),
+            })
+            .collect();
+        let report = report_of(panes, Vec::new());
+
+        let started = std::time::Instant::now();
+        let rendered = render(&report, false);
+        let took = started.elapsed();
+
+        assert!(
+            rendered.len() <= MAX_RESPONSE_BYTES,
+            "{} bytes exceeds the 16 MiB limit",
+            rendered.len()
+        );
+        let value = parse(&rendered);
+
+        // History is what goes, so all four panes survive with their screens
+        // whole. `complete` is about panes being present, not about history
+        // being full — a shed pane says so with `truncated` and
+        // `dropped_for_size`, which is a different fact from a missing pane.
+        assert_eq!(value["panes"].as_array().expect("panes").len(), 4);
+        assert_eq!(value["complete"], json!(true));
+        // Equal treatment: no pane keeps its full history while another is
+        // stripped bare.
+        let dropped: Vec<u64> = value["panes"]
+            .as_array()
+            .expect("panes")
+            .iter()
+            .map(|pane| pane["history"]["dropped_for_size"].as_u64().expect("count"))
+            .collect();
+        let smallest = dropped.iter().min().copied().expect("a pane");
+        let largest = dropped.iter().max().copied().expect("a pane");
+        assert!(
+            largest - smallest <= 1,
+            "every pane gave up the same history: {dropped:?}"
+        );
+
+        for pane in value["panes"].as_array().expect("panes") {
+            assert_eq!(pane["truncated"], json!(true));
+            assert!(pane["history"]["dropped_for_size"].as_u64().expect("count") > 0);
+            assert_eq!(
+                pane["rows"].as_array().expect("rows").len() as u64,
+                pane["history"]["returned"].as_u64().expect("returned") + 40,
+                "the 40-row current screen is whole in every pane"
+            );
+        }
+        // Deliberately generous: these tests run unoptimised, where encoding
+        // several megabytes is many times slower than in the build a user runs.
+        // The number worth quoting is measured in release, not here.
+        assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+        eprintln!(
+            "  16 MiB limit: {} bytes, {} panes kept, {} dropped rows, took {took:?}",
+            rendered.len(),
+            value["panes"].as_array().expect("panes").len(),
+            value["panes"][0]["history"]["dropped_for_size"]
+        );
+    }
+
+    #[test]
+    fn an_impossible_limit_still_answers_with_a_valid_document() {
+        let report = one_pane(bulky(100, 24, 80, 'q'));
+        let value = parse(&render_limited(&report, false, 1));
+
+        assert_eq!(value["complete"], json!(false));
+        assert!(value["panes"].as_array().expect("panes").is_empty());
+        assert_eq!(value["errors"][0]["error"], json!("response_limit"));
     }
 }
