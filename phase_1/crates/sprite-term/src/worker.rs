@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::Terminal;
 use libghostty_vt::key;
+use libghostty_vt::kitty::graphics::PlacementIterator;
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::terminal::Options as TerminalOptions;
 use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
@@ -162,6 +163,13 @@ pub(crate) fn run(
         }
     };
 
+    // Applied before a single byte of child output is read, so there is no
+    // window in which an image could be stored under looser rules than these.
+    if let Err(error) = apply_graphics_policy(&mut terminal, config.graphics) {
+        let _ = events.send_blocking(TerminalEvent::Error(error));
+        return;
+    }
+
     // Terminal-generated replies (device status reports and the like) take the
     // same ordered write path as keyboard input.
     let registered = terminal.on_pty_write({
@@ -299,7 +307,7 @@ pub(crate) fn run(
         }
     };
 
-    let (mut render_state, mut rows, mut cells) = match render_objects() {
+    let (mut render_state, mut rows, mut cells, mut placements) = match render_objects() {
         Ok(objects) => objects,
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));
@@ -607,6 +615,23 @@ pub(crate) fn run(
                     }
                 }
                 TerminalCommand::Capture => dirty = true,
+                TerminalCommand::CaptureGraphics => {
+                    match crate::graphics::capture_graphics(&terminal, &mut placements) {
+                        Ok(snapshot) => {
+                            if events
+                                .send_blocking(TerminalEvent::Graphics(snapshot))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
                 TerminalCommand::CaptureHistory(lines) => {
                     // Answered once, from this thread, against the same
                     // terminal the snapshots come from — so the rows returned
@@ -835,6 +860,70 @@ pub(crate) fn run(
 /// The group recorded at spawn covers the shell and anything it started; the
 /// current foreground group covers an interactive program that moved itself
 /// into its own group since.
+/// Bounds what a pane will accept in the way of images.
+///
+/// **Every denial here is deliberate rather than a default.** Ghostty's image
+/// storage can be told to load images from a path, from a temporary file, or
+/// from shared memory. Those turn "a program printed something" into "the
+/// terminal read a file nobody named", which is a capability no image protocol
+/// needs in order to show a picture — so all three are refused, whatever the
+/// library's own default happens to be now or after an update.
+fn apply_graphics_policy(
+    terminal: &mut Terminal<'_, '_>,
+    policy: crate::GraphicsPolicy,
+) -> Result<(), SessionError> {
+    use libghostty_vt::kitty::graphics;
+
+    let vt = |what: &'static str| move |error| SessionError::new(what, error);
+
+    terminal
+        .set_kitty_image_from_file_allowed(false)
+        .map_err(vt("kitty_from_file"))?;
+    // The temporary-file medium is *not* set here, and must not be: the
+    // binding's `set_kitty_image_from_temp_file_allowed` takes a `bool`, while
+    // the option it writes expects a string — the permitted directory — so the
+    // Zig side `@alignCast`s a one-byte pointer to an eight-byte-aligned type
+    // and aborts the process. Calling it is not a refusal Sprite can catch; it
+    // is an abort.
+    //
+    // It is denied anyway: Ghostty's default limits are `.direct`, which
+    // disables the file, temporary-file, and shared-memory mediums together.
+    // That is a default rather than an instruction, so it is asserted by
+    // behaviour instead — `tests/graphics_policy.rs` sends a transmission on
+    // each medium and requires that no image appears. A future libghostty that
+    // changed the default would fail those tests rather than silently open a
+    // path from terminal output to the filesystem.
+    terminal
+        .set_kitty_image_from_shared_mem_allowed(false)
+        .map_err(vt("kitty_from_shared_mem"))?;
+
+    // Zero storage is how a disabled pane refuses: an image is dropped as it
+    // arrives rather than accumulated and then ignored.
+    let storage = if policy.enabled {
+        policy.storage_bytes
+    } else {
+        0
+    };
+    terminal
+        .set_kitty_image_storage_limit(storage)
+        .map_err(vt("kitty_storage_limit"))?;
+    terminal
+        .set_apc_max_bytes_kitty(Some(policy.apc_max_bytes))
+        .map_err(vt("kitty_apc_max_bytes"))?;
+
+    // No PNG decoder yet, so a PNG transmission is refused rather than decoded;
+    // raw formats are unaffected. Sprite's own decoder arrives in Task 2 and is
+    // installed here, on this thread, because the binding requires the decoder
+    // to belong to the thread that owns the terminal.
+    //
+    // Clearing it is not a no-op: the setting is per thread and a worker thread
+    // may be reused, so a pane with graphics disabled must actively ensure no
+    // decoder is installed rather than assume none is.
+    graphics::set_png_decoder(None).map_err(vt("kitty_png_decoder"))?;
+
+    Ok(())
+}
+
 /// The basename of the program in the foreground of this terminal.
 ///
 /// Read from the process the kernel already reports as the terminal's
@@ -906,6 +995,7 @@ type RenderObjects = (
     RenderState<'static>,
     RowIterator<'static>,
     CellIterator<'static>,
+    PlacementIterator<'static>,
 );
 
 fn render_objects() -> Result<RenderObjects, SessionError> {
@@ -915,7 +1005,9 @@ fn render_objects() -> Result<RenderObjects, SessionError> {
         RowIterator::new().map_err(|error| SessionError::new("create_row_iterator", error))?;
     let cells =
         CellIterator::new().map_err(|error| SessionError::new("create_cell_iterator", error))?;
-    Ok((render_state, rows, cells))
+    let placements = PlacementIterator::new()
+        .map_err(|error| SessionError::new("create_placement_iterator", error))?;
+    Ok((render_state, rows, cells, placements))
 }
 
 /// Opens the PTY, launches the child, and hands the child to its waiter.

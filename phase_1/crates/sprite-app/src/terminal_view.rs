@@ -206,6 +206,10 @@ impl TerminalView {
                     // observation and for a future bell policy; neither has a
                     // presentation yet, so neither is acted on here.
                     Ok(TerminalEvent::WorkingDirectoryChanged(_)) | Ok(TerminalEvent::Bell) => {}
+                    // A graphics probe, answered to whoever asked. The view
+                    // does not draw from it: Checkpoint 4 Task 5 gives images a
+                    // texture cache, and until then a pane draws only text.
+                    Ok(TerminalEvent::Graphics(_)) => {}
                     // Nothing to draw: this belongs to whoever asked for it.
                     // The view forwards it because it is the single consumer of
                     // this session's events, and forwarding in arrival order is

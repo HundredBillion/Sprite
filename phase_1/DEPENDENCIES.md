@@ -127,10 +127,26 @@ terminal. Reimplementing parsing, wide-character and grapheme handling, and
 mode/state machines against std alone would duplicate years of Ghostty work and
 guarantee divergence from the emulator Sprite is measured against.
 
-**Features.** `default-features = false`, which disables `kitty-graphics`.
-Checkpoint 1 allocates no images and records a 0 MiB graphics budget;
-Checkpoint 4 re-enables `kitty-graphics` and updates this entry. `log`,
-`tracing`, `png`, `allocator_api`, and `link-dynamic` stay off.
+**Features.** `default-features = false` plus `kitty-graphics`, enabled in
+Checkpoint 4 so a pane can show images. Turning it on required no lock-file
+change at all. `log`, `tracing`, `allocator_api`, and `link-dynamic` stay off.
+
+**`png` stays off deliberately**, even though it sounds like the feature a
+terminal decoding PNGs would want. It provides `RustPngDecoder`, which cannot be
+used: the struct has a private field and neither a constructor nor a `Default`
+implementation, so nothing outside the crate can build one — and its
+`decode_png` reserves buffer *capacity* without setting the buffer's length,
+then hands `next_frame` a zero-length slice, so it would decode nothing even if
+it could be constructed. Sprite installs its own decoder through
+`set_png_decoder`, which is not gated on that feature.
+
+**A third defect in the same area, worked around rather than fixed here.**
+`set_kitty_image_from_temp_file_allowed` takes a `bool`, but the option it
+writes expects a string — the permitted directory — so the Zig side
+`@alignCast`s a one-byte pointer to an eight-byte-aligned type and **aborts the
+process**. It is never called. The medium is denied anyway by Ghostty's default
+limits, and `tests/graphics_policy.rs` asserts that by behaviour rather than
+trusting the default. All three are worth reporting upstream.
 
 **License and source.** MIT OR Apache-2.0.
 <https://github.com/uzaaft/libghostty-rs>.

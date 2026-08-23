@@ -5,6 +5,7 @@
 //! the Sprite application. No libghostty pointer, borrowed row or cell,
 //! allocator, iterator, or PTY handle appears in this crate's public interface.
 
+mod graphics;
 #[cfg(unix)]
 mod pty_unix;
 mod shell;
@@ -175,6 +176,8 @@ pub struct SessionConfig {
     pub working_directory: Option<PathBuf>,
     pub environment: Vec<(OsString, OsString)>,
     pub size: TerminalSize,
+    /// What this pane will accept in the way of images.
+    pub graphics: GraphicsPolicy,
     /// Scrollback budget in **bytes**, not lines.
     ///
     /// libghostty's C header documents this as "maximum number of lines", but
@@ -194,6 +197,7 @@ impl SessionConfig {
             working_directory: None,
             environment: Vec::new(),
             size: TerminalSize::DEFAULT,
+            graphics: GraphicsPolicy::default(),
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
         }
     }
@@ -352,6 +356,13 @@ pub enum TerminalCommand {
     /// observation has the opposite need, so it asks separately and pays only
     /// when it asks.
     CaptureHistory(HistoryLines),
+    /// Ask what images this pane is holding, answered once with
+    /// [`TerminalEvent::Graphics`].
+    ///
+    /// Carries no image data: it reports identities, sizes and placements so a
+    /// caller can see *that* an image is held, which is what the graphics
+    /// limits are asserted against.
+    CaptureGraphics,
 }
 
 /// How many lines of history an observation request wants.
@@ -381,6 +392,62 @@ impl HistoryLines {
 impl Default for HistoryLines {
     fn default() -> Self {
         Self(Self::DEFAULT)
+    }
+}
+
+pub use graphics::{GraphicsSnapshot, ImageSummary, PlacementSummary};
+
+/// What a pane will accept in the way of images.
+///
+/// Every field here bounds something a program that can merely *print* would
+/// otherwise control. Image data arrives as escape-sequence bytes from an
+/// arbitrary child, so the defaults refuse anything that is not strictly
+/// necessary to show a picture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphicsPolicy {
+    /// Whether this pane stores images at all.
+    ///
+    /// Disabled means a transmitted image is discarded as it arrives, not
+    /// buffered and then ignored — the only certain defence against a defect in
+    /// an image decoder is not to run it.
+    pub enabled: bool,
+    /// How many bytes of decoded image this pane may hold.
+    pub storage_bytes: u64,
+    /// The largest single APC payload this pane will accumulate.
+    ///
+    /// An unterminated sequence would otherwise grow for as long as a child
+    /// keeps writing.
+    pub apc_max_bytes: usize,
+}
+
+impl GraphicsPolicy {
+    /// Decoded image bytes one pane may hold.
+    ///
+    /// Deliberately smaller than Ghostty's own default, because that default is
+    /// per terminal and a Sprite window holds many panes: sixteen panes at a
+    /// generous per-pane limit is a great deal of memory for a window.
+    pub const DEFAULT_STORAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// The largest single image transmission this pane will accumulate.
+    pub const DEFAULT_APC_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+    /// A pane that shows no images at all.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            storage_bytes: 0,
+            apc_max_bytes: Self::DEFAULT_APC_MAX_BYTES,
+        }
+    }
+}
+
+impl Default for GraphicsPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            storage_bytes: Self::DEFAULT_STORAGE_BYTES,
+            apc_max_bytes: Self::DEFAULT_APC_MAX_BYTES,
+        }
     }
 }
 
@@ -632,6 +699,8 @@ pub enum TerminalEvent {
     TitleChanged(Option<String>),
     /// The answer to one [`TerminalCommand::CaptureHistory`].
     History(Arc<HistorySnapshot>),
+    /// The answer to one [`TerminalCommand::CaptureGraphics`].
+    Graphics(Arc<GraphicsSnapshot>),
     /// The child reported a new working directory.
     WorkingDirectoryChanged(Option<String>),
     /// The answer to `ResolveHyperlink`.

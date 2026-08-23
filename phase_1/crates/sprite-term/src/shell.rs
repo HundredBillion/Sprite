@@ -43,6 +43,7 @@ pub(crate) fn login_shell() -> Result<SessionConfig, SessionError> {
         environment: identity_environment(),
         size: TerminalSize::DEFAULT,
         scrollback_bytes: crate::default_scrollback_bytes(),
+        graphics: crate::GraphicsPolicy::default(),
     })
 }
 
