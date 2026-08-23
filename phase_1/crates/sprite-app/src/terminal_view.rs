@@ -69,6 +69,12 @@ pub struct TerminalView {
     font_family: SharedString,
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<TerminalSize>,
+    /// The pixels this pane has been given.
+    ///
+    /// A pane is not the window: once a tab holds several, sizing the grid from
+    /// the viewport would give every pane the whole window's dimensions and
+    /// tell every child the wrong size.
+    allocated: Option<Size<Pixels>>,
     status: Option<SharedString>,
     /// Sub-row scroll remainder, so trackpad gestures are not rounded away.
     scroll: ScrollAccumulator,
@@ -259,6 +265,7 @@ impl TerminalView {
             cell_height: LINE_HEIGHT,
             font_family,
             size: Some(initial_size),
+            allocated: None,
             status: None,
             scroll: ScrollAccumulator::default(),
             drag_anchor: None,
@@ -286,6 +293,7 @@ impl TerminalView {
             cell_height: LINE_HEIGHT,
             font_family,
             size: None,
+            allocated: None,
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag_anchor: None,
@@ -365,9 +373,16 @@ impl TerminalView {
 
     /// Recomputes the grid for the current layout and sends a resize only when
     /// it actually changed.
+    /// Tells this pane how much room it has. The workspace knows; the pane does
+    /// not, because a pane cannot see its siblings.
+    pub fn set_allocated(&mut self, allocated: Size<Pixels>) {
+        self.allocated = Some(allocated);
+    }
+
     fn synchronise_size(&mut self, window: &Window) {
+        let available = self.allocated.unwrap_or_else(|| window.viewport_size());
         let Some(size) = grid_size(
-            window.viewport_size(),
+            available,
             self.cell_width,
             self.cell_height,
             window.scale_factor(),

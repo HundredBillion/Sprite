@@ -292,6 +292,16 @@ impl PaneTree {
     /// the perpendicular axis — otherwise a pane diagonally away could steal
     /// focus from one directly beside you. Among candidates, the closest edge
     /// wins, then the greatest overlap, then the lowest id.
+    /// Focuses a specific pane, if it is still in the tree.
+    pub fn focus_pane(&mut self, pane: PaneId) -> bool {
+        if self.contains(pane) {
+            self.focus = pane;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn focus_direction(&mut self, direction: Direction) -> Option<PaneId> {
         let target = self.neighbour(self.focus, direction)?;
         self.focus = target;

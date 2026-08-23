@@ -123,15 +123,73 @@ reintroduce exactly the cost Checkpoint 2 removed.
 
 **Files:** `sprite-app/src/terminal_view.rs`, new `sprite-app/src/workspace.rs`
 
-- [ ] Each pane owns exactly one Terminal Session; splitting creates a new one.
+- [x] Each pane owns exactly one Terminal Session; splitting creates a new one.
   Test that closing, moving, or resizing one pane leaves another's child
-  running.
-- [ ] Normalised `x`, `y`, `width`, `height` per pane within its tab, so clients
-  learn left/right and above/below without pixels or DPI.
-- [ ] A launch creates one fresh tab with one fresh session and restores
+  running. `PaneRegistry<T>` is generic over the payload so this is asserted
+  headlessly with a drop-recording spy: closing one pane ends exactly one
+  session, focus movement ends none, and a closed pane is handed back to the
+  caller rather than dropped at an unpredictable moment.
+- [x] Normalised `x`, `y`, `width`, `height` per pane within its tab, so clients
+  learn left/right and above/below without pixels or DPI. `layout()` returns
+  them, and a test asserts the panes tile the tab exactly.
+- [x] A launch creates one fresh tab with one fresh session and restores
   nothing.
-- [ ] Verify with several panes running Croft and shells simultaneously that
-  per-pane shutdown still reaps only its own descendants.
+- [x] Each pane is told its own allocation before it lays out its grid.
+  `TerminalView` previously sized itself from the window viewport, which would
+  have told every pane in a split it was the full window's size.
+- [x] Verify with several panes running Croft and shells simultaneously that
+  per-pane shutdown still reaps only its own descendants. Two panes, Croft
+  running in one: the pane's tree was `croft`, its `bash`, and two
+  `rust-analyzer` processes. Closing that pane left exactly the other pane's
+  shell, with the whole Croft tree reaped.
+
+**Defect found and fixed during verification: focus did not follow a split.**
+Splitting builds a view whose element does not exist in the dispatch tree until
+the frame that draws it, and GPUI discards a focus request naming a handle that
+is not yet there. The keyboard silently stayed with the previous pane, so the
+second split divided the wrong pane and typing went to the wrong child. The
+workspace now records the pane that should hold the keyboard and applies it
+while rendering, once the element exists.
+
+This was caught by making the running application report *which child PID*
+received a keystroke, rather than by reading a screenshot: the layout looked
+plausible precisely because the bug produced a believable arrangement. Focus
+*movement* (`Ctrl+Shift+<arrow>`) was confirmed correct at the same time, which
+is what localised the fault to newly created panes.
+
+**Second defect found and fixed: a binding reached two consumers.** A pane
+encodes every key it does not claim as an application shortcut and writes it to
+its child. The workspace's bindings were bound during the *bubble* phase, so the
+focused pane saw `Ctrl+Shift+D` first, wrote it to the shell, and only then did
+the workspace split — the split key was also typed into the child. This breaks
+the input rule that one event never reaches two consumers, the same rule the
+double-letter defect broke. The workspace now binds during the **capture**
+phase, which runs from the root down to the focused element, and calls
+`stop_propagation` on a claimed key so no pane ever sees it.
+
+The symptom that exposed it was small: `Ctrl+Shift+Up` at the top pane, where
+focus cannot move, left the shell unable to run the next command — the escape
+sequence had been typed into it.
+
+**How Task 2 was verified.** The application was driven end to end, with each
+step reporting *which child PID owned the keyboard*, so a claim about focus is
+backed by which process received the keystroke:
+
+| step | result |
+| --- | --- |
+| launch | keyboard on the only pane |
+| split right, split down | keyboard on the newly created pane each time |
+| focus left / right | keyboard on the pane in that direction |
+| focus up, no neighbour | keyboard unmoved, shell still usable |
+| close focused pane | exactly one session ended; the others kept running |
+| close a pane running Croft | `croft`, its shell, and both `rust-analyzer` processes reaped; the other pane untouched |
+
+Leakage was tested directly by running `cat` in a pane and pressing the
+bindings: zero bytes reached the child, against a control run in which ordinary
+text did arrive. The control matters — an earlier version of this test reported
+"no bytes" for *everything*, because the tty is in canonical mode and the line
+discipline holds bytes until Enter. Without the flush and the control, the test
+would have "passed" while proving nothing.
 
 ### Task 3: Tabs
 

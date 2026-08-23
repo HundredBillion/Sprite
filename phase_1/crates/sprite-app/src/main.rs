@@ -4,7 +4,7 @@ use gpui::{
     App, AppContext, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions,
     px, size,
 };
-use sprite_app::TerminalView;
+use sprite_app::Workspace;
 
 fn main() {
     Application::new().run(|cx: &mut App| {
@@ -24,7 +24,7 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| TerminalView::new(window, cx));
+                    let view = cx.new(|cx| Workspace::new(window, cx));
                     window.focus(&view.focus_handle(cx));
                     view
                 },
@@ -38,8 +38,15 @@ fn main() {
                     // The first close takes the worker and waits for it off the
                     // GPUI thread, so the native window can shut immediately
                     // while the child and helper threads finish joining.
-                    if let Some(handle) = view.update(cx, |view, _cx| view.begin_shutdown()) {
-                        let finished = cx.background_executor().spawn(async move { handle.wait() });
+                    // Every pane, not just one: a window may hold several
+                    // sessions and each owns its own child.
+                    let handles = view.update(cx, |view, cx| view.begin_shutdown(cx));
+                    if !handles.is_empty() {
+                        let finished = cx.background_executor().spawn(async move {
+                            for handle in handles {
+                                let _ = handle.wait();
+                            }
+                        });
                         cx.spawn(async move |cx| {
                             let _ = finished.await;
                             // Quitting any earlier could tear the executor down

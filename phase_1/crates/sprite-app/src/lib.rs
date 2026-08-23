@@ -6,8 +6,12 @@
 
 mod grid;
 mod input;
+mod pane_registry;
 mod pane_tree;
 mod terminal_view;
+mod workspace;
 
+pub use pane_registry::PaneRegistry;
 pub use pane_tree::{Direction, Orientation, PaneId, PaneTree, Rect};
 pub use terminal_view::TerminalView;
+pub use workspace::Workspace;
