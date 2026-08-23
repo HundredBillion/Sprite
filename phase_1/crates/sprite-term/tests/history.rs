@@ -349,3 +349,40 @@ fn measure_maximum_request() {
         );
     }
 }
+
+/// The metadata the observation schema promises comes from the same capture as
+/// the rows, so an answer never mixes one generation's text with another's
+/// cursor.
+#[test]
+fn a_history_answer_carries_the_metadata_the_schema_needs() {
+    let (mut session, events, _snapshots) = counting_session(60);
+
+    session
+        .send(TerminalCommand::CaptureHistory(HistoryLines::new(10)))
+        .expect("request history");
+    let history = wait_for_history(&events);
+
+    assert!(history.viewport.total_rows >= history.rows.len());
+    assert!(
+        history.cursor.row < history.size.rows,
+        "the cursor is on the screen it was captured from"
+    );
+    assert!(
+        history.captured_at_unix_ms > 1_700_000_000_000,
+        "a real wall-clock capture time, not zero"
+    );
+    // The session's own program is `sh`, but the script ends in `sleep 300`,
+    // so `sleep` is what holds the terminal. Asserting that rather than `sh`
+    // is what proves this reports the *foreground* program instead of the
+    // shell that happens to own the session.
+    assert_eq!(
+        history.foreground.as_deref(),
+        Some("sleep"),
+        "the foreground executable's basename, and only its basename"
+    );
+    let foreground = history.foreground.clone().unwrap_or_default();
+    assert!(
+        !foreground.contains('/') && !foreground.contains(' '),
+        "never a path and never arguments: {foreground:?}"
+    );
+}

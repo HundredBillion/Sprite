@@ -580,6 +580,24 @@ pub struct HistorySnapshot {
     pub requested: usize,
     /// Scrollback rows that existed when this was captured.
     pub available: usize,
+    pub cursor: CursorSnapshot,
+    pub viewport: Viewport,
+    /// The title the child set, if it set one. Never inferred from what is on
+    /// screen.
+    pub title: Option<String>,
+    /// The working directory the child reported through OSC 7, if any.
+    pub working_directory: Option<String>,
+    /// When this was captured, in milliseconds since the Unix epoch.
+    ///
+    /// Each pane is captured independently, so a multi-pane answer carries
+    /// several of these and does not claim one window-wide instant.
+    pub captured_at_unix_ms: u128,
+    /// The basename of the program in the foreground of this pane's terminal,
+    /// when the platform can be asked safely.
+    ///
+    /// Never arguments, never environment values, and `None` rather than a
+    /// guess read off the screen.
+    pub foreground: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

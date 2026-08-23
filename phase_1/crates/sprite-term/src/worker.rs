@@ -611,7 +611,15 @@ pub(crate) fn run(
                     // Answered once, from this thread, against the same
                     // terminal the snapshots come from — so the rows returned
                     // belong to one generation rather than a moving target.
-                    match snapshot::capture_history(generation, size, lines.get(), &terminal) {
+                    let foreground = foreground_executable(master.as_ref());
+                    match snapshot::capture_history(
+                        generation,
+                        size,
+                        lines.get(),
+                        foreground,
+                        &terminal,
+                        &mut render_state,
+                    ) {
                         Ok(history) => {
                             if events
                                 .send_blocking(TerminalEvent::History(Arc::new(history)))
@@ -827,6 +835,20 @@ pub(crate) fn run(
 /// The group recorded at spawn covers the shell and anything it started; the
 /// current foreground group covers an interactive program that moved itself
 /// into its own group since.
+/// The basename of the program in the foreground of this terminal.
+///
+/// Read from the process the kernel already reports as the terminal's
+/// foreground group leader, and only its `comm` — never its arguments and never
+/// its environment, both of which are readable there and neither of which any
+/// observer is entitled to. Anything unavailable is `None` rather than a guess:
+/// a wrong name is worse than no name.
+fn foreground_executable(master: &(dyn MasterPty + Send)) -> Option<String> {
+    let leader = master.process_group_leader()?;
+    let comm = std::fs::read_to_string(format!("/proc/{leader}/comm")).ok()?;
+    let name = comm.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 fn process_groups(master: &(dyn MasterPty + Send), recorded: Option<i32>) -> Vec<i32> {
     let mut groups = Vec::with_capacity(2);
     if let Some(group) = recorded {

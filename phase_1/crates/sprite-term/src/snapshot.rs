@@ -30,11 +30,13 @@ use crate::{
 /// Every row is read in **screen** coordinates of the *active* screen, so an
 /// alternate-screen application yields its own screen and its own history. The
 /// normal screen hidden behind it is not reachable from here at all.
-pub(crate) fn capture_history(
+pub(crate) fn capture_history<'vt>(
     generation: u64,
     size: TerminalSize,
     lines: usize,
-    terminal: &Terminal<'_, '_>,
+    foreground: Option<String>,
+    terminal: &Terminal<'vt, '_>,
+    render_state: &mut RenderState<'vt>,
 ) -> Result<HistorySnapshot, SessionError> {
     let screen = match terminal.active_screen().map_err(vt("active_screen"))? {
         Screen::Primary => ScreenKind::Primary,
@@ -53,6 +55,28 @@ pub(crate) fn capture_history(
         rows.push(history_row(terminal, size, y)?);
     }
 
+    // Read from the same terminal, in the same call, as the rows above: an
+    // answer that mixed one generation's rows with another's cursor would
+    // describe a screen that never existed.
+    let scrollbar = terminal.scrollbar().map_err(vt("scrollbar"))?;
+    let viewport = Viewport {
+        total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),
+        offset: usize::try_from(scrollbar.offset).unwrap_or(0),
+        visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows)),
+    };
+    let title = terminal
+        .title()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let working_directory = terminal
+        .pwd()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let snapshot = render_state.update(terminal).map_err(vt("render_update"))?;
+    let cursor = cursor_snapshot(&snapshot)?;
+
     Ok(HistorySnapshot {
         generation,
         size,
@@ -61,6 +85,15 @@ pub(crate) fn capture_history(
         history_rows,
         requested: lines,
         available,
+        cursor,
+        viewport,
+        title,
+        working_directory,
+        captured_at_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis())
+            .unwrap_or(0),
+        foreground,
     })
 }
 

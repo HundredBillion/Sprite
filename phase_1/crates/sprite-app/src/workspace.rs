@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use crate::observation::broker::{self, Refusal};
 use crate::observation::endpoint::{DENIED, Endpoint};
-use crate::observation::panes::{PaneLink, WindowPanes};
+use crate::observation::panes::{PaneLink, Placement, WindowPanes};
+use crate::observation::schema;
 use crate::pane_tree::{Direction, Orientation, PaneId};
 use crate::tabs::{TabId, Tabs};
 use crate::terminal_view::TerminalView;
@@ -229,40 +230,10 @@ fn respond(panes: &WindowPanes, body: &str) -> String {
         Err(Refusal::Denied) => return DENIED.to_owned(),
     };
     match broker::collect(&query, panes, broker::DEADLINE) {
-        Ok(report) => render(&report),
+        Ok(report) => schema::render(&report, query.pretty),
         Err(Refusal::Malformed(why)) => format!("malformed: {why}"),
         Err(Refusal::Denied) => DENIED.to_owned(),
     }
-}
-
-/// A provisional rendering, replaced by the versioned JSON schema in Task 7.
-///
-/// One line, because the transport is line-delimited and the schema will bring
-/// its own framing. It carries counts rather than content on purpose: shipping
-/// pane text through a format nothing has specified yet would create a second,
-/// accidental schema for clients to depend on.
-fn render(report: &broker::Report) -> String {
-    let mut out = format!(
-        "complete={} panes={} failures={}",
-        report.complete,
-        report.panes.len(),
-        report.failures.len()
-    );
-    for pane in &report.panes {
-        out.push_str(&format!(
-            " pane:{}/{}:rows={}",
-            pane.address.tab.0,
-            pane.address.pane.0,
-            pane.snapshot.rows.len()
-        ));
-    }
-    for failure in &report.failures {
-        out.push_str(&format!(
-            " failed:{}/{}",
-            failure.address.tab.0, failure.address.pane.0
-        ));
-    }
-    out
 }
 
 /// How a pane will be reached by observation, when the window has an endpoint.
@@ -382,6 +353,26 @@ impl Render for Workspace {
         // Every pane in `placements` gets an element in this frame, so a focus
         // request recorded earlier can now be honoured.
         self.apply_pending_focus(window, cx);
+
+        // Published from here because this is where the layout is decided, and
+        // a request arriving on another thread must never have to wait for a
+        // frame to learn where a pane sits.
+        let published: Vec<(PaneId, Placement)> = self
+            .tabs
+            .placements()
+            .into_iter()
+            .map(|(pane, tab_order, rect, focused)| {
+                (
+                    pane,
+                    Placement {
+                        tab_order,
+                        rect,
+                        focused,
+                    },
+                )
+            })
+            .collect();
+        self.panes.set_layout(&published);
 
         // Built before the outer element so each listener's borrow of `cx`
         // ends here rather than spanning the rest of the chain.

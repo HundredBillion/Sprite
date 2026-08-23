@@ -45,7 +45,8 @@ pub struct Rect {
 }
 
 impl Rect {
-    const FULL: Self = Self {
+    /// The whole tab, which is what a single pane occupies.
+    pub const FULL: Self = Self {
         x: 0.0,
         y: 0.0,
         width: 1.0,

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use sprite_term::{HistoryLines, HistorySnapshot};
 
-use crate::pane_tree::PaneId;
+use crate::pane_tree::{PaneId, Rect};
 use crate::tabs::TabId;
 
 /// One deadline for a whole request, however many panes it covers.
@@ -31,10 +31,18 @@ use crate::tabs::TabId;
 pub const DEADLINE: Duration = Duration::from_millis(500);
 
 /// Where a pane lives in this window.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaneAddress {
     pub tab: TabId,
+    /// The tab's position in window order, which is the order the schema
+    /// promises. Carried rather than derived, because a tab's identity does not
+    /// have to follow its position.
+    pub tab_order: usize,
     pub pane: PaneId,
+    /// The pane's rectangle within its tab, normalised to 0..1.
+    pub rect: Rect,
+    /// Whether this is the focused pane of its tab.
+    pub focused: bool,
 }
 
 /// A capture that has been asked for and not yet answered.
@@ -89,6 +97,8 @@ pub struct Query {
     pub from: Option<PaneId>,
     pub scope: Scope,
     pub lines: HistoryLines,
+    /// Lay the JSON out for a human. Whitespace only; never a second schema.
+    pub pretty: bool,
 }
 
 /// Why a request was not carried out.
@@ -112,10 +122,38 @@ pub struct PaneReport {
     pub snapshot: Arc<HistorySnapshot>,
 }
 
+/// Why one pane is missing from an answer.
+///
+/// Named rather than free text, because a client has to be able to tell a slow
+/// pane from a closed one without reading English.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureKind {
+    /// Did not answer before the request's deadline.
+    Timeout,
+    /// Ended before it could answer.
+    Closed,
+    /// Answered with a failure.
+    Errored,
+}
+
+impl FailureKind {
+    /// The wire name, which is part of the schema.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            // The wire names keep the `pane_` prefix the schema promises,
+            // whatever the Rust variants are called.
+            Self::Timeout => "pane_timeout",
+            Self::Closed => "pane_closed",
+            Self::Errored => "pane_error",
+        }
+    }
+}
+
 /// A pane that was asked and did not answer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Failure {
     pub address: PaneAddress,
+    pub kind: FailureKind,
     pub reason: String,
 }
 
@@ -143,11 +181,13 @@ pub fn parse(body: &str) -> Result<Query, Refusal> {
     let mut from = None;
     let mut scope = None;
     let mut include_self = false;
+    let mut pretty = false;
     let mut lines = HistoryLines::default();
 
     while let Some(word) = words.next() {
         match word {
             "--include-self" => include_self = true,
+            "--pretty" => pretty = true,
             "--window" => {
                 if scope.is_some() {
                     return Err(Refusal::Malformed("scope given twice"));
@@ -197,6 +237,7 @@ pub fn parse(body: &str) -> Result<Query, Refusal> {
         from,
         scope: scope.unwrap_or(Scope::Tab { include_self }),
         lines,
+        pretty,
     })
 }
 
@@ -253,7 +294,11 @@ pub fn collect(
             Ok(request) => pending.push(request),
             // A pane that cannot even be asked — it closed as the request
             // arrived — is named, and costs the request nothing.
-            Err(reason) => failures.push(Failure { address, reason }),
+            Err(reason) => failures.push(Failure {
+                address,
+                kind: FailureKind::Closed,
+                reason,
+            }),
         }
     }
 
@@ -280,25 +325,62 @@ pub fn collect(
             }),
             Ok(Err(reason)) => failures.push(Failure {
                 address: request.address,
+                kind: FailureKind::Errored,
                 reason,
             }),
             Err(RecvTimeoutError::Timeout) => failures.push(Failure {
                 address: request.address,
+                kind: FailureKind::Timeout,
                 reason: "the pane did not answer within the deadline".to_owned(),
             }),
             // The pane ended between being asked and answering.
             Err(RecvTimeoutError::Disconnected) => failures.push(Failure {
                 address: request.address,
+                kind: FailureKind::Closed,
                 reason: "the pane closed before it answered".to_owned(),
             }),
         }
     }
 
-    Ok(Report {
+    let mut report = Report {
         complete: failures.is_empty(),
         panes,
         failures,
-    })
+    };
+    order_for_schema(&mut report);
+    Ok(report)
+}
+
+/// Puts a report into the order the schema promises: tabs by window order, then
+/// panes by top edge, then left edge, then identity.
+///
+/// Applied to the finished report rather than left to the order answers
+/// happened to arrive in, so which pane was slow today cannot change how a
+/// response is serialised.
+pub fn order_for_schema(report: &mut Report) {
+    fn key(address: &PaneAddress) -> (usize, f32, f32, PaneId) {
+        (
+            address.tab_order,
+            address.rect.y,
+            address.rect.x,
+            address.pane,
+        )
+    }
+    fn compare(left: &PaneAddress, right: &PaneAddress) -> std::cmp::Ordering {
+        let (left_tab, left_y, left_x, left_pane) = key(left);
+        let (right_tab, right_y, right_x, right_pane) = key(right);
+        left_tab
+            .cmp(&right_tab)
+            .then(left_y.total_cmp(&right_y))
+            .then(left_x.total_cmp(&right_x))
+            .then(left_pane.cmp(&right_pane))
+    }
+    report
+        .panes
+        .sort_by(|left, right| compare(&left.address, &right.address));
+    report
+        .failures
+        .sort_by(|left, right| compare(&left.address, &right.address));
 }
 
 #[cfg(test)]
@@ -329,6 +411,21 @@ mod tests {
             history_rows: 0,
             requested: 0,
             available: 0,
+            cursor: sprite_term::CursorSnapshot {
+                row: 0,
+                column: 0,
+                visible: true,
+                blinking: false,
+            },
+            viewport: sprite_term::Viewport {
+                total_rows: 24,
+                offset: 0,
+                visible_rows: 24,
+            },
+            title: None,
+            working_directory: None,
+            captured_at_unix_ms: 1_800_000_000_000,
+            foreground: None,
         })
     }
 
@@ -359,9 +456,18 @@ mod tests {
             Self {
                 panes: panes
                     .iter()
-                    .map(|(tab, pane)| PaneAddress {
+                    .enumerate()
+                    .map(|(index, (tab, pane))| PaneAddress {
                         tab: TabId(*tab),
+                        tab_order: *tab as usize,
                         pane: PaneId(*pane),
+                        rect: Rect {
+                            x: 0.0,
+                            y: index as f32 / 10.0,
+                            width: 1.0,
+                            height: 0.1,
+                        },
+                        focused: index == 0,
                     })
                     .collect(),
                 behaviour: HashMap::new(),
@@ -639,15 +745,11 @@ mod tests {
 
         assert_eq!(seen(&report), vec![0, 2]);
         assert!(!report.complete);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].address.pane, PaneId(1));
+        assert_eq!(report.failures[0].kind, FailureKind::Errored);
         assert_eq!(
-            report.failures,
-            vec![Failure {
-                address: PaneAddress {
-                    tab: TabId(0),
-                    pane: PaneId(1)
-                },
-                reason: "the terminal worker ended".to_owned(),
-            }],
+            report.failures[0].reason, "the terminal worker ended",
             "the failure is named rather than silently dropped"
         );
     }

@@ -15,7 +15,7 @@ use crate::observation::broker::{PaneAddress, PaneSource, Pending};
 
 /// What a pane sends back when it answers.
 type Answer = Result<Arc<HistorySnapshot>, String>;
-use crate::pane_tree::PaneId;
+use crate::pane_tree::{PaneId, Rect};
 use crate::tabs::TabId;
 
 /// What a pane needs in order to be observable.
@@ -32,6 +32,11 @@ pub struct PaneLink {
 /// One registered pane.
 struct Entry {
     tab: TabId,
+    /// Where the pane sits, refreshed from the window as the layout changes.
+    ///
+    /// Held here rather than asked for at request time because the layout lives
+    /// on the GPUI thread, and a request must never have to wait for a frame.
+    placement: Placement,
     commands: CommandSender,
     /// Requests submitted and not yet answered, oldest first.
     ///
@@ -40,6 +45,24 @@ struct Entry {
     /// exactly once, and the view forwards answers in the order they arrive, so
     /// matching the oldest waiter to the next answer pairs them correctly.
     waiting: VecDeque<std::sync::mpsc::Sender<Answer>>,
+}
+
+/// Where a pane sits in the window, as the schema reports it.
+#[derive(Clone, Copy, Debug)]
+pub struct Placement {
+    pub tab_order: usize,
+    pub rect: Rect,
+    pub focused: bool,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self {
+            tab_order: 0,
+            rect: Rect::FULL,
+            focused: false,
+        }
+    }
 }
 
 /// Every pane in one window that observation may reach.
@@ -63,10 +86,30 @@ impl WindowPanes {
             pane,
             Entry {
                 tab,
+                // Corrected by the next layout the window publishes; a pane
+                // that has not been laid out yet still has to be answerable.
+                placement: Placement::default(),
                 commands,
                 waiting: VecDeque::new(),
             },
         );
+    }
+
+    /// Records where the window's panes currently sit.
+    ///
+    /// Published by the window as the layout changes. Panes the window no
+    /// longer has are ignored rather than added back: this reports placement,
+    /// not membership.
+    pub fn set_layout(&self, placements: &[(PaneId, Placement)]) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for (pane, placement) in placements {
+            if let Some(entry) = entries.get_mut(pane) {
+                entry.placement = *placement;
+            }
+        }
     }
 
     /// Forgets a pane that has closed.
@@ -127,12 +170,22 @@ impl PaneSource for WindowPanes {
             .iter()
             .map(|(pane, entry)| PaneAddress {
                 tab: entry.tab,
+                tab_order: entry.placement.tab_order,
                 pane: *pane,
+                rect: entry.placement.rect,
+                focused: entry.placement.focused,
             })
             .collect();
         // A map has no order, and a caller must not see panes shuffle between
-        // requests; the schema's own ordering is applied later.
-        addresses.sort_by_key(|address| (address.tab, address.pane));
+        // requests. This is the schema's order: tabs by window order, then
+        // panes by top edge, then left edge, then identity.
+        addresses.sort_by(|left, right| {
+            left.tab_order
+                .cmp(&right.tab_order)
+                .then(left.rect.y.total_cmp(&right.rect.y))
+                .then(left.rect.x.total_cmp(&right.rect.x))
+                .then(left.pane.cmp(&right.pane))
+        });
         addresses
     }
 
@@ -151,7 +204,10 @@ impl PaneSource for WindowPanes {
         entry.waiting.push_back(sender);
         let address = PaneAddress {
             tab: entry.tab,
+            tab_order: entry.placement.tab_order,
             pane,
+            rect: entry.placement.rect,
+            focused: entry.placement.focused,
         };
         if let Err(error) = entry.commands.send(TerminalCommand::CaptureHistory(lines)) {
             entry.waiting.pop_back();
@@ -180,6 +236,21 @@ mod tests {
             history_rows: 0,
             requested: 0,
             available: 0,
+            cursor: sprite_term::CursorSnapshot {
+                row: 0,
+                column: 0,
+                visible: true,
+                blinking: false,
+            },
+            viewport: sprite_term::Viewport {
+                total_rows: 24,
+                offset: 0,
+                visible_rows: 24,
+            },
+            title: None,
+            working_directory: None,
+            captured_at_unix_ms: 1_800_000_000_000,
+            foreground: None,
         })
     }
 
@@ -203,19 +274,14 @@ mod tests {
         panes.register(PaneId(2), TabId(0), second.commands());
 
         let listed = panes.panes();
+        let order: Vec<(u64, u64)> = listed
+            .iter()
+            .map(|address| (address.tab.0, address.pane.0))
+            .collect();
         assert_eq!(
-            listed,
-            vec![
-                PaneAddress {
-                    tab: TabId(0),
-                    pane: PaneId(2)
-                },
-                PaneAddress {
-                    tab: TabId(1),
-                    pane: PaneId(5)
-                },
-            ],
-            "ordered by tab then pane, never by hash order"
+            order,
+            vec![(0, 2), (1, 5)],
+            "ordered by the window's layout, never by hash order"
         );
     }
 

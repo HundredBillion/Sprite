@@ -195,6 +195,25 @@ impl<T> Tabs<T> {
             })
             .collect()
     }
+
+    /// Where every pane in the window sits, with its tab's position in window
+    /// order and whether it holds its tab's focus.
+    ///
+    /// Covers background tabs too: a pane nobody is looking at still has a
+    /// place, and observation reports it.
+    pub fn placements(&self) -> Vec<(PaneId, usize, Rect, bool)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .flat_map(|(order, (_, registry))| {
+                let focus = registry.focus();
+                registry
+                    .layout()
+                    .into_iter()
+                    .map(move |(pane, rect, _)| (pane, order, rect, pane == focus))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

@@ -8,3 +8,4 @@
 pub mod broker;
 pub mod endpoint;
 pub mod panes;
+pub mod schema;

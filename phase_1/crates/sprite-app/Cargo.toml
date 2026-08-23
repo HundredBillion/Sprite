@@ -10,6 +10,7 @@ name = "sprite"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = { workspace = true }
 sprite-term = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

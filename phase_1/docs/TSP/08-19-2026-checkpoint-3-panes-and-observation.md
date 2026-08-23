@@ -425,18 +425,80 @@ accidental schema for clients to depend on. Task 7 replaces it.
 
 **Files:** new `sprite-app/src/observation/schema.rs`
 
-- [ ] One versioned object with `schema_version` and a `panes` array, built from
+- [x] One versioned object with `schema_version` and a `panes` array, built from
   typed Rust data. Pretty printing changes whitespace only and never creates a
-  second schema.
-- [ ] Deterministic ordering: tabs by window order, panes by normalised top
+  second schema. A test renders one report both ways and asserts the two parse
+  to the same document.
+- [x] Deterministic ordering: tabs by window order, panes by normalised top
   edge, then left edge, then stable pane ID. Test that concurrent completion
-  order cannot change serialisation.
-- [ ] Every snapshot declares `content_trust: "untrusted_terminal_output"`.
-- [ ] Exclude screenshots, colours, fonts, raw control sequences, clipboard
+  order cannot change serialisation. Ordering is applied to the finished report
+  by `order_for_schema`, so which pane happened to be slow cannot change how a
+  response serialises — and the schema's test calls that same function rather
+  than a copy of the rule written for the test.
+- [x] Every snapshot declares `content_trust: "untrusted_terminal_output"`.
+- [x] Exclude screenshots, colours, fonts, raw control sequences, clipboard
   data, environment values, image bytes, and filenames. Test the exclusions
-  explicitly — this is a promise about what cannot leak.
-- [ ] Foreground executable basename only when obtainable safely from platform
+  explicitly — this is a promise about what cannot leak. Checked twice: the
+  rendered text must not contain any of twenty forbidden words, **and** a pane
+  object's key set must equal the agreed list exactly, so a field added to a
+  snapshot for the renderer cannot arrive on the wire unnoticed.
+- [x] Foreground executable basename only when obtainable safely from platform
   process state; never arguments or environment; `null` rather than a guess.
+  Read from `/proc/<pid>/comm` of the process the kernel reports as the
+  terminal's foreground group leader — never `cmdline`, never `environ`, both of
+  which are readable there and neither of which an observer is entitled to. Live
+  answer: `"bash"`.
+
+**Every field is written out by hand rather than derived.** A derive serialises
+whatever a type happens to hold, so adding a field to a snapshot for the
+renderer's benefit would silently put it on the wire. The exclusions are
+therefore enforced by construction: those things cannot leak because no line
+writes them. It also keeps `serde_derive` and its proc-macro chain out of the
+direct dependencies.
+
+**`serde_json =1.0.151`, ledger entry written.** It adds nothing to the supply
+chain: it and `serde` were already compiled into the binary through `gpui`, and
+declaring it directly changed `Cargo.lock` by exactly one line — an edge from
+`sprite-app`, no new crates, no version changes. It earns its place on escaping
+rather than on syntax: the encoded data is arbitrary terminal output, and a test
+feeds hostile text — quotes, backslashes, `ESC`, a bell, `</script>`, a
+right-to-left override — through the encoder and asserts it round-trips as data
+without inventing a field.
+
+**The transport now frames by end of stream.** A response may be laid out over
+many lines, so "read one line" is not a frame a client can rely on; the endpoint
+closes its write half when an answer is complete.
+
+**Metadata comes from the same capture as the rows.** The history answer gained
+cursor, viewport, title, working directory, capture time and foreground
+executable, all read in the one call that reads the rows — an answer mixing one
+generation's text with another's cursor would describe a screen that never
+existed.
+
+**Verified against the running application**, two panes, one split:
+
+```json
+{ "schema_version": 1, "complete": true, "panes": [ ... ], "errors": [] }
+```
+
+The second pane's JSON carried the text typed into it, `layout` of
+`x: 0.5, width: 0.5` for the right half, `foreground_executable: "bash"`,
+`content_trust: "untrusted_terminal_output"`, and ordering by tab then top edge
+then left edge. `working_directory` was `null` while `title` contained a path,
+which is the rule working: the title is not parsed to guess a directory.
+
+**Two gaps recorded rather than papered over.** `tab_title` is always `null`
+because tabs have no titles yet — using the active pane's title would be a guess
+dressed as a fact. And the PRD's Kitty placement metadata is Checkpoint 4 work,
+so no placement fields exist yet.
+
+**A pre-existing flaky security test was fixed on the way through.**
+`paste_cannot_escape_its_own_brackets` waited for the *opening* bracket and then
+counted terminators, so under parallel load it could assert before Sprite's own
+closing bracket had rendered and report a pass as a failure. The sanitisation
+itself was working — the payload's `ESC` showed as `20` where `1b` would be. It
+now waits for the closing bracket, which still fails correctly if a payload's
+terminator ever survives.
 
 ### Task 8: Response limiting
 

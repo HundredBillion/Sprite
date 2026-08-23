@@ -346,7 +346,7 @@ where
         .take(MAX_REQUEST_BYTES)
         .read_line(&mut line);
     if read.is_err() {
-        let _ = writeln!(stream, "{DENIED}");
+        refuse(&mut stream);
         return;
     }
 
@@ -365,7 +365,7 @@ where
     if !running.load(Ordering::SeqCst) || !key.matches(presented) {
         // No detail, and nothing about the request: a caller learns only that
         // it was refused.
-        let _ = writeln!(stream, "{DENIED}");
+        refuse(&mut stream);
         return;
     }
 
@@ -373,6 +373,15 @@ where
         body: body.to_owned(),
     });
     let _ = writeln!(stream, "{response}");
+    // The write half is closed so a client knows the answer is complete. A
+    // response may be laid out over many lines, so "read one line" is not a
+    // frame a client can rely on; end of stream is.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+fn refuse(stream: &mut UnixStream) {
+    let _ = writeln!(stream, "{DENIED}");
+    let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
 /// The per-user runtime directory this window's socket lives in.
@@ -410,9 +419,11 @@ mod tests {
             writeln!(writer, "{line}").expect("send the request");
             writer.flush().expect("flush");
         }
+        // Read to end of stream, which is how a client frames a response that
+        // may be laid out over several lines.
         let mut answer = String::new();
         BufReader::new(&stream)
-            .read_line(&mut answer)
+            .read_to_string(&mut answer)
             .expect("read the answer");
         answer.trim_end().to_owned()
     }

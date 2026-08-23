@@ -18,8 +18,44 @@ much maintained complexity the dependency removes from Sprite.
 
 ## Current direct dependencies
 
-Five direct external crates, all pinned to exact versions in
+Six direct external crates, all pinned to exact versions in
 `phase_1/Cargo.toml` and locked in `phase_1/Cargo.lock`.
+
+### `serde_json` `=1.0.151`
+
+**Capability.** Encoding the observation response: the versioned JSON object
+that `sprite panes snapshot` returns.
+
+**Not provided.** Correct JSON encoding is mostly correct *escaping*, and the
+data being encoded is arbitrary terminal output chosen by arbitrary programs —
+quotes, backslashes, control bytes, lone surrogates, right-to-left overrides.
+Hand-rolled escaping is a well-known source of injection bugs, and this is the
+one place where untrusted content crosses a machine-readable boundary. A test
+feeds hostile text through the encoder and asserts it round-trips as data
+without inventing a field.
+
+**Why not std.** The standard library has no JSON.
+
+**Adds nothing to the supply chain.** `serde_json` and `serde` were already in
+`Cargo.lock` and already compiled into the binary as transitive dependencies of
+`gpui`. Declaring it directly changed the lock file by exactly one line — an
+edge from `sprite-app` — with no new crates and no version changes.
+
+**Features.** Defaults (`std`). No `preserve_order`, no `arbitrary_precision`,
+no `unbounded_depth`.
+
+**Derive is deliberately not used.** The schema is built by writing every field
+out by hand rather than deriving `Serialize` on Sprite's own types. A derive
+serialises whatever a type happens to hold, so a field added to a snapshot for
+the renderer's benefit would silently appear on the wire. The PRD's exclusion
+list is enforced by construction instead: those things cannot leak because no
+line writes them. This also keeps `serde_derive` and its proc-macro chain out of
+the direct dependencies.
+
+**License and source.** MIT OR Apache-2.0, crates.io.
+
+**Pin and updates.** Exact pin. Updated deliberately, with the encoder's
+escaping behaviour re-checked against the hostile-content test.
 
 ### `gpui` `=0.2.2`
 

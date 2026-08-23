@@ -5034,6 +5034,7 @@ name = "sprite-app"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "serde_json",
  "sprite-term",
 ]
 

@@ -103,7 +103,15 @@ fn paste_cannot_escape_its_own_brackets() {
         .send(TerminalCommand::Paste("a\u{1b}[201~rm -rf".to_owned()))
         .expect("paste");
 
-    let bundle = snapshots.wait_for("the sanitised paste", |b| pane_text(b).contains("1b 5b 32"));
+    // Wait for the *closing* bracket, not merely the opening one: under load
+    // the rest of the write may not have been rendered yet, and counting
+    // terminators before they have all arrived reports a pass as a failure.
+    // If the payload's terminator were not neutralised this predicate still
+    // matches — on the payload's own bracket — and the count below then fails,
+    // which is the outcome the test exists to produce.
+    let bundle = snapshots.wait_for("the sanitised paste", |b| {
+        pane_text(b).contains("1b 5b 32 30 31 7e")
+    });
     let text = pane_text(&bundle);
 
     // Exactly one closing bracket, and it is the one Sprite added at the end.
