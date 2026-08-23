@@ -1,25 +1,31 @@
-//! One window's panes.
+//! One window: ordered tabs, each holding a tree of panes.
 //!
-//! The workspace owns the split tree and one `TerminalView` per pane, positions
-//! each view in its share of the window, and routes focus. It creates a session
-//! per pane and never shares one, which is the property `PaneRegistry`'s tests
-//! pin without needing a window.
+//! The workspace owns the tabs, positions the active tab's panes in their share
+//! of the window, and routes focus. It creates a session per pane and never
+//! shares one, which is the property `Tabs` and `PaneRegistry` pin without
+//! needing a window.
 
 use gpui::prelude::*;
-use gpui::{Context, FocusHandle, Focusable, KeyDownEvent, Pixels, Size, Window, div, px, rgb};
+use gpui::{
+    Context, FocusHandle, Focusable, KeyDownEvent, Pixels, SharedString, Size, Window, div, px, rgb,
+};
 use sprite_term::ShutdownHandle;
 
-use crate::pane_registry::PaneRegistry;
 use crate::pane_tree::{Direction, Orientation, PaneId};
+use crate::tabs::{TabId, Tabs};
 use crate::terminal_view::TerminalView;
 
 const BACKGROUND: u32 = 0x101014;
 /// Drawn between panes so a split is visible without a separate widget.
 const DIVIDER: u32 = 0x2a2a34;
 const DIVIDER_PX: f32 = 1.0;
+const TAB_STRIP_HEIGHT: f32 = 28.0;
+const TAB_ACTIVE_BG: u32 = 0x1d1d24;
+const TAB_INACTIVE_FG: u32 = 0x8a8a99;
+const TAB_ACTIVE_FG: u32 = 0xe6e6ef;
 
 pub struct Workspace {
-    panes: PaneRegistry<gpui::Entity<TerminalView>>,
+    tabs: Tabs<gpui::Entity<TerminalView>>,
     focus: FocusHandle,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
@@ -33,13 +39,12 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let first = cx.new(|cx| TerminalView::new(window, cx));
-        let panes = PaneRegistry::new(first);
+        let tabs = Tabs::new(|| cx.new(|cx| TerminalView::new(window, cx)));
         // The window focuses the workspace; the workspace hands the keyboard to
         // a pane, rather than leaving which pane receives typing to chance.
-        let pending_focus = Some(panes.focus());
+        let pending_focus = Some(tabs.active().focus());
         Self {
-            panes,
+            tabs,
             focus: cx.focus_handle(),
             pending_focus,
         }
@@ -47,11 +52,11 @@ impl Workspace {
 
     /// Hands over every pane's worker so the window can wait for all of them.
     ///
-    /// Each pane is shut down individually; there is no shared session to
-    /// coordinate, which is why closing one never disturbs another.
+    /// Every tab, not only the visible one: a background tab's child is still
+    /// running and still owns a PTY.
     pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<ShutdownHandle> {
-        self.panes
-            .layout()
+        self.tabs
+            .all_panes()
             .into_iter()
             .map(|(_, _, view)| view.clone())
             .collect::<Vec<_>>()
@@ -63,18 +68,21 @@ impl Workspace {
     fn split(&mut self, orientation: Orientation, window: &mut Window, cx: &mut Context<Self>) {
         // A split starts a fresh session; panes never share one.
         let view = cx.new(|cx| TerminalView::new(window, cx));
-        let pane = self.panes.split(orientation, || view);
+        let pane = self.tabs.split(orientation, || view);
         self.request_focus(pane);
         cx.notify();
     }
 
-    fn close_focused(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let focused = self.panes.focus();
-        let Some(view) = self.panes.close(focused) else {
-            return;
-        };
-        // Shut the session down deliberately rather than leaving it to a drop,
-        // so the child is reaped at a known moment.
+    fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| TerminalView::new(window, cx));
+        self.tabs.open(|| view);
+        self.request_focus(self.tabs.active().focus());
+        cx.notify();
+    }
+
+    /// Shuts a session down deliberately rather than leaving it to a drop, so
+    /// the child is reaped at a known moment.
+    fn shut_down(&self, view: gpui::Entity<TerminalView>, cx: &mut Context<Self>) {
         let handle = view.update(cx, |view, _cx| view.begin_shutdown());
         if let Some(handle) = handle {
             cx.background_executor()
@@ -83,24 +91,55 @@ impl Workspace {
                 })
                 .detach();
         }
+    }
 
-        if self.panes.is_empty() {
-            // The last pane closed, so the window has nothing left to show.
+    fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.tabs.close_focused_pane() else {
+            return;
+        };
+        self.shut_down(view, cx);
+        self.after_close(cx);
+    }
+
+    fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        let tab = self.tabs.active_tab();
+        for view in self.tabs.close_tab(tab) {
+            self.shut_down(view, cx);
+        }
+        self.after_close(cx);
+    }
+
+    fn after_close(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            // The last pane of the last tab closed, so the window has nothing
+            // left to show.
             cx.quit();
             return;
         }
-        self.request_focus(self.panes.focus());
+        self.request_focus(self.tabs.active().focus());
         cx.notify();
     }
 
-    fn focus_direction(
-        &mut self,
-        direction: Direction,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pane) = self.panes.focus_direction(direction) {
+    fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
+        if let Some(pane) = self.tabs.focus_direction(direction) {
             self.request_focus(pane);
+            cx.notify();
+        }
+    }
+
+    fn switch_tab(&mut self, forwards: bool, cx: &mut Context<Self>) {
+        if forwards {
+            self.tabs.next_tab();
+        } else {
+            self.tabs.previous_tab();
+        }
+        self.request_focus(self.tabs.active().focus());
+        cx.notify();
+    }
+
+    fn focus_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        if self.tabs.focus_tab(tab) {
+            self.request_focus(self.tabs.active().focus());
             cx.notify();
         }
     }
@@ -116,15 +155,15 @@ impl Workspace {
         let Some(pane) = self.pending_focus.take() else {
             return;
         };
-        let Some(view) = self.panes.get(pane) else {
+        let Some(view) = self.tabs.active().get(pane) else {
             return;
         };
         let handle = view.read(cx).focus_handle(cx);
         window.focus(&handle);
     }
 
-    fn focus_pane(&mut self, pane: PaneId, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.focus_pane(pane) {
+    fn focus_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        if self.tabs.focus_pane(pane) {
             self.request_focus(pane);
             cx.notify();
         }
@@ -140,6 +179,10 @@ enum WorkspaceAction {
     SplitRight,
     SplitDown,
     ClosePane,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PreviousTab,
     Focus(Direction),
 }
 
@@ -152,6 +195,10 @@ fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
         "d" => Some(WorkspaceAction::SplitRight),
         "e" => Some(WorkspaceAction::SplitDown),
         "w" => Some(WorkspaceAction::ClosePane),
+        "t" => Some(WorkspaceAction::NewTab),
+        "q" => Some(WorkspaceAction::CloseTab),
+        "pagedown" => Some(WorkspaceAction::NextTab),
+        "pageup" => Some(WorkspaceAction::PreviousTab),
         "left" => Some(WorkspaceAction::Focus(Direction::Left)),
         "right" => Some(WorkspaceAction::Focus(Direction::Right)),
         "up" => Some(WorkspaceAction::Focus(Direction::Up)),
@@ -170,13 +217,21 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport: Size<Pixels> = window.viewport_size();
         let width = f32::from(viewport.width);
-        let height = f32::from(viewport.height);
-        let focused = self.panes.focus();
+        // A tab strip is only worth its height when there is more than one tab.
+        let strip = if self.tabs.len() > 1 {
+            TAB_STRIP_HEIGHT
+        } else {
+            0.0
+        };
+        let height = (f32::from(viewport.height) - strip).max(1.0);
+        let focused = self.tabs.active().focus();
+        let active_tab = self.tabs.active_tab();
+        let tab_order = self.tabs.order();
 
         // Each pane learns its own allocation before it lays out its grid, so
         // every child is told the size of its pane rather than of the window.
         let placements: Vec<(PaneId, f32, f32, f32, f32, gpui::Entity<TerminalView>)> = self
-            .panes
+            .tabs
             .layout()
             .into_iter()
             .map(|(pane, rect, view)| {
@@ -201,17 +256,81 @@ impl Render for Workspace {
         // request recorded earlier can now be honoured.
         self.apply_pending_focus(window, cx);
 
-        div()
+        // Built before the outer element so each listener's borrow of `cx`
+        // ends here rather than spanning the rest of the chain.
+        let pane_children: Vec<gpui::Div> = placements
+            .into_iter()
+            .map(|(pane, x, y, pane_width, pane_height, view)| {
+                let is_focused = pane == focused;
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(pane_width))
+                    .h(px(pane_height))
+                    .overflow_hidden()
+                    .bg(rgb(BACKGROUND))
+                    // Clicking a pane focuses it, which is how focus follows
+                    // the mouse without a separate mechanism.
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |workspace, _event, _window, cx| {
+                            workspace.focus_pane(pane, cx);
+                        }),
+                    )
+                    .child(view)
+                    .when(!is_focused, |element| element.opacity(0.92))
+            })
+            .collect();
+
+        let tab_children: Vec<gpui::Div> = tab_order
+            .into_iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let is_active = tab == active_tab;
+                let label: SharedString = format!("{}", index + 1).into();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px(px(14.0))
+                    .h_full()
+                    .text_size(px(12.0))
+                    .bg(rgb(if is_active { TAB_ACTIVE_BG } else { BACKGROUND }))
+                    .text_color(rgb(if is_active {
+                        TAB_ACTIVE_FG
+                    } else {
+                        TAB_INACTIVE_FG
+                    }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |workspace, _event, _window, cx| {
+                            workspace.focus_tab(tab, cx);
+                        }),
+                    )
+                    .child(label)
+            })
+            .collect();
+
+        let panes = div()
             .relative()
-            .size_full()
+            .w_full()
+            .h(px(height))
             .bg(rgb(DIVIDER))
+            .children(pane_children);
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(BACKGROUND))
             .track_focus(&self.focus)
             // Capture phase, not bubble: the workspace must claim its bindings
             // before the focused pane sees them. A pane encodes every key it
             // does not recognise and writes it to its child, so a binding left
-            // to bubble would both split the workspace *and* be typed into the
-            // shell — one event reaching two consumers, which the terminal's
-            // input rules forbid.
+            // to bubble would both act here *and* be typed into the shell —
+            // one event reaching two consumers, which the terminal's input
+            // rules forbid.
             .capture_key_down(cx.listener(|workspace, event: &KeyDownEvent, window, cx| {
                 let Some(action) = workspace_action(&event.keystroke) else {
                     return;
@@ -225,34 +344,27 @@ impl Render for Workspace {
                     WorkspaceAction::SplitDown => {
                         workspace.split(Orientation::Vertical, window, cx);
                     }
-                    WorkspaceAction::ClosePane => workspace.close_focused(window, cx),
+                    WorkspaceAction::ClosePane => workspace.close_focused_pane(cx),
+                    WorkspaceAction::NewTab => workspace.open_tab(window, cx),
+                    WorkspaceAction::CloseTab => workspace.close_active_tab(cx),
+                    WorkspaceAction::NextTab => workspace.switch_tab(true, cx),
+                    WorkspaceAction::PreviousTab => workspace.switch_tab(false, cx),
                     WorkspaceAction::Focus(direction) => {
-                        workspace.focus_direction(direction, window, cx);
+                        workspace.focus_direction(direction, cx);
                     }
                 }
             }))
-            .children(placements.into_iter().map(
-                move |(pane, x, y, pane_width, pane_height, view)| {
-                    let is_focused = pane == focused;
+            .when(strip > 0.0, |element| {
+                element.child(
                     div()
-                        .absolute()
-                        .left(px(x))
-                        .top(px(y))
-                        .w(px(pane_width))
-                        .h(px(pane_height))
-                        .overflow_hidden()
+                        .flex()
+                        .flex_row()
+                        .w_full()
+                        .h(px(TAB_STRIP_HEIGHT))
                         .bg(rgb(BACKGROUND))
-                        // Clicking a pane focuses it, which is how focus follows
-                        // the mouse without a separate mechanism.
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |workspace, _event, window, cx| {
-                                workspace.focus_pane(pane, window, cx);
-                            }),
-                        )
-                        .child(view)
-                        .when(!is_focused, |element| element.opacity(0.92))
-                },
-            ))
+                        .children(tab_children),
+                )
+            })
+            .child(panes)
     }
 }

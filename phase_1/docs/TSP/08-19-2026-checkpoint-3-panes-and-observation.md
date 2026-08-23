@@ -195,10 +195,37 @@ would have "passed" while proving nothing.
 
 **Files:** `sprite-app/src/workspace.rs`
 
-- [ ] A window owns ordered tabs, each owning one pane tree.
-- [ ] Tab and pane identity is stable for the lifetime of the window, because
-  the observation schema exposes it.
-- [ ] Test that closing a tab shuts down every session it owns and no others.
+- [x] A window owns ordered tabs, each owning one pane tree. `Tabs<T>` is
+  generic over the payload, like `PaneRegistry<T>`, so its ownership rules are
+  asserted headlessly. Only the active tab is laid out; the rest keep running.
+- [x] Tab and pane identity is stable for the lifetime of the window, because
+  the observation schema exposes it. **This required moving identity out of the
+  tree.** `PaneTree` minted its own IDs from a counter starting at zero, so
+  every tab would have held a `PaneId(0)` and one ID would have named several
+  panes in one window. A window-scoped `PaneIds` now mints them and the tree
+  accepts them, with tests that no two panes in a window share an ID and that a
+  closed tab's IDs are never handed out again.
+- [x] Test that closing a tab shuts down every session it owns and no others.
+  Asserted headlessly with drop-recording payloads, and confirmed in the running
+  application: closing a tab holding two panes ended exactly those two children
+  and left the other tabs' shells running.
+
+**Bindings.** `Ctrl+Shift+T` opens a tab, `Ctrl+Shift+Q` closes the active one,
+`Ctrl+Shift+PageUp`/`PageDown` move between them, wrapping at each end. All
+workspace bindings require `Ctrl+Shift` so they cannot collide with what a child
+expects to receive, and all are claimed in the capture phase so none reaches a
+child. The tab strip appears only when a second tab exists, so a single-tab
+window loses no height to it.
+
+**How Task 3 was verified.** The same method as Task 2 — each step reports which
+child PID owns the keyboard:
+
+| step | result |
+| --- | --- |
+| new tab, twice | a new session each time, focused |
+| previous tab / next tab | keyboard on that tab's own shell |
+| split inside a tab | new session in that tab, focused |
+| close the active tab | exactly its two sessions ended; the other tabs' shells kept running, and the keyboard moved to a neighbouring tab |
 
 ### Task 4: History extraction for observation
 

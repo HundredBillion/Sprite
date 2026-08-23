@@ -19,8 +19,11 @@ pub struct PaneRegistry<T> {
 
 impl<T> PaneRegistry<T> {
     /// A new tab with one pane owning `content`.
-    pub fn new(content: T) -> Self {
-        let tree = PaneTree::new();
+    ///
+    /// The identity is supplied by the window, so panes in different tabs of
+    /// one window never share an ID.
+    pub fn new(first: PaneId, content: T) -> Self {
+        let tree = PaneTree::new(first);
         let mut contents = HashMap::new();
         contents.insert(tree.focus(), content);
         Self { tree, contents }
@@ -57,8 +60,13 @@ impl<T> PaneRegistry<T> {
 
     /// Splits the focused pane. `content` is built only if the split happens,
     /// so a refused split never starts a session that is then thrown away.
-    pub fn split(&mut self, orientation: Orientation, content: impl FnOnce() -> T) -> PaneId {
-        let pane = self.tree.split(orientation);
+    pub fn split(
+        &mut self,
+        new_pane: PaneId,
+        orientation: Orientation,
+        content: impl FnOnce() -> T,
+    ) -> PaneId {
+        let pane = self.tree.split(orientation, new_pane);
         self.contents.insert(pane, content());
         pane
     }
@@ -80,6 +88,19 @@ impl<T> PaneRegistry<T> {
             self.contents.clear();
         }
         content
+    }
+
+    /// Consumes the tab, handing back everything its panes owned.
+    ///
+    /// Ordered by pane ID so a closing tab shuts its sessions down in a
+    /// predictable order rather than a hash order that varies per run.
+    pub fn into_contents(mut self) -> Vec<T> {
+        let mut panes: Vec<PaneId> = self.contents.keys().copied().collect();
+        panes.sort_unstable();
+        panes
+            .into_iter()
+            .filter_map(|pane| self.contents.remove(&pane))
+            .collect()
     }
 
     /// Every pane with its normalised rectangle and contents, in the order the
@@ -108,6 +129,7 @@ impl<T> PaneRegistry<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane_tree::PaneIds;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -135,8 +157,9 @@ mod tests {
 
     #[test]
     fn a_new_tab_owns_exactly_one_session() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let registry = PaneRegistry::new(spy("first", &log));
+        let registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
 
         assert_eq!(registry.len(), 1);
         assert!(registry.focused().is_some());
@@ -145,10 +168,13 @@ mod tests {
 
     #[test]
     fn splitting_creates_a_second_session_and_focuses_it() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("first", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
 
-        let second = registry.split(Orientation::Horizontal, || spy("second", &log));
+        let second = registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
 
         assert_eq!(registry.len(), 2);
         assert_eq!(registry.focus(), second);
@@ -160,10 +186,13 @@ mod tests {
     /// closing one pane must not disturb another's child.
     #[test]
     fn closing_one_pane_shuts_down_only_its_own_session() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("first", &log));
-        let second = registry.split(Orientation::Horizontal, || spy("second", &log));
-        registry.split(Orientation::Vertical, || spy("third", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
+        let second = registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
+        registry.split(ids.allocate(), Orientation::Vertical, || spy("third", &log));
 
         let closed = registry.close(second).expect("the pane existed");
         assert_eq!(closed.name, "second");
@@ -179,11 +208,14 @@ mod tests {
 
     #[test]
     fn a_closed_pane_is_handed_back_rather_than_silently_dropped() {
+        let mut ids = PaneIds::new();
         // The caller shuts the session down deliberately; relying on a drop
         // would mean a session ending at an unpredictable moment.
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("first", &log));
-        let second = registry.split(Orientation::Horizontal, || spy("second", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
+        let second = registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
 
         let handed_back = registry.close(second).expect("returned");
         assert!(
@@ -196,8 +228,9 @@ mod tests {
 
     #[test]
     fn closing_the_last_pane_ends_the_tab_and_its_session() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("only", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("only", &log));
 
         let closed = registry.close(registry.focus()).expect("returned");
         drop(closed);
@@ -209,9 +242,12 @@ mod tests {
 
     #[test]
     fn closing_an_unknown_pane_touches_nothing() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("first", &log));
-        registry.split(Orientation::Horizontal, || spy("second", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
+        registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
 
         assert!(registry.close(PaneId(999)).is_none());
         assert_eq!(registry.len(), 2);
@@ -222,10 +258,13 @@ mod tests {
     /// that moving or resizing a pane does not recreate its PTY.
     #[test]
     fn moving_focus_around_never_ends_a_session() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("first", &log));
-        registry.split(Orientation::Horizontal, || spy("second", &log));
-        registry.split(Orientation::Vertical, || spy("third", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
+        registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
+        registry.split(ids.allocate(), Orientation::Vertical, || spy("third", &log));
 
         for direction in [
             Direction::Left,
@@ -246,10 +285,13 @@ mod tests {
 
     #[test]
     fn every_pane_appears_in_the_layout_with_its_own_contents() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("first", &log));
-        registry.split(Orientation::Horizontal, || spy("second", &log));
-        registry.split(Orientation::Vertical, || spy("third", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
+        registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
+        registry.split(ids.allocate(), Orientation::Vertical, || spy("third", &log));
 
         let layout = registry.layout();
         assert_eq!(layout.len(), 3);
@@ -268,9 +310,12 @@ mod tests {
 
     #[test]
     fn focusing_a_pane_by_identity_only_works_for_a_live_pane() {
+        let mut ids = PaneIds::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut registry = PaneRegistry::new(spy("first", &log));
-        let second = registry.split(Orientation::Horizontal, || spy("second", &log));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
+        let second = registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
 
         assert!(registry.focus_pane(PaneId(0)));
         assert_eq!(registry.focus(), PaneId(0));
