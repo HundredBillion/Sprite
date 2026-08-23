@@ -27,11 +27,18 @@ pub struct Tabs<T> {
 
 impl<T> Tabs<T> {
     /// A window with one tab holding one pane.
-    pub fn new(content: impl FnOnce() -> T) -> Self {
+    ///
+    /// The payload is built from its own identity, because a Terminal Session
+    /// is told which pane it is: that is what lets a request from inside a pane
+    /// default to its own tab without naming a pane it may not be allowed to
+    /// see.
+    pub fn new(content: impl FnOnce(TabId, PaneId) -> T) -> Self {
         let mut panes = PaneIds::new();
-        let first = PaneRegistry::new(panes.allocate(), content());
+        let tab = TabId(0);
+        let pane = panes.allocate();
+        let first = PaneRegistry::new(pane, content(tab, pane));
         Self {
-            tabs: vec![(TabId(0), first)],
+            tabs: vec![(tab, first)],
             active: 0,
             panes,
             next_tab: 1,
@@ -73,10 +80,11 @@ impl<T> Tabs<T> {
 
     /// Opens a tab at the end of the window's order, holding one new pane, and
     /// makes it active. Existing tabs keep their sessions and their identity.
-    pub fn open(&mut self, content: impl FnOnce() -> T) -> TabId {
+    pub fn open(&mut self, content: impl FnOnce(TabId, PaneId) -> T) -> TabId {
         let tab = TabId(self.next_tab);
         self.next_tab += 1;
-        let registry = PaneRegistry::new(self.panes.allocate(), content());
+        let pane = self.panes.allocate();
+        let registry = PaneRegistry::new(pane, content(tab, pane));
         self.tabs.push((tab, registry));
         self.active = self.tabs.len() - 1;
         tab
@@ -103,9 +111,16 @@ impl<T> Tabs<T> {
     }
 
     /// Splits the active tab's focused pane.
-    pub fn split(&mut self, orientation: Orientation, content: impl FnOnce() -> T) -> PaneId {
+    pub fn split(
+        &mut self,
+        orientation: Orientation,
+        content: impl FnOnce(TabId, PaneId) -> T,
+    ) -> PaneId {
         let pane = self.panes.allocate();
-        self.tabs[self.active].1.split(pane, orientation, content)
+        let tab = self.active_tab();
+        self.tabs[self.active]
+            .1
+            .split(pane, orientation, || content(tab, pane))
     }
 
     /// Closes the active tab's focused pane, handing back what it owned.
@@ -218,7 +233,7 @@ mod tests {
     #[test]
     fn a_window_starts_with_one_tab_holding_one_session() {
         let log: Log = Rc::default();
-        let tabs = Tabs::new(|| spy("first", &log));
+        let tabs = Tabs::new(|_tab, _pane| spy("first", &log));
 
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs.active().len(), 1);
@@ -228,9 +243,9 @@ mod tests {
     #[test]
     fn opening_a_tab_adds_one_session_and_makes_it_active() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("first", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
 
-        let second = tabs.open(|| spy("second", &log));
+        let second = tabs.open(|_tab, _pane| spy("second", &log));
 
         assert_eq!(tabs.len(), 2);
         assert_eq!(tabs.active_tab(), second);
@@ -242,12 +257,12 @@ mod tests {
     #[test]
     fn closing_a_tab_ends_every_session_it_owns_and_no_others() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("keep-1", &log));
-        tabs.split(Orientation::Horizontal, || spy("keep-2", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("keep-1", &log));
+        tabs.split(Orientation::Horizontal, |_tab, _pane| spy("keep-2", &log));
 
-        let doomed = tabs.open(|| spy("doomed-1", &log));
-        tabs.split(Orientation::Horizontal, || spy("doomed-2", &log));
-        tabs.split(Orientation::Vertical, || spy("doomed-3", &log));
+        let doomed = tabs.open(|_tab, _pane| spy("doomed-1", &log));
+        tabs.split(Orientation::Horizontal, |_tab, _pane| spy("doomed-2", &log));
+        tabs.split(Orientation::Vertical, |_tab, _pane| spy("doomed-3", &log));
 
         let handed_back = tabs.close_tab(doomed);
         assert_eq!(handed_back.len(), 3, "every session it owned came back");
@@ -269,9 +284,9 @@ mod tests {
     #[test]
     fn switching_tabs_never_ends_a_session() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("first", &log));
-        let second = tabs.open(|| spy("second", &log));
-        let third = tabs.open(|| spy("third", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
+        let second = tabs.open(|_tab, _pane| spy("second", &log));
+        let third = tabs.open(|_tab, _pane| spy("third", &log));
 
         tabs.focus_tab(second);
         assert_eq!(tabs.active_tab(), second);
@@ -294,10 +309,10 @@ mod tests {
     #[test]
     fn pane_identity_is_unique_across_tabs() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("a", &log));
-        tabs.split(Orientation::Horizontal, || spy("b", &log));
-        tabs.open(|| spy("c", &log));
-        tabs.split(Orientation::Vertical, || spy("d", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("a", &log));
+        tabs.split(Orientation::Horizontal, |_tab, _pane| spy("b", &log));
+        tabs.open(|_tab, _pane| spy("c", &log));
+        tabs.split(Orientation::Vertical, |_tab, _pane| spy("d", &log));
 
         let mut seen: Vec<PaneId> = tabs
             .all_panes()
@@ -313,8 +328,8 @@ mod tests {
     #[test]
     fn identity_is_never_reused_after_a_close() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("first", &log));
-        let doomed = tabs.open(|| spy("doomed", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
+        let doomed = tabs.open(|_tab, _pane| spy("doomed", &log));
         let doomed_panes: Vec<PaneId> = tabs
             .active()
             .layout()
@@ -323,7 +338,7 @@ mod tests {
             .collect();
 
         drop(tabs.close_tab(doomed));
-        let reopened = tabs.open(|| spy("reopened", &log));
+        let reopened = tabs.open(|_tab, _pane| spy("reopened", &log));
         let reopened_panes: Vec<PaneId> = tabs
             .active()
             .layout()
@@ -346,8 +361,8 @@ mod tests {
     #[test]
     fn closing_the_last_pane_of_a_tab_closes_the_tab() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("first", &log));
-        tabs.open(|| spy("only-pane", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
+        tabs.open(|_tab, _pane| spy("only-pane", &log));
 
         let closed = tabs.close_focused_pane().expect("the pane existed");
         drop(closed);
@@ -360,7 +375,7 @@ mod tests {
     #[test]
     fn closing_the_last_tab_leaves_the_window_empty() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("only", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("only", &log));
 
         let closed = tabs.close_focused_pane().expect("the pane existed");
         drop(closed);
@@ -372,9 +387,9 @@ mod tests {
     #[test]
     fn closing_a_tab_before_the_active_one_keeps_the_same_tab_active() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("first", &log));
-        let second = tabs.open(|| spy("second", &log));
-        let third = tabs.open(|| spy("third", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
+        let second = tabs.open(|_tab, _pane| spy("second", &log));
+        let third = tabs.open(|_tab, _pane| spy("third", &log));
         assert_eq!(tabs.active_tab(), third);
 
         drop(tabs.close_tab(second));
@@ -386,9 +401,9 @@ mod tests {
     #[test]
     fn closing_the_active_tab_selects_a_neighbour() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("first", &log));
-        let second = tabs.open(|| spy("second", &log));
-        let third = tabs.open(|| spy("third", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
+        let second = tabs.open(|_tab, _pane| spy("second", &log));
+        let third = tabs.open(|_tab, _pane| spy("third", &log));
 
         tabs.focus_tab(second);
         drop(tabs.close_tab(second));
@@ -401,9 +416,11 @@ mod tests {
     #[test]
     fn only_the_active_tab_is_laid_out() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("background", &log));
-        tabs.open(|| spy("foreground-1", &log));
-        tabs.split(Orientation::Horizontal, || spy("foreground-2", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("background", &log));
+        tabs.open(|_tab, _pane| spy("foreground-1", &log));
+        tabs.split(Orientation::Horizontal, |_tab, _pane| {
+            spy("foreground-2", &log)
+        });
 
         let names: Vec<&str> = tabs
             .layout()
@@ -423,8 +440,8 @@ mod tests {
     #[test]
     fn closing_an_unknown_tab_touches_nothing() {
         let log: Log = Rc::default();
-        let mut tabs = Tabs::new(|| spy("first", &log));
-        tabs.open(|| spy("second", &log));
+        let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
+        tabs.open(|_tab, _pane| spy("second", &log));
 
         assert!(tabs.close_tab(TabId(999)).is_empty());
         assert_eq!(tabs.len(), 2);

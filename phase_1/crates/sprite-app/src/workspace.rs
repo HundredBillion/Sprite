@@ -11,6 +11,7 @@ use gpui::{
 };
 use sprite_term::ShutdownHandle;
 
+use crate::observation::endpoint::{DENIED, Endpoint};
 use crate::pane_tree::{Direction, Orientation, PaneId};
 use crate::tabs::{TabId, Tabs};
 use crate::terminal_view::TerminalView;
@@ -26,6 +27,13 @@ const TAB_ACTIVE_FG: u32 = 0xe6e6ef;
 
 pub struct Workspace {
     tabs: Tabs<gpui::Entity<TerminalView>>,
+    /// This window's observation socket and key.
+    ///
+    /// `None` when the endpoint could not be opened — there is no private
+    /// runtime directory to put it in, for instance. Observation is then simply
+    /// unavailable: panes still run, and no session is told a key, which is
+    /// better than putting the socket somewhere another user could reach.
+    endpoint: Option<Endpoint>,
     focus: FocusHandle,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
@@ -39,12 +47,24 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let tabs = Tabs::new(|| cx.new(|cx| TerminalView::new(window, cx)));
+        // Opened before the first session, so every session this window
+        // launches — including the first — is told the key and its own pane.
+        //
+        // The handler refuses everything until the broker exists. A window that
+        // answered requests before anything decided what a caller may see would
+        // be an observation surface with no policy behind it.
+        let endpoint = Endpoint::open(|_request| DENIED.to_owned()).ok();
+
+        let tabs = Tabs::new(|tab, pane| {
+            let environment = session_environment(endpoint.as_ref(), tab, pane);
+            cx.new(|cx| TerminalView::new(environment, window, cx))
+        });
         // The window focuses the workspace; the workspace hands the keyboard to
         // a pane, rather than leaving which pane receives typing to chance.
         let pending_focus = Some(tabs.active().focus());
         Self {
             tabs,
+            endpoint,
             focus: cx.focus_handle(),
             pending_focus,
         }
@@ -55,6 +75,11 @@ impl Workspace {
     /// Every tab, not only the visible one: a background tab's child is still
     /// running and still owns a PTY.
     pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<ShutdownHandle> {
+        // The window is going: its socket leaves the filesystem and its key
+        // stops being accepted now, not once the last child has been reaped.
+        if let Some(endpoint) = self.endpoint.as_mut() {
+            endpoint.close();
+        }
         self.tabs
             .all_panes()
             .into_iter()
@@ -67,15 +92,21 @@ impl Workspace {
 
     fn split(&mut self, orientation: Orientation, window: &mut Window, cx: &mut Context<Self>) {
         // A split starts a fresh session; panes never share one.
-        let view = cx.new(|cx| TerminalView::new(window, cx));
-        let pane = self.tabs.split(orientation, || view);
+        let endpoint = self.endpoint.as_ref();
+        let pane = self.tabs.split(orientation, |tab, pane| {
+            let environment = session_environment(endpoint, tab, pane);
+            cx.new(|cx| TerminalView::new(environment, window, cx))
+        });
         self.request_focus(pane);
         cx.notify();
     }
 
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| TerminalView::new(window, cx));
-        self.tabs.open(|| view);
+        let endpoint = self.endpoint.as_ref();
+        self.tabs.open(|tab, pane| {
+            let environment = session_environment(endpoint, tab, pane);
+            cx.new(|cx| TerminalView::new(environment, window, cx))
+        });
         self.request_focus(self.tabs.active().focus());
         cx.notify();
     }
@@ -168,6 +199,21 @@ impl Workspace {
             cx.notify();
         }
     }
+}
+
+/// What one pane's session is told about observation.
+///
+/// A window with no endpoint tells its sessions nothing, rather than half of
+/// it: a session holding a socket path with no key, or a key with no socket,
+/// could only produce confusing failures.
+fn session_environment(
+    endpoint: Option<&Endpoint>,
+    tab: TabId,
+    pane: PaneId,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    endpoint
+        .map(|endpoint| endpoint.environment(tab, pane))
+        .unwrap_or_default()
 }
 
 /// The workspace's own bindings, resolved before anything reaches a terminal.

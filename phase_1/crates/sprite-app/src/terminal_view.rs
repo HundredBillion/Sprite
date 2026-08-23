@@ -92,7 +92,14 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `environment` carries this pane's observation variables: the window's
+    /// socket and key, and the pane's own identity. It is the only route by
+    /// which a child learns the key.
+    pub fn new(
+        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The cell is shaped before the session starts, so the child never
         // observes scale-1 metrics for a moment on a HiDPI display.
         // TitlebarOptions only reaches macOS and Windows titlebars, so the
@@ -114,6 +121,7 @@ impl TerminalView {
             cell_height_px: physical(LINE_HEIGHT, scale_factor),
             ..config.size
         };
+        config.environment.extend(environment);
         let initial_size = config.size;
 
         let mut session = match TerminalSession::spawn(config) {

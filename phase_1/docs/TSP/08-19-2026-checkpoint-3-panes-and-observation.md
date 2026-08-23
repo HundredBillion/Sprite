@@ -289,17 +289,63 @@ measurement is kept as an ignored test so it can be re-run rather than trusted.
 every pane in the window. The key is therefore unguessable, per-window, injected
 only into sessions Sprite launches, and destroyed with the window.
 
-- [ ] Create a private Unix-domain socket per window, with restrictive
-  permissions, in a per-user runtime directory.
-- [ ] Generate an unguessable key per window from a cryptographically secure
-  source. Test that two windows never share one.
-- [ ] Inject key, socket path, and the session's own pane identity into every
-  Terminal Session the window launches.
-- [ ] Reject any request with a missing or incorrect key **without returning
-  pane data**, and without revealing whether the key or the pane was wrong.
-- [ ] Closing the window destroys socket and key. Test that a captured key stops
-  working afterwards.
-- [ ] No TCP port is opened. Assert this in the forbidden-state scan.
+- [x] Create a private Unix-domain socket per window, with restrictive
+  permissions, in a per-user runtime directory. `$XDG_RUNTIME_DIR/sprite`, made
+  `0700` **before** the socket exists so there is no moment in which the path is
+  reachable, with the socket itself `0600`. There is deliberately no fall back
+  to a world-writable temporary directory: with no private directory, the window
+  has no observation surface at all, which is better than one another user can
+  reach.
+- [x] Generate an unguessable key per window from a cryptographically secure
+  source. Test that two windows never share one. 32 bytes read from
+  `/dev/urandom`; 64 draws produce no repeat, and two endpoints share neither
+  key nor socket path. The socket filename is separately random and **not**
+  derived from the key, because a path appears in the environment and in process
+  listings.
+- [x] Inject key, socket path, and the session's own pane identity into every
+  Terminal Session the window launches. `Tabs` now hands a pane's identity to
+  whatever builds its payload, so a session is told which pane it is at the
+  moment it is created. Confirmed in the running application: the first child
+  carries `SPRITE_PANE=0 SPRITE_TAB=0`, and a pane created by a split carries
+  `SPRITE_PANE=1`.
+- [x] Reject any request with a missing or incorrect key **without returning
+  pane data**, and without revealing whether the key or the pane was wrong. One
+  fixed refusal for all three cases. The key is compared in constant time over
+  all 32 bytes — a comparison that stopped at the first wrong byte would leak
+  how much of a guess was right, which is enough to recover a key a byte at a
+  time — and a malformed candidate is compared against zeroes rather than
+  returning early, so a wrong length costs the same as a wrong key. A spy proves
+  the handler is never reached at all for an unauthorised request.
+- [x] Closing the window destroys socket and key. Test that a captured key stops
+  working afterwards. Verified live: closing the window removed the socket and
+  the runtime directory. A request already in flight when the window closes is
+  refused too, so the key stops being accepted at the moment of closing rather
+  than whenever the last serving thread finishes.
+- [x] No TCP port is opened. Assert this in the forbidden-state scan. Asserted
+  by **measurement** rather than by inspection: a test opens an endpoint, reads
+  the process's own descriptor table for socket inodes, and intersects them with
+  `/proc/net/tcp` and `/proc/net/tcp6`. The intersection must be empty, and the
+  test first asserts the endpoint is open and that its Unix socket *is* visible,
+  so it cannot pass by measuring nothing. Confirmed against the running
+  application as well.
+
+**A defect found by a test that was meant to be a formality.** Connections were
+served on the accepting thread, so one client that connected and said nothing
+held the whole window's endpoint for the client timeout — five seconds at the
+time. That is the same failure Task 6 forbids for a slow pane, arriving early.
+Each connection now gets its own thread, capped at 16 in flight so that removing
+the stall does not simply move it, with connections past the cap dropped
+unread. The timeout is down to two seconds, which is generous for a local client
+that connects and writes immediately.
+
+**No `unsafe` was added.** The key is wiped on drop with a plain fill plus
+`black_box`, not `write_volatile`: the latter would have been the only `unsafe`
+outside the one audited descriptor borrow in `sprite-term`, and that is a poor
+trade for wiping 32 bytes.
+
+**The handler refuses everything until Task 6.** A window that answered requests
+before anything decided what a caller may see would be an observation surface
+with no policy behind it.
 
 ### Task 6: The broker
 
