@@ -72,16 +72,23 @@ the PRD), or accessibility (see below).
 
 ## Carried forward from Checkpoint 2
 
-These are open and should close before or during this checkpoint:
+Status at the end of Checkpoint 3:
 
-1. Human review of Checkpoints 1 and 2.
-2. IME, which needs GPUI's `InputHandler`.
-3. Paste protection for unbracketed pastes containing newlines.
-4. Shell-integration auto-loading, whose per-shell mechanisms are risky.
-5. Word-boundary tests for selection against wide characters and combining
-   marks.
-6. Drag-to-select is unverified by machine; no mouse-injection tool was
-   available.
+1. **Still open.** Human review of Checkpoints 1 and 2.
+2. **Closed.** IME is implemented through GPUI's input handler. It remains
+   unverified on this machine, which has no composing input engine installed;
+   the code path is exercised by the double-letter regression the key path
+   guards against.
+3. **Closed.** An unbracketed paste containing a newline is withheld and must be
+   confirmed, since it would otherwise execute on arrival.
+4. **Still open, deliberately.** Shell-integration auto-loading is not
+   attempted: the per-shell mechanisms risk breaking a person's own
+   configuration, and zsh and fish are not installed here to test against.
+5. **Closed.** Word selection has tests for wide characters and for combining
+   marks staying with their base.
+6. **Still open.** Drag-to-select is verified by hand but not by machine: this
+   machine has a keyboard-injection tool but no mouse-injection tool, so the
+   gesture cannot be driven in a test.
 
 ## Accessibility, again
 
@@ -125,9 +132,12 @@ reintroduce exactly the cost Checkpoint 2 removed.
 - [x] Pane identity is stable across splits, which is what ties a pane to its
   session; a rearrangement that renumbered panes would silently reattach
   terminals to the wrong ones.
-- [ ] Sessions are not attached yet, so "moving a pane does not recreate its
+- [x] Sessions are not attached yet, so "moving a pane does not recreate its
   PTY" is only proved at the identity level. Task 2 attaches sessions and can
-  assert it end to end.
+  assert it end to end. **Closed by Task 2**: closing a pane rearranges the
+  tree, and the surviving panes kept the same child PIDs across that
+  rearrangement — 81573 and 82867 before and after — so the layout changing did
+  not recreate a PTY.
 
 ### Task 2: Many sessions in one window
 
@@ -681,9 +691,14 @@ that never answers, a per-pane deadline would take four times as long.
    needs the pane tree and tab order. But it also needs history extraction from
    `sprite-term`, and the PRD calls the snapshot model "tested" — meaning it
    should be testable without a GUI. Splitting it may be right.
-2. **How is the socket authenticated beyond the key?** Unix peer credentials
-   could confirm the same user, which the key alone does not. Worth deciding
-   deliberately rather than defaulting to key-only.
+2. **RESOLVED (2026-08-23): the window is the boundary, not the pane.** Any
+   pane may read any other pane in its window, deliberately, so that tools can
+   coordinate across panes. Peer credentials are not needed: they would make
+   `--from` honest without making it meaningful, since the same key already
+   authorises `--window`. See
+   [ADR 0013](../adr/0013-scope-observation-to-the-window-not-the-pane.md),
+   which also records what follows — a program in one pane can read a secret
+   visible in another, so the window is the unit of trust.
 3. **What is a "pane timeout" when a pane is merely busy?** The 500 ms deadline
    is per request, but a pane under sustained output may always miss it. That
    would make a loud pane permanently unobservable, which is a bad property.

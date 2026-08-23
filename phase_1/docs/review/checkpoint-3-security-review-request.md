@@ -49,22 +49,30 @@ does not exist and a pane that may not be seen produce the same `denied`. The
 default scope is the requester's own tab excluding itself; `--include-self`,
 `--pane`, and `--window` adjust it.
 
-**The known limit, stated plainly.** The key is a boundary between this window
-and everything else. It is **not** a boundary between the panes inside it: every
-session gets the same key, `--from` is self-reported, and any pane can ask for
-`--window` anyway. A reviewer should decide whether that is acceptable for Phase
-1 or whether peer credentials (`SO_PEERCRED` → pid → pane) should make identity
-real. The TSP's open question 2 asks the same thing.
+**The model is decided, and is not what this review is for.** Any pane may read
+any other pane in its window: the key separates windows, not panes. That is a
+deliberate product decision recorded in
+[ADR 0013](../adr/0013-scope-observation-to-the-window-not-the-pane.md), taken so
+that tools can coordinate across panes. It follows that a program in one pane
+can read a secret visible in another, and that the window is the unit of trust.
+Peer credentials are not wanted: they would make `--from` honest without making
+it meaningful, since the same key already authorises `--window`.
+
+Please review the implementation of that model, not the model. Specifically:
 
 **Push hardest on.**
 
-- Is "any pane in a window can read any other pane in that window" the intended
-  security model? It means a program run in one pane can read a password typed
-  in another, if that password is on screen.
+- Does the window boundary actually hold? Scope resolves only against one
+  window's panes, which is meant to make "never across windows" structural
+  rather than a check. Is there any path — `--pane` with an id from another
+  window, a stale registry entry, a shared runtime directory — by which one
+  window's request reaches another window's pane?
 - The refusal is identical for wrong key, unknown pane, and forbidden pane — but
   a *malformed* request is distinguishable. Does that distinction leak anything?
 - `WindowPanes` is populated by views registering themselves and removed on
   drop. Is there a window in which a closed pane is still listed?
+- Given the decision, is there anywhere the code still implies a per-pane
+  boundary it does not enforce? Half a boundary is worse than none.
 
 ## 3. The deadline
 

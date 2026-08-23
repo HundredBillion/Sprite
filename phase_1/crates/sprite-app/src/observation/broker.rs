@@ -9,11 +9,16 @@
 //! under a single deadline rather than one per pane.
 //!
 //! **What the key does and does not separate.** The key is a boundary between
-//! this window and everything else. It is *not* a boundary between the panes
-//! inside it: every session the window launches is told the same key, so a
-//! caller can already ask for `--window`. The requester's identity is therefore
-//! a convenience that makes the common request short, not a privilege — and
-//! this module says so rather than implying a separation it does not enforce.
+//! this window and everything else. It is deliberately *not* a boundary between
+//! the panes inside it — any pane may read any other pane in its window, so that
+//! tools can coordinate across panes. Every session is told the same key, so the
+//! requester's identity is a convenience that makes the common request short,
+//! never a privilege.
+//!
+//! That is a decision, not an omission: see ADR 0013. It follows that a program
+//! in one pane can read a secret visible in another, and that the window is the
+//! unit of trust. Do not add a partial per-pane check here — half a boundary
+//! suggests a protection that is not there, which is worse than none.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
