@@ -22,6 +22,7 @@ libghostty-vt = { version = "=0.2.1", default-features = false, features = [
 ] }
 serde_json = { version = "=1.0.151" }
 toml = { version = "=0.8.23", default-features = false, features = ["parse"] }
+png = { version = "=0.18.1", default-features = false }
 nix = { version = "=0.28.0", default-features = false, features = ["poll", "process", "signal"] }
 portable-pty = { version = "=0.9.0", default-features = false }
 sprite-term = { path = "crates/sprite-term" }

@@ -5044,8 +5044,10 @@ name = "sprite-term"
 version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
+ "flate2",
  "libghostty-vt",
  "nix 0.28.0",
+ "png 0.18.1",
  "portable-pty",
 ]
 

@@ -150,3 +150,58 @@ impl EventPump {
         None
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kitty graphics
+// ---------------------------------------------------------------------------
+
+/// Base64 as the Kitty protocol wants it, without a dependency for it.
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// One Kitty escape sequence, written as printf escapes.
+///
+/// `q=2` silences the protocol's reply. The terminal answers a transmission by
+/// writing back to the child, which is correct Kitty behaviour — but these
+/// tests drive a shell, and a shell reading a protocol reply on its standard
+/// input tries to run it as a command and mangles whatever came next.
+pub fn kitty(control: &str, payload: &str) -> String {
+    format!("\\033_G{control},q=2;{payload}\\033\\\\")
+}
+
+/// A PNG of one flat colour, built by the same crate the decoder reads with.
+pub fn png_bytes(width: u32, height: u32, value: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("write the header");
+        let pixels = vec![value; (width * height * 4) as usize];
+        writer.write_image_data(&pixels).expect("write the pixels");
+    }
+    out
+}

@@ -911,15 +911,24 @@ fn apply_graphics_policy(
         .set_apc_max_bytes_kitty(Some(policy.apc_max_bytes))
         .map_err(vt("kitty_apc_max_bytes"))?;
 
-    // No PNG decoder yet, so a PNG transmission is refused rather than decoded;
-    // raw formats are unaffected. Sprite's own decoder arrives in Task 2 and is
-    // installed here, on this thread, because the binding requires the decoder
-    // to belong to the thread that owns the terminal.
+    // Installed here, on this thread, because the binding requires the decoder
+    // to belong to the thread that owns the terminal — it is stored in thread
+    // local storage, so a decoder set anywhere else would simply not be found.
+    // One worker thread per pane therefore means one decoder per pane, each
+    // bounded by that pane's own storage limit.
     //
-    // Clearing it is not a no-op: the setting is per thread and a worker thread
-    // may be reused, so a pane with graphics disabled must actively ensure no
-    // decoder is installed rather than assume none is.
-    graphics::set_png_decoder(None).map_err(vt("kitty_png_decoder"))?;
+    // Clearing it for a disabled pane is not a no-op: the setting belongs to
+    // the thread, so a pane must actively ensure no decoder is installed rather
+    // than assume none is. A pane that stores no images should not run a parser
+    // over bytes an arbitrary child printed.
+    let decoder: Option<Box<dyn graphics::DecodePng>> = if policy.enabled {
+        Some(Box::new(crate::png_decoder::PngDecoder::new(
+            policy.storage_bytes,
+        )))
+    } else {
+        None
+    };
+    graphics::set_png_decoder(decoder).map_err(vt("kitty_png_decoder"))?;
 
     Ok(())
 }

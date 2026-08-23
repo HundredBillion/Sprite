@@ -6,6 +6,7 @@
 //! allocator, iterator, or PTY handle appears in this crate's public interface.
 
 mod graphics;
+mod png_decoder;
 #[cfg(unix)]
 mod pty_unix;
 mod shell;

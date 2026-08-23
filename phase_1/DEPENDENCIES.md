@@ -18,7 +18,7 @@ much maintained complexity the dependency removes from Sprite.
 
 ## Current direct dependencies
 
-Seven direct external crates, all pinned to exact versions in
+Eight direct external crates, all pinned to exact versions in
 `phase_1/Cargo.toml` and locked in `phase_1/Cargo.lock`.
 
 ### `toml` `=0.8.23`
@@ -49,6 +49,36 @@ covered by this entry.
 **License and source.** MIT OR Apache-2.0, crates.io.
 
 **Pin and updates.** Exact pin, updated deliberately.
+
+### `png` `=0.18.1`
+
+**Capability.** Decoding PNG images transmitted through the Kitty graphics
+protocol.
+
+**Not provided.** `libghostty-vt` accepts a decoder through `set_png_decoder`
+but does not supply a usable one — see its entry above for the two reasons.
+Sprite therefore implements `DecodePng` itself, and needs a PNG decoder to do
+it. Writing one is out of the question: PNG is a container format with
+filtering, interlacing, palettes, and multiple bit depths, decoded from bytes an
+arbitrary program printed.
+
+**Why not std.** The standard library has no image decoding.
+
+**Adds nothing to the supply chain.** Already in `Cargo.lock`; declaring it
+directly changed the lock by exactly one line, an edge from `sprite-term`.
+
+**Features.** Defaults off. No `benchmarks`, no unstable APIs.
+
+**How it is bounded.** Sprite's decoder checks the declared output size against
+the pane's storage limit **before** allocating, because the size a PNG declares
+is attacker-controlled and a decoder that allocates first can be asked for a
+gigabyte. Every failure returns `None`; nothing panics, because this runs on the
+thread that owns the terminal and a panic there would end the pane.
+
+**License and source.** MIT OR Apache-2.0, crates.io.
+
+**Pin and updates.** Exact pin. Updated deliberately, with the malformed-input
+tests re-run.
 
 ### `serde_json` `=1.0.151`
 
