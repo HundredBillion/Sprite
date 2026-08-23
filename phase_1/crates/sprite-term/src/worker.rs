@@ -607,6 +607,26 @@ pub(crate) fn run(
                     }
                 }
                 TerminalCommand::Capture => dirty = true,
+                TerminalCommand::CaptureHistory(lines) => {
+                    // Answered once, from this thread, against the same
+                    // terminal the snapshots come from — so the rows returned
+                    // belong to one generation rather than a moving target.
+                    match snapshot::capture_history(generation, size, lines.get(), &terminal) {
+                        Ok(history) => {
+                            if events
+                                .send_blocking(TerminalEvent::History(Arc::new(history)))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
             },
             Message::ChildExited(status) => {
                 // Recorded, not published: Exited is only sent once descendant

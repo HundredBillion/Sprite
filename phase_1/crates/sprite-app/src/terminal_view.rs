@@ -179,6 +179,10 @@ impl TerminalView {
                     // observation and for a future bell policy; neither has a
                     // presentation yet, so neither is acted on here.
                     Ok(TerminalEvent::WorkingDirectoryChanged(_)) | Ok(TerminalEvent::Bell) => {}
+                    // Answered to whoever asked, which is the observation
+                    // broker rather than the view. A pane never asks for its
+                    // own history, so one arriving here is nothing to draw.
+                    Ok(TerminalEvent::History(_)) => {}
                     Ok(TerminalEvent::ClipboardWrite(text)) => {
                         // Terminal Core already applied the OSC 52 policy, so
                         // reaching here means the write was allowed.

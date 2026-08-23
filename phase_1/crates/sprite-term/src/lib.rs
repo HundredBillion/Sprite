@@ -343,6 +343,45 @@ pub enum TerminalCommand {
     /// thousands of calls a second for information almost never used.
     ResolveHyperlink(CellPosition),
     Capture,
+    /// Ask for the active screen plus up to N lines of history, answered once
+    /// with [`TerminalEvent::History`].
+    ///
+    /// Deliberately not part of the render bundle. Snapshots carry no history
+    /// because rebuilding a full scrollback on every capture would cost
+    /// thousands of allocations a second for rows the renderer never draws;
+    /// observation has the opposite need, so it asks separately and pays only
+    /// when it asks.
+    CaptureHistory(HistoryLines),
+}
+
+/// How many lines of history an observation request wants.
+///
+/// Constructed through [`HistoryLines::new`], which **clamps** rather than
+/// refuses: a caller asking for more than the maximum gets the maximum, because
+/// an observer guessing a large number should receive what exists rather than
+/// an error it must learn to handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryLines(usize);
+
+impl HistoryLines {
+    /// The most history any single request can ask for, as the PRD fixes it.
+    pub const MAX: usize = 5_000;
+    /// What a request that does not say gets.
+    pub const DEFAULT: usize = 500;
+
+    pub fn new(lines: usize) -> Self {
+        Self(lines.min(Self::MAX))
+    }
+
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for HistoryLines {
+    fn default() -> Self {
+        Self(Self::DEFAULT)
+    }
 }
 
 /// Where a Pane's viewport sits over its scrollable area.
@@ -512,6 +551,37 @@ pub struct PaneSnapshot {
     pub working_directory: Option<String>,
 }
 
+/// The active screen plus the history asked for, answered once.
+///
+/// Separate from [`PaneSnapshot`] on purpose: this is built on demand and may
+/// be thousands of rows, while a pane snapshot is built many times a second and
+/// is only ever as tall as the screen.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistorySnapshot {
+    pub generation: u64,
+    pub size: TerminalSize,
+    /// Which screen this came from. When an alternate-screen application is
+    /// running this is its screen and its history — never the normal screen
+    /// hidden behind it.
+    pub screen: ScreenKind,
+    /// Oldest first: `history_rows` rows of scrollback, then the active screen.
+    ///
+    /// Rows carry what the child wrote, not the shape of the grid. Unlike
+    /// [`PaneSnapshot::rows`], which reports one entry per cell and so pads a
+    /// short row out to the screen width, these are not padded: an observer
+    /// reading thousands of rows should not receive thousands of columns of
+    /// invented spaces. Trailing whitespace a child actually wrote is kept, and
+    /// a soft-wrapped row stays its own row with `wrapped` set.
+    pub rows: Vec<PaneRow>,
+    /// How many leading entries of `rows` came from scrollback.
+    pub history_rows: usize,
+    /// What was asked for after clamping, so a caller can tell "you asked for
+    /// more than exists" from "you asked for more than is allowed".
+    pub requested: usize,
+    /// Scrollback rows that existed when this was captured.
+    pub available: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotBundle {
     pub generation: u64,
@@ -542,6 +612,8 @@ pub enum TerminalEvent {
     Bell,
     /// The child set a new title.
     TitleChanged(Option<String>),
+    /// The answer to one [`TerminalCommand::CaptureHistory`].
+    History(Arc<HistorySnapshot>),
     /// The child reported a new working directory.
     WorkingDirectoryChanged(Option<String>),
     /// The answer to `ResolveHyperlink`.

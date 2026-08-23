@@ -11,13 +11,114 @@ use std::sync::Arc;
 use libghostty_vt::Terminal;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
+use libghostty_vt::selection::{FormatOptions, Selection};
 use libghostty_vt::style::{RgbColor, StyleColor, Underline};
+use libghostty_vt::terminal::{Point, PointCoordinate};
 
 use crate::{
-    CellStyle, CellWidth, CursorSnapshot, PaneRow, PaneSnapshot, PromptKind, RenderCell, RenderRow,
-    RenderSnapshot, Rgb, ScreenKind, SessionError, SnapshotBundle, SnapshotColor, TerminalSize,
-    UnderlineStyle, Viewport,
+    CellStyle, CellWidth, CursorSnapshot, HistorySnapshot, PaneRow, PaneSnapshot, PromptKind,
+    RenderCell, RenderRow, RenderSnapshot, Rgb, ScreenKind, SessionError, SnapshotBundle,
+    SnapshotColor, TerminalSize, UnderlineStyle, Viewport,
 };
+
+/// The active screen plus up to `lines` rows of history, read once.
+///
+/// Deliberately does not touch the render path. The render bundle stays as tall
+/// as the screen, which is the decision Checkpoint 2 made after measuring; this
+/// walks the scrollback directly and pays its cost only when asked.
+///
+/// Every row is read in **screen** coordinates of the *active* screen, so an
+/// alternate-screen application yields its own screen and its own history. The
+/// normal screen hidden behind it is not reachable from here at all.
+pub(crate) fn capture_history(
+    generation: u64,
+    size: TerminalSize,
+    lines: usize,
+    terminal: &Terminal<'_, '_>,
+) -> Result<HistorySnapshot, SessionError> {
+    let screen = match terminal.active_screen().map_err(vt("active_screen"))? {
+        Screen::Primary => ScreenKind::Primary,
+        Screen::Alternate => ScreenKind::Alternate,
+    };
+    let total_rows = terminal.total_rows().map_err(vt("total_rows"))?;
+    let available = terminal.scrollback_rows().map_err(vt("scrollback_rows"))?;
+
+    // Asking for more history than exists is not an error: the answer is
+    // whatever there is.
+    let history_rows = lines.min(available);
+    let first = available.saturating_sub(history_rows);
+
+    let mut rows = Vec::with_capacity(total_rows.saturating_sub(first));
+    for y in first..total_rows {
+        rows.push(history_row(terminal, size, y)?);
+    }
+
+    Ok(HistorySnapshot {
+        generation,
+        size,
+        screen,
+        rows,
+        history_rows,
+        requested: lines,
+        available,
+    })
+}
+
+/// One row of the active screen in screen coordinates, history included.
+fn history_row(
+    terminal: &Terminal<'_, '_>,
+    size: TerminalSize,
+    y: usize,
+) -> Result<PaneRow, SessionError> {
+    let y = u32::try_from(y).unwrap_or(u32::MAX);
+    let start = terminal
+        .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+        .map_err(vt("history_grid_ref"))?;
+    let end = terminal
+        .grid_ref(Point::Screen(PointCoordinate {
+            x: size.cols.saturating_sub(1),
+            y,
+        }))
+        .map_err(vt("history_grid_ref_end"))?;
+
+    let raw_row = start.row().map_err(vt("history_row"))?;
+    let wrapped = raw_row.is_wrapped().map_err(vt("history_row_is_wrapped"))?;
+    let prompt = match raw_row
+        .semantic_prompt()
+        .map_err(vt("history_row_semantic_prompt"))?
+    {
+        libghostty_vt::screen::RowSemanticPrompt::None => PromptKind::None,
+        libghostty_vt::screen::RowSemanticPrompt::Prompt => PromptKind::Prompt,
+        libghostty_vt::screen::RowSemanticPrompt::Continuation => PromptKind::Continuation,
+    };
+
+    // Neither unwrapped nor trimmed: a soft-wrapped row stays its own row, and
+    // trailing spaces a program actually wrote are part of the row. Unwrapping
+    // here would destroy exactly the boundary `wrapped` is reporting.
+    let selection = Selection::new(start, end, false);
+    let options = FormatOptions::new()
+        .with_selection(&selection)
+        .with_unwrap(false)
+        .with_trim(false);
+    let formatted = terminal
+        .format_selection_alloc(None, options)
+        .map_err(vt("history_format"))?;
+
+    let text = match formatted {
+        Some(bytes) => String::from_utf8(bytes.to_vec())
+            .map_err(|error| SessionError::new("history_utf8", error))?,
+        None => String::new(),
+    };
+    // One row was asked for, so a trailing row separator carries no
+    // information and would otherwise appear inside the row's own text.
+    let text = text.strip_suffix('\n').unwrap_or(&text).to_owned();
+
+    Ok(PaneRow {
+        text,
+        wrapped,
+        prompt,
+    })
+}
 
 /// Builds one coherent bundle from the terminal's current state.
 ///

@@ -233,14 +233,53 @@ child PID owns the keyboard:
 
 **Threat model:** none directly; this is the data source the broker will expose.
 
-- [ ] Add a request for the active screen plus up to N history lines, answered
+- [x] Add a request for the active screen plus up to N history lines, answered
   once. It must **not** widen the render bundle — see the note above.
-- [ ] Clamp N to 0..=5000, defaulting to 500. Test the boundary and that a
-  request beyond it is clamped rather than refused.
-- [ ] Return only the **active** screen's history. When an alternate-screen
+  `TerminalCommand::CaptureHistory` is answered once with
+  `TerminalEvent::History`. It does not touch the render path at all: the rows
+  are read straight from the scrollback in screen coordinates, so the render
+  bundle keeps exactly the shape Checkpoint 2 measured. Every committed
+  benchmark budget still passes.
+- [x] Clamp N to 0..=5000, defaulting to 500. Test the boundary and that a
+  request beyond it is clamped rather than refused. `HistoryLines::new` clamps;
+  `usize::MAX` yields 5,000, 4,999 stays 4,999, and 0 is a real request meaning
+  "the screen only". Asking for more history than exists returns what exists
+  rather than an error.
+- [x] Return only the **active** screen's history. When an alternate-screen
   application is running, return that screen and its history, never the hidden
-  normal-screen buffer. Test with a real full-screen program.
-- [ ] Preserve Unicode rows, whitespace, and line-wrap markers exactly.
+  normal-screen buffer. Tested with `less`, a real full-screen program: the
+  answer names `Alternate`, reports **zero** rows of available scrollback, and
+  does not contain text the shell printed before `less` started.
+- [x] Preserve Unicode rows, whitespace, and line-wrap markers exactly.
+  Formatting is done with unwrap and trim both off, so a soft-wrapped row stays
+  its own row with `wrapped` set, and trailing spaces a child actually wrote
+  survive. A combining mark is not normalised away.
+
+**A difference between the two projections, made deliberate.** History rows are
+not padded out to the screen width, while `PaneSnapshot` rows report one entry
+per cell and so are. An observer reading thousands of rows should not receive
+thousands of columns of invented spaces, and whitespace a child *wrote* is
+preserved either way — but the difference is real, so it is documented on the
+type and pinned by a test rather than left to be discovered later by whoever
+writes the schema.
+
+**Continuity.** History and the active screen are one continuous run of rows: a
+test prints 200 numbered lines and asserts no number is skipped or repeated
+across the seam, with the last history row `line-177` immediately followed by
+the first screen row `line-178`.
+
+**Cost**, measured on this machine with a 6,000-row scrollback, request to
+answer including the channel round trip:
+
+| requested | rows returned | time |
+| --- | --- | --- |
+| 0 (screen only) | 24 | 0.32 ms |
+| 500 (the default) | 524 | 2.7 ms |
+| 5,000 (the maximum) | 5,024 | 20.4 ms |
+
+Linear in rows returned, about 4 µs a row, with no page-traversal blowup at the
+maximum. Task 6's deadline handling can be sized against these numbers. The
+measurement is kept as an ignored test so it can be re-run rather than trusted.
 
 ### Task 5: The window socket and key
 
