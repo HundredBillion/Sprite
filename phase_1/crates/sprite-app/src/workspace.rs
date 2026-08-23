@@ -11,7 +11,11 @@ use gpui::{
 };
 use sprite_term::ShutdownHandle;
 
+use std::sync::Arc;
+
+use crate::observation::broker::{self, Refusal};
 use crate::observation::endpoint::{DENIED, Endpoint};
+use crate::observation::panes::{PaneLink, WindowPanes};
 use crate::pane_tree::{Direction, Orientation, PaneId};
 use crate::tabs::{TabId, Tabs};
 use crate::terminal_view::TerminalView;
@@ -34,6 +38,9 @@ pub struct Workspace {
     /// unavailable: panes still run, and no session is told a key, which is
     /// better than putting the socket somewhere another user could reach.
     endpoint: Option<Endpoint>,
+    /// The panes this window's endpoint may reach. Shared with the endpoint's
+    /// serving threads, and the only route from a request to a pane.
+    panes: Arc<WindowPanes>,
     focus: FocusHandle,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
@@ -49,15 +56,17 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Opened before the first session, so every session this window
         // launches — including the first — is told the key and its own pane.
-        //
-        // The handler refuses everything until the broker exists. A window that
-        // answered requests before anything decided what a caller may see would
-        // be an observation surface with no policy behind it.
-        let endpoint = Endpoint::open(|_request| DENIED.to_owned()).ok();
+        let panes = WindowPanes::new();
+        let endpoint = Endpoint::open({
+            let panes = Arc::clone(&panes);
+            move |request| respond(panes.as_ref(), &request.body)
+        })
+        .ok();
 
         let tabs = Tabs::new(|tab, pane| {
             let environment = session_environment(endpoint.as_ref(), tab, pane);
-            cx.new(|cx| TerminalView::new(environment, window, cx))
+            let link = pane_link(&panes, endpoint.as_ref(), tab, pane);
+            cx.new(|cx| TerminalView::new(environment, link, window, cx))
         });
         // The window focuses the workspace; the workspace hands the keyboard to
         // a pane, rather than leaving which pane receives typing to chance.
@@ -65,6 +74,7 @@ impl Workspace {
         Self {
             tabs,
             endpoint,
+            panes,
             focus: cx.focus_handle(),
             pending_focus,
         }
@@ -93,9 +103,11 @@ impl Workspace {
     fn split(&mut self, orientation: Orientation, window: &mut Window, cx: &mut Context<Self>) {
         // A split starts a fresh session; panes never share one.
         let endpoint = self.endpoint.as_ref();
+        let panes = &self.panes;
         let pane = self.tabs.split(orientation, |tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(environment, window, cx))
+            let link = pane_link(panes, endpoint, tab, pane);
+            cx.new(|cx| TerminalView::new(environment, link, window, cx))
         });
         self.request_focus(pane);
         cx.notify();
@@ -103,9 +115,11 @@ impl Workspace {
 
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let endpoint = self.endpoint.as_ref();
+        let panes = &self.panes;
         self.tabs.open(|tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(environment, window, cx))
+            let link = pane_link(panes, endpoint, tab, pane);
+            cx.new(|cx| TerminalView::new(environment, link, window, cx))
         });
         self.request_focus(self.tabs.active().focus());
         cx.notify();
@@ -199,6 +213,73 @@ impl Workspace {
             cx.notify();
         }
     }
+}
+
+/// Answers one authenticated request.
+///
+/// Runs on an endpoint thread, never the GPUI thread: a request must not be
+/// able to hold up drawing, and the deadline inside `collect` is what keeps it
+/// from holding up the endpoint either.
+fn respond(panes: &WindowPanes, body: &str) -> String {
+    let query = match broker::parse(body) {
+        Ok(query) => query,
+        // A malformed request describes the caller's own words and reveals
+        // nothing about the window's contents, so it may say so.
+        Err(Refusal::Malformed(why)) => return format!("malformed: {why}"),
+        Err(Refusal::Denied) => return DENIED.to_owned(),
+    };
+    match broker::collect(&query, panes, broker::DEADLINE) {
+        Ok(report) => render(&report),
+        Err(Refusal::Malformed(why)) => format!("malformed: {why}"),
+        Err(Refusal::Denied) => DENIED.to_owned(),
+    }
+}
+
+/// A provisional rendering, replaced by the versioned JSON schema in Task 7.
+///
+/// One line, because the transport is line-delimited and the schema will bring
+/// its own framing. It carries counts rather than content on purpose: shipping
+/// pane text through a format nothing has specified yet would create a second,
+/// accidental schema for clients to depend on.
+fn render(report: &broker::Report) -> String {
+    let mut out = format!(
+        "complete={} panes={} failures={}",
+        report.complete,
+        report.panes.len(),
+        report.failures.len()
+    );
+    for pane in &report.panes {
+        out.push_str(&format!(
+            " pane:{}/{}:rows={}",
+            pane.address.tab.0,
+            pane.address.pane.0,
+            pane.snapshot.rows.len()
+        ));
+    }
+    for failure in &report.failures {
+        out.push_str(&format!(
+            " failed:{}/{}",
+            failure.address.tab.0, failure.address.pane.0
+        ));
+    }
+    out
+}
+
+/// How a pane will be reached by observation, when the window has an endpoint.
+///
+/// A window with no endpoint links no panes: with nothing able to ask, a
+/// registry of panes would be a list nobody can use.
+fn pane_link(
+    panes: &Arc<WindowPanes>,
+    endpoint: Option<&Endpoint>,
+    tab: TabId,
+    pane: PaneId,
+) -> Option<PaneLink> {
+    endpoint.map(|_| PaneLink {
+        pane,
+        tab,
+        panes: Arc::clone(panes),
+    })
 }
 
 /// What one pane's session is told about observation.

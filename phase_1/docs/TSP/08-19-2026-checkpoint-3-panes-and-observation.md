@@ -354,16 +354,72 @@ with no policy behind it.
 **Threat model:** a client is authorised but untrusted. It must not be able to
 mutate anything, escape its window, or use a slow pane to stall the window.
 
-- [ ] Requests are pull-based and read-only. There are no subscriptions, no
+- [x] Requests are pull-based and read-only. There are no subscriptions, no
   continuous output, and no keystroke access; assert the request enum admits
-  nothing that mutates.
-- [ ] Default scope is the requesting pane's tab, excluding the requester;
+  nothing that mutates. The grammar is one verb — `panes snapshot` — and
+  anything unrecognised is refused rather than ignored, so a lenient parser
+  cannot let a verb through. A test tries `send-keys`, `input`, `paste`,
+  `subscribe`, `watch`, `stream`, `--write`, `--exec` and `kill`, and asserts
+  none of them parse. The narrowness is structural as well: `PaneSource` can
+  list this window's panes and ask one for a snapshot, and has no method that
+  writes or hands back a session — a broker cannot do what its source cannot
+  express.
+- [x] Default scope is the requesting pane's tab, excluding the requester;
   `--include-self`, `--pane`, and `--window` adjust it. **Never** across windows.
-- [ ] Capture panes concurrently under **one** 500 ms deadline for the whole
+  Never-across-windows is structural rather than a check: every address comes
+  from `source.panes()`, which lists one window, so a pane elsewhere cannot
+  appear whatever the caller asks. A pane in another window and a pane that
+  never existed produce the same `denied`.
+- [x] Capture panes concurrently under **one** 500 ms deadline for the whole
   request. A slow pane must not extend anyone else's. Test with a deliberately
-  stalled pane.
-- [ ] A pane that closes or fails mid-collection does not discard healthy
-  snapshots: `complete` becomes false and the failure is named.
+  stalled pane. Every pane is asked before any answer is waited for; per-pane
+  deadlines would let a request grow without limit as panes are added, so a
+  caller could stall the endpoint just by opening more of them.
+- [x] A pane that closes or fails mid-collection does not discard healthy
+  snapshots: `complete` becomes false and the failure is named. Four separate
+  failures are covered: a pane that stalls, one that fails, one that closes
+  after being asked, and one that cannot be asked at all.
+
+**An answer that arrived during someone else's stall is still collected.** Once
+the deadline is spent, each remaining pane is still given a non-blocking chance
+to hand over an answer that arrived while a neighbour was holding things up.
+Discarding it would punish a healthy pane for a slow one, and it costs nothing.
+
+**Answers are matched to callers in order.** Two clients may ask one pane at
+once, so the registry keeps a queue of waiters rather than a single slot. The
+worker handles commands in order and answers each exactly once, and the view
+forwards answers in arrival order, so pairing the oldest waiter with the next
+answer is correct. A closing pane releases its waiters immediately rather than
+letting them wait out the deadline for something already known to be gone.
+
+**An honest limit, recorded rather than implied.** The key is a boundary between
+this window and everything else; it is **not** a boundary between the panes
+inside it. Every session the window launches is told the same key, so a caller
+can already ask for `--window`, and `--from` is self-reported. The requester's
+identity therefore shapes the default scope for convenience — it is not a
+privilege, and the module says so instead of implying a separation it does not
+enforce. Peer credentials over the socket could make identity real; the TSP
+already anticipates that as "if peer checking proves necessary".
+
+**Verified against the running application**, with three panes across two tabs:
+
+| request from pane 0 | answer |
+| --- | --- |
+| default | pane 1 only — its own tab, without itself |
+| `--include-self` | panes 0 and 1 |
+| `--window` | panes 0, 1 and 2, including the other tab's |
+| `--pane 2` | that pane alone |
+| `--pane 999` | `denied` |
+| `panes send-keys rm -rf /` | `malformed`, never parsed as a request |
+| no key | `denied` |
+
+All answered in under a millisecond. After closing a pane it disappeared from
+the listing and asking for it by name returned `denied`, indistinguishable from
+a pane that never existed.
+
+**The response is provisional.** It carries counts, not content: shipping pane
+text through a format nothing has specified yet would create a second,
+accidental schema for clients to depend on. Task 7 replaces it.
 
 ### Task 7: The versioned JSON schema
 

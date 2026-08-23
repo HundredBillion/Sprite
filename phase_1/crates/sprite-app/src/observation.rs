@@ -5,4 +5,6 @@
 //! handle to anything — no PTY, no libghostty object, no keystroke stream, no
 //! route to another child process.
 
+pub mod broker;
 pub mod endpoint;
+pub mod panes;

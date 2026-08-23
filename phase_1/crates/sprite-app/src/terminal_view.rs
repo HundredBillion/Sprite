@@ -69,6 +69,8 @@ pub struct TerminalView {
     font_family: SharedString,
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<TerminalSize>,
+    /// How this pane is reached by observation, if the window has an endpoint.
+    observation: Option<crate::observation::panes::PaneLink>,
     /// The pixels this pane has been given.
     ///
     /// A pane is not the window: once a tab holds several, sizing the grid from
@@ -97,6 +99,7 @@ impl TerminalView {
     /// which a child learns the key.
     pub fn new(
         environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        observation: Option<crate::observation::panes::PaneLink>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -129,8 +132,15 @@ impl TerminalView {
             Err(error) => return Self::failed(error.to_string(), font_family, cx),
         };
 
+        // Registered before the event task starts, so an answer can never
+        // arrive for a pane the registry does not yet know about.
+        if let Some(link) = &observation {
+            link.panes.register(link.pane, link.tab, session.commands());
+        }
+
         let events = session.take_event_stream();
         let snapshots = session.take_snapshot_stream();
+        let event_link = observation.clone();
 
         let event_task = cx.spawn(async move |view, cx| {
             let Ok(mut events) = events else { return };
@@ -187,10 +197,15 @@ impl TerminalView {
                     // observation and for a future bell policy; neither has a
                     // presentation yet, so neither is acted on here.
                     Ok(TerminalEvent::WorkingDirectoryChanged(_)) | Ok(TerminalEvent::Bell) => {}
-                    // Answered to whoever asked, which is the observation
-                    // broker rather than the view. A pane never asks for its
-                    // own history, so one arriving here is nothing to draw.
-                    Ok(TerminalEvent::History(_)) => {}
+                    // Nothing to draw: this belongs to whoever asked for it.
+                    // The view forwards it because it is the single consumer of
+                    // this session's events, and forwarding in arrival order is
+                    // what lets the registry pair answers with waiters.
+                    Ok(TerminalEvent::History(history)) => {
+                        if let Some(link) = &event_link {
+                            link.panes.deliver(link.pane, history);
+                        }
+                    }
                     Ok(TerminalEvent::ClipboardWrite(text)) => {
                         // Terminal Core already applied the OSC 52 policy, so
                         // reaching here means the write was allowed.
@@ -271,6 +286,7 @@ impl TerminalView {
 
         Self {
             session,
+            observation,
             bundle: None,
             focus: cx.focus_handle(),
             cell_width,
@@ -299,6 +315,8 @@ impl TerminalView {
 
         Self {
             session,
+            // A view that never started a session has nothing to observe.
+            observation: None,
             bundle: None,
             focus: cx.focus_handle(),
             cell_width: px(8.0),
@@ -616,6 +634,17 @@ pub(crate) fn grid_size(
         cell_width_px: physical(cell_width, scale_factor),
         cell_height_px: physical(cell_height, scale_factor),
     })
+}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        // A pane that is gone must stop being listed, and anyone waiting on it
+        // is released rather than left to time out on something already known
+        // to have ended.
+        if let Some(link) = &self.observation {
+            link.panes.forget(link.pane);
+        }
+    }
 }
 
 impl Focusable for TerminalView {

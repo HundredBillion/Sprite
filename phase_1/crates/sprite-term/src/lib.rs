@@ -712,6 +712,33 @@ impl SnapshotStream {
 }
 
 /// Ownership of the worker thread, handed over exactly once.
+/// Sends commands to one session's worker from any thread.
+///
+/// Cloneable and `Send`, and deliberately write-only in the narrow sense that
+/// it can submit commands and never observe results — answers arrive on the
+/// session's event stream, which has exactly one consumer.
+#[derive(Clone)]
+pub struct CommandSender {
+    commands: SyncSender<worker::Message>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl CommandSender {
+    /// Submits a command, applying the same checks as [`TerminalSession::send`].
+    pub fn send(&self, command: TerminalCommand) -> Result<(), SessionError> {
+        validate(&command)?;
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err(SessionError::new(
+                "send",
+                "the terminal session is shutting down",
+            ));
+        }
+        self.commands
+            .send(worker::Message::Command(command))
+            .map_err(|_| SessionError::new("send", "the terminal worker ended"))
+    }
+}
+
 pub struct ShutdownHandle {
     worker: JoinHandle<()>,
 }
@@ -724,6 +751,32 @@ impl ShutdownHandle {
             .join()
             .map_err(|_| SessionError::new("join_worker", "the terminal worker panicked"))
     }
+}
+
+/// Checks a command before it can occupy a worker slot.
+///
+/// Applied wherever a command enters, so a second entry point cannot become a
+/// way around the limits.
+fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
+    // Rejected before it reaches the queue, so an oversized payload never
+    // occupies a worker slot and never partially reaches the child.
+    if let TerminalCommand::Input(bytes) = command
+        && bytes.len() > MAX_INPUT_BYTES
+    {
+        return Err(SessionError::new(
+            "send",
+            format!(
+                "input of {} bytes exceeds the {MAX_INPUT_BYTES} byte limit",
+                bytes.len()
+            ),
+        ));
+    }
+    // Validated at the seam, so neither the PTY nor libghostty is asked to
+    // allocate or mutate for a grid Sprite would refuse anyway.
+    if let TerminalCommand::Resize(size) = command {
+        size.validate("resize")?;
+    }
+    Ok(())
 }
 
 pub struct TerminalSession {
@@ -791,6 +844,19 @@ impl TerminalSession {
         })
     }
 
+    /// A handle for sending commands from another thread.
+    ///
+    /// Commands already cross threads — the worker owns the terminal and reads
+    /// them from a queue — so handing out a sender changes no ownership rule.
+    /// It carries no way to read output: a holder can ask, and receives nothing
+    /// back through this handle.
+    pub fn commands(&self) -> CommandSender {
+        CommandSender {
+            commands: self.commands.clone(),
+            shutdown: Arc::clone(&self.shutdown),
+        }
+    }
+
     pub fn send(&mut self, command: TerminalCommand) -> Result<(), SessionError> {
         if self.shutdown.load(Ordering::SeqCst) {
             return Err(SessionError::new(
@@ -798,24 +864,7 @@ impl TerminalSession {
                 "the terminal session is shutting down",
             ));
         }
-        // Rejected before it reaches the queue, so an oversized payload never
-        // occupies a worker slot and never partially reaches the child.
-        if let TerminalCommand::Input(bytes) = &command
-            && bytes.len() > MAX_INPUT_BYTES
-        {
-            return Err(SessionError::new(
-                "send",
-                format!(
-                    "input of {} bytes exceeds the {MAX_INPUT_BYTES} byte limit",
-                    bytes.len()
-                ),
-            ));
-        }
-        // Validated at the seam, so neither the PTY nor libghostty is asked to
-        // allocate or mutate for a grid Sprite would refuse anyway.
-        if let TerminalCommand::Resize(size) = &command {
-            size.validate("resize")?;
-        }
+        validate(&command)?;
         self.commands
             .send(worker::Message::Command(command))
             .map_err(|_| SessionError::new("send", "the terminal worker ended"))
