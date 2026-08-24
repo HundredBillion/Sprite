@@ -307,10 +307,38 @@ does not know the defaults still learns what the window is doing.
 
 ### Task 9: macOS parity
 
-- [ ] The workspace compiles for macOS in CI, as it does today.
+- [x] The workspace compiles for macOS in CI — and now its tests pass there,
+  which they had not been doing.
 - [ ] **OUTSTANDING by construction on this machine:** the interactive smoke,
   the benchmarks, and the packaging check need real macOS hardware. Recorded as
   a gate rather than pretended.
+
+**CI was red on both platforms, and had been for three checkpoints.** Twelve
+tests opened an observation endpoint through `XDG_RUNTIME_DIR`, which a
+container does not set and macOS does not have at all, so they failed everywhere
+except a logged-in Linux desktop. A test that only passes on the machine it was
+written on is not a gate. `Endpoint::open_in` now takes the directory, the tests
+give it one of their own, and the suite passes with `XDG_RUNTIME_DIR` unset as
+well as set — 345 tests both ways.
+
+Two things came out of fixing it:
+
+- **Observation did not exist on macOS.** There is no `XDG_RUNTIME_DIR` there,
+  so the endpoint would have failed to open on every macOS window. `TMPDIR` is
+  the equivalent guarantee — a per-user directory under `/var/folders`, readable
+  only by its owner — and is used there. The mode is not taken on trust either
+  way: `open_in` applies `0700` to whatever directory it is given, before the
+  socket exists.
+- **A forbidden-state gate was checking prose.** `grep -rn "libghostty"` over
+  `sprite-app` matched the comments *explaining why the application does not use
+  libghostty*, so the gate failed on the documentation of the rule it enforces.
+  It now matches `use` statements, path expressions, and the manifest.
+
+One test hung the suite while this was being fixed, and the reason is worth
+keeping: bindings drop in reverse, so a scratch directory returned *after* an
+endpoint deleted the socket before the endpoint shut down — and shutting down
+means connecting to that socket to wake the thread parked in `accept`. The
+connection failed, the thread never woke, and the join waited forever.
 
 ### Task 10: Gates and review
 

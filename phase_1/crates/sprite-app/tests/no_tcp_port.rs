@@ -51,8 +51,11 @@ fn tcp_inodes() -> HashSet<u64> {
 
 #[test]
 fn an_open_endpoint_holds_no_tcp_socket() {
-    let endpoint = Endpoint::open(|_request| "unused".to_owned())
-        .expect("open an endpoint; this test needs XDG_RUNTIME_DIR");
+    // A directory of this test's own rather than `XDG_RUNTIME_DIR`, which a
+    // container does not set and macOS does not have.
+    let directory = std::env::temp_dir().join(format!("sprite-no-tcp-{}", std::process::id()));
+    let endpoint = Endpoint::open_in(directory.clone(), |_request| "unused".to_owned())
+        .expect("open an endpoint");
 
     // The endpoint is listening, so if it were ever going to open a port it
     // would have one now.

@@ -137,7 +137,13 @@ jobs:
           set -euo pipefail
           ! grep -rnE "unsafe impl.*(Send|Sync)|gpui[-_]ghostty|tty7|tokio|async_std|smol|crossbeam" \
             --include='*.rs' --include='Cargo.toml' crates
-          ! grep -rn "libghostty\|portable_pty" --include='*.rs' crates/sprite-app
+          # Dependence, not prose. The earlier form matched the word anywhere,
+          # including in comments explaining why the application does not use
+          # these — so the gate failed on the documentation of the rule it
+          # exists to enforce.
+          ! grep -rnE "^[[:space:]]*use[[:space:]]+(libghostty_vt|portable_pty)|(libghostty_vt|portable_pty)::" \
+            --include='*.rs' crates/sprite-app
+          ! grep -nE "^(libghostty-vt|portable-pty)[[:space:]]*=" crates/sprite-app/Cargo.toml
           ! grep -rnE "thread::sleep|Timer::after|request_animation_frame" \
             --include='*.rs' crates/sprite-app
 

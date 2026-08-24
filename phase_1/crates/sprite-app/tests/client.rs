@@ -46,9 +46,20 @@ fn run(arguments: &[&str], environment: &[(&str, &str)]) -> Outcome {
     }
 }
 
+/// A directory of this test's own for the endpoint's socket.
+///
+/// Taken explicitly rather than read from `XDG_RUNTIME_DIR`, which a container
+/// does not set and macOS does not have: a test that only passes on a
+/// logged-in Linux desktop is not a gate.
+fn scratch() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ordinal = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    std::env::temp_dir().join(format!("sprite-client-{}-{ordinal}", std::process::id()))
+}
+
 /// A window that answers with whatever `answer` produces.
 fn window(answer: impl Fn() -> String + Send + Sync + 'static) -> Endpoint {
-    Endpoint::open(move |_request| answer()).expect("open an endpoint")
+    Endpoint::open_in(scratch(), move |_request| answer()).expect("open an endpoint")
 }
 
 fn credentials(endpoint: &Endpoint, pane: &str) -> Vec<(String, String)> {
@@ -167,7 +178,7 @@ fn the_request_carries_the_options_the_command_was_given() {
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let recorder = Arc::clone(&seen);
-    let endpoint = Endpoint::open(move |request| {
+    let endpoint = Endpoint::open_in(scratch(), move |request| {
         recorder.lock().expect("lock").push(request.body.clone());
         r#"{"schema_version":1,"complete":true,"panes":[],"errors":[]}"#.to_owned()
     })

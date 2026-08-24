@@ -379,7 +379,9 @@ mod tests {
 
         // What switching observation off does to a window: the endpoint is
         // destroyed. Nothing here touches the session.
-        drop(Endpoint::open(|_| String::new()).expect("an endpoint"));
+        let directory = std::env::temp_dir().join(format!("sprite-panes-{}", std::process::id()));
+        drop(Endpoint::open_in(directory.clone(), |_| String::new()).expect("an endpoint"));
+        let _ = std::fs::remove_dir_all(&directory);
 
         // The child is still there, and the session still takes commands.
         assert!(

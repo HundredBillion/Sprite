@@ -179,7 +179,24 @@ impl Endpoint {
     where
         H: Fn(Request) -> String + Send + Sync + 'static,
     {
-        let directory = runtime_directory()?;
+        Self::open_in(runtime_directory()?, handler)
+    }
+
+    /// Opens the endpoint inside a named directory.
+    ///
+    /// Split out from [`open`](Endpoint::open) so the tests do not depend on
+    /// the ambient environment. They used to, and it cost this project a red
+    /// CI on both platforms for three checkpoints: a container has no
+    /// `XDG_RUNTIME_DIR` and macOS has none at all, so twelve tests failed
+    /// everywhere except a logged-in Linux desktop. A test that only passes on
+    /// the machine it was written on is not a gate.
+    ///
+    /// The privacy rules are applied here, to whatever directory is named, so a
+    /// caller cannot obtain a laxer endpoint by choosing a different one.
+    pub fn open_in<H>(directory: PathBuf, handler: H) -> std::io::Result<Self>
+    where
+        H: Fn(Request) -> String + Send + Sync + 'static,
+    {
         // 0700: the socket's own mode is a second line of defence, but a
         // directory nobody else may enter is what actually keeps other users
         // off the socket, and it is set before the socket exists rather than
@@ -420,15 +437,39 @@ fn sweep_dead_sockets(directory: &Path) {
 
 /// The per-user runtime directory this window's socket lives in.
 ///
-/// `XDG_RUNTIME_DIR` is a directory the system already guarantees is private to
-/// one user and cleaned up on logout. There is deliberately no fall back to a
-/// world-writable temporary directory: an endpoint nobody else can reach is the
-/// whole point, so it is better to have no observation surface than one in a
-/// place another user can reach.
+/// On Linux, `XDG_RUNTIME_DIR`: a directory the system already guarantees is
+/// private to one user and cleaned up on logout. There is deliberately no fall
+/// back to a world-writable temporary directory: an endpoint nobody else can
+/// reach is the whole point, so it is better to have no observation surface
+/// than one in a place another user can reach.
+#[cfg(not(target_os = "macos"))]
 fn runtime_directory() -> std::io::Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
         std::io::Error::other(
             "XDG_RUNTIME_DIR is not set, so there is no private directory for the \
+             observation socket; observation is unavailable rather than placed \
+             somewhere other users could reach",
+        )
+    })?;
+    Ok(PathBuf::from(base).join("sprite"))
+}
+
+/// The per-user runtime directory this window's socket lives in.
+///
+/// macOS has no `XDG_RUNTIME_DIR`, and the equivalent guarantee lives
+/// elsewhere: `TMPDIR` there is a per-user directory under `/var/folders`,
+/// created by the system and readable only by its owner — the same property
+/// `XDG_RUNTIME_DIR` is chosen for on Linux. Without this, observation would
+/// simply not exist on macOS, which is not parity.
+///
+/// `TMPDIR` is honoured because that is where the system publishes the path;
+/// the mode is not taken on trust either way, since [`Endpoint::open_in`]
+/// applies 0700 to the directory it is given before the socket exists.
+#[cfg(target_os = "macos")]
+fn runtime_directory() -> std::io::Result<PathBuf> {
+    let base = std::env::var_os("TMPDIR").ok_or_else(|| {
+        std::io::Error::other(
+            "TMPDIR is not set, so there is no private directory for the \
              observation socket; observation is unavailable rather than placed \
              somewhere other users could reach",
         )
@@ -441,6 +482,33 @@ mod tests {
     use super::*;
     use std::io::BufWriter;
     use std::sync::Mutex;
+
+    /// A private directory of this test's own, removed when it is dropped.
+    ///
+    /// Tests take one rather than reading `XDG_RUNTIME_DIR`, so the suite
+    /// passes in a container, over ssh, and on macOS — none of which have one.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let ordinal = NEXT.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir()
+                .join(format!("sprite-endpoint-{}-{ordinal}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            Self(path)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.clone()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// Sends one request and returns the answer.
     fn ask(socket: &Path, line: &str) -> String {
@@ -467,9 +535,14 @@ mod tests {
     #[derive(Default)]
     struct Calls(Mutex<Vec<String>>);
 
-    fn endpoint_with_spy() -> (Endpoint, Arc<Calls>) {
+    /// One endpoint in a directory of the test's choosing.
+    ///
+    /// The directory is a parameter because two of these tests are *about* two
+    /// endpoints sharing one: sweeping a dead socket, and two windows in the
+    /// same runtime directory keeping their keys apart.
+    fn endpoint_in(scratch: &Scratch) -> (Endpoint, Arc<Calls>) {
         let calls: Arc<Calls> = Arc::default();
-        let endpoint = Endpoint::open({
+        let endpoint = Endpoint::open_in(scratch.path(), {
             let calls = Arc::clone(&calls);
             move |request| {
                 calls.0.lock().expect("lock").push(request.body.clone());
@@ -480,10 +553,27 @@ mod tests {
         (endpoint, calls)
     }
 
+    /// The common case: one endpoint, in a directory nobody else uses.
+    ///
+    /// **The scratch comes first, and the order is load-bearing.** Bindings are
+    /// dropped in reverse, so a scratch returned last would delete the socket
+    /// before the endpoint shut down — and shutting down means connecting to
+    /// that socket to wake the thread parked in `accept`. With the file gone
+    /// the connection fails, the thread never wakes, and the join hangs
+    /// forever. This suite hung exactly that way once.
+    fn endpoint_with_spy() -> (Scratch, Endpoint, Arc<Calls>) {
+        let scratch = Scratch::new();
+        let (endpoint, calls) = endpoint_in(&scratch);
+        (scratch, endpoint, calls)
+    }
+
     #[test]
     fn two_windows_never_share_a_key_or_a_socket() {
-        let (first, _) = endpoint_with_spy();
-        let (second, _) = endpoint_with_spy();
+        // The same directory, which is the case that matters: two windows on
+        // one machine share a runtime directory and must still be separate.
+        let scratch = Scratch::new();
+        let (first, _) = endpoint_in(&scratch);
+        let (second, _) = endpoint_in(&scratch);
 
         assert_ne!(first.key_hex(), second.key_hex());
         assert_ne!(first.socket_path(), second.socket_path());
@@ -504,7 +594,7 @@ mod tests {
 
     #[test]
     fn the_socket_and_its_directory_are_private() {
-        let (endpoint, _) = endpoint_with_spy();
+        let (_scratch, endpoint, _) = endpoint_with_spy();
 
         let socket = fs::metadata(endpoint.socket_path()).expect("socket exists");
         assert_eq!(
@@ -523,7 +613,7 @@ mod tests {
 
     #[test]
     fn a_request_with_the_right_key_reaches_the_handler() {
-        let (endpoint, calls) = endpoint_with_spy();
+        let (_scratch, endpoint, calls) = endpoint_with_spy();
 
         let answer = ask(
             endpoint.socket_path(),
@@ -536,7 +626,7 @@ mod tests {
 
     #[test]
     fn a_request_with_no_key_is_refused_without_reaching_the_handler() {
-        let (endpoint, calls) = endpoint_with_spy();
+        let (_scratch, endpoint, calls) = endpoint_with_spy();
 
         assert_eq!(ask(endpoint.socket_path(), ""), DENIED);
         assert_eq!(ask(endpoint.socket_path(), "panes snapshot"), DENIED);
@@ -548,7 +638,7 @@ mod tests {
 
     #[test]
     fn a_request_with_the_wrong_key_is_refused_without_reaching_the_handler() {
-        let (endpoint, calls) = endpoint_with_spy();
+        let (_scratch, endpoint, calls) = endpoint_with_spy();
         let mut wrong = endpoint.key_hex();
         // One byte different, so this also covers a near-miss rather than only
         // an obviously bogus key.
@@ -571,7 +661,9 @@ mod tests {
     fn every_refusal_is_the_same_answer() {
         // The handler refuses a pane the caller may not see, using the same
         // constant the endpoint uses for a bad key.
-        let endpoint = Endpoint::open(|_request| DENIED.to_owned()).expect("open endpoint");
+        let scratch = Scratch::new();
+        let endpoint =
+            Endpoint::open_in(scratch.path(), |_request| DENIED.to_owned()).expect("open endpoint");
 
         let bad_key = ask(endpoint.socket_path(), "0123 panes snapshot --pane 4");
         let missing_key = ask(endpoint.socket_path(), "panes snapshot");
@@ -590,7 +682,7 @@ mod tests {
 
     #[test]
     fn closing_the_window_destroys_the_socket_and_the_key_stops_working() {
-        let (mut endpoint, _) = endpoint_with_spy();
+        let (_scratch, mut endpoint, _) = endpoint_with_spy();
         let captured_key = endpoint.key_hex();
         let path = endpoint.socket_path().to_path_buf();
         assert_eq!(
@@ -614,7 +706,7 @@ mod tests {
 
     #[test]
     fn a_session_is_told_the_socket_the_key_and_its_own_identity() {
-        let (endpoint, _) = endpoint_with_spy();
+        let (_scratch, endpoint, _) = endpoint_with_spy();
 
         let environment = endpoint.environment(TabId(3), PaneId(7));
         let lookup = |name: &str| {
@@ -638,7 +730,7 @@ mod tests {
     /// next caller still gets served.
     #[test]
     fn a_silent_client_does_not_wedge_the_endpoint() {
-        let (endpoint, _) = endpoint_with_spy();
+        let (_scratch, endpoint, _) = endpoint_with_spy();
         let silent = UnixStream::connect(endpoint.socket_path()).expect("connect");
 
         let answer = ask(
@@ -654,7 +746,8 @@ mod tests {
     /// the moment someone re-enabled it.
     #[test]
     fn re_enabling_creates_a_new_endpoint_and_the_old_key_stays_dead() {
-        let (mut first, _) = endpoint_with_spy();
+        let scratch = Scratch::new();
+        let (mut first, _) = endpoint_in(&scratch);
         let captured_key = first.key_hex();
         let captured_path = first.socket_path().to_path_buf();
         assert_eq!(
@@ -668,7 +761,7 @@ mod tests {
         assert!(!captured_path.exists());
 
         // Re-enabled: a new endpoint, with a new key at a new path.
-        let (second, calls) = endpoint_with_spy();
+        let (second, calls) = endpoint_in(&scratch);
         assert_ne!(second.key_hex(), captured_key, "a fresh key");
         assert_ne!(second.socket_path(), captured_path, "at a fresh path");
 
@@ -693,7 +786,9 @@ mod tests {
     /// window clears it — without disturbing a window that is still running.
     #[test]
     fn a_new_endpoint_clears_dead_sockets_but_not_live_ones() {
-        let (live, _) = endpoint_with_spy();
+        // One directory for both, because a sweep only ever clears its own.
+        let scratch = Scratch::new();
+        let (live, _) = endpoint_in(&scratch);
         let live_path = live.socket_path().to_path_buf();
         let directory = live_path.parent().expect("a directory").to_path_buf();
 
@@ -706,7 +801,7 @@ mod tests {
         }
         assert!(abandoned.exists());
 
-        let (next, _) = endpoint_with_spy();
+        let (next, _) = endpoint_in(&scratch);
 
         assert!(!abandoned.exists(), "the dead socket was cleared");
         assert!(live_path.exists(), "the live one was left alone");
