@@ -1070,6 +1070,56 @@ impl TerminalView {
     /// The measurement has to be redone rather than scaled: a font's advance
     /// width is not linear in its size, and a grid computed from a guess drifts
     /// away from what is drawn.
+    /// Applies a reloaded configuration to this pane, live.
+    ///
+    /// Only what *can* change without restarting a session: the font, the
+    /// colours, the cursor, and the renderer's own texture budget. The shell,
+    /// the scrollback and the graphics limits belong to a terminal that is
+    /// already running, and are left for the next session rather than applied
+    /// halfway.
+    pub fn apply_settings(
+        &mut self,
+        settings: &crate::config::Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (family, _) = chosen_family(window, settings.font.family.as_deref());
+        if family != self.font_family {
+            self.font_family = family;
+        }
+        // Unconditional: the family may have changed under the same size, and
+        // re-measuring a cell costs one text layout.
+        self.set_font_size(settings.font.size, window, cx);
+
+        self.fallback_colors = (
+            settings
+                .colors
+                .foreground
+                .unwrap_or_else(|| unpack(FOREGROUND)),
+            settings
+                .colors
+                .background
+                .unwrap_or_else(|| unpack(BACKGROUND)),
+        );
+        let _ = self.session.send(sprite_term::TerminalCommand::SetColors(
+            sprite_term::ColorDefaults {
+                foreground: Some(self.fallback_colors.0),
+                background: Some(self.fallback_colors.1),
+                cursor: settings.colors.cursor,
+                palette: settings.colors.palette.clone(),
+            },
+        ));
+        let _ = self.session.send(sprite_term::TerminalCommand::SetCursor(
+            sprite_term::CursorDefaults {
+                style: settings.cursor.style,
+                blink: settings.cursor.blink,
+            },
+        ));
+
+        self.textures.set_budget(settings.graphics.texture_bytes);
+        cx.notify();
+    }
+
     pub fn set_font_size(&mut self, size: f32, window: &Window, cx: &mut Context<Self>) {
         self.font_size = px(size);
         self.cell_height = px(crate::config::Font::line_height(size));

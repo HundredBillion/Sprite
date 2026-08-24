@@ -149,6 +149,19 @@ impl GraphicsCache {
         self.used
     }
 
+    /// Changes the budget, evicting immediately if the new one is smaller.
+    ///
+    /// Immediately rather than at the next image: a person who lowers the limit
+    /// has asked for the memory back now, and a pane showing nothing new would
+    /// otherwise hold the old textures until it did.
+    pub fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+        // `keep` names an image that must survive; nothing is being admitted
+        // here, so no id is exempt. Zero is not special-cased because an image
+        // id of zero is a real id — it is simply as evictable as any other.
+        self.make_room(0, u32::MAX);
+    }
+
     /// Evicts least-recently-placed entries until `wanted` bytes will fit.
     fn make_room(&mut self, wanted: usize, keep: u32) {
         while self.used + wanted > self.budget {
@@ -371,6 +384,23 @@ mod tests {
 
         assert!(cache.is_empty());
         assert_eq!(cache.used_bytes(), 0);
+    }
+
+    /// A lowered limit is a request for the memory back now, not at whatever
+    /// moment the pane happens to show its next image.
+    #[test]
+    fn lowering_the_budget_releases_textures_at_once() {
+        let mut cache = GraphicsCache::with_budget(4096);
+        cache.texture(&image(1, 1, 8, 0x10));
+        cache.texture(&image(2, 1, 8, 0x20));
+        let before = cache.used_bytes();
+        assert!(before > 0, "two images are held");
+
+        cache.set_budget(before / 2);
+        assert!(
+            cache.used_bytes() <= before / 2,
+            "the memory is given back when the limit falls, not at the next image"
+        );
     }
 
     /// The GPU-side ceiling is its own limit, and is enforced by evicting what

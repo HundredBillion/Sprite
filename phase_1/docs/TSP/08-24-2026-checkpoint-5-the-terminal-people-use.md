@@ -207,15 +207,41 @@ thousand rows.
 
 **Files:** new `sprite-app/src/config/watch.rs`
 
-- [ ] `sprite config reload` re-reads the file and applies what can be applied
-  live: fonts, colours, cursor, close warnings.
-- [ ] An invalid candidate leaves the last known good configuration active and
-  reports the error with its location.
-- [ ] Changes are classified: live, new-session-only, restart-required. Nothing
-  silently restarts a PTY or discards pane state.
-- [ ] Watching the file is **deferred** unless a watcher dependency earns its
-  place; the reload command is the contract, and a watcher is an ergonomic on
-  top of it.
+- [x] `sprite config reload` re-reads the file and applies what can be applied
+  live: fonts, colours, cursor, and the renderer's texture budget. Close
+  warnings need nothing applied — the check asks the kernel at the moment a key
+  is pressed, so it is always current.
+- [x] An invalid candidate leaves the last known good configuration active and
+  reports the error with its location. Verified on screen: a missing bracket
+  produced "not reloaded; the running configuration is unchanged" and
+  "TOML parse error at line 5, column 8 — invalid table header", on standard
+  error, exit 5, with the window still in the colours and size it had.
+- [x] Changes are classified: live and new-session-only. Nothing silently
+  restarts a PTY or discards pane state. Verified on screen in one reload:
+  *applied now* font, colors, cursor, graphics.texture_bytes; *waiting for a new
+  pane* shell, scrollback, graphics storage.
+- [x] Watching the file is **deferred**: no watcher dependency was taken. The
+  reload command is the contract.
+
+**Nothing restart-required survived.** The third class was in the plan because
+some settings looked as though they could only apply to a new window; on
+inspection every one of them is either live or belongs to a session that is
+already running, so the report has two headings rather than three. A heading
+that never appears is worse than no heading.
+
+**How a shell command reaches a running window.** Through the observation
+endpoint it already has: the same socket, the same per-window key, the same
+rule that only sessions this window started can reach it. A caller that could
+not read this window's panes cannot reload its settings either. The endpoint's
+threads are not the GPUI thread, so the request crosses on a channel and the
+endpoint thread waits two seconds for the answer — a wedged window costs one
+wait rather than a thread.
+
+The two graphics limits part company here, which is the clearest case for the
+classification: `texture_bytes` belongs to the renderer and is applied at once
+(lowering it releases textures immediately, rather than at whatever moment the
+pane next shows an image), while `storage_bytes` belongs to a terminal that is
+already running and waits for a new pane.
 
 ### Task 7: Linux packaging
 

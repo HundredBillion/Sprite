@@ -655,6 +655,26 @@ pub(crate) fn run(
                     }
                 }
                 TerminalCommand::Capture => dirty = true,
+                TerminalCommand::SetColors(colors) => {
+                    // Applied on this thread, against this pane's own terminal,
+                    // so a reload cannot interleave with the parser.
+                    if let Err(error) = apply_color_defaults(&mut terminal, &colors)
+                        && events.send_blocking(TerminalEvent::Error(error)).is_err()
+                    {
+                        break;
+                    }
+                    // The colours live in the render state, so a frame has to be
+                    // taken for anyone to see them.
+                    let _ = commands.try_send(Message::CaptureRequested);
+                }
+                TerminalCommand::SetCursor(cursor) => {
+                    if let Err(error) = apply_cursor_defaults(&mut terminal, cursor)
+                        && events.send_blocking(TerminalEvent::Error(error)).is_err()
+                    {
+                        break;
+                    }
+                    let _ = commands.try_send(Message::CaptureRequested);
+                }
                 TerminalCommand::CaptureGraphics => {
                     match crate::graphics::capture_graphics(&terminal, &mut placements) {
                         Ok(snapshot) => {

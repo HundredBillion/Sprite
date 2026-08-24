@@ -14,6 +14,8 @@ pub enum Invocation {
     Window(WindowArgs),
     /// Ask the containing window about its panes and print the answer.
     Snapshot(SnapshotArgs),
+    /// Ask the containing window to re-read its configuration file.
+    ConfigReload,
     Help,
     Version,
 }
@@ -65,6 +67,7 @@ sprite — a terminal
     sprite                       open a window
     sprite -e <program> [args]   open a window running <program>
     sprite panes snapshot        print what other panes in this window show
+    sprite config reload         re-read the configuration file in this window
 
 Options for `panes snapshot`:
     --include-self               include the pane making the request
@@ -104,6 +107,24 @@ where
             Ok(Invocation::Window(WindowArgs {
                 command: Some(command),
             }))
+        }
+        Some("config") => {
+            let Some(sub) = arguments.next() else {
+                return Err(UsageError(
+                    "config needs a command, such as: reload".to_owned(),
+                ));
+            };
+            match text(&sub).as_deref() {
+                Some("reload") => match arguments.next() {
+                    None => Ok(Invocation::ConfigReload),
+                    Some(extra) => Err(UsageError(format!(
+                        "config reload takes no arguments, but was given {}",
+                        extra.to_string_lossy()
+                    ))),
+                },
+                Some(other) => Err(UsageError(format!("unknown config command: {other}"))),
+                None => Err(UsageError("arguments must be valid text".to_owned())),
+            }
         }
         Some("panes") => {
             // `unwrap_or_default` here would turn "no subcommand at all" into an
@@ -188,6 +209,24 @@ fn text(value: &OsStr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_reload_is_its_own_invocation() {
+        assert_eq!(
+            parse_arguments(["config", "reload"]).expect("parse"),
+            Invocation::ConfigReload
+        );
+    }
+
+    #[test]
+    fn config_says_what_it_needs_rather_than_guessing() {
+        let missing = parse_arguments(["config"]).expect_err("no subcommand");
+        assert!(missing.0.contains("reload"), "it names a way forward");
+
+        assert!(parse_arguments(["config", "reboot"]).is_err());
+        // A flag that does nothing must not look as though it did.
+        assert!(parse_arguments(["config", "reload", "--now"]).is_err());
+    }
 
     fn parsed(arguments: &[&str]) -> Invocation {
         parse_arguments(arguments.iter().map(OsString::from)).expect("a valid command line")

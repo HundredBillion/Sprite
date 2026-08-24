@@ -23,7 +23,7 @@ pub use observation::broker::{
     DEADLINE, Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report,
     collect as collect_panes, parse as parse_request,
 };
-pub use observation::client::{Exit, run_snapshot};
+pub use observation::client::{Exit, run_config_reload, run_snapshot};
 pub use observation::endpoint::{DENIED, Endpoint, ObservationKey, Request};
 pub use observation::schema::render as render_schema;
 pub use pane_registry::PaneRegistry;

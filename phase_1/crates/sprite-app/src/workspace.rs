@@ -57,6 +57,16 @@ pub struct Workspace {
     command: Option<Vec<std::ffi::OsString>>,
     /// A close waiting on a second press, because something is running.
     pending_close: Option<PendingClose>,
+    /// A reloaded configuration, applied during the next render.
+    ///
+    /// Applied there for the same reason focus is: the panes need a `Window` to
+    /// re-measure a cell with, and the endpoint thread that asked for the
+    /// reload has none.
+    pending_settings: Option<crate::config::Settings>,
+    /// Keeps the reload listener alive for as long as the window is.
+    _reload: gpui::Task<()>,
+    /// Handed to an endpoint opened later, when observation is turned back on.
+    reload_sender: async_channel::Sender<ReloadRequest>,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
     /// A pane created by a split has no element in the dispatch tree until the
@@ -77,11 +87,16 @@ impl Workspace {
         // Opened before the first session, so every session this window
         // launches — including the first — is told the key and its own pane.
         let panes = WindowPanes::new();
+        // The endpoint's threads are not the GPUI thread, and a reload has to
+        // touch views. So a request crosses back on a channel and is answered
+        // from here, with the endpoint thread waiting on a reply of its own.
+        let (reload_tx, reload_rx) = async_channel::bounded::<ReloadRequest>(1);
         let endpoint = settings
             .pane_observation
             .enabled
-            .then(|| open_endpoint(&panes))
+            .then(|| open_endpoint(&panes, &reload_tx))
             .flatten();
+        let reload_sender = reload_tx.clone();
 
         let program = command.clone();
         let pane_settings = settings.clone();
@@ -100,6 +115,17 @@ impl Workspace {
             })
         });
         // The window focuses the workspace; the workspace hands the keyboard to
+        let reload_task = cx.spawn(async move |workspace, cx| {
+            while let Ok(request) = reload_rx.recv().await {
+                let answer = workspace
+                    .update(cx, |workspace, cx| workspace.reload(cx))
+                    .unwrap_or_else(|_| "this window is closing".to_owned());
+                // The endpoint thread is waiting on this with a timeout of its
+                // own, so a failure here costs it a wait rather than a thread.
+                let _ = request.reply.send(answer);
+            }
+        });
+
         // a pane, rather than leaving which pane receives typing to chance.
         let pending_focus = Some(tabs.active().focus());
         Self {
@@ -112,6 +138,9 @@ impl Workspace {
             focus: cx.focus_handle(),
             pending_focus,
             pending_close: None,
+            pending_settings: None,
+            _reload: reload_task,
+            reload_sender,
         }
     }
 
@@ -132,7 +161,7 @@ impl Workspace {
         }
         self.settings.pane_observation.enabled = enabled;
         if enabled {
-            self.endpoint = open_endpoint(&self.panes);
+            self.endpoint = open_endpoint(&self.panes, &self.reload_sender);
         } else if let Some(mut endpoint) = self.endpoint.take() {
             endpoint.close();
         }
@@ -300,6 +329,54 @@ impl Workspace {
             .collect()
     }
 
+    /// Re-reads the configuration file and reports what became of it.
+    ///
+    /// Three outcomes, kept apart on purpose. A file that will not parse leaves
+    /// the running configuration entirely alone and reports the error with the
+    /// line it is on — replacing a working setup with defaults because of a
+    /// missing bracket would be a worse answer than doing nothing. A file that
+    /// parses is applied, and anything inside it that could not be used is
+    /// reported field by field while the rest takes effect. And a change that
+    /// cannot honestly be applied to a session that is already running is said
+    /// to be waiting for the next one, rather than silently dropped.
+    fn reload(&mut self, cx: &mut Context<Self>) -> String {
+        let Some(path) = crate::config::path() else {
+            return "there is nowhere to read a configuration file from \
+                    (neither XDG_CONFIG_HOME nor HOME is set)"
+                .to_owned();
+        };
+        let candidate = match crate::config::Settings::load_candidate(&path) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                return format!("not reloaded; the running configuration is unchanged\n{error}");
+            }
+        };
+        let (settings, complaints) = candidate;
+
+        let outcome = classify(&self.settings, &settings);
+        // Recorded rather than applied here: a pane needs a `Window` to
+        // re-measure a cell with, and this runs without one.
+        self.pending_settings = Some(settings.clone());
+        self.settings = settings;
+        self.configured_font_size = self.settings.font.size;
+        // Observation is the one setting the window itself owns, and it can be
+        // turned on or off without a frame.
+        self.set_observation_enabled(self.settings.pane_observation.enabled, cx);
+        cx.notify();
+
+        outcome.describe(&path, &complaints.0)
+    }
+
+    /// Applies a reloaded configuration to every pane, during a render.
+    fn apply_pending_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(settings) = self.pending_settings.take() else {
+            return;
+        };
+        for (_, _, view) in self.tabs.all_panes() {
+            view.update(cx, |view, cx| view.apply_settings(&settings, window, cx));
+        }
+    }
+
     fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
         if self.pending_close.take().is_some() {
             cx.notify();
@@ -403,17 +480,45 @@ impl Workspace {
 }
 
 /// Opens an endpoint that answers from this window's panes.
-fn open_endpoint(panes: &Arc<WindowPanes>) -> Option<Endpoint> {
+fn open_endpoint(
+    panes: &Arc<WindowPanes>,
+    reload: &async_channel::Sender<ReloadRequest>,
+) -> Option<Endpoint> {
     let panes = Arc::clone(panes);
-    Endpoint::open(move |request| respond(panes.as_ref(), &request.body)).ok()
+    let reload = reload.clone();
+    Endpoint::open(move |request| respond(panes.as_ref(), &reload, &request.body)).ok()
 }
+
+/// A reload asked for from an endpoint thread, and where to put the answer.
+///
+/// The reply travels on a `std::sync::mpsc` channel rather than an async one
+/// because the waiting side is a plain thread that needs a *timeout*: a wedged
+/// GPUI thread must cost the endpoint one two-second wait, not a thread that
+/// never returns.
+pub(crate) struct ReloadRequest {
+    reply: std::sync::mpsc::SyncSender<String>,
+}
+
+/// How long an endpoint thread will wait for the window to answer a reload.
+const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Answers one authenticated request.
 ///
 /// Runs on an endpoint thread, never the GPUI thread: a request must not be
 /// able to hold up drawing, and the deadline inside `collect` is what keeps it
 /// from holding up the endpoint either.
-fn respond(panes: &WindowPanes, body: &str) -> String {
+fn respond(
+    panes: &WindowPanes,
+    reload: &async_channel::Sender<ReloadRequest>,
+    body: &str,
+) -> String {
+    // One verb that is not a question about panes. It is authenticated by the
+    // same key and reachable only from inside this window, which is the same
+    // rule observation lives by: a caller that could not read this window's
+    // panes cannot reload its settings either.
+    if is_reload_request(body) {
+        return request_reload(reload);
+    }
     let query = match broker::parse(body) {
         Ok(query) => query,
         // A malformed request describes the caller's own words and reveals
@@ -437,6 +542,35 @@ fn respond(panes: &WindowPanes, body: &str) -> String {
             )
         }
         Err(Refusal::Denied) => DENIED.to_owned(),
+    }
+}
+
+/// Whether a request body is `config reload` rather than a pane query.
+///
+/// The protocol token is optional here for the same reason it is in the pane
+/// parser: a client older than this window should be understood.
+fn is_reload_request(body: &str) -> bool {
+    let mut words = body.split_whitespace().peekable();
+    if let Some(word) = words.peek()
+        && word.starts_with("sprite-observation/")
+    {
+        words.next();
+    }
+    matches!(
+        (words.next(), words.next(), words.next()),
+        (Some("config"), Some("reload"), None)
+    )
+}
+
+/// Hands a reload to the GPUI thread and waits, briefly, for what it made of it.
+fn request_reload(reload: &async_channel::Sender<ReloadRequest>) -> String {
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    if reload.send_blocking(ReloadRequest { reply }).is_err() {
+        return "this window is no longer accepting reloads".to_owned();
+    }
+    match answer.recv_timeout(RELOAD_TIMEOUT) {
+        Ok(answer) => answer,
+        Err(_) => "this window did not answer in time; nothing was changed".to_owned(),
     }
 }
 
@@ -470,6 +604,78 @@ fn session_environment(
     endpoint
         .map(|endpoint| endpoint.environment(tab, pane))
         .unwrap_or_default()
+}
+
+/// What a reload changed, and when each change takes effect.
+///
+/// The three groups are the honest ones. "Live" is applied before the answer
+/// is printed. "Next session" is a setting that belongs to a terminal already
+/// running — its shell, its scrollback, what it will accept in the way of
+/// images — and quietly restarting a PTY to apply it would discard somebody's
+/// work. "Ignored" is what the file asked for and could not have.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ReloadOutcome {
+    live: Vec<&'static str>,
+    next_session: Vec<&'static str>,
+}
+
+impl ReloadOutcome {
+    fn describe(&self, path: &std::path::Path, ignored: &[String]) -> String {
+        let mut lines = vec![format!("reloaded {}", path.display())];
+        if self.live.is_empty() && self.next_session.is_empty() {
+            lines.push("nothing changed".to_owned());
+        }
+        if !self.live.is_empty() {
+            lines.push(format!("applied now: {}", self.live.join(", ")));
+        }
+        if !self.next_session.is_empty() {
+            lines.push(format!(
+                "waiting for a new pane: {}",
+                self.next_session.join(", ")
+            ));
+        }
+        for complaint in ignored {
+            lines.push(format!("ignored: {complaint}"));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Sorts the differences between two configurations into when they can apply.
+fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -> ReloadOutcome {
+    let mut outcome = ReloadOutcome::default();
+
+    if current.font != next.font {
+        outcome.live.push("font");
+    }
+    if current.colors != next.colors {
+        outcome.live.push("colors");
+    }
+    if current.cursor != next.cursor {
+        outcome.live.push("cursor");
+    }
+    if current.graphics.texture_bytes != next.graphics.texture_bytes {
+        outcome.live.push("graphics.texture_bytes");
+    }
+    if current.pane_observation != next.pane_observation {
+        outcome.live.push("pane_observation");
+    }
+
+    if current.shell != next.shell {
+        outcome.next_session.push("shell");
+    }
+    if current.scrollback != next.scrollback {
+        outcome.next_session.push("scrollback");
+    }
+    // The terminal's own image limits are set when a session starts, and
+    // lowering one afterwards would not release what a pane already holds.
+    if current.graphics.enabled != next.graphics.enabled
+        || current.graphics.storage_bytes != next.graphics.storage_bytes
+    {
+        outcome.next_session.push("graphics storage");
+    }
+
+    outcome
 }
 
 /// A close waiting on a second press.
@@ -621,6 +827,7 @@ impl Render for Workspace {
 
         // Every pane in `placements` gets an element in this frame, so a focus
         // request recorded earlier can now be honoured.
+        self.apply_pending_settings(window, cx);
         self.apply_pending_focus(window, cx);
 
         // Published from here because this is where the layout is decided, and
@@ -794,7 +1001,10 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{CloseScope, Direction, WorkspaceAction, describe_running, workspace_action};
+    use super::{
+        CloseScope, Direction, WorkspaceAction, classify, describe_running, is_reload_request,
+        workspace_action,
+    };
     use gpui::{Keystroke, Modifiers};
 
     fn press(key: &str, modifiers: Modifiers) -> Keystroke {
@@ -926,6 +1136,73 @@ mod tests {
     fn a_close_question_says_what_it_would_close() {
         assert_eq!(CloseScope::Pane.noun(), "pane");
         assert_eq!(CloseScope::Tab.noun(), "tab");
+    }
+
+    #[test]
+    fn a_reload_is_told_from_a_pane_query() {
+        assert!(is_reload_request("config reload"));
+        assert!(is_reload_request("sprite-observation/1 config reload"));
+        assert!(is_reload_request("  config   reload  "));
+
+        assert!(!is_reload_request("panes snapshot"));
+        assert!(!is_reload_request("config"));
+        assert!(!is_reload_request("config reload --now"));
+        assert!(!is_reload_request(""));
+    }
+
+    /// The distinction the whole command rests on: what may change under a
+    /// running shell, and what may not.
+    #[test]
+    fn changes_are_sorted_by_when_they_can_apply() {
+        use crate::config::Settings;
+
+        let current = Settings::default();
+
+        let mut fonts = current.clone();
+        fonts.font.size = 20.0;
+        let outcome = classify(&current, &fonts);
+        assert_eq!(outcome.live, vec!["font"]);
+        assert!(outcome.next_session.is_empty());
+
+        let mut shell = current.clone();
+        shell.scrollback.bytes = 4096;
+        shell.shell.program = Some(std::path::PathBuf::from("/bin/zsh"));
+        let outcome = classify(&current, &shell);
+        assert!(outcome.live.is_empty());
+        assert_eq!(outcome.next_session, vec!["shell", "scrollback"]);
+
+        // The two graphics limits part company here: one belongs to the
+        // renderer and can change now, the other to a terminal already running.
+        let mut graphics = current.clone();
+        graphics.graphics.texture_bytes = 1024;
+        graphics.graphics.storage_bytes = 1024;
+        let outcome = classify(&current, &graphics);
+        assert_eq!(outcome.live, vec!["graphics.texture_bytes"]);
+        assert_eq!(outcome.next_session, vec!["graphics storage"]);
+
+        assert_eq!(classify(&current, &current), Default::default());
+    }
+
+    #[test]
+    fn a_reload_report_says_what_happened_to_each_part() {
+        use crate::config::Settings;
+
+        let mut next = Settings::default();
+        next.font.size = 20.0;
+        next.scrollback.bytes = 4096;
+        let report = classify(&Settings::default(), &next).describe(
+            std::path::Path::new("/home/someone/.config/sprite/config.toml"),
+            &["cursor.style \"wobbly\" is not one of them".to_owned()],
+        );
+
+        assert!(report.starts_with("reloaded /home/someone/.config/sprite/config.toml"));
+        assert!(report.contains("applied now: font"));
+        assert!(report.contains("waiting for a new pane: scrollback"));
+        assert!(report.contains("ignored: cursor.style"));
+
+        let unchanged = classify(&Settings::default(), &Settings::default())
+            .describe(std::path::Path::new("/tmp/config.toml"), &[]);
+        assert!(unchanged.contains("nothing changed"));
     }
 
     #[test]

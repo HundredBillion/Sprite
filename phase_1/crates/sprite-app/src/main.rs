@@ -12,7 +12,8 @@ use gpui::{
     px, size,
 };
 use sprite_app::{
-    Invocation, Settings, USAGE, WindowArgs, Workspace, parse_arguments, run_snapshot,
+    Invocation, Settings, USAGE, WindowArgs, Workspace, parse_arguments, run_config_reload,
+    run_snapshot,
 };
 
 fn main() -> ExitCode {
@@ -25,6 +26,11 @@ fn main() -> ExitCode {
             let mut out = std::io::stdout().lock();
             let mut errors = std::io::stderr().lock();
             ExitCode::from(run_snapshot(&args, &mut out, &mut errors) as u8)
+        }
+        Ok(Invocation::ConfigReload) => {
+            let mut out = std::io::stdout().lock();
+            let mut errors = std::io::stderr().lock();
+            ExitCode::from(run_config_reload(&mut out, &mut errors) as u8)
         }
         Ok(Invocation::Help) => {
             println!("{USAGE}");

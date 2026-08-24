@@ -247,21 +247,43 @@ impl Settings {
         Self::parse(&text)
     }
 
+    /// Reads one file as a *candidate*, keeping a whole-file failure separate.
+    ///
+    /// At startup a file that will not parse means defaults, because a terminal
+    /// must open. On reload it means something quite different: there is
+    /// already a working configuration, and replacing it with defaults because
+    /// of a missing bracket would be a worse answer than keeping it. The two
+    /// callers need to tell those apart, so this reports it as an error rather
+    /// than folding it into the complaints.
+    pub fn load_candidate(path: &Path) -> Result<(Self, Complaints), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+        Self::parse_candidate(&text)
+    }
+
     /// Reads settings from TOML text, keeping the default for anything the file
     /// does not say or says wrongly.
     pub fn parse(text: &str) -> (Self, Complaints) {
+        match Self::parse_candidate(text) {
+            Ok(parsed) => parsed,
+            Err(error) => (
+                Self::default(),
+                Complaints(vec![format!(
+                    "configuration is not valid TOML, so Sprite's defaults are in use: {error}"
+                )]),
+            ),
+        }
+    }
+
+    /// The same reading, with a whole-file failure reported as an error.
+    ///
+    /// The error carries the TOML crate's own message, which names the line and
+    /// column — a reload that says only "invalid" leaves somebody hunting.
+    pub fn parse_candidate(text: &str) -> Result<(Self, Complaints), String> {
         let mut settings = Self::default();
         let mut complaints = Complaints::default();
 
-        let document: toml::Value = match toml::from_str(text) {
-            Ok(document) => document,
-            Err(error) => {
-                complaints.0.push(format!(
-                    "configuration is not valid TOML, so Sprite's defaults are in use: {error}"
-                ));
-                return (settings, complaints);
-            }
-        };
+        let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
 
         if let Some(section) = document.get("font") {
             match section.get("family") {
@@ -512,8 +534,13 @@ impl Settings {
             }
         }
 
-        (settings, complaints)
+        Ok((settings, complaints))
     }
+}
+
+/// Where this user's configuration lives, when it can be located at all.
+pub fn path() -> Option<PathBuf> {
+    configuration_path()
 }
 
 /// Where this user's configuration lives.
@@ -874,6 +901,34 @@ mod tests {
         let wrong = "[scrollback]\nbytes = \"lots\"\n";
         assert_eq!(parsed(wrong).scrollback.bytes, Scrollback::default().bytes);
         assert!(complaints(wrong)[0].contains("whole number of bytes"));
+    }
+
+    /// The difference reload rests on: a file that will not parse at all is an
+    /// error, not a complaint, because there is already a working
+    /// configuration that should be left alone.
+    #[test]
+    fn a_candidate_that_will_not_parse_is_an_error_with_its_location() {
+        let error = Settings::parse_candidate("[font\nsize = 12").expect_err("broken TOML");
+        assert!(
+            error.contains("line") || error.contains("TOML"),
+            "the message should locate the problem: {error}"
+        );
+
+        // The same text at startup is a complaint and defaults, because a
+        // terminal has to open.
+        let (settings, complaints) = Settings::parse("[font\nsize = 12");
+        assert_eq!(settings, Settings::default());
+        assert!(complaints.0[0].contains("not valid TOML"));
+    }
+
+    #[test]
+    fn a_candidate_that_parses_reports_its_bad_fields_and_keeps_the_rest() {
+        let (settings, complaints) =
+            Settings::parse_candidate("[font]\nsize = 20\nfamily = 12\n").expect("valid TOML");
+
+        assert_eq!(settings.font.size, 20.0, "the good field is kept");
+        assert_eq!(settings.font.family, None, "the bad one falls back");
+        assert_eq!(complaints.0.len(), 1);
     }
 
     #[test]

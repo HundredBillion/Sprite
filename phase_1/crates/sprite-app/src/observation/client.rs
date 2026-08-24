@@ -98,6 +98,54 @@ pub fn run_snapshot(args: &SnapshotArgs, out: &mut dyn Write, errors: &mut dyn W
     Exit::Ok
 }
 
+/// Asks the containing window to re-read its configuration file.
+///
+/// The answer is prose rather than JSON — it is written for the person who
+/// typed the command, and there is nothing here for a tool to parse — so it
+/// goes to standard output as it arrives.
+pub fn run_config_reload(out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
+    let environment = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+
+    let (Some(socket), Some(key)) = (environment(SOCKET_VARIABLE), environment(KEY_VARIABLE))
+    else {
+        let _ = writeln!(
+            errors,
+            "sprite: not running inside a Sprite window, so there is no window to reload\n\
+             (a window reloads its own configuration; this command asks the one it is running in)"
+        );
+        return Exit::NoWindow;
+    };
+
+    match exchange(&socket, &format!("{key} {PROTOCOL} config reload")) {
+        Ok(answer) => {
+            let trimmed = answer.trim();
+            if trimmed.is_empty() {
+                let _ = writeln!(
+                    errors,
+                    "sprite: the window closed the connection without answering"
+                );
+                return Exit::Refused;
+            }
+            // A refusal is prose too, so it is told apart by what it says
+            // rather than by its shape: only a reload that happened begins by
+            // saying so.
+            if !trimmed.starts_with("reloaded ") {
+                let _ = writeln!(errors, "sprite: {trimmed}");
+                return Exit::Refused;
+            }
+            let _ = writeln!(out, "{trimmed}");
+            Exit::Ok
+        }
+        Err(error) => {
+            let _ = writeln!(
+                errors,
+                "sprite: could not ask this window to reload: {error}"
+            );
+            Exit::Unreachable
+        }
+    }
+}
+
 /// Builds the request, which carries the key and nothing the window did not ask
 /// for.
 fn request_line(args: &SnapshotArgs, key: &str, pane: Option<&str>) -> Result<String, String> {

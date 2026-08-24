@@ -381,6 +381,14 @@ pub enum TerminalCommand {
     /// caller can see *that* an image is held, which is what the graphics
     /// limits are asserted against.
     CaptureGraphics,
+    /// Replace this pane's default colours, as a reload does.
+    ///
+    /// Defaults, so a program that has set its own colours keeps them: a
+    /// preference changed while `vim` is running takes effect when `vim`
+    /// stops, which is the same rule as at startup.
+    SetColors(ColorDefaults),
+    /// Replace this pane's default cursor, as a reload does.
+    SetCursor(CursorDefaults),
 }
 
 /// How many lines of history an observation request wants.

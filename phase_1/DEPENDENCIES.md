@@ -280,6 +280,12 @@ need a polling loop or an extra bridge thread. Sprite keeps the ordered internal
 command/output queue on `std::sync::mpsc::sync_channel` and uses
 `async-channel` only at the GUI boundary, per ADR 0010.
 
+Checkpoint 5 added the same boundary in the other direction: an observation
+endpoint thread hands a `config reload` to the GPUI thread, which is the only
+one that may touch a view. The reply travels back on a `std::sync::mpsc`
+channel, because the waiting side is a plain thread that needs a *timeout*
+rather than an await.
+
 **Features.** Default features (`std`) only; `portable-atomic` stays off.
 
 **License and source.** Apache-2.0 OR MIT.
