@@ -492,6 +492,7 @@ mod tests {
                 column: 4,
                 visible: true,
                 blinking: false,
+                style: Default::default(),
             },
             viewport: Viewport {
                 total_rows: 40,

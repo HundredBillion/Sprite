@@ -5,6 +5,7 @@
 //! the Sprite application. No libghostty pointer, borrowed row or cell,
 //! allocator, iterator, or PTY handle appears in this crate's public interface.
 
+mod foreground;
 mod graphics;
 mod png_decoder;
 #[cfg(unix)]
@@ -181,6 +182,8 @@ pub struct SessionConfig {
     pub graphics: GraphicsPolicy,
     /// The colours this pane starts with, before any program says otherwise.
     pub colors: ColorDefaults,
+    /// The cursor this pane starts with, before any program says otherwise.
+    pub cursor: CursorDefaults,
     /// Scrollback budget in **bytes**, not lines.
     ///
     /// libghostty's C header documents this as "maximum number of lines", but
@@ -202,6 +205,7 @@ impl SessionConfig {
             size: TerminalSize::DEFAULT,
             graphics: GraphicsPolicy::default(),
             colors: ColorDefaults::default(),
+            cursor: CursorDefaults::default(),
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
         }
     }
@@ -399,6 +403,7 @@ impl Default for HistoryLines {
     }
 }
 
+pub use foreground::{ForegroundState, ForegroundWatch};
 pub use graphics::{
     GraphicsFrame, GraphicsSnapshot, ImagePixels, ImageSummary, Layer, Placement,
     PlacementMetadata, PlacementSummary, Rectangle, TransmittedFormat,
@@ -498,6 +503,32 @@ impl ColorDefaults {
             && self.cursor.is_none()
             && self.palette.is_empty()
     }
+}
+
+/// How a cursor is drawn.
+///
+/// The four shapes DECSCUSR can select, which is also the set libghostty
+/// reports. A terminal that offered fewer would silently ignore a program that
+/// asked for one of them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+    /// An outline, which is how a terminal shows an unfocused cursor.
+    BlockHollow,
+}
+
+/// The cursor a pane starts with, before any program says otherwise.
+///
+/// Defaults rather than overrides, for the same reason colours are: DECSCUSR 0
+/// means "back to the default", and a program that sends it should land on the
+/// preference rather than on libghostty's built-in block.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CursorDefaults {
+    pub style: Option<CursorStyle>,
+    pub blink: Option<bool>,
 }
 
 /// Where a Pane's viewport sits over its scrollable area.
@@ -611,6 +642,8 @@ pub struct CursorSnapshot {
     pub column: u16,
     pub visible: bool,
     pub blinking: bool,
+    /// The shape to draw, which a program can change with DECSCUSR at any time.
+    pub style: CursorStyle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -952,6 +985,8 @@ pub struct TerminalSession {
     events: Option<EventStream>,
     snapshots: Option<SnapshotStream>,
     shutdown: Arc<AtomicBool>,
+    /// Answers "what is running in this pane" without a round-trip.
+    foreground: Arc<ForegroundWatch>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -965,12 +1000,14 @@ impl TerminalSession {
         let (event_tx, event_rx) = async_channel::bounded(EVENT_CAPACITY);
         let (snapshot_tx, snapshot_rx) = async_channel::bounded(SNAPSHOT_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
+        let foreground = Arc::new(ForegroundWatch::default());
 
         let worker = std::thread::Builder::new()
             .name("sprite-term-worker".to_owned())
             .spawn({
                 let shutdown = Arc::clone(&shutdown);
                 let commands = commands.clone();
+                let foreground = Arc::clone(&foreground);
                 move || {
                     worker::run(
                         config,
@@ -979,6 +1016,7 @@ impl TerminalSession {
                         event_tx,
                         snapshot_tx,
                         shutdown,
+                        foreground,
                     )
                 }
             })
@@ -993,8 +1031,17 @@ impl TerminalSession {
                 requests,
             }),
             shutdown,
+            foreground,
             worker: Some(worker),
         })
+    }
+
+    /// What is in the foreground of this pane's terminal, right now.
+    ///
+    /// Asked of the kernel rather than of the worker, so an answer arrives
+    /// while a key is still being handled — see [`ForegroundWatch`].
+    pub fn foreground(&self) -> ForegroundState {
+        self.foreground.state()
     }
 
     pub fn take_event_stream(&mut self) -> Result<EventStream, SessionError> {

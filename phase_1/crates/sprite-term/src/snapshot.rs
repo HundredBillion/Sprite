@@ -16,9 +16,9 @@ use libghostty_vt::style::{RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{Point, PointCoordinate};
 
 use crate::{
-    CellStyle, CellWidth, CursorSnapshot, HistorySnapshot, PaneRow, PaneSnapshot, PromptKind,
-    RenderCell, RenderRow, RenderSnapshot, Rgb, ScreenKind, SessionError, SnapshotBundle,
-    SnapshotColor, TerminalSize, UnderlineStyle, Viewport,
+    CellStyle, CellWidth, CursorSnapshot, CursorStyle, HistorySnapshot, PaneRow, PaneSnapshot,
+    PromptKind, RenderCell, RenderRow, RenderSnapshot, Rgb, ScreenKind, SessionError,
+    SnapshotBundle, SnapshotColor, TerminalSize, UnderlineStyle, Viewport,
 };
 
 /// The active screen plus up to `lines` rows of history, read once.
@@ -364,9 +364,24 @@ pub(crate) fn capture<'vt>(
 fn cursor_snapshot(
     snapshot: &libghostty_vt::render::Snapshot<'_, '_>,
 ) -> Result<CursorSnapshot, SessionError> {
+    use libghostty_vt::render::CursorVisualStyle;
+
     let viewport = snapshot.cursor_viewport().map_err(vt("cursor_viewport"))?;
     let blinking = snapshot.cursor_blinking().map_err(vt("cursor_blinking"))?;
     let visible = snapshot.cursor_visible().map_err(vt("cursor_visible"))?;
+    let style = match snapshot
+        .cursor_visual_style()
+        .map_err(vt("cursor_visual_style"))?
+    {
+        CursorVisualStyle::Block => CursorStyle::Block,
+        CursorVisualStyle::Bar => CursorStyle::Bar,
+        CursorVisualStyle::Underline => CursorStyle::Underline,
+        CursorVisualStyle::BlockHollow => CursorStyle::BlockHollow,
+        // The enum is `non_exhaustive`, so a future libghostty may report a
+        // shape this version has never heard of. A block is the shape every
+        // terminal has always drawn, and is legible whatever was meant.
+        _ => CursorStyle::Block,
+    };
 
     Ok(match viewport {
         // Off-viewport cursors are reported as not visible rather than
@@ -376,12 +391,14 @@ fn cursor_snapshot(
             column: 0,
             visible: false,
             blinking,
+            style,
         },
         Some(position) => CursorSnapshot {
             row: position.y,
             column: position.x,
             visible,
             blinking,
+            style,
         },
     })
 }

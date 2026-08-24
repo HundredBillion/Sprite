@@ -13,7 +13,7 @@
 //! work.
 
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
@@ -269,6 +269,27 @@ impl From<&GroupSignal> for Signal {
             GroupSignal::Kill => Signal::SIGKILL,
         }
     }
+}
+
+/// A private duplicate of the PTY master.
+///
+/// The worker's own copy is closed when the session ends, and a descriptor
+/// number is reused the moment it is free — so asking a stale number what is
+/// running on it could answer for an unrelated file. Holding a duplicate means
+/// the question is always asked of this session's terminal or of nothing.
+pub(crate) fn duplicate(fd: RawFd) -> Option<OwnedFd> {
+    let copy = nix::unistd::dup(fd).ok()?;
+    // SAFETY: `dup` returns a freshly allocated descriptor that no other owner
+    // holds, and ownership passes to this `OwnedFd` and nowhere else.
+    Some(unsafe { OwnedFd::from_raw_fd(copy) })
+}
+
+/// The process group currently in the foreground of a terminal.
+///
+/// This is the kernel's own answer to "what is running", the same one a shell
+/// uses to decide who receives a Ctrl+C.
+pub(crate) fn foreground_group(master: &OwnedFd) -> Option<i32> {
+    nix::unistd::tcgetpgrp(master).ok().map(Pid::as_raw)
 }
 
 /// The process group a child belongs to, recorded so descendants that outlive

@@ -22,6 +22,7 @@ pub struct Settings {
     pub graphics: Graphics,
     pub font: Font,
     pub colors: Colors,
+    pub cursor: Cursor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,6 +121,35 @@ impl Colors {
     }
 }
 
+/// The cursor, which is the one part of a terminal that is always moving.
+///
+/// Both settings are *defaults* rather than overrides: DECSCUSR lets a program
+/// choose a shape, and `vim` does it constantly. What is configured here is
+/// what a pane starts with and what a program returns it to.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Cursor {
+    /// `None` keeps libghostty's block.
+    pub style: Option<sprite_term::CursorStyle>,
+    /// `None` keeps libghostty's steady cursor.
+    pub blink: Option<bool>,
+}
+
+impl Cursor {
+    /// The spellings a person may write, and nothing else.
+    ///
+    /// `hollow` is included because libghostty can report it and DECSCUSR
+    /// cannot select it, so configuration is the only way to ask for one.
+    pub fn parse_style(text: &str) -> Option<sprite_term::CursorStyle> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "block" => Some(sprite_term::CursorStyle::Block),
+            "bar" | "beam" => Some(sprite_term::CursorStyle::Bar),
+            "underline" => Some(sprite_term::CursorStyle::Underline),
+            "hollow" | "block_hollow" => Some(sprite_term::CursorStyle::BlockHollow),
+            _ => None,
+        }
+    }
+}
+
 /// What a pane will spend on images.
 ///
 /// The two limits are separate on purpose, as the PRD requires: the terminal
@@ -151,6 +181,7 @@ impl Default for Settings {
         Self {
             font: Font::default(),
             colors: Colors::default(),
+            cursor: Cursor::default(),
             graphics: Graphics::default(),
             // Observation is on by default: the PRD makes it automatically
             // available to local tools without prompting, and a window that
@@ -275,22 +306,21 @@ impl Settings {
         }
 
         if let Some(section) = document.get("colors") {
-            let mut named = |key: &str, slot: &mut Option<sprite_term::Rgb>| {
-                match section.get(key) {
-                    Some(toml::Value::String(text)) => match Colors::parse_hex(text) {
-                        Some(color) => *slot = Some(color),
-                        None => complaints.0.push(format!(
-                            "colors.{key} is {text:?}, which is not a #rrggbb colour; \
+            let mut named = |key: &str, slot: &mut Option<sprite_term::Rgb>| match section.get(key)
+            {
+                Some(toml::Value::String(text)) => match Colors::parse_hex(text) {
+                    Some(color) => *slot = Some(color),
+                    None => complaints.0.push(format!(
+                        "colors.{key} is {text:?}, which is not a #rrggbb colour; \
                              keeping the default"
-                        )),
-                    },
-                    Some(other) => complaints.0.push(format!(
-                        "colors.{key} must be a #rrggbb colour in quotes, not {}; \
-                         keeping the default",
-                        other.type_str()
                     )),
-                    None => {}
-                }
+                },
+                Some(other) => complaints.0.push(format!(
+                    "colors.{key} must be a #rrggbb colour in quotes, not {}; \
+                         keeping the default",
+                    other.type_str()
+                )),
+                None => {}
             };
             named("background", &mut settings.colors.background);
             named("foreground", &mut settings.colors.foreground);
@@ -321,6 +351,31 @@ impl Settings {
                 Some(other) => complaints.0.push(format!(
                     "colors.palette must be a table of index = \"#rrggbb\", not {}; \
                      keeping the palette",
+                    other.type_str()
+                )),
+                None => {}
+            }
+        }
+
+        if let Some(section) = document.get("cursor") {
+            match section.get("style") {
+                Some(toml::Value::String(text)) => match Cursor::parse_style(text) {
+                    Some(style) => settings.cursor.style = Some(style),
+                    None => complaints.0.push(format!(
+                        "cursor.style {text:?} is not block, bar, underline or hollow; \
+                         keeping the default"
+                    )),
+                },
+                Some(other) => complaints.0.push(format!(
+                    "cursor.style must be a name in quotes, not {}; keeping the default",
+                    other.type_str()
+                )),
+                None => {}
+            }
+            match section.get("blink") {
+                Some(toml::Value::Boolean(blink)) => settings.cursor.blink = Some(*blink),
+                Some(other) => complaints.0.push(format!(
+                    "cursor.blink must be true or false, not {}; keeping the default",
                     other.type_str()
                 )),
                 None => {}
@@ -616,6 +671,46 @@ mod tests {
         assert_eq!(Colors::parse_hex("#ABCDEF"), Colors::parse_hex("#abcdef"));
         assert_eq!(Colors::parse_hex(""), None);
         assert_eq!(Colors::parse_hex("#12345"), None);
+    }
+
+    #[test]
+    fn a_cursor_style_and_blink_are_read() {
+        let settings = parsed("[cursor]\nstyle = \"bar\"\nblink = true\n");
+        assert_eq!(settings.cursor.style, Some(sprite_term::CursorStyle::Bar));
+        assert_eq!(settings.cursor.blink, Some(true));
+
+        // Unset is not the same as "block, steady": it means the terminal's own
+        // default, which is what a program resetting the cursor returns to.
+        assert_eq!(Settings::default().cursor.style, None);
+        assert_eq!(Settings::default().cursor.blink, None);
+    }
+
+    #[test]
+    fn every_cursor_shape_has_a_spelling() {
+        use sprite_term::CursorStyle;
+        assert_eq!(Cursor::parse_style("block"), Some(CursorStyle::Block));
+        assert_eq!(Cursor::parse_style("BAR"), Some(CursorStyle::Bar));
+        assert_eq!(Cursor::parse_style("beam"), Some(CursorStyle::Bar));
+        assert_eq!(
+            Cursor::parse_style(" underline "),
+            Some(CursorStyle::Underline)
+        );
+        assert_eq!(
+            Cursor::parse_style("hollow"),
+            Some(CursorStyle::BlockHollow)
+        );
+        assert_eq!(Cursor::parse_style("wobbly"), None);
+    }
+
+    #[test]
+    fn a_nonsense_cursor_keeps_the_default_and_says_so() {
+        let text = "[cursor]\nstyle = \"wobbly\"\n";
+        assert_eq!(parsed(text).cursor.style, None);
+        assert!(complaints(text)[0].contains("block, bar, underline"));
+
+        let blink = "[cursor]\nblink = \"yes\"\n";
+        assert_eq!(parsed(blink).cursor.blink, None);
+        assert!(complaints(blink)[0].contains("true or false"));
     }
 
     #[test]

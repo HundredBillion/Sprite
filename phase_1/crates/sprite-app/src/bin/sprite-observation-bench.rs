@@ -149,6 +149,7 @@ fn snapshot(history: usize, width: usize) -> Arc<HistorySnapshot> {
             column: 0,
             visible: true,
             blinking: false,
+            style: Default::default(),
         },
         viewport: Viewport {
             total_rows: history + 40,

@@ -29,6 +29,9 @@ const TAB_STRIP_HEIGHT: f32 = 28.0;
 const TAB_ACTIVE_BG: u32 = 0x1d1d24;
 const TAB_INACTIVE_FG: u32 = 0x8a8a99;
 const TAB_ACTIVE_FG: u32 = 0xe6e6ef;
+/// The close question, in the one colour nothing else in the window uses.
+const CONFIRM_BG: u32 = 0x5a3030;
+const CONFIRM_FG: u32 = 0xffe0e0;
 
 pub struct Workspace {
     tabs: Tabs<gpui::Entity<TerminalView>>,
@@ -52,6 +55,8 @@ pub struct Workspace {
     /// Held so that a pane created later — by a split or a new tab — runs the
     /// same thing the window was asked to run.
     command: Option<Vec<std::ffi::OsString>>,
+    /// A close waiting on a second press, because something is running.
+    pending_close: Option<PendingClose>,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
     /// A pane created by a split has no element in the dispatch tree until the
@@ -106,6 +111,7 @@ impl Workspace {
             settings,
             focus: cx.focus_handle(),
             pending_focus,
+            pending_close: None,
         }
     }
 
@@ -219,6 +225,9 @@ impl Workspace {
     }
 
     fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
+        if !self.may_close(CloseScope::Pane, cx) {
+            return;
+        }
         let Some(view) = self.tabs.close_focused_pane() else {
             return;
         };
@@ -227,11 +236,74 @@ impl Workspace {
     }
 
     fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        if !self.may_close(CloseScope::Tab, cx) {
+            return;
+        }
         let tab = self.tabs.active_tab();
         for view in self.tabs.close_tab(tab) {
             self.shut_down(view, cx);
         }
         self.after_close(cx);
+    }
+
+    /// Whether a close may go ahead now, or must be asked about first.
+    ///
+    /// PRD story 11, and the last thing between a mistyped binding and an hour
+    /// of somebody's work. A pane sitting at a shell prompt closes without
+    /// ceremony; one running a program asks, and the same keystroke again
+    /// answers. A pane whose state cannot be determined closes too — a question
+    /// nobody can ever resolve is one people learn to dismiss unread.
+    fn may_close(&mut self, scope: CloseScope, cx: &mut Context<Self>) -> bool {
+        // The second press. Only for the same scope: a pending pane close is
+        // not consent to closing the whole tab.
+        if self
+            .pending_close
+            .as_ref()
+            .is_some_and(|pending| pending.scope == scope)
+        {
+            self.pending_close = None;
+            return true;
+        }
+
+        let running = self.running_programs(scope, cx);
+        if running.is_empty() {
+            return true;
+        }
+        self.pending_close = Some(PendingClose {
+            scope,
+            running: describe_running(&running).into(),
+        });
+        cx.notify();
+        false
+    }
+
+    /// The programs a close would interrupt, one entry per busy pane.
+    fn running_programs(&self, scope: CloseScope, cx: &Context<Self>) -> Vec<Option<String>> {
+        let views: Vec<&gpui::Entity<TerminalView>> = match scope {
+            CloseScope::Pane => self.tabs.active().focused().into_iter().collect(),
+            CloseScope::Tab => self
+                .tabs
+                .active()
+                .layout()
+                .into_iter()
+                .map(|(_, _, view)| view)
+                .collect(),
+        };
+        views
+            .into_iter()
+            .filter_map(|view| {
+                let state = view.read(cx).foreground();
+                state
+                    .should_confirm()
+                    .then(|| state.program().map(str::to_owned))
+            })
+            .collect()
+    }
+
+    fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
+        if self.pending_close.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn after_close(&mut self, cx: &mut Context<Self>) {
@@ -398,6 +470,49 @@ fn session_environment(
     endpoint
         .map(|endpoint| endpoint.environment(tab, pane))
         .unwrap_or_default()
+}
+
+/// A close waiting on a second press.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingClose {
+    scope: CloseScope,
+    /// What is running, as it will be shown.
+    running: SharedString,
+}
+
+/// How much a close would take with it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseScope {
+    Pane,
+    Tab,
+}
+
+impl CloseScope {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Pane => "pane",
+            Self::Tab => "tab",
+        }
+    }
+}
+
+/// Names the programs a close would interrupt.
+///
+/// A pane whose program could not be named still counts — "something is
+/// running" is the part that matters, and inventing a name would be worse than
+/// admitting to none.
+fn describe_running(running: &[Option<String>]) -> String {
+    let mut names: Vec<&str> = running.iter().filter_map(Option::as_deref).collect();
+    names.sort_unstable();
+    names.dedup();
+    let unnamed = running.len() - running.iter().filter(|name| name.is_some()).count();
+
+    match (names.as_slice(), unnamed) {
+        ([], _) => "a program is running".to_owned(),
+        ([one], 0) => format!("{one} is running"),
+        (many, 0) => format!("{} are running", many.join(", ")),
+        (many, _) => format!("{} and other programs are running", many.join(", ")),
+    }
 }
 
 /// The workspace's own bindings, resolved before anything reaches a terminal.
@@ -604,7 +719,26 @@ impl Render for Workspace {
             // one event reaching two consumers, which the terminal's input
             // rules forbid.
             .capture_key_down(cx.listener(|workspace, event: &KeyDownEvent, window, cx| {
-                let Some(action) = workspace_action(&event.keystroke) else {
+                let action = workspace_action(&event.keystroke);
+                if workspace.pending_close.is_some() {
+                    // Escape answers "no". It is claimed, because a question on
+                    // screen is what the key is for at that moment.
+                    if event.keystroke.key == "escape" {
+                        workspace.dismiss_pending_close(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // Anything that is not the same close again is a person
+                    // getting on with something else. The question goes away
+                    // and the key carries on to whatever it was for.
+                    if !matches!(
+                        action,
+                        Some(WorkspaceAction::ClosePane | WorkspaceAction::CloseTab)
+                    ) {
+                        workspace.dismiss_pending_close(cx);
+                    }
+                }
+                let Some(action) = action else {
                     return;
                 };
                 // Claimed: nothing below this element will see it.
@@ -629,6 +763,20 @@ impl Render for Workspace {
                     }
                 }
             }))
+            .children(self.pending_close.as_ref().map(|pending| {
+                div()
+                    .flex()
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .bg(rgb(CONFIRM_BG))
+                    .text_color(rgb(CONFIRM_FG))
+                    .child(SharedString::from(format!(
+                        "{} — press the same keys again to close this {}, Esc to keep it",
+                        pending.running,
+                        pending.scope.noun()
+                    )))
+            }))
             .when(strip > 0.0, |element| {
                 element.child(
                     div()
@@ -646,7 +794,7 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Direction, WorkspaceAction, workspace_action};
+    use super::{CloseScope, Direction, WorkspaceAction, describe_running, workspace_action};
     use gpui::{Keystroke, Modifiers};
 
     fn press(key: &str, modifiers: Modifiers) -> Keystroke {
@@ -743,6 +891,41 @@ mod tests {
             ..Modifiers::default()
         };
         assert_eq!(workspace_action(&press("_", with_platform)), None);
+    }
+
+    #[test]
+    fn what_is_running_is_named_where_it_can_be() {
+        let named = |name: &str| Some(name.to_owned());
+
+        assert_eq!(describe_running(&[named("vim")]), "vim is running");
+        assert_eq!(
+            describe_running(&[named("vim"), named("cargo")]),
+            "cargo, vim are running"
+        );
+        // The same program in two panes is one name, not two.
+        assert_eq!(
+            describe_running(&[named("vim"), named("vim")]),
+            "vim is running"
+        );
+    }
+
+    /// A pane whose program cannot be named still counts. "Something is
+    /// running" is the part that matters, and a guess would be worse than an
+    /// admission.
+    #[test]
+    fn an_unnamed_program_still_asks() {
+        assert_eq!(describe_running(&[None]), "a program is running");
+        assert_eq!(describe_running(&[None, None]), "a program is running");
+        assert_eq!(
+            describe_running(&[Some("vim".to_owned()), None]),
+            "vim and other programs are running"
+        );
+    }
+
+    #[test]
+    fn a_close_question_says_what_it_would_close() {
+        assert_eq!(CloseScope::Pane.noun(), "pane");
+        assert_eq!(CloseScope::Tab.noun(), "tab");
     }
 
     #[test]

@@ -443,6 +443,7 @@ mod tests {
                 column: 0,
                 visible: true,
                 blinking: false,
+                style: Default::default(),
             },
             viewport: sprite_term::Viewport {
                 total_rows: 24,

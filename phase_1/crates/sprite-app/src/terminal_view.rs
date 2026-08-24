@@ -53,6 +53,15 @@ const BACKGROUND: u32 = 0x101014;
 const FOREGROUND: u32 = 0xd8d8e0;
 const STATUS: u32 = 0xf0a0a0;
 
+/// Half a blink. The rate every terminal has used since the VT100.
+const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
+
+/// How thick a bar or underline cursor is drawn, as a fraction of a cell.
+///
+/// A fraction rather than a constant, because a cursor two logical pixels wide
+/// is a bold stripe at size 8 and nearly invisible at size 48.
+const CURSOR_STROKE: f32 = 0.12;
+
 pub struct TerminalView {
     session: TerminalSession,
     bundle: Option<Arc<SnapshotBundle>>,
@@ -93,6 +102,11 @@ pub struct TerminalView {
     drag_anchor: Option<CellPosition>,
     /// A paste withheld as unsafe, awaiting a second explicit request.
     pending_unsafe_paste: Option<String>,
+    /// Whether the cursor is in the visible half of its blink.
+    ///
+    /// Always true for a cursor that does not blink, so the phase costs a
+    /// non-blinking pane nothing.
+    blink_on: bool,
     /// Text an input method is composing.
     ///
     /// Shown at the cursor and deliberately *not* sent: the terminal learns
@@ -100,6 +114,7 @@ pub struct TerminalView {
     preedit: Option<String>,
     _events: Task<()>,
     _snapshots: Task<()>,
+    _blink: Task<()>,
 }
 
 impl TerminalView {
@@ -124,6 +139,7 @@ impl TerminalView {
             font,
             graphics,
             colors,
+            cursor,
             ..
         } = settings;
 
@@ -179,6 +195,10 @@ impl TerminalView {
             background: Some(fallback_colors.1),
             cursor: colors.cursor,
             palette: colors.palette,
+        };
+        config.cursor = sprite_term::CursorDefaults {
+            style: cursor.style,
+            blink: cursor.blink,
         };
         config.environment.extend(environment);
         let initial_size = config.size;
@@ -345,6 +365,19 @@ impl TerminalView {
             }
         });
 
+        // One timer per pane, running whether or not the cursor blinks: it wakes
+        // twice a second, notices a steady cursor, and does nothing. Starting
+        // and stopping it as programs change the cursor would be more moving
+        // parts for less than a millisecond of work.
+        let blink_task = cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                if view.update(cx, |view, cx| view.tick_blink(cx)).is_err() {
+                    return;
+                }
+            }
+        });
+
         Self {
             session,
             observation,
@@ -366,8 +399,10 @@ impl TerminalView {
             drag_anchor: None,
             pending_unsafe_paste: None,
             preedit: None,
+            blink_on: true,
             _events: event_task,
             _snapshots: snapshot_task,
+            _blink: blink_task,
         }
     }
 
@@ -401,8 +436,10 @@ impl TerminalView {
             drag_anchor: None,
             pending_unsafe_paste: None,
             preedit: None,
+            blink_on: true,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
+            _blink: Task::ready(()),
         }
     }
 
@@ -505,6 +542,31 @@ impl TerminalView {
             return Vec::new();
         };
         bundle.render.rows.iter().map(lay_out_row).collect()
+    }
+
+    /// One half-blink. Returns the pane to a visible cursor when nothing is
+    /// blinking, so a program that stops the blink cannot leave the cursor
+    /// hidden.
+    fn tick_blink(&mut self, cx: &mut Context<Self>) {
+        let blinking = self
+            .bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.render.cursor.blinking && bundle.render.cursor.visible);
+        if !blinking {
+            if !self.blink_on {
+                self.blink_on = true;
+                cx.notify();
+            }
+            return;
+        }
+        self.blink_on = !self.blink_on;
+        cx.notify();
+    }
+
+    /// What this pane is running, asked of the kernel rather than of the
+    /// worker — see [`sprite_term::ForegroundWatch`].
+    pub fn foreground(&self) -> sprite_term::ForegroundState {
+        self.session.foreground()
     }
 
     fn default_colors(&self) -> (Rgb, Rgb) {
@@ -779,15 +841,20 @@ fn row_element(
         .children(cells.into_iter().filter_map(move |cell| {
             let (foreground, background) =
                 cell_colors(&cell.style, default_fg, default_bg, palette.as_deref());
-            let is_cursor = on_cursor.is_some_and(|c| c.column == cell.column);
-            // Selection and cursor both invert. The cursor wins where they
-            // overlap so it stays findable inside a selected run.
-            let inverted = is_cursor || cell.selected;
+            let here = on_cursor.filter(|c| c.column == cell.column);
+            // Only a block covers the cell it sits on. A bar or an underline is
+            // a mark drawn beside the glyph, so the text under them keeps the
+            // colours it would have had.
+            let is_block = here.is_some_and(|c| c.style == sprite_term::CursorStyle::Block);
+            // Selection and a block cursor both invert. The cursor wins where
+            // they overlap so it stays findable inside a selected run.
+            let inverted = is_block || cell.selected;
             // "Painted" means the cell asked for a colour of its own, whether
             // directly or by being inverted. A cell showing the terminal's
             // default background has asked for nothing, and is where an image
             // behind the text is meant to show through.
             let painted = inverted
+                || here.is_some()
                 || !matches!(cell.style.background, SnapshotColor::Default)
                 || cell.style.inverse;
 
@@ -806,16 +873,16 @@ fn row_element(
                 .h(cell_height)
                 .overflow_hidden();
 
+            // A configured or program-set cursor colour paints the cursor;
+            // without one it is drawn in the cell's own foreground, which is
+            // legible against that cell's background by definition.
+            let cursor_paint = cursor_color.map_or(foreground, |color| rgb(pack(color)));
+
             if pass != RowPass::Text {
-                // A configured or program-set cursor colour paints the cursor
-                // cell; everything else inverts as before. The text stays the
-                // inverted colour either way, so a cursor is legible on top of
-                // whatever colour it was given.
-                let block = is_cursor.then_some(cursor_color).flatten();
-                element = element.bg(match block {
-                    Some(color) => rgb(pack(color)),
-                    None if inverted => foreground,
-                    None => background,
+                element = element.bg(match (is_block, inverted) {
+                    (true, _) => cursor_paint,
+                    (false, true) => foreground,
+                    (false, false) => background,
                 });
             }
             if pass == RowPass::Background {
@@ -829,8 +896,59 @@ fn row_element(
             if cell.style.italic {
                 element = element.italic();
             }
-            Some(element.child(SharedString::from(cell.text)))
+            element = element.child(SharedString::from(cell.text));
+            // Added after the glyph so it draws over it, which is what makes a
+            // bar between two characters visible at all.
+            if let Some(mark) = cursor_mark(here, cursor_paint, cell_width, cell_height) {
+                element = element.child(mark);
+            }
+            Some(element)
         }))
+}
+
+/// The mark a non-block cursor leaves on the cell it sits on.
+///
+/// `None` for a block, which is drawn by painting the whole cell instead, and
+/// for a cell the cursor is not on.
+fn cursor_mark(
+    cursor: Option<sprite_term::CursorSnapshot>,
+    paint: Rgba,
+    cell_width: Pixels,
+    cell_height: Pixels,
+) -> Option<gpui::Div> {
+    use sprite_term::CursorStyle;
+
+    // At least one logical pixel: a stroke that rounds to nothing is a cursor
+    // nobody can find.
+    let stroke = |extent: Pixels| px((f32::from(extent) * CURSOR_STROKE).max(1.0));
+
+    Some(match cursor?.style {
+        CursorStyle::Block => return None,
+        CursorStyle::Bar => div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .h(cell_height)
+            .w(stroke(cell_width))
+            .bg(paint),
+        CursorStyle::Underline => div()
+            .absolute()
+            .left(px(0.0))
+            .bottom(px(0.0))
+            .w(cell_width)
+            .h(stroke(cell_height))
+            .bg(paint),
+        // An outline: the shape a terminal shows for an unfocused cursor, and
+        // the one DECSCUSR cannot ask for.
+        CursorStyle::BlockHollow => div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .w(cell_width)
+            .h(cell_height)
+            .border(px(1.0))
+            .border_color(paint),
+    })
 }
 
 /// Which part of a row a pass draws.
@@ -1012,7 +1130,13 @@ impl Render for TerminalView {
         let (default_fg, default_bg) = self.default_colors();
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
-        let cursor = self.bundle.as_ref().map(|bundle| bundle.render.cursor);
+        // A blinking cursor is simply absent for half of each blink, which is
+        // the whole of what blinking is; a steady one ignores the phase.
+        let cursor = self
+            .bundle
+            .as_ref()
+            .map(|bundle| bundle.render.cursor)
+            .filter(|cursor| self.blink_on || !cursor.blinking);
         let cursor_color = self
             .bundle
             .as_ref()

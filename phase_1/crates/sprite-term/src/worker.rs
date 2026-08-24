@@ -106,6 +106,7 @@ pub(crate) fn run(
     events: async_channel::Sender<TerminalEvent>,
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
+    foreground: Arc<crate::ForegroundWatch>,
 ) {
     let started = match start(&config, &commands) {
         Ok(started) => started,
@@ -124,6 +125,10 @@ pub(crate) fn run(
         process_group,
         waiter,
     } = started;
+
+    // Attached as soon as the PTY and child exist, so a pane can be asked what
+    // it is running from the moment it opens.
+    foreground.attach(master_fd, process_group);
 
     // Declared before the terminal so they outlive the callback it holds.
     let writer: PtyWriter = match master.take_writer() {
@@ -191,6 +196,11 @@ pub(crate) fn run(
     // Also before the first byte, so the first frame is already the configured
     // colours rather than a flash of Ghostty's own.
     if let Err(error) = apply_color_defaults(&mut terminal, &config.colors) {
+        let _ = events.send_blocking(TerminalEvent::Error(error));
+        return;
+    }
+
+    if let Err(error) = apply_cursor_defaults(&mut terminal, config.cursor) {
         let _ = events.send_blocking(TerminalEvent::Error(error));
         return;
     }
@@ -950,6 +960,38 @@ fn apply_color_defaults(
     Ok(())
 }
 
+/// Writes the configured cursor into the terminal's *default* cursor.
+///
+/// The same slot DECSCUSR 0 resets to, so a program that asks for the default
+/// cursor gets the configured one rather than libghostty's block.
+fn apply_cursor_defaults(
+    terminal: &mut Terminal<'_, '_>,
+    cursor: crate::CursorDefaults,
+) -> Result<(), SessionError> {
+    use libghostty_vt::terminal::CursorStyle;
+
+    let vt = |what: &'static str| move |error| SessionError::new(what, error);
+
+    if let Some(style) = cursor.style {
+        let style = match style {
+            crate::CursorStyle::Block => CursorStyle::Block,
+            crate::CursorStyle::Bar => CursorStyle::Bar,
+            crate::CursorStyle::Underline => CursorStyle::Underline,
+            crate::CursorStyle::BlockHollow => CursorStyle::BlockHollow,
+        };
+        terminal
+            .set_default_cursor_style(Some(style))
+            .map_err(vt("default_cursor_style"))?;
+    }
+    if let Some(blink) = cursor.blink {
+        terminal
+            .set_default_cursor_blink(Some(blink))
+            .map_err(vt("default_cursor_blink"))?;
+    }
+
+    Ok(())
+}
+
 /// Bounds what a pane will accept in the way of images.
 ///
 /// **Every denial here is deliberate rather than a default.** Ghostty's image
@@ -1022,8 +1064,6 @@ fn apply_graphics_policy(
 
     Ok(())
 }
-
-
 
 /// The basename of the program in the foreground of this terminal.
 ///

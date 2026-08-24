@@ -146,10 +146,41 @@ every window. The window now takes its colour from the terminal too.
 **Files:** `sprite-app/src/config.rs`, `sprite-app/src/terminal_view.rs`,
 `sprite-app/src/workspace.rs`
 
-- [ ] `cursor.style` (block, bar, underline) and `cursor.blink`.
-- [ ] **A pane with a live foreground process asks before closing** — PRD story
+- [x] `cursor.style` (block, bar, underline, and `hollow`, which DECSCUSR
+  cannot ask for) and `cursor.blink`. Both are *defaults*, so `vim` still picks
+  its own shape and DECSCUSR 0 returns to the configured one — verified on
+  screen: a configured bar, `\033[4 q` making it an underline, `\033[0 q`
+  returning it to the bar rather than to libghostty's block.
+- [x] Blinking is real blinking: one timer per pane, half a period at 530 ms.
+  Measured rather than eyeballed — eight screenshots 180 ms apart differ by the
+  61 pixels of the cursor and by nothing else, while a steady cursor gives eight
+  identical frames.
+- [x] **A pane with a live foreground process asks before closing** — PRD story
   11, and the last thing standing between a stray `Ctrl+Shift+W` and lost work.
   A pane sitting at a shell prompt closes without ceremony.
+
+**Asked of the kernel, not of the worker.** Every terminal has a foreground
+process group — the one that receives a Ctrl+C — and comparing it against the
+group the pane's shell was put in says whether the shell is at a prompt or
+waiting on something it started. That answer is available while the keystroke is
+still being handled, which a round-trip through the worker would not be: a pane
+flooded with output would answer late, and a confirmation that arrives after the
+pane has closed is not a confirmation. `ForegroundWatch` holds a private
+duplicate of the PTY master for exactly this, because a descriptor number is
+reused the moment it is free and a stale one would answer for an unrelated file.
+
+Three states, not two. `Unknown` — too early, or a platform that cannot be asked
+— closes without prompting: a question nobody can ever resolve is one people
+learn to dismiss unread. The name comes from `/proc/<pid>/comm` and nothing
+else; the arguments and the environment sit beside it and are deliberately not
+read, because a pane needs to say *what* is running, never with what secrets on
+its command line.
+
+Closing a whole tab asks by the same rule, since it is strictly more
+destructive, and a pending pane close is not consent to closing the tab. Verified
+on screen: `sleep 60` in a split produced "sleep is running — press the same keys
+again to close this pane, Esc to keep it"; Escape kept the pane; two presses
+closed it; and the idle pane left behind closed on one.
 
 ### Task 5: Shell, directory, scrollback
 
