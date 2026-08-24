@@ -11,9 +11,10 @@ use std::ops::Range;
 
 use gpui::{
     Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    Focusable, Font, FontFeatures, FontStyle, FontWeight, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollDelta, ScrollWheelEvent,
-    SharedString, Size, Task, TextRun, UTF16Selection, Window, canvas, div, point, px, rgb,
+    Focusable, Font, FontFeatures, FontStyle, FontWeight, ImageSource, KeyDownEvent, KeyUpEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollDelta,
+    ScrollWheelEvent, SharedString, Size, Task, TextRun, UTF16Selection, Window, canvas, div, img,
+    point, px, rgb,
 };
 use sprite_term::{
     CellPosition, CellStyle, KeyAction, MouseAction, MouseEvent, Rgb, Scroll, SelectionMode,
@@ -669,7 +670,183 @@ impl Drop for TerminalView {
     }
 }
 
+/// One row's elements for a given pass.
+///
+/// Every cell is placed by its grid column, so a glyph that renders wider than
+/// its cell is clipped instead of displacing the rest of the row.
+#[allow(clippy::too_many_arguments)]
+fn row_element(
+    index: usize,
+    cells: Vec<PositionedCell>,
+    pass: RowPass,
+    cursor: Option<sprite_term::CursorSnapshot>,
+    default_fg: sprite_term::Rgb,
+    default_bg: sprite_term::Rgb,
+    cell_width: Pixels,
+    cell_height: Pixels,
+) -> gpui::Div {
+    let row_top = px(index as f32 * f32::from(cell_height));
+    let on_cursor = cursor.filter(|c| c.visible && usize::from(c.row) == index);
+
+    div()
+        .absolute()
+        .top(row_top)
+        .left(px(0.0))
+        .h(cell_height)
+        .w_full()
+        .children(cells.into_iter().filter_map(move |cell| {
+            let (foreground, background) = cell_colors(&cell.style, default_fg, default_bg);
+            let is_cursor = on_cursor.is_some_and(|c| c.column == cell.column);
+            // Selection and cursor both invert. The cursor wins where they
+            // overlap so it stays findable inside a selected run.
+            let inverted = is_cursor || cell.selected;
+            // "Painted" means the cell asked for a colour of its own, whether
+            // directly or by being inverted. A cell showing the terminal's
+            // default background has asked for nothing, and is where an image
+            // behind the text is meant to show through.
+            let painted = inverted
+                || !matches!(cell.style.background, SnapshotColor::Default)
+                || cell.style.inverse;
+
+            // In a split pass a cell whose background is the terminal's default
+            // is left unpainted, so an image behind it shows through. A cell
+            // with a background of its own still covers the image, which is
+            // what an explicit background means.
+            if pass == RowPass::Background && !painted {
+                return None;
+            }
+
+            let mut element = div()
+                .absolute()
+                .left(cell.left(cell_width))
+                .w(cell.width(cell_width))
+                .h(cell_height)
+                .overflow_hidden();
+
+            if pass != RowPass::Text {
+                element = element.bg(if inverted { foreground } else { background });
+            }
+            if pass == RowPass::Background {
+                return Some(element);
+            }
+
+            element = element.text_color(if inverted { background } else { foreground });
+            if cell.style.bold {
+                element = element.font_weight(FontWeight::BOLD);
+            }
+            if cell.style.italic {
+                element = element.italic();
+            }
+            Some(element.child(SharedString::from(cell.text)))
+        }))
+}
+
+/// Which part of a row a pass draws.
+///
+/// Cells normally paint their background and their glyph together, which is
+/// cheapest and is what a pane without images does. An image that belongs
+/// *between* those two — Ghostty's below-text band is above the background and
+/// under the glyphs — can only be drawn if they are separate passes, so the
+/// split is made only when such an image exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowPass {
+    Whole,
+    Background,
+    Text,
+}
+
+/// One placement's element: the image, cropped to its source rectangle and
+/// scaled to the size the terminal computed.
+///
+/// GPUI draws a whole texture, so a source rectangle is expressed the way a
+/// browser would: an outer box the size of the visible result, clipping an
+/// inner image that is scaled up and shifted so the wanted region lands inside
+/// it.
+fn placement_element(
+    placement: &sprite_term::Placement,
+    texture: Arc<gpui::RenderImage>,
+    image_width: u32,
+    image_height: u32,
+    cell_width: Pixels,
+    cell_height: Pixels,
+) -> Option<gpui::Div> {
+    if placement.source.width == 0 || placement.source.height == 0 {
+        return None;
+    }
+
+    let scale_x = placement.pixel_width as f32 / placement.source.width as f32;
+    let scale_y = placement.pixel_height as f32 / placement.source.height as f32;
+
+    let left = placement.viewport_column as f32 * f32::from(cell_width) + placement.x_offset as f32;
+    let top = placement.viewport_row as f32 * f32::from(cell_height) + placement.y_offset as f32;
+
+    Some(
+        div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(placement.pixel_width as f32))
+            .h(px(placement.pixel_height as f32))
+            // Clips the image to its source rectangle, and clips the whole
+            // placement at the pane's edge rather than stretching it.
+            .overflow_hidden()
+            .child(
+                img(ImageSource::Render(texture))
+                    .absolute()
+                    .left(px(-(placement.source.x as f32) * scale_x))
+                    .top(px(-(placement.source.y as f32) * scale_y))
+                    .w(px(image_width as f32 * scale_x))
+                    .h(px(image_height as f32 * scale_y)),
+            ),
+    )
+}
+
 impl TerminalView {
+    /// The images to draw, grouped by the band they belong to.
+    ///
+    /// Virtual placements are left out: they are addressed by text rather than
+    /// drawn, so drawing one would put a picture where a character should be.
+    /// Placements entirely off screen are left out too, rather than drawn and
+    /// clipped to nothing.
+    fn image_layers(&self, cell_width: Pixels, cell_height: Pixels) -> [Vec<gpui::Div>; 3] {
+        let mut layers = [Vec::new(), Vec::new(), Vec::new()];
+        let Some(frame) = self.bundle.as_ref().and_then(|b| b.graphics.as_ref()) else {
+            return layers;
+        };
+
+        for placement in &frame.placements {
+            if placement.is_virtual || !placement.visible {
+                continue;
+            }
+            let Some(image) = frame.image(placement.image) else {
+                continue;
+            };
+            let Some(texture) = self.textures.get(image.id, image.generation) else {
+                // No texture means the image was refused — too large, or its
+                // pixels disagreed with its size. The rest of the pane still
+                // draws.
+                continue;
+            };
+            let Some(element) = placement_element(
+                placement,
+                texture,
+                image.width,
+                image.height,
+                cell_width,
+                cell_height,
+            ) else {
+                continue;
+            };
+            let band = match placement.layer {
+                sprite_term::Layer::BelowBackground => 0,
+                sprite_term::Layer::BelowText => 1,
+                sprite_term::Layer::AboveText => 2,
+            };
+            layers[band].push(element);
+        }
+        layers
+    }
+
     /// Builds textures for the images this generation shows, and lets go of the
     /// rest.
     ///
@@ -712,6 +889,40 @@ impl Render for TerminalView {
         let preedit = self.preedit.clone();
         let focus_for_input = self.focus.clone();
         let entity_for_input = cx.entity();
+
+        // Images first, because whether any belong below the text decides how
+        // the rows themselves are drawn.
+        let [below_background, below_text, above_text] = self.image_layers(cell_width, cell_height);
+        // The split costs an extra pass over the cells, so it is taken only
+        // when something actually needs to sit between them. The Kitty default
+        // is above the text, so the common case never pays for it.
+        let split = !below_background.is_empty() || !below_text.is_empty();
+
+        let build = |pass: RowPass, rows: Vec<Vec<PositionedCell>>| {
+            rows.into_iter()
+                .enumerate()
+                .map(move |(index, cells)| {
+                    row_element(
+                        index,
+                        cells,
+                        pass,
+                        cursor,
+                        default_fg,
+                        default_bg,
+                        cell_width,
+                        cell_height,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let (background_rows, text_rows) = if split {
+            (
+                build(RowPass::Background, rows.clone()),
+                build(RowPass::Text, rows),
+            )
+        } else {
+            (build(RowPass::Whole, rows), Vec::new())
+        };
 
         div()
             .relative()
@@ -824,47 +1035,11 @@ impl Render for TerminalView {
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);
                 view.send(TerminalCommand::Key(key));
             }))
-            // Every cell is placed by its grid column, so a glyph that renders
-            // wider than its cell is clipped instead of displacing the rest of
-            // the row.
-            .children(rows.into_iter().enumerate().map(|(index, cells)| {
-                let row_top = px(index as f32 * f32::from(cell_height));
-                let on_cursor = cursor.filter(|c| c.visible && usize::from(c.row) == index);
-
-                div()
-                    .absolute()
-                    .top(row_top)
-                    .left(px(0.0))
-                    .h(cell_height)
-                    .w_full()
-                    .children(cells.into_iter().map(move |cell| {
-                        let (foreground, background) =
-                            cell_colors(&cell.style, default_fg, default_bg);
-                        let is_cursor = on_cursor.is_some_and(|c| c.column == cell.column);
-                        // Selection and cursor both invert. The cursor wins
-                        // where they overlap so it stays findable inside a
-                        // selected run.
-                        let inverted = is_cursor || cell.selected;
-
-                        let mut element = div()
-                            .absolute()
-                            .left(cell.left(cell_width))
-                            .w(cell.width(cell_width))
-                            .h(cell_height)
-                            .overflow_hidden()
-                            .bg(if inverted { foreground } else { background })
-                            .text_color(if inverted { background } else { foreground });
-
-                        if cell.style.bold {
-                            element = element.font_weight(FontWeight::BOLD);
-                        }
-                        if cell.style.italic {
-                            element = element.italic();
-                        }
-
-                        element.child(SharedString::from(cell.text))
-                    }))
-            }))
+            .children(below_background)
+            .children(background_rows)
+            .children(below_text)
+            .children(text_rows)
+            .children(above_text)
             // Composition is drawn at the cursor and nowhere else. It is view
             // state: the terminal has not been told anything about it.
             .children(preedit.map(|text| {

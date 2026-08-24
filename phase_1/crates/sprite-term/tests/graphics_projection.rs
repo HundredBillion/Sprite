@@ -268,3 +268,103 @@ fn deleting_the_last_image_returns_the_pane_to_carrying_nothing() {
         cleared.graphics
     );
 }
+
+/// A virtual placement is addressed by text rather than drawn, so it must be
+/// reported as one — a renderer that drew it would put a picture where a
+/// character belongs.
+#[test]
+fn a_virtual_placement_is_reported_as_virtual() {
+    let (mut session, _events, snapshots) = session(GraphicsPolicy::default());
+
+    // `U=1` makes the placement a Unicode-placeholder one.
+    let bundle = feed(
+        &mut session,
+        &snapshots,
+        kitty("a=T,f=32,s=8,v=8,i=1,U=1", &base64(&[0x60_u8; 8 * 8 * 4])),
+    );
+
+    let placement = bundle
+        .graphics
+        .as_ref()
+        .expect("a frame")
+        .placements
+        .iter()
+        .find(|placement| placement.image == 1)
+        .copied()
+        .expect("the placement");
+    assert!(placement.is_virtual);
+    assert!(
+        !placement.visible,
+        "a virtual placement has no position of its own to be visible at"
+    );
+}
+
+/// Resizing changes where an image is drawn, not what it is. Re-decoding on
+/// every resize would make dragging a window edge as expensive as receiving the
+/// images again.
+#[test]
+fn resizing_re_places_without_re_copying_the_pixels() {
+    let (mut session, _events, snapshots) = session(GraphicsPolicy::default());
+
+    let before = feed(
+        &mut session,
+        &snapshots,
+        kitty("a=T,f=32,s=32,v=32,i=1", &base64(&[0x70_u8; 32 * 32 * 4])),
+    );
+    let original = Arc::clone(
+        before
+            .graphics
+            .as_ref()
+            .expect("a frame")
+            .image(1)
+            .expect("image 1"),
+    );
+    let placement_before = before
+        .graphics
+        .as_ref()
+        .expect("a frame")
+        .placements
+        .first()
+        .copied()
+        .expect("a placement");
+
+    session
+        .send(TerminalCommand::Resize(sprite_term::TerminalSize {
+            rows: 30,
+            cols: 100,
+            cell_width_px: 10,
+            cell_height_px: 20,
+        }))
+        .expect("resize");
+    let after = feed(&mut session, &snapshots, "resized\\n".to_owned());
+
+    let again = after
+        .graphics
+        .as_ref()
+        .expect("a frame")
+        .image(1)
+        .expect("image 1");
+    assert!(
+        Arc::ptr_eq(&original, again),
+        "the same pixels: a resize is not new content"
+    );
+
+    let placement_after = after
+        .graphics
+        .as_ref()
+        .expect("a frame")
+        .placements
+        .first()
+        .copied()
+        .expect("the placement survives the resize");
+
+    // A placement's cell extent is decided when it is placed, not recomputed
+    // from the current cell size, so resizing does not reflow an image the way
+    // it reflows text. That is Ghostty's semantics rather than a promise Sprite
+    // makes, and it is asserted here so a future change to it is noticed
+    // rather than absorbed.
+    assert_eq!(
+        (placement_before.columns, placement_before.rows),
+        (placement_after.columns, placement_after.rows),
+    );
+}

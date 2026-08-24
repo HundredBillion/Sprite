@@ -119,7 +119,11 @@ static NEXT_MARK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 /// The marker is printed by a second command, so seeing it means the shell has
 /// finished the first — which is a fact about the terminal's parser rather than
 /// a guess about timing.
-fn feed(session: &mut TerminalSession, snapshots: &SnapshotPump, escapes: String) {
+fn feed(
+    session: &mut TerminalSession,
+    snapshots: &SnapshotPump,
+    escapes: String,
+) -> std::sync::Arc<sprite_term::SnapshotBundle> {
     // Sent verbatim: the sequence is already written as printf escapes, and
     // doubling the backslashes here would make printf emit the text `\033`
     // rather than an escape character.
@@ -138,7 +142,7 @@ fn feed(session: &mut TerminalSession, snapshots: &SnapshotPump, escapes: String
         .expect("ask the child to print the marker");
     snapshots.wait_for("the payload to be processed", |bundle| {
         pane_text(bundle).contains(&marker)
-    });
+    })
 }
 
 fn probe(session: &mut TerminalSession, events: &EventPump) -> GraphicsSnapshot {
@@ -268,10 +272,12 @@ fn a_pane_with_graphics_disabled_holds_no_images() {
     assert_eq!(graphics.stored_bytes(), 0);
 
     // Text still works: disabling images disables images, not the terminal.
-    feed(&mut session, &snapshots, "still-here\\n".to_owned());
-    let bundle = snapshots.wait_for("text after a refused image", |bundle| {
-        pane_text(bundle).contains("still-here")
-    });
+    //
+    // The bundle `feed` already waited for is the one to assert on. Waiting
+    // again would require a *further* snapshot, and once the screen has settled
+    // there is no reason for one to arrive — which made this test fail on a
+    // loaded machine and pass on an idle one.
+    let bundle = feed(&mut session, &snapshots, "still-here\\n".to_owned());
     assert!(pane_text(&bundle).contains("still-here"));
 }
 

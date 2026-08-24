@@ -105,6 +105,18 @@ impl GraphicsCache {
         Some(texture)
     }
 
+    /// The texture already built for this image, if it is the current content.
+    ///
+    /// Drawing looks up rather than builds: textures are made when a snapshot
+    /// arrives, so a frame that asked to build one would be converting during
+    /// paint.
+    pub fn get(&self, id: u32, generation: u64) -> Option<Arc<RenderImage>> {
+        self.entries
+            .get(&id)
+            .filter(|entry| entry.generation == generation)
+            .map(|entry| Arc::clone(&entry.texture))
+    }
+
     /// Drops every texture whose image is no longer being shown.
     ///
     /// Called with the images of the current frame, so a pane that has shown a
