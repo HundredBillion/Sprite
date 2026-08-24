@@ -396,7 +396,10 @@ impl Default for HistoryLines {
     }
 }
 
-pub use graphics::{GraphicsSnapshot, ImageSummary, PlacementSummary};
+pub use graphics::{
+    GraphicsFrame, GraphicsSnapshot, ImagePixels, ImageSummary, Layer, Placement, PlacementSummary,
+    Rectangle, TransmittedFormat,
+};
 
 /// What a pane will accept in the way of images.
 ///
@@ -673,6 +676,16 @@ pub struct SnapshotBundle {
     pub generation: u64,
     pub render: Arc<RenderSnapshot>,
     pub pane: Arc<PaneSnapshot>,
+    /// The images this generation shows, if it shows any.
+    ///
+    /// `None` rather than an empty frame for a pane with no images, which is
+    /// the common case: nothing is allocated, and the projection costs a single
+    /// call to read the storage generation. Checkpoint 2 measured what happens
+    /// when a capture grows work per cell, and this deliberately does not.
+    ///
+    /// When present it belongs to the same generation as `render` and `pane`,
+    /// so an image is never drawn against text it never accompanied.
+    pub graphics: Option<Arc<GraphicsFrame>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

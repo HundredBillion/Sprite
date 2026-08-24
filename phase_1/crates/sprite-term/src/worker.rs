@@ -163,6 +163,24 @@ pub(crate) fn run(
         }
     };
 
+    // `Terminal::new` takes columns and rows but no cell metrics, so a terminal
+    // starts life not knowing how large a cell is — and everything derived from
+    // that, including how many cells an image covers, is zero until something
+    // resizes it. A pane's first frame should not be the one frame with the
+    // wrong geometry, so the configured size is applied immediately.
+    if let Err(error) = terminal.resize(
+        size.cols,
+        size.rows,
+        size.cell_width_px,
+        size.cell_height_px,
+    ) {
+        let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
+            "initial_resize",
+            error,
+        )));
+        return;
+    }
+
     // Applied before a single byte of child output is read, so there is no
     // window in which an image could be stored under looser rules than these.
     if let Err(error) = apply_graphics_policy(&mut terminal, config.graphics) {
@@ -307,6 +325,9 @@ pub(crate) fn run(
         }
     };
 
+    // Kept across captures so a still image is copied once rather than once
+    // a frame.
+    let mut pixels = crate::graphics::PixelCache::default();
     let (mut render_state, mut rows, mut cells, mut placements) = match render_objects() {
         Ok(objects) => objects,
         Err(error) => {
@@ -345,6 +366,8 @@ pub(crate) fn run(
         &mut render_state,
         &mut rows,
         &mut cells,
+        &mut placements,
+        &mut pixels,
         &snapshots,
         &events,
     );
@@ -700,6 +723,8 @@ pub(crate) fn run(
                 &mut render_state,
                 &mut rows,
                 &mut cells,
+                &mut placements,
+                &mut pixels,
                 &snapshots,
                 &events,
             );
@@ -717,6 +742,8 @@ pub(crate) fn run(
             &mut render_state,
             &mut rows,
             &mut cells,
+            &mut placements,
+            &mut pixels,
         )
     {
         let _ = snapshots.force_send(Arc::new(bundle));
@@ -980,6 +1007,8 @@ fn publish<'vt>(
     render_state: &mut RenderState<'vt>,
     rows: &mut RowIterator<'vt>,
     cells: &mut CellIterator<'vt>,
+    placements: &mut PlacementIterator<'vt>,
+    pixels: &mut crate::graphics::PixelCache,
     snapshots: &async_channel::Sender<Arc<SnapshotBundle>>,
     events: &async_channel::Sender<TerminalEvent>,
 ) -> bool {
@@ -991,6 +1020,8 @@ fn publish<'vt>(
         render_state,
         rows,
         cells,
+        placements,
+        pixels,
     ) {
         Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_ok(),
         Err(error) => {

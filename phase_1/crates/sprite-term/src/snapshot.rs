@@ -162,6 +162,7 @@ fn history_row(
 /// The TSP writes every lifetime here as `'_`; libghostty requires the
 /// terminal, render state, and both iterators to share one allocator lifetime,
 /// so `'vt` names it explicitly. The ownership the TSP fixes is unchanged.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture<'vt>(
     generation: u64,
     size: TerminalSize,
@@ -170,6 +171,8 @@ pub(crate) fn capture<'vt>(
     render_state: &mut RenderState<'vt>,
     rows: &mut RowIterator<'vt>,
     cells: &mut CellIterator<'vt>,
+    placements: &mut libghostty_vt::kitty::graphics::PlacementIterator<'vt>,
+    pixels: &mut crate::graphics::PixelCache,
 ) -> Result<SnapshotBundle, SessionError> {
     let screen = match terminal.active_screen().map_err(vt("active_screen"))? {
         Screen::Primary => ScreenKind::Primary,
@@ -315,6 +318,11 @@ pub(crate) fn capture<'vt>(
         .set_dirty(Dirty::Clean)
         .map_err(vt("render_set_dirty"))?;
 
+    // Taken from the same terminal, in the same call, as the rows above: an
+    // image drawn against text it never accompanied would be a frame that
+    // never existed on anyone's screen.
+    let graphics = crate::graphics::capture_frame(terminal, placements, pixels)?;
+
     Ok(SnapshotBundle {
         generation,
         render: Arc::new(RenderSnapshot {
@@ -337,6 +345,7 @@ pub(crate) fn capture<'vt>(
             title,
             working_directory,
         }),
+        graphics,
     })
 }
 
