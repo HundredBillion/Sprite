@@ -80,13 +80,33 @@ generation is captured, not work per cell.
 
 **Files:** `sprite-app/src/config.rs`, `sprite-app/src/terminal_view.rs`
 
-- [ ] `font.family` and `font.size` are configurable, with today's behaviour as
-  the default.
-- [ ] A family that is not installed falls back to the current search and says
-  what it did, rather than rendering nothing.
-- [ ] Cell metrics follow the configured size, so the grid stays correct.
-- [ ] `Ctrl+Shift+Plus` / `Ctrl+Shift+Minus` / `Ctrl+Shift+0` adjust size live,
-  within bounds, and resize the grid.
+- [x] `font.family` and `font.size` are configurable, with today's behaviour as
+  the default. Size is clamped to 6..=72 and a rejected value is reported rather
+  than obeyed.
+- [x] A family that is not installed falls back to the current search and says
+  what it did, rather than rendering nothing. The complaint becomes the pane's
+  opening status line, so the fallback is visible instead of silent.
+- [x] Cell metrics follow the configured size, so the grid stays correct.
+  `size = 20` gives an 78x24 grid in the window that gives 117x35 at 14.
+- [x] `Ctrl+Shift+Plus` / `Ctrl+Shift+Minus` / `Ctrl+Shift+0` adjust size live,
+  within bounds, and resize the grid. Verified on screen in one session:
+  78 columns at the configured 20, 92 after three shrinks, 78 again after a
+  reset, 223 at the floor after thirty, 87 after twelve enlargements, and 78
+  after a second reset. The floor holds and the reset returns to the
+  *configured* size rather than to a built-in one.
+
+**Shift is not always a flag, and the bindings were dead because of it.** GPUI
+clears `modifiers.shift` for a key whose character has no case to carry it, and
+reports the shifted glyph instead: Ctrl+Shift+Minus arrives as Ctrl with the key
+`_`, Ctrl+Shift+Plus as Ctrl with `+`, Ctrl+Shift+0 as Ctrl with `)`. The first
+implementation demanded the flag, so all three size bindings did nothing and the
+keystroke went to the shell as a CSI-u sequence instead. Only the live test
+found it; every unit test passed. `workspace_action` now accepts either
+spelling, and six tests pin both. Letter bindings are unaffected — a letter has
+a case, so its flag survives.
+
+The cost is one collision: Ctrl+Shift+Minus *is* `C-_`, which Emacs and readline
+use for undo. Sprite takes it, as kitty does by default. `C-/` remains.
 
 ### Task 3: Colours
 

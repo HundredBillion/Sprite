@@ -17,7 +17,7 @@ mod terminal_view;
 mod workspace;
 
 pub use cli::{Invocation, SnapshotArgs, USAGE, UsageError, WindowArgs, parse_arguments};
-pub use config::{Complaints, Graphics, PaneObservation, Settings};
+pub use config::{Complaints, Font, Graphics, PaneObservation, Settings};
 pub use graphics_cache::GraphicsCache;
 pub use observation::broker::{
     DEADLINE, Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report,

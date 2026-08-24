@@ -25,12 +25,6 @@ use sprite_term::{
 use crate::grid::{PositionedCell, ScrollAccumulator, cell_at, lay_out_row};
 use crate::input::gpui_key_event;
 
-/// The rendered font size, in logical pixels.
-const FONT_SIZE: Pixels = px(14.0);
-
-/// The rendered line height, in logical pixels.
-const LINE_HEIGHT: Pixels = px(16.0);
-
 /// The largest grid Terminal Core will accept, mirrored here so the view never
 /// asks for one it knows will be refused.
 const MAX_CELLS: u64 = 1_000_000;
@@ -69,6 +63,8 @@ pub struct TerminalView {
     /// forget to call.
     textures: crate::graphics_cache::GraphicsCache,
     focus: FocusHandle,
+    /// The configured text size, which the cell metrics follow.
+    font_size: Pixels,
     /// Measured from the font actually rendered, in logical pixels.
     cell_width: Pixels,
     cell_height: Pixels,
@@ -106,6 +102,7 @@ impl TerminalView {
     /// which a child learns the key.
     pub fn new(
         command: Option<Vec<std::ffi::OsString>>,
+        font: crate::config::Font,
         graphics: crate::config::Graphics,
         environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
         observation: Option<crate::observation::panes::PaneLink>,
@@ -118,8 +115,9 @@ impl TerminalView {
         // Wayland/X11 title is set explicitly here.
         window.set_window_title("Sprite");
 
-        let font_family = monospace_family(window);
-        let cell_width = measure_cell_width(window, &font_family);
+        let font_size = px(font.size);
+        let (font_family, complaint) = chosen_family(window, font.family.as_deref());
+        let cell_width = measure_cell_width(window, &font_family, font_size);
         let scale_factor = window.scale_factor();
 
         // A window told what to run gives every one of its panes the same
@@ -138,7 +136,10 @@ impl TerminalView {
         // corrected for the display this window opened on.
         config.size = TerminalSize {
             cell_width_px: physical(cell_width, scale_factor),
-            cell_height_px: physical(LINE_HEIGHT, scale_factor),
+            cell_height_px: physical(
+                px(crate::config::Font::line_height(font.size)),
+                scale_factor,
+            ),
             ..config.size
         };
         // The terminal's own limit: how much decoded image it will hold.
@@ -315,16 +316,19 @@ impl TerminalView {
         Self {
             session,
             observation,
+            font_size,
+            // A mistyped font family is shown rather than silently ignored:
+            // somebody whose setting did nothing deserves to know why.
+            status: complaint.map(Into::into),
             bundle: None,
             // The renderer's own limit, separate from the terminal's above.
             textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
             focus: cx.focus_handle(),
             cell_width,
-            cell_height: LINE_HEIGHT,
+            cell_height: px(crate::config::Font::line_height(font.size)),
             font_family,
             size: Some(initial_size),
             allocated: None,
-            status: None,
             scroll: ScrollAccumulator::default(),
             drag_anchor: None,
             pending_unsafe_paste: None,
@@ -347,11 +351,14 @@ impl TerminalView {
             session,
             // A view that never started a session has nothing to observe.
             observation: None,
+            font_size: px(crate::config::Font::DEFAULT_SIZE),
             bundle: None,
             textures: crate::graphics_cache::GraphicsCache::default(),
             focus: cx.focus_handle(),
             cell_width: px(8.0),
-            cell_height: LINE_HEIGHT,
+            cell_height: px(crate::config::Font::line_height(
+                crate::config::Font::DEFAULT_SIZE,
+            )),
             font_family,
             size: None,
             allocated: None,
@@ -564,6 +571,29 @@ fn describe_exit(exit: &sprite_term::ChildExit) -> String {
 }
 
 /// The first genuinely monospaced family the system offers.
+/// The family to render with, and a complaint if the configured one was not
+/// usable.
+///
+/// A configured family that is not installed falls back rather than failing:
+/// somebody who mistypes a font name should get a terminal in the wrong font,
+/// not no terminal.
+fn chosen_family(window: &Window, configured: Option<&str>) -> (SharedString, Option<String>) {
+    let available = window.text_system().all_font_names();
+    if let Some(wanted) = configured {
+        if available.iter().any(|name| name == wanted) {
+            return (wanted.to_owned().into(), None);
+        }
+        let found = monospace_family(window);
+        return (
+            found.clone(),
+            Some(format!(
+                "font.family {wanted:?} is not installed; using {found} instead"
+            )),
+        );
+    }
+    (monospace_family(window), None)
+}
+
 fn monospace_family(window: &Window) -> SharedString {
     let available = window.text_system().all_font_names();
 
@@ -595,7 +625,7 @@ fn terminal_font(family: &SharedString) -> Font {
 
 /// Shapes `M` with the exact font run the view renders, so grid geometry and
 /// drawn text can never disagree.
-fn measure_cell_width(window: &Window, family: &SharedString) -> Pixels {
+fn measure_cell_width(window: &Window, family: &SharedString, size: Pixels) -> Pixels {
     let text: SharedString = "M".into();
     let run = TextRun {
         len: text.len(),
@@ -605,9 +635,7 @@ fn measure_cell_width(window: &Window, family: &SharedString) -> Pixels {
         underline: None,
         strikethrough: None,
     };
-    let shaped = window
-        .text_system()
-        .shape_line(text, FONT_SIZE, &[run], None);
+    let shaped = window.text_system().shape_line(text, size, &[run], None);
 
     let width = shaped.width;
     if width > px(0.0) { width } else { px(8.0) }
@@ -870,6 +898,22 @@ impl TerminalView {
         layers
     }
 
+    /// Re-measures the cell at a new text size and tells the child.
+    ///
+    /// The measurement has to be redone rather than scaled: a font's advance
+    /// width is not linear in its size, and a grid computed from a guess drifts
+    /// away from what is drawn.
+    pub fn set_font_size(&mut self, size: f32, window: &Window, cx: &mut Context<Self>) {
+        self.font_size = px(size);
+        self.cell_height = px(crate::config::Font::line_height(size));
+        self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
+        // Forces `synchronise_size` to recompute rather than compare against a
+        // grid measured with the old cell.
+        self.size = None;
+        self.synchronise_size(window);
+        cx.notify();
+    }
+
     /// Builds textures for the images this generation shows, and lets go of the
     /// rest.
     ///
@@ -983,8 +1027,8 @@ impl Render for TerminalView {
             .bg(rgb(BACKGROUND))
             .text_color(rgb(FOREGROUND))
             .font_family(self.font_family.clone())
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
+            .text_size(self.font_size)
+            .line_height(self.cell_height)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
                 // Application shortcuts are resolved first and explicitly. Only

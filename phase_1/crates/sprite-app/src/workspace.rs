@@ -44,6 +44,9 @@ pub struct Workspace {
     panes: Arc<WindowPanes>,
     focus: FocusHandle,
     settings: crate::config::Settings,
+    /// The size the configuration asked for, so "reset" returns to what a
+    /// person set rather than to Sprite's own default.
+    configured_font_size: f32,
     /// What every pane in this window runs instead of a login shell.
     ///
     /// Held so that a pane created later — by a split or a new tab — runs the
@@ -77,10 +80,21 @@ impl Workspace {
 
         let program = command.clone();
         let graphics = settings.graphics;
+        let font = settings.font.clone();
         let tabs = Tabs::new(|tab, pane| {
             let environment = session_environment(endpoint.as_ref(), tab, pane);
             let link = pane_link(&panes, endpoint.as_ref(), tab, pane);
-            cx.new(|cx| TerminalView::new(program, graphics, environment, link, window, cx))
+            cx.new(|cx| {
+                TerminalView::new(
+                    program,
+                    font.clone(),
+                    graphics,
+                    environment,
+                    link,
+                    window,
+                    cx,
+                )
+            })
         });
         // The window focuses the workspace; the workspace hands the keyboard to
         // a pane, rather than leaving which pane receives typing to chance.
@@ -90,6 +104,7 @@ impl Workspace {
             endpoint,
             panes,
             command,
+            configured_font_size: settings.font.size,
             settings,
             focus: cx.focus_handle(),
             pending_focus,
@@ -151,10 +166,21 @@ impl Workspace {
         let panes = &self.panes;
         let program = self.command.clone();
         let graphics = self.settings.graphics;
+        let font = self.settings.font.clone();
         let pane = self.tabs.split(orientation, |tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(program, graphics, environment, link, window, cx))
+            cx.new(|cx| {
+                TerminalView::new(
+                    program,
+                    font.clone(),
+                    graphics,
+                    environment,
+                    link,
+                    window,
+                    cx,
+                )
+            })
         });
         self.request_focus(pane);
         cx.notify();
@@ -165,10 +191,21 @@ impl Workspace {
         let panes = &self.panes;
         let program = self.command.clone();
         let graphics = self.settings.graphics;
+        let font = self.settings.font.clone();
         self.tabs.open(|tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(program, graphics, environment, link, window, cx))
+            cx.new(|cx| {
+                TerminalView::new(
+                    program,
+                    font.clone(),
+                    graphics,
+                    environment,
+                    link,
+                    window,
+                    cx,
+                )
+            })
         });
         self.request_focus(self.tabs.active().focus());
         cx.notify();
@@ -236,6 +273,41 @@ impl Workspace {
             self.request_focus(self.tabs.active().focus());
             cx.notify();
         }
+    }
+
+    /// Changes the text size of every pane in this window.
+    ///
+    /// Every pane rather than the focused one: a window with one pane in a
+    /// different size from its neighbours looks broken. Each pane re-measures
+    /// its cell and tells its child the new grid, which is why this resizes
+    /// rather than merely redraws.
+    fn adjust_font(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = crate::config::Font::clamp_size(self.settings.font.size + delta);
+        self.apply_font_size(wanted, window, cx);
+    }
+
+    /// Back to the configured size, which is what a person means by "reset" —
+    /// not back to Sprite's built-in default.
+    fn reset_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let configured = self.configured_font_size;
+        self.apply_font_size(configured, window, cx);
+    }
+
+    fn apply_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
+        if (size - self.settings.font.size).abs() < f32::EPSILON {
+            return;
+        }
+        self.settings.font.size = size;
+        let views: Vec<_> = self
+            .tabs
+            .all_panes()
+            .into_iter()
+            .map(|(_, _, view)| view.clone())
+            .collect();
+        for view in views {
+            view.update(cx, |view, cx| view.set_font_size(size, window, cx));
+        }
+        cx.notify();
     }
 
     /// Asks for `pane` to hold the keyboard from the next frame onwards.
@@ -338,11 +410,20 @@ fn session_environment(
 ///
 /// Deliberately few, and all requiring Ctrl+Shift so they cannot collide with
 /// what a child program expects to receive.
+///
+/// Shift is not always a *flag*. GPUI clears `modifiers.shift` for a key whose
+/// character has no case to carry it — `-`, `=`, `0` — and reports the shifted
+/// glyph instead, so Ctrl+Shift+Minus arrives as Ctrl with the key `_`. The
+/// shift is in the glyph rather than the flag, and a binding that insists on
+/// the flag never fires. That cost this checkpoint a live test to find.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceAction {
     SplitRight,
     SplitDown,
     ClosePane,
+    FontLarger,
+    FontSmaller,
+    FontReset,
     NewTab,
     CloseTab,
     NextTab,
@@ -352,13 +433,26 @@ enum WorkspaceAction {
 
 fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
     let modifiers = &keystroke.modifiers;
-    if !(modifiers.control && modifiers.shift) || modifiers.alt || modifiers.platform {
+    if !modifiers.control || modifiers.alt || modifiers.platform {
         return None;
     }
-    match keystroke.key.as_str() {
+    let key = keystroke.key.as_str();
+    // Either spelling of shift counts: the flag, or a glyph that only a shifted
+    // key produces. Requiring one means Ctrl+Minus still reaches the child,
+    // which is what a program that binds it expects.
+    if !(modifiers.shift || matches!(key, "_" | "+" | ")")) {
+        return None;
+    }
+    match key {
         "d" => Some(WorkspaceAction::SplitRight),
         "e" => Some(WorkspaceAction::SplitDown),
         "w" => Some(WorkspaceAction::ClosePane),
+        // Both spellings, because a keyboard reports the unshifted key on some
+        // layouts and the shifted one on others, and a size binding that works
+        // on only one machine is not a binding.
+        "=" | "+" => Some(WorkspaceAction::FontLarger),
+        "-" | "_" => Some(WorkspaceAction::FontSmaller),
+        "0" | ")" => Some(WorkspaceAction::FontReset),
         "t" => Some(WorkspaceAction::NewTab),
         "q" => Some(WorkspaceAction::CloseTab),
         "pagedown" => Some(WorkspaceAction::NextTab),
@@ -529,6 +623,9 @@ impl Render for Workspace {
                         workspace.split(Orientation::Vertical, window, cx);
                     }
                     WorkspaceAction::ClosePane => workspace.close_focused_pane(cx),
+                    WorkspaceAction::FontLarger => workspace.adjust_font(1.0, window, cx),
+                    WorkspaceAction::FontSmaller => workspace.adjust_font(-1.0, window, cx),
+                    WorkspaceAction::FontReset => workspace.reset_font(window, cx),
                     WorkspaceAction::NewTab => workspace.open_tab(window, cx),
                     WorkspaceAction::CloseTab => workspace.close_active_tab(cx),
                     WorkspaceAction::NextTab => workspace.switch_tab(true, cx),
@@ -550,5 +647,120 @@ impl Render for Workspace {
                 )
             })
             .child(panes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Direction, WorkspaceAction, workspace_action};
+    use gpui::{Keystroke, Modifiers};
+
+    fn press(key: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            modifiers,
+            key: key.to_owned(),
+            key_char: None,
+        }
+    }
+
+    fn ctrl_shift() -> Modifiers {
+        Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn a_letter_binding_needs_both_modifiers() {
+        assert_eq!(
+            workspace_action(&press("d", ctrl_shift())),
+            Some(WorkspaceAction::SplitRight)
+        );
+        assert_eq!(workspace_action(&press("d", ctrl())), None);
+        assert_eq!(workspace_action(&press("d", Modifiers::default())), None);
+    }
+
+    /// The defect this checkpoint's live test found: GPUI folds shift into the
+    /// glyph for keys with no case, so the size bindings arrive with the flag
+    /// already cleared. Insisting on the flag made all three dead keys.
+    #[test]
+    fn size_bindings_accept_shift_folded_into_the_glyph() {
+        assert_eq!(
+            workspace_action(&press("_", ctrl())),
+            Some(WorkspaceAction::FontSmaller)
+        );
+        assert_eq!(
+            workspace_action(&press("+", ctrl())),
+            Some(WorkspaceAction::FontLarger)
+        );
+        assert_eq!(
+            workspace_action(&press(")", ctrl())),
+            Some(WorkspaceAction::FontReset)
+        );
+    }
+
+    #[test]
+    fn size_bindings_also_accept_the_flag() {
+        assert_eq!(
+            workspace_action(&press("-", ctrl_shift())),
+            Some(WorkspaceAction::FontSmaller)
+        );
+        assert_eq!(
+            workspace_action(&press("=", ctrl_shift())),
+            Some(WorkspaceAction::FontLarger)
+        );
+        assert_eq!(
+            workspace_action(&press("0", ctrl_shift())),
+            Some(WorkspaceAction::FontReset)
+        );
+    }
+
+    /// Ctrl alone belongs to the child. A program that binds Ctrl+Minus keeps
+    /// it; only the shifted spelling is the workspace's.
+    #[test]
+    fn unshifted_ctrl_symbols_reach_the_child() {
+        for key in ["-", "=", "0"] {
+            assert_eq!(workspace_action(&press(key, ctrl())), None);
+        }
+    }
+
+    #[test]
+    fn other_modifiers_disqualify_a_binding() {
+        let with_alt = Modifiers {
+            control: true,
+            shift: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(workspace_action(&press("d", with_alt)), None);
+
+        let with_platform = Modifiers {
+            control: true,
+            shift: true,
+            platform: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(workspace_action(&press("_", with_platform)), None);
+    }
+
+    #[test]
+    fn navigation_keys_keep_their_names() {
+        assert_eq!(
+            workspace_action(&press("left", ctrl_shift())),
+            Some(WorkspaceAction::Focus(Direction::Left))
+        );
+        assert_eq!(
+            workspace_action(&press("pagedown", ctrl_shift())),
+            Some(WorkspaceAction::NextTab)
+        );
+        assert_eq!(workspace_action(&press("f5", ctrl_shift())), None);
     }
 }
