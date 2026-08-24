@@ -287,9 +287,15 @@ impl Endpoint {
         // Removed only after the thread has stopped, so nothing can connect to
         // a socket whose server is already gone.
         let _ = fs::remove_file(&self.socket);
-        // The directory is shared by this user's windows, so it is removed only
-        // when this was the last one; a failure means another window is live.
-        let _ = fs::remove_dir(&self.directory);
+
+        // The **directory is deliberately left behind.** It is shared by every
+        // window this user has, and removing it here — on the assumption that
+        // an empty directory means the last window — races another window
+        // between its `create_dir_all` and its `bind`, which then fails with
+        // "no such file or directory" and starts with no observation at all.
+        // Parallel tests found exactly that. An empty `0700` directory in a
+        // runtime path the system already clears costs nothing; a window that
+        // silently loses its endpoint costs a feature.
     }
 }
 
@@ -597,6 +603,10 @@ mod tests {
         endpoint.close();
 
         assert!(!path.exists(), "the socket is gone from the filesystem");
+        assert!(
+            path.parent().expect("a directory").exists(),
+            "but the directory other windows share is left alone"
+        );
         let refused = UnixStream::connect(&path);
         assert!(
             refused.is_err(),
