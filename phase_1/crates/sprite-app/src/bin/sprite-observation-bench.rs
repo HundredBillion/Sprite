@@ -157,6 +157,7 @@ fn snapshot(history: usize, width: usize) -> Arc<HistorySnapshot> {
         },
         title: Some("bench".to_owned()),
         working_directory: None,
+        placements: Vec::new(),
         captured_at_unix_ms: 1_800_000_000_000,
         foreground: Some("bash".to_owned()),
     })

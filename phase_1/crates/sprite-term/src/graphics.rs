@@ -157,6 +157,34 @@ pub struct Rectangle {
     pub height: u32,
 }
 
+/// What an observer may learn about an image.
+///
+/// **Metadata only, and deliberately no way to reach the picture.** The
+/// observation exclusion list bans transmitted bytes, decoded pixels, and
+/// source filenames; this type carries none of them and has no field that could
+/// hold one. A client learns that an image occupies terminal space, how much of
+/// it, and in what order it draws — enough to understand a screen, and nothing
+/// that reproduces the image.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlacementMetadata {
+    pub image: u32,
+    pub placement: u32,
+    pub is_virtual: bool,
+    pub layer: Layer,
+    /// How the image arrived, which is a fact about the protocol rather than
+    /// about the picture.
+    pub format: TransmittedFormat,
+    /// The image's own pixel dimensions.
+    pub image_width: u32,
+    pub image_height: u32,
+    /// The cells the placement covers.
+    pub columns: u32,
+    pub rows: u32,
+    pub viewport_column: i32,
+    pub viewport_row: i32,
+    pub visible: bool,
+}
+
 /// Everything a renderer needs to draw one pane's images.
 #[derive(Debug, Default)]
 pub struct GraphicsFrame {
@@ -405,4 +433,78 @@ pub(crate) fn capture_frame(
         images,
         placements: found,
     })))
+}
+
+/// Reads placement metadata for the observation path.
+///
+/// Never touches `Image::data`, so no pixel can reach an answer even by
+/// accident: the bytes are not read, not copied, and not reachable from the
+/// value this returns.
+pub(crate) fn capture_placements(
+    terminal: &Terminal<'_, '_>,
+    placements: &mut PlacementIterator<'_>,
+) -> Result<Vec<PlacementMetadata>, SessionError> {
+    let vt = |what: &'static str| move |error| SessionError::new(what, error);
+
+    let graphics = terminal.kitty_graphics().map_err(vt("kitty_graphics"))?;
+    let mut found = Vec::new();
+
+    for layer in [
+        (
+            libghostty_vt::kitty::graphics::Layer::BelowBg,
+            Layer::BelowBackground,
+        ),
+        (
+            libghostty_vt::kitty::graphics::Layer::BelowText,
+            Layer::BelowText,
+        ),
+        (
+            libghostty_vt::kitty::graphics::Layer::AboveText,
+            Layer::AboveText,
+        ),
+    ] {
+        let mut iteration = placements
+            .update(&graphics)
+            .map_err(vt("placement_iterator"))?;
+        iteration
+            .set_layer(layer.0)
+            .map_err(vt("placement_layer"))?;
+
+        while iteration.next().is_some() {
+            let image_id = iteration.image_id().map_err(vt("placement_image_id"))?;
+            let Some(image) = graphics.image(image_id) else {
+                continue;
+            };
+            let info = iteration
+                .placement_render_info(&image, terminal)
+                .map_err(vt("placement_render_info"))?;
+
+            found.push(PlacementMetadata {
+                image: image_id,
+                placement: iteration.placement_id().map_err(vt("placement_id"))?,
+                is_virtual: iteration.is_virtual().map_err(vt("placement_virtual"))?,
+                layer: layer.1,
+                format: match image.format().map_err(vt("image_format"))? {
+                    libghostty_vt::kitty::graphics::ImageFormat::Rgb => TransmittedFormat::Rgb,
+                    libghostty_vt::kitty::graphics::ImageFormat::Rgba => TransmittedFormat::Rgba,
+                    libghostty_vt::kitty::graphics::ImageFormat::Png => TransmittedFormat::Png,
+                    libghostty_vt::kitty::graphics::ImageFormat::Gray => TransmittedFormat::Gray,
+                    libghostty_vt::kitty::graphics::ImageFormat::GrayAlpha => {
+                        TransmittedFormat::GrayAlpha
+                    }
+                    _ => TransmittedFormat::Unknown,
+                },
+                image_width: image.width().map_err(vt("image_width"))?,
+                image_height: image.height().map_err(vt("image_height"))?,
+                columns: info.grid_cols,
+                rows: info.grid_rows,
+                viewport_column: info.viewport_col,
+                viewport_row: info.viewport_row,
+                visible: info.viewport_visible,
+            });
+        }
+    }
+
+    found.sort_by_key(|placement| (placement.layer, placement.image, placement.placement));
+    Ok(found)
 }

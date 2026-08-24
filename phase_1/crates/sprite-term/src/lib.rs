@@ -397,8 +397,8 @@ impl Default for HistoryLines {
 }
 
 pub use graphics::{
-    GraphicsFrame, GraphicsSnapshot, ImagePixels, ImageSummary, Layer, Placement, PlacementSummary,
-    Rectangle, TransmittedFormat,
+    GraphicsFrame, GraphicsSnapshot, ImagePixels, ImageSummary, Layer, Placement,
+    PlacementMetadata, PlacementSummary, Rectangle, TransmittedFormat,
 };
 
 /// What a pane will accept in the way of images.
@@ -663,6 +663,11 @@ pub struct HistorySnapshot {
     /// Each pane is captured independently, so a multi-pane answer carries
     /// several of these and does not claim one window-wide instant.
     pub captured_at_unix_ms: u128,
+    /// The images shown on this screen, as metadata only.
+    ///
+    /// Never any pixels: see [`PlacementMetadata`], which has no field that
+    /// could carry one.
+    pub placements: Vec<PlacementMetadata>,
     /// The basename of the program in the foreground of this pane's terminal,
     /// when the platform can be asked safely.
     ///

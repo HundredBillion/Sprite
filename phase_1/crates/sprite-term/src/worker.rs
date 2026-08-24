@@ -667,6 +667,7 @@ pub(crate) fn run(
                         foreground,
                         &terminal,
                         &mut render_state,
+                        &mut placements,
                     ) {
                         Ok(history) => {
                             if events

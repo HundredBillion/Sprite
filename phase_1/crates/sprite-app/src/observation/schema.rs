@@ -21,6 +21,14 @@ use crate::observation::broker::{Failure, PaneReport, Report};
 ///
 /// Bump only for a change a client cannot ignore. Pretty printing is whitespace
 /// and never a second schema, so it does not bump anything.
+///
+/// **Adding `placements` did not bump it.** A new key is ignorable by
+/// definition: a client reading the keys it knows sees exactly what it saw
+/// before, and one that wants images now has them. Bumping for an addition
+/// would make the version a change counter rather than a compatibility signal,
+/// and a client pinning it would be forced to re-pin for something that cannot
+/// affect it. What *would* bump it is a key changing meaning, changing type, or
+/// going away.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// What every pane's content is, stated rather than implied.
@@ -369,6 +377,50 @@ fn pane(report: &PaneReport, dropped: usize) -> Value {
         optional(snapshot.foreground.as_deref()),
     );
 
+    // Images occupying terminal space, as metadata only. There is no field
+    // here for bytes, pixels, or a filename, and none can be added by
+    // accident: a pane's key set is asserted exactly, and so is this one.
+    object.insert(
+        "placements".to_owned(),
+        Value::Array(
+            snapshot
+                .placements
+                .iter()
+                .map(|placement| {
+                    json!({
+                        "placement": placement.placement,
+                        "image": placement.image,
+                        "virtual": placement.is_virtual,
+                        "z_order": match placement.layer {
+                            sprite_term::Layer::BelowBackground => "below_background",
+                            sprite_term::Layer::BelowText => "below_text",
+                            sprite_term::Layer::AboveText => "above_text",
+                        },
+                        "transmission_format": match placement.format {
+                            sprite_term::TransmittedFormat::Rgb => "rgb",
+                            sprite_term::TransmittedFormat::Rgba => "rgba",
+                            sprite_term::TransmittedFormat::Png => "png",
+                            sprite_term::TransmittedFormat::Gray => "gray",
+                            sprite_term::TransmittedFormat::GrayAlpha => "gray_alpha",
+                            sprite_term::TransmittedFormat::Unknown => "unknown",
+                        },
+                        "pixel_size": {
+                            "width": placement.image_width,
+                            "height": placement.image_height,
+                        },
+                        "cells": {
+                            "columns": placement.columns,
+                            "rows": placement.rows,
+                            "column": placement.viewport_column,
+                            "row": placement.viewport_row,
+                        },
+                        "visible": placement.visible,
+                    })
+                })
+                .collect(),
+        ),
+    );
+
     // Whole rows only. Dropping happens at row boundaries, which is also what
     // keeps every emitted row's Unicode intact: a row is never cut, so no
     // character can be halved.
@@ -448,6 +500,7 @@ mod tests {
             },
             title: Some("a title".to_owned()),
             working_directory: Some("/home/somebody".to_owned()),
+            placements: Vec::new(),
             captured_at_unix_ms: 1_800_000_000_000,
             foreground: Some("vim".to_owned()),
         })
@@ -650,6 +703,7 @@ mod tests {
                 "history",
                 "layout",
                 "pane",
+                "placements",
                 "rows",
                 "screen",
                 "size",
@@ -659,6 +713,71 @@ mod tests {
                 "truncated",
                 "viewport",
                 "working_directory",
+            ]
+        );
+    }
+
+    /// A placement tells a client that an image occupies terminal space, and
+    /// nothing that reproduces the picture.
+    #[test]
+    fn a_placement_reports_where_an_image_is_and_not_what_it_looks_like() {
+        let mut snapshot = (*snapshot("text")).clone();
+        snapshot.placements = vec![sprite_term::PlacementMetadata {
+            image: 4,
+            placement: 9,
+            is_virtual: false,
+            layer: sprite_term::Layer::AboveText,
+            format: sprite_term::TransmittedFormat::Png,
+            image_width: 640,
+            image_height: 480,
+            columns: 80,
+            rows: 30,
+            viewport_column: 2,
+            viewport_row: -3,
+            visible: true,
+        }];
+        let report = report_of(
+            vec![PaneReport {
+                address: address(0, 0, 0, 0.0, 0.0),
+                snapshot: Arc::new(snapshot),
+            }],
+            Vec::new(),
+        );
+
+        let value = parse(&render(&report, false));
+        let placement = &value["panes"][0]["placements"][0];
+        assert_eq!(placement["image"], json!(4));
+        assert_eq!(placement["placement"], json!(9));
+        assert_eq!(placement["z_order"], json!("above_text"));
+        assert_eq!(placement["transmission_format"], json!("png"));
+        assert_eq!(placement["pixel_size"]["width"], json!(640));
+        assert_eq!(placement["cells"]["columns"], json!(80));
+        assert_eq!(
+            placement["cells"]["row"],
+            json!(-3),
+            "a placement partly scrolled off the top keeps its negative row"
+        );
+
+        // The agreed key set, so a field added to the graphics projection
+        // cannot reach the wire unnoticed.
+        let mut keys: Vec<&str> = placement
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "cells",
+                "image",
+                "pixel_size",
+                "placement",
+                "transmission_format",
+                "virtual",
+                "visible",
+                "z_order",
             ]
         );
     }

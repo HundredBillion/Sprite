@@ -37,6 +37,7 @@ pub(crate) fn capture_history<'vt>(
     foreground: Option<String>,
     terminal: &Terminal<'vt, '_>,
     render_state: &mut RenderState<'vt>,
+    placements: &mut libghostty_vt::kitty::graphics::PlacementIterator<'vt>,
 ) -> Result<HistorySnapshot, SessionError> {
     let screen = match terminal.active_screen().map_err(vt("active_screen"))? {
         Screen::Primary => ScreenKind::Primary,
@@ -89,6 +90,9 @@ pub(crate) fn capture_history<'vt>(
         viewport,
         title,
         working_directory,
+        // Metadata about the images on this screen. Read through a path that
+        // never touches their pixels.
+        placements: crate::graphics::capture_placements(terminal, placements)?,
         captured_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_millis())
