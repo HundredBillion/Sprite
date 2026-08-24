@@ -386,3 +386,47 @@ fn a_history_answer_carries_the_metadata_the_schema_needs() {
         "never a path and never arguments: {foreground:?}"
     );
 }
+
+/// `scrollback.bytes` is a real budget, not a suggestion.
+///
+/// The unit is bytes, which is the trap this project already fell into once:
+/// libghostty's header calls the value a number of lines and its implementation
+/// counts bytes. Two panes printing the same thousand lines under budgets three
+/// orders of magnitude apart must therefore remember very different amounts.
+#[test]
+fn a_small_scrollback_budget_holds_less_history() {
+    fn available_after_five_thousand_lines(scrollback_bytes: usize) -> usize {
+        let script = "for i in $(seq 1 5000); do echo line-$i; done; sleep 300";
+        let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
+        config.scrollback_bytes = scrollback_bytes;
+        let mut session = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        events.expect_ready();
+        snapshots.wait_for("the last printed line", |bundle| {
+            pane_text(bundle).contains("line-5000")
+        });
+
+        session
+            .send(TerminalCommand::CaptureHistory(HistoryLines::new(1)))
+            .expect("request history");
+        wait_for_history(&events).available
+    }
+
+    let small = available_after_five_thousand_lines(4 * 1024);
+    let large = available_after_five_thousand_lines(16 * 1024 * 1024);
+
+    // Five thousand lines rather than a few hundred, because the budget is
+    // rounded up to whole pages: a 4 KiB pane still holds around a thousand
+    // rows, so a shorter run would find both panes holding everything and
+    // prove nothing.
+    assert!(
+        small < large,
+        "a 4 KiB pane kept {small} rows and a 16 MiB pane {large}; \
+         the budget did not reach the terminal"
+    );
+    assert!(
+        large > 4000,
+        "the larger budget should hold nearly all five thousand lines, not {large}"
+    );
+}

@@ -140,11 +140,13 @@ impl TerminalView {
             graphics,
             colors,
             cursor,
+            shell,
+            scrollback,
             ..
         } = settings;
 
         let font_size = px(font.size);
-        let (font_family, complaint) = chosen_family(window, font.family.as_deref());
+        let (font_family, mut complaints) = chosen_family(window, font.family.as_deref());
         let cell_width = measure_cell_width(window, &font_family, font_size);
         let scale_factor = window.scale_factor();
 
@@ -155,8 +157,13 @@ impl TerminalView {
                 let (program, arguments) = command.split_first().expect("a program to run");
                 SessionConfig::command(program, arguments.to_vec())
             }
-            None => match SessionConfig::login_shell() {
-                Ok(config) => config,
+            // A preference that cannot be honoured falls back and says so
+            // rather than leaving a pane that will not open.
+            None => match SessionConfig::shell(&shell) {
+                Ok((config, refused)) => {
+                    complaints.extend(refused);
+                    config
+                }
                 Err(error) => return Self::failed(error.to_string(), font_family, cx),
             },
         };
@@ -200,6 +207,7 @@ impl TerminalView {
             style: cursor.style,
             blink: cursor.blink,
         };
+        config.scrollback_bytes = scrollback.bytes;
         config.environment.extend(environment);
         let initial_size = config.size;
 
@@ -382,9 +390,9 @@ impl TerminalView {
             session,
             observation,
             font_size,
-            // A mistyped font family is shown rather than silently ignored:
-            // somebody whose setting did nothing deserves to know why.
-            status: complaint.map(Into::into),
+            // A setting that did nothing is shown rather than silently
+            // ignored: somebody whose file had no effect deserves to know why.
+            status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
             bundle: None,
             // The renderer's own limit, separate from the terminal's above.
             textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
@@ -670,21 +678,21 @@ fn describe_exit(exit: &sprite_term::ChildExit) -> String {
 /// A configured family that is not installed falls back rather than failing:
 /// somebody who mistypes a font name should get a terminal in the wrong font,
 /// not no terminal.
-fn chosen_family(window: &Window, configured: Option<&str>) -> (SharedString, Option<String>) {
+fn chosen_family(window: &Window, configured: Option<&str>) -> (SharedString, Vec<String>) {
     let available = window.text_system().all_font_names();
     if let Some(wanted) = configured {
         if available.iter().any(|name| name == wanted) {
-            return (wanted.to_owned().into(), None);
+            return (wanted.to_owned().into(), Vec::new());
         }
         let found = monospace_family(window);
         return (
             found.clone(),
-            Some(format!(
+            vec![format!(
                 "font.family {wanted:?} is not installed; using {found} instead"
-            )),
+            )],
         );
     }
-    (monospace_family(window), None)
+    (monospace_family(window), Vec::new())
 }
 
 fn monospace_family(window: &Window) -> SharedString {

@@ -42,7 +42,7 @@ const MAX_CELLS: u64 = 1_000_000;
 const DEFAULT_SCROLLBACK_BYTES: usize = 10 * 1024 * 1024;
 
 /// The default scrollback budget in bytes.
-pub(crate) fn default_scrollback_bytes() -> usize {
+pub fn default_scrollback_bytes() -> usize {
     DEFAULT_SCROLLBACK_BYTES
 }
 
@@ -214,6 +214,16 @@ impl SessionConfig {
     /// terminal identity.
     pub fn login_shell() -> Result<Self, SessionError> {
         shell::login_shell()
+    }
+
+    /// The shell a preference asks for, with anything that had to be ignored.
+    ///
+    /// A preference that cannot be honoured falls back to the login shell and
+    /// is reported; it never fails to produce a session. The error case is only
+    /// the one where *no* shell can be found at all, which is a broken system
+    /// rather than a broken setting.
+    pub fn shell(preference: &ShellPreference) -> Result<(Self, Vec<String>), SessionError> {
+        shell::configured_shell(preference)
     }
 }
 
@@ -529,6 +539,22 @@ pub enum CursorStyle {
 pub struct CursorDefaults {
     pub style: Option<CursorStyle>,
     pub blink: Option<bool>,
+}
+
+/// What a person would like their panes to run.
+///
+/// Every field is a *preference*: unusable ones fall back to what Sprite would
+/// have done anyway and are reported. Nothing here can produce a pane that
+/// fails to open.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ShellPreference {
+    /// An absolute path to an executable. Anything else falls back.
+    pub program: Option<PathBuf>,
+    /// The arguments for `program`, used only when `program` is honoured.
+    pub args: Option<Vec<OsString>>,
+    /// Where a pane starts. Anything that is not a directory falls back to
+    /// wherever Sprite itself was started.
+    pub startup_directory: Option<PathBuf>,
 }
 
 /// Where a Pane's viewport sits over its scrollable area.

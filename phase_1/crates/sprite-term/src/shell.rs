@@ -34,19 +34,71 @@ const FALLBACK_SHELLS: [&str; 2] = ["/bin/bash", "/bin/sh"];
 
 /// A login shell in the current directory, carrying Sprite's identity.
 pub(crate) fn login_shell() -> Result<SessionConfig, SessionError> {
-    let program = resolve_shell(env::var_os("SHELL").as_deref())?;
+    Ok(configured_shell(&crate::ShellPreference::default())?.0)
+}
 
-    Ok(SessionConfig {
-        program,
-        args: vec![OsString::from("-l")],
-        working_directory: env::current_dir().ok(),
-        environment: identity_environment(),
-        size: TerminalSize::DEFAULT,
-        scrollback_bytes: crate::default_scrollback_bytes(),
-        graphics: crate::GraphicsPolicy::default(),
-        colors: crate::ColorDefaults::default(),
-        cursor: crate::CursorDefaults::default(),
-    })
+/// The shell a preference asks for, or the login shell and a reason why not.
+///
+/// **A configured shell that cannot be run must not cost somebody their
+/// terminal.** A typo in a program name would otherwise be a pane that fails to
+/// open, which is the one outcome a settings file must never be able to
+/// produce. So an unusable preference falls back to the login shell and says
+/// what it did, and the fallback is complete: the arguments went with the
+/// program they were written for, and applying them to a different shell would
+/// be a second guess on top of a first mistake.
+pub(crate) fn configured_shell(
+    preference: &crate::ShellPreference,
+) -> Result<(SessionConfig, Vec<String>), SessionError> {
+    let mut complaints = Vec::new();
+
+    let (program, args) = match &preference.program {
+        Some(configured) if is_usable_shell(configured) => (
+            configured.clone(),
+            preference.args.clone().unwrap_or_default(),
+        ),
+        Some(configured) => {
+            let program = resolve_shell(env::var_os("SHELL").as_deref())?;
+            complaints.push(format!(
+                "shell.program {} is not an absolute executable file; \
+                 running {} instead",
+                configured.display(),
+                program.display()
+            ));
+            (program, vec![OsString::from("-l")])
+        }
+        None => (
+            resolve_shell(env::var_os("SHELL").as_deref())?,
+            vec![OsString::from("-l")],
+        ),
+    };
+
+    let working_directory = match &preference.startup_directory {
+        Some(directory) if directory.is_dir() => Some(directory.clone()),
+        Some(directory) => {
+            complaints.push(format!(
+                "shell.startup_directory {} is not a directory; \
+                 starting where Sprite was started",
+                directory.display()
+            ));
+            env::current_dir().ok()
+        }
+        None => env::current_dir().ok(),
+    };
+
+    Ok((
+        SessionConfig {
+            program,
+            args,
+            working_directory,
+            environment: identity_environment(),
+            size: TerminalSize::DEFAULT,
+            scrollback_bytes: crate::default_scrollback_bytes(),
+            graphics: crate::GraphicsPolicy::default(),
+            colors: crate::ColorDefaults::default(),
+            cursor: crate::CursorDefaults::default(),
+        },
+        complaints,
+    ))
 }
 
 /// Picks the login shell. Pure apart from the filesystem check, so the decision
@@ -230,6 +282,66 @@ mod tests {
 
         let entries: Vec<PathBuf> = env::split_paths(&joined).collect();
         assert_eq!(entries, vec![directory.to_path_buf()]);
+    }
+
+    #[test]
+    fn a_configured_shell_is_run_with_its_own_arguments() {
+        let preference = crate::ShellPreference {
+            program: Some(PathBuf::from("/bin/sh")),
+            args: Some(vec![OsString::from("-i")]),
+            startup_directory: None,
+        };
+        let (config, complaints) = configured_shell(&preference).expect("resolve");
+
+        assert_eq!(config.program, PathBuf::from("/bin/sh"));
+        assert_eq!(config.args, vec![OsString::from("-i")]);
+        assert!(complaints.is_empty());
+    }
+
+    /// The rule that keeps a typo from costing somebody their terminal.
+    #[test]
+    fn an_unusable_shell_falls_back_whole_and_says_so() {
+        let preference = crate::ShellPreference {
+            program: Some(PathBuf::from("/nonexistent/sprite-shell")),
+            args: Some(vec![OsString::from("--flag-for-the-other-shell")]),
+            startup_directory: None,
+        };
+        let (config, complaints) = configured_shell(&preference).expect("resolve");
+
+        assert!(config.program.is_absolute());
+        assert_ne!(config.program, PathBuf::from("/nonexistent/sprite-shell"));
+        assert_eq!(
+            config.args,
+            vec![OsString::from("-l")],
+            "arguments written for one shell are not passed to another"
+        );
+        assert_eq!(complaints.len(), 1);
+        assert!(complaints[0].contains("not an absolute executable file"));
+    }
+
+    #[test]
+    fn a_startup_directory_is_used_when_it_exists() {
+        let preference = crate::ShellPreference {
+            startup_directory: Some(PathBuf::from("/tmp")),
+            ..crate::ShellPreference::default()
+        };
+        let (config, complaints) = configured_shell(&preference).expect("resolve");
+
+        assert_eq!(config.working_directory, Some(PathBuf::from("/tmp")));
+        assert!(complaints.is_empty());
+    }
+
+    #[test]
+    fn a_missing_startup_directory_keeps_the_pane_and_says_so() {
+        let preference = crate::ShellPreference {
+            startup_directory: Some(PathBuf::from("/nonexistent/sprite-directory")),
+            ..crate::ShellPreference::default()
+        };
+        let (config, complaints) = configured_shell(&preference).expect("resolve");
+
+        assert_eq!(config.working_directory, env::current_dir().ok());
+        assert_eq!(complaints.len(), 1);
+        assert!(complaints[0].contains("is not a directory"));
     }
 
     #[test]

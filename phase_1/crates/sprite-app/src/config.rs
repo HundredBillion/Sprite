@@ -23,6 +23,8 @@ pub struct Settings {
     pub font: Font,
     pub colors: Colors,
     pub cursor: Cursor,
+    pub shell: sprite_term::ShellPreference,
+    pub scrollback: Scrollback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +152,33 @@ impl Cursor {
     }
 }
 
+/// How much output a pane remembers.
+///
+/// Bytes, not lines, because that is what libghostty actually measures — its
+/// own header says lines and its implementation counts bytes, which Checkpoint
+/// 1 learned the expensive way. Naming the unit correctly here is the whole
+/// point of exposing it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Scrollback {
+    pub bytes: usize,
+}
+
+impl Scrollback {
+    /// A ceiling, because a scrollback is memory a pane holds forever and
+    /// sixteen panes at a careless number is a window that will not fit.
+    /// Nothing stops somebody asking for it deliberately; this only stops a
+    /// mistyped one.
+    pub const MAX_BYTES: usize = 1024 * 1024 * 1024;
+}
+
+impl Default for Scrollback {
+    fn default() -> Self {
+        Self {
+            bytes: sprite_term::default_scrollback_bytes(),
+        }
+    }
+}
+
 /// What a pane will spend on images.
 ///
 /// The two limits are separate on purpose, as the PRD requires: the terminal
@@ -182,6 +211,8 @@ impl Default for Settings {
             font: Font::default(),
             colors: Colors::default(),
             cursor: Cursor::default(),
+            shell: sprite_term::ShellPreference::default(),
+            scrollback: Scrollback::default(),
             graphics: Graphics::default(),
             // Observation is on by default: the PRD makes it automatically
             // available to local tools without prompting, and a window that
@@ -379,6 +410,86 @@ impl Settings {
                     other.type_str()
                 )),
                 None => {}
+            }
+        }
+
+        if let Some(section) = document.get("shell") {
+            match section.get("program") {
+                Some(toml::Value::String(program)) if !program.trim().is_empty() => {
+                    settings.shell.program = Some(PathBuf::from(program.trim()));
+                }
+                Some(toml::Value::String(_)) => complaints
+                    .0
+                    .push("shell.program is empty; using the login shell".to_owned()),
+                Some(other) => complaints.0.push(format!(
+                    "shell.program must be a path in quotes, not {}; using the login shell",
+                    other.type_str()
+                )),
+                None => {}
+            }
+            match section.get("args") {
+                Some(toml::Value::Array(values)) => {
+                    let mut args = Vec::with_capacity(values.len());
+                    let mut usable = true;
+                    for value in values {
+                        match value.as_str() {
+                            Some(argument) => args.push(std::ffi::OsString::from(argument)),
+                            None => usable = false,
+                        }
+                    }
+                    if usable {
+                        settings.shell.args = Some(args);
+                    } else {
+                        complaints.0.push(
+                            "shell.args must be a list of strings; \
+                             running the shell with no arguments of its own"
+                                .to_owned(),
+                        );
+                    }
+                }
+                Some(other) => complaints.0.push(format!(
+                    "shell.args must be a list of strings, not {}; \
+                     running the shell with no arguments of its own",
+                    other.type_str()
+                )),
+                None => {}
+            }
+            match section.get("startup_directory") {
+                Some(toml::Value::String(directory)) if !directory.trim().is_empty() => {
+                    settings.shell.startup_directory = Some(PathBuf::from(directory.trim()));
+                }
+                Some(toml::Value::String(_)) => complaints.0.push(
+                    "shell.startup_directory is empty; \
+                     starting where Sprite was started"
+                        .to_owned(),
+                ),
+                Some(other) => complaints.0.push(format!(
+                    "shell.startup_directory must be a path in quotes, not {}; \
+                     starting where Sprite was started",
+                    other.type_str()
+                )),
+                None => {}
+            }
+        }
+
+        if let Some(section) = document.get("scrollback")
+            && let Some(value) = section.get("bytes")
+        {
+            match value.as_integer().and_then(|v| usize::try_from(v).ok()) {
+                Some(bytes) if bytes <= Scrollback::MAX_BYTES => {
+                    settings.scrollback.bytes = bytes;
+                }
+                Some(bytes) => {
+                    complaints.0.push(format!(
+                        "scrollback.bytes {bytes} is above the {} byte ceiling; using that",
+                        Scrollback::MAX_BYTES
+                    ));
+                    settings.scrollback.bytes = Scrollback::MAX_BYTES;
+                }
+                None => complaints.0.push(
+                    "scrollback.bytes must be a whole number of bytes; keeping the default"
+                        .to_owned(),
+                ),
             }
         }
 
@@ -711,6 +822,58 @@ mod tests {
         let blink = "[cursor]\nblink = \"yes\"\n";
         assert_eq!(parsed(blink).cursor.blink, None);
         assert!(complaints(blink)[0].contains("true or false"));
+    }
+
+    #[test]
+    fn a_shell_and_its_arguments_are_read() {
+        let settings = parsed(
+            "[shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\", \"-i\"]\n\
+             startup_directory = \"/tmp\"\n",
+        );
+        assert_eq!(settings.shell.program, Some(PathBuf::from("/bin/zsh")));
+        assert_eq!(
+            settings.shell.args,
+            Some(vec![
+                std::ffi::OsString::from("-l"),
+                std::ffi::OsString::from("-i")
+            ])
+        );
+        assert_eq!(
+            settings.shell.startup_directory,
+            Some(PathBuf::from("/tmp"))
+        );
+    }
+
+    /// Whether the shell *runs* is Terminal Core's business; this is only that
+    /// nonsense in the file never reaches it.
+    #[test]
+    fn nonsense_shell_settings_are_dropped_and_reported() {
+        let text = "[shell]\nprogram = 7\nargs = \"-l\"\nstartup_directory = []\n";
+        let settings = parsed(text);
+        assert_eq!(settings.shell, sprite_term::ShellPreference::default());
+        assert_eq!(complaints(text).len(), 3);
+
+        let mixed = "[shell]\nargs = [\"-l\", 3]\n";
+        assert_eq!(parsed(mixed).shell.args, None);
+        assert!(complaints(mixed)[0].contains("list of strings"));
+    }
+
+    #[test]
+    fn scrollback_is_bytes_and_is_bounded() {
+        assert_eq!(
+            parsed("[scrollback]\nbytes = 4096\n").scrollback.bytes,
+            4096
+        );
+        // Zero is a real answer: a pane that remembers nothing.
+        assert_eq!(parsed("[scrollback]\nbytes = 0\n").scrollback.bytes, 0);
+
+        let huge = "[scrollback]\nbytes = 999999999999\n";
+        assert_eq!(parsed(huge).scrollback.bytes, Scrollback::MAX_BYTES);
+        assert!(complaints(huge)[0].contains("ceiling"));
+
+        let wrong = "[scrollback]\nbytes = \"lots\"\n";
+        assert_eq!(parsed(wrong).scrollback.bytes, Scrollback::default().bytes);
+        assert!(complaints(wrong)[0].contains("whole number of bytes"));
     }
 
     #[test]

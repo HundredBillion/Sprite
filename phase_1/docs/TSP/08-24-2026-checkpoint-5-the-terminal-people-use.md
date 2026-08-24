@@ -186,10 +186,22 @@ closed it; and the idle pane left behind closed on one.
 
 **Files:** `sprite-app/src/config.rs`, `sprite-term/src/shell.rs`
 
-- [ ] `shell.program`, `shell.args`, `shell.startup_directory`, and
-  `scrollback.bytes`.
-- [ ] A configured shell that cannot be run falls back to the login shell with a
-  diagnostic, rather than a pane that fails to open.
+- [x] `shell.program`, `shell.args`, `shell.startup_directory`, and
+  `scrollback.bytes`. Verified on screen: `/bin/bash --norc -i` running in
+  `/tmp`, reported by `ps` rather than inferred.
+- [x] A configured shell that cannot be run falls back to the login shell with a
+  diagnostic, rather than a pane that fails to open. **The fallback is whole**:
+  arguments written for one shell are not passed to another, because that would
+  be a second guess on top of a first mistake. Both diagnostics — the program
+  and the startup directory — appear in the pane's status line at the same time.
+
+`scrollback.bytes` says bytes and means bytes, which is the trap this project
+already fell into once: libghostty's header calls the value a number of lines
+and its implementation counts them as bytes. A test now pins it — five thousand
+lines through a 4 KiB pane and a 16 MiB one, and the budget has to reach the
+terminal for the two to differ. Five thousand rather than a few hundred because
+the budget rounds up to whole pages, and a 4 KiB pane still holds around a
+thousand rows.
 
 ### Task 6: Reload
 
