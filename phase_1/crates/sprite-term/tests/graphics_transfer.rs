@@ -53,7 +53,11 @@ fn session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump)
 static NEXT_MARK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Has the child print `escapes`, then waits until the terminal has read them.
-fn feed(session: &mut TerminalSession, snapshots: &SnapshotPump, escapes: String) {
+fn feed(
+    session: &mut TerminalSession,
+    snapshots: &SnapshotPump,
+    escapes: String,
+) -> std::sync::Arc<sprite_term::SnapshotBundle> {
     session
         .send(TerminalCommand::Input(
             format!("printf '{escapes}'\n").into_bytes(),
@@ -69,7 +73,7 @@ fn feed(session: &mut TerminalSession, snapshots: &SnapshotPump, escapes: String
         .expect("ask the child to print the marker");
     snapshots.wait_for("the payload to be processed", |bundle| {
         pane_text(bundle).contains(&marker)
-    });
+    })
 }
 
 fn probe(session: &mut TerminalSession, events: &EventPump) -> GraphicsSnapshot {
@@ -313,10 +317,10 @@ fn malformed_payloads_are_refused_and_the_pane_survives() {
         "a good image after six bad ones"
     );
 
-    feed(&mut session, &snapshots, "text-still-works\\n".to_owned());
-    let bundle = snapshots.wait_for("text after malformed images", |bundle| {
-        pane_text(bundle).contains("text-still-works")
-    });
+    // The bundle `feed` already waited for is the one to assert on: waiting
+    // again needs a *further* snapshot, and a settled screen has no reason to
+    // produce one.
+    let bundle = feed(&mut session, &snapshots, "text-still-works\\n".to_owned());
     assert!(pane_text(&bundle).contains("text-still-works"));
 }
 

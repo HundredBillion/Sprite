@@ -166,7 +166,6 @@ pub struct Request {
 /// filesystem and wipes the key, so a captured key stops working.
 pub struct Endpoint {
     socket: PathBuf,
-    directory: PathBuf,
     key: Arc<ObservationKey>,
     running: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
@@ -228,7 +227,6 @@ impl Endpoint {
 
         Ok(Self {
             socket,
-            directory,
             key,
             running,
             listener: Some(thread),

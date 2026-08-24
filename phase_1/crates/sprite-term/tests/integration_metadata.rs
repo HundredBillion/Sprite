@@ -103,12 +103,21 @@ fn prompt_marks_are_reported_per_row() {
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
     events.expect_ready();
 
-    let bundle = snapshots.wait_for("a marked prompt row", |bundle| {
+    // Both conditions, not just the mark: the first bundle carrying a prompt
+    // mark can arrive before the output line has been printed, and this test
+    // asserts something about each. Waiting for one and asserting the other is
+    // what made it fail under load and pass when idle.
+    let bundle = snapshots.wait_for("a marked prompt row and the output", |bundle| {
         bundle
             .pane
             .rows
             .iter()
             .any(|row| row.prompt == PromptKind::Prompt)
+            && bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("output-line"))
     });
 
     let marked: Vec<usize> = bundle
