@@ -188,6 +188,13 @@ pub(crate) fn run(
         return;
     }
 
+    // Also before the first byte, so the first frame is already the configured
+    // colours rather than a flash of Ghostty's own.
+    if let Err(error) = apply_color_defaults(&mut terminal, &config.colors) {
+        let _ = events.send_blocking(TerminalEvent::Error(error));
+        return;
+    }
+
     // Terminal-generated replies (device status reports and the like) take the
     // same ordered write path as keyboard input.
     let registered = terminal.on_pty_write({
@@ -883,11 +890,66 @@ pub(crate) fn run(
     drop(master);
 }
 
-/// The process groups descendant cleanup must reach.
+/// Writes configured colours into the terminal's *default* colours.
 ///
-/// The group recorded at spawn covers the shell and anything it started; the
-/// current foreground group covers an interactive program that moved itself
-/// into its own group since.
+/// Deliberately not into the effective ones. The default slot is where
+/// libghostty keeps its own built-ins, and a program that sets a colour writes
+/// above it — so a preference is what a pane starts with and what it returns to
+/// when a program resets, and never something that overrides a program while it
+/// runs.
+fn apply_color_defaults(
+    terminal: &mut Terminal<'_, '_>,
+    colors: &crate::ColorDefaults,
+) -> Result<(), SessionError> {
+    use libghostty_vt::style::{PaletteIndex, RgbColor};
+
+    if colors.is_empty() {
+        return Ok(());
+    }
+
+    let vt = |what: &'static str| move |error| SessionError::new(what, error);
+    let color = |value: crate::Rgb| RgbColor {
+        r: value.r,
+        g: value.g,
+        b: value.b,
+    };
+
+    if let Some(foreground) = colors.foreground {
+        terminal
+            .set_default_fg_color(Some(color(foreground)))
+            .map_err(vt("default_fg_color"))?;
+    }
+    if let Some(background) = colors.background {
+        terminal
+            .set_default_bg_color(Some(color(background)))
+            .map_err(vt("default_bg_color"))?;
+    }
+    if let Some(cursor) = colors.cursor {
+        terminal
+            .set_default_cursor_color(Some(color(cursor)))
+            .map_err(vt("default_cursor_color"))?;
+    }
+
+    // The palette is set whole or not at all, so a sparse preference is applied
+    // by reading the current defaults and putting back a patched copy. Read
+    // *defaults* rather than the active palette: at creation they are the same,
+    // and reading the active one would be a habit that stops being correct the
+    // moment this is called anywhere else.
+    if !colors.palette.is_empty() {
+        let mut palette = terminal
+            .default_color_palette()
+            .map_err(vt("default_color_palette"))?;
+        for &(index, value) in &colors.palette {
+            palette.set(PaletteIndex(index), color(value));
+        }
+        terminal
+            .set_default_color_palette(Some(palette))
+            .map_err(vt("set_default_color_palette"))?;
+    }
+
+    Ok(())
+}
+
 /// Bounds what a pane will accept in the way of images.
 ///
 /// **Every denial here is deliberate rather than a default.** Ghostty's image
@@ -961,6 +1023,8 @@ fn apply_graphics_policy(
     Ok(())
 }
 
+
+
 /// The basename of the program in the foreground of this terminal.
 ///
 /// Read from the process the kernel already reports as the terminal's
@@ -975,6 +1039,11 @@ fn foreground_executable(master: &(dyn MasterPty + Send)) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// The process groups descendant cleanup must reach.
+///
+/// The group recorded at spawn covers the shell and anything it started; the
+/// current foreground group covers an interactive program that moved itself
+/// into its own group since.
 fn process_groups(master: &(dyn MasterPty + Send), recorded: Option<i32>) -> Vec<i32> {
     let mut groups = Vec::with_capacity(2);
     if let Some(group) = recorded {

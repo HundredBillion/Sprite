@@ -179,6 +179,8 @@ pub struct SessionConfig {
     pub size: TerminalSize,
     /// What this pane will accept in the way of images.
     pub graphics: GraphicsPolicy,
+    /// The colours this pane starts with, before any program says otherwise.
+    pub colors: ColorDefaults,
     /// Scrollback budget in **bytes**, not lines.
     ///
     /// libghostty's C header documents this as "maximum number of lines", but
@@ -199,6 +201,7 @@ impl SessionConfig {
             environment: Vec::new(),
             size: TerminalSize::DEFAULT,
             graphics: GraphicsPolicy::default(),
+            colors: ColorDefaults::default(),
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
         }
     }
@@ -455,6 +458,48 @@ impl Default for GraphicsPolicy {
     }
 }
 
+/// The colours a pane starts with, before any program says otherwise.
+///
+/// **These are defaults, not overrides**, and the distinction is the whole
+/// design. They are written into the terminal's *default* colours at creation,
+/// which is the same slot Ghostty's own built-in colours occupy. A program that
+/// sets its own colours — OSC 10, 11, 12, or 4 — writes the *effective* colour
+/// on top, and the effective colour is what a snapshot reports. So a preference
+/// never overrides a running program, and a program that resets its colours
+/// falls back to the preference rather than to Ghostty's built-ins.
+///
+/// Anything left `None` keeps what libghostty ships.
+///
+/// **Set `foreground` and `background` together or not at all.** libghostty
+/// reports the two as a pair and only when it knows both: a terminal with one
+/// of them unset reports neither, and a snapshot falls back to the placeholder
+/// black-on-white a `RenderState` starts life with. Its own comment says as
+/// much — the expected use is that an application supplies its defaults at
+/// startup. Sprite's does, so a pane's reported colours are always the ones it
+/// is actually drawn in.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ColorDefaults {
+    pub foreground: Option<Rgb>,
+    pub background: Option<Rgb>,
+    pub cursor: Option<Rgb>,
+    /// Palette entries to replace, by index.
+    ///
+    /// Sparse on purpose: someone who dislikes one shade of blue should not
+    /// have to write out the other 255 colours to change it. Entries not listed
+    /// keep libghostty's own.
+    pub palette: Vec<(u8, Rgb)>,
+}
+
+impl ColorDefaults {
+    /// Whether anything at all is configured.
+    pub fn is_empty(&self) -> bool {
+        self.foreground.is_none()
+            && self.background.is_none()
+            && self.cursor.is_none()
+            && self.palette.is_empty()
+    }
+}
+
 /// Where a Pane's viewport sits over its scrollable area.
 ///
 /// History is deliberately *not* carried in snapshots. A full scrollback would
@@ -595,6 +640,12 @@ pub struct RenderSnapshot {
     /// It is the *active* palette, so a program that redefines an entry through
     /// OSC 4 is reflected here rather than overridden by a preference.
     pub palette: Box<[Rgb; 256]>,
+    /// The colour the cursor should be painted, when one is set.
+    ///
+    /// `None` means nobody has an opinion, and the renderer should fall back to
+    /// its own convention — inverting the cell it sits on, which is legible
+    /// against any background without knowing what that background is.
+    pub cursor_color: Option<Rgb>,
 }
 
 /// Whether a row is part of a shell prompt, as reported by OSC 133.

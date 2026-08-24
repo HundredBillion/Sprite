@@ -79,16 +79,14 @@ impl Workspace {
             .flatten();
 
         let program = command.clone();
-        let graphics = settings.graphics;
-        let font = settings.font.clone();
+        let pane_settings = settings.clone();
         let tabs = Tabs::new(|tab, pane| {
             let environment = session_environment(endpoint.as_ref(), tab, pane);
             let link = pane_link(&panes, endpoint.as_ref(), tab, pane);
             cx.new(|cx| {
                 TerminalView::new(
                     program,
-                    font.clone(),
-                    graphics,
+                    pane_settings.clone(),
                     environment,
                     link,
                     window,
@@ -165,16 +163,14 @@ impl Workspace {
         let endpoint = self.endpoint.as_ref();
         let panes = &self.panes;
         let program = self.command.clone();
-        let graphics = self.settings.graphics;
-        let font = self.settings.font.clone();
+        let pane_settings = self.settings.clone();
         let pane = self.tabs.split(orientation, |tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
             cx.new(|cx| {
                 TerminalView::new(
                     program,
-                    font.clone(),
-                    graphics,
+                    pane_settings.clone(),
                     environment,
                     link,
                     window,
@@ -190,16 +186,14 @@ impl Workspace {
         let endpoint = self.endpoint.as_ref();
         let panes = &self.panes;
         let program = self.command.clone();
-        let graphics = self.settings.graphics;
-        let font = self.settings.font.clone();
+        let pane_settings = self.settings.clone();
         self.tabs.open(|tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
             cx.new(|cx| {
                 TerminalView::new(
                     program,
-                    font.clone(),
-                    graphics,
+                    pane_settings.clone(),
                     environment,
                     link,
                     window,

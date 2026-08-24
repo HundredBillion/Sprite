@@ -21,6 +21,7 @@ pub struct Settings {
     pub pane_observation: PaneObservation,
     pub graphics: Graphics,
     pub font: Font,
+    pub colors: Colors,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +79,47 @@ impl Default for Font {
     }
 }
 
+/// Colours a person prefers, for the parts of a terminal that have one.
+///
+/// **A preference, not an override.** These become the pane's *default*
+/// colours, which is the slot libghostty's own built-ins occupy; a program that
+/// sets its own colours writes above them and wins for as long as it runs. That
+/// is the right way round: a preference should decide what a fresh shell looks
+/// like, not overrule a program that has gone to the trouble of asking.
+///
+/// Anything unset keeps libghostty's colour.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Colors {
+    pub background: Option<sprite_term::Rgb>,
+    pub foreground: Option<sprite_term::Rgb>,
+    pub cursor: Option<sprite_term::Rgb>,
+    /// Palette entries to replace, by index, in ascending order.
+    ///
+    /// Sparse: someone who dislikes one shade of blue changes that one entry
+    /// rather than restating the palette.
+    pub palette: Vec<(u8, sprite_term::Rgb)>,
+}
+
+impl Colors {
+    /// Reads `#rrggbb`, and the same without the `#` because people write both.
+    ///
+    /// Three-digit forms and colour names are deliberately not accepted: a
+    /// terminal that guessed at `#abc` or at "grey" would be guessing at
+    /// somebody's palette.
+    pub fn parse_hex(text: &str) -> Option<sprite_term::Rgb> {
+        let digits = text.trim().strip_prefix('#').unwrap_or(text.trim());
+        if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let channel = |from: usize| u8::from_str_radix(&digits[from..from + 2], 16).ok();
+        Some(sprite_term::Rgb {
+            r: channel(0)?,
+            g: channel(2)?,
+            b: channel(4)?,
+        })
+    }
+}
+
 /// What a pane will spend on images.
 ///
 /// The two limits are separate on purpose, as the PRD requires: the terminal
@@ -108,6 +150,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             font: Font::default(),
+            colors: Colors::default(),
             graphics: Graphics::default(),
             // Observation is on by default: the PRD makes it automatically
             // available to local tools without prompting, and a window that
@@ -228,6 +271,59 @@ impl Settings {
                             .to_owned(),
                     ),
                 }
+            }
+        }
+
+        if let Some(section) = document.get("colors") {
+            let mut named = |key: &str, slot: &mut Option<sprite_term::Rgb>| {
+                match section.get(key) {
+                    Some(toml::Value::String(text)) => match Colors::parse_hex(text) {
+                        Some(color) => *slot = Some(color),
+                        None => complaints.0.push(format!(
+                            "colors.{key} is {text:?}, which is not a #rrggbb colour; \
+                             keeping the default"
+                        )),
+                    },
+                    Some(other) => complaints.0.push(format!(
+                        "colors.{key} must be a #rrggbb colour in quotes, not {}; \
+                         keeping the default",
+                        other.type_str()
+                    )),
+                    None => {}
+                }
+            };
+            named("background", &mut settings.colors.background);
+            named("foreground", &mut settings.colors.foreground);
+            named("cursor", &mut settings.colors.cursor);
+
+            match section.get("palette") {
+                Some(toml::Value::Table(entries)) => {
+                    for (key, value) in entries {
+                        let Ok(index) = key.parse::<u8>() else {
+                            complaints.0.push(format!(
+                                "colors.palette key {key:?} is not an index from 0 to 255; \
+                                 ignoring it"
+                            ));
+                            continue;
+                        };
+                        match value.as_str().and_then(Colors::parse_hex) {
+                            Some(color) => settings.colors.palette.push((index, color)),
+                            None => complaints.0.push(format!(
+                                "colors.palette.{index} is not a #rrggbb colour; \
+                                 keeping that entry"
+                            )),
+                        }
+                    }
+                    // Ascending, so the order a file happens to be written in
+                    // does not change what Sprite does with it.
+                    settings.colors.palette.sort_by_key(|&(index, _)| index);
+                }
+                Some(other) => complaints.0.push(format!(
+                    "colors.palette must be a table of index = \"#rrggbb\", not {}; \
+                     keeping the palette",
+                    other.type_str()
+                )),
+                None => {}
             }
         }
 
@@ -402,6 +498,124 @@ mod tests {
         assert_eq!(Font::line_height(14.0), 16.0);
         assert_eq!(Font::line_height(28.0), 32.0);
         assert!(Font::line_height(Font::MIN_SIZE) >= Font::MIN_SIZE);
+    }
+
+    #[test]
+    fn colours_are_read_in_hex() {
+        let settings = parsed(
+            "[colors]\nbackground = \"#101014\"\nforeground = \"#d8d8e0\"\n\
+             cursor = \"#f0a0a0\"\n",
+        );
+        assert_eq!(
+            settings.colors.background,
+            Some(sprite_term::Rgb {
+                r: 0x10,
+                g: 0x10,
+                b: 0x14
+            })
+        );
+        assert_eq!(
+            settings.colors.foreground,
+            Some(sprite_term::Rgb {
+                r: 0xd8,
+                g: 0xd8,
+                b: 0xe0
+            })
+        );
+        assert_eq!(
+            settings.colors.cursor,
+            Some(sprite_term::Rgb {
+                r: 0xf0,
+                g: 0xa0,
+                b: 0xa0
+            })
+        );
+        assert!(Settings::default().colors.background.is_none());
+    }
+
+    #[test]
+    fn a_palette_is_a_sparse_table_of_indices() {
+        let settings = parsed("[colors.palette]\n4 = \"#0000ff\"\n1 = \"#ff0000\"\n");
+        assert_eq!(
+            settings.colors.palette,
+            vec![
+                (
+                    1,
+                    sprite_term::Rgb {
+                        r: 0xff,
+                        g: 0,
+                        b: 0
+                    }
+                ),
+                (
+                    4,
+                    sprite_term::Rgb {
+                        r: 0,
+                        g: 0,
+                        b: 0xff
+                    }
+                ),
+            ],
+            "in ascending order, whatever order the file was written in"
+        );
+    }
+
+    /// Every one of these must leave a usable terminal, because a colour is
+    /// exactly the sort of thing people mistype.
+    #[test]
+    fn an_unparseable_colour_keeps_the_default_and_says_so() {
+        for text in [
+            "[colors]\nbackground = \"blue\"\n",
+            "[colors]\nbackground = \"#abc\"\n",
+            "[colors]\nbackground = \"#gggggg\"\n",
+            "[colors]\nbackground = \"#1010144\"\n",
+        ] {
+            assert_eq!(
+                parsed(text).colors.background,
+                None,
+                "the default survives {text:?}"
+            );
+            assert!(
+                complaints(text)[0].contains("#rrggbb"),
+                "and says so: {:?}",
+                complaints(text)
+            );
+        }
+
+        let wrong_type = "[colors]\ncursor = 5\n";
+        assert_eq!(parsed(wrong_type).colors.cursor, None);
+        assert!(complaints(wrong_type)[0].contains("in quotes"));
+    }
+
+    #[test]
+    fn a_bad_palette_entry_is_the_only_one_lost() {
+        let text = "[colors.palette]\n1 = \"#ff0000\"\nred = \"#ff0000\"\n\
+                    2 = \"not a colour\"\n";
+        let settings = parsed(text);
+        assert_eq!(settings.colors.palette.len(), 1, "the good entry survives");
+        assert_eq!(settings.colors.palette[0].0, 1);
+        assert_eq!(complaints(text).len(), 2, "and both bad ones are reported");
+
+        let not_a_table = "[colors]\npalette = \"solarized\"\n";
+        assert!(parsed(not_a_table).colors.palette.is_empty());
+        assert!(complaints(not_a_table)[0].contains("table"));
+    }
+
+    /// A hex colour is written both ways in the wild, and a leading `#` is not
+    /// the interesting part of it.
+    #[test]
+    fn hex_is_accepted_with_or_without_a_hash() {
+        let expected = sprite_term::Rgb {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+        };
+        assert_eq!(Colors::parse_hex("#123456"), Some(expected));
+        assert_eq!(Colors::parse_hex("123456"), Some(expected));
+        assert_eq!(Colors::parse_hex("  #123456  "), Some(expected));
+        assert_eq!(Colors::parse_hex("#ABCDEF"), Colors::parse_hex("#abcdef"));
+        assert_eq!(Colors::parse_hex(""), None);
+        assert_eq!(Colors::parse_hex("#12345"), None);
     }
 
     #[test]

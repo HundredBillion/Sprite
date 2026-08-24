@@ -70,6 +70,12 @@ pub struct TerminalView {
     cell_height: Pixels,
     /// Resolved once, then used for both measuring and drawing.
     font_family: SharedString,
+    /// Foreground and background to use before the first snapshot arrives.
+    ///
+    /// Configured colours are held here as well as sent to the terminal, so a
+    /// pane that opens on a light background does not spend its first frame
+    /// dark.
+    fallback_colors: (Rgb, Rgb),
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<TerminalSize>,
     /// How this pane is reached by observation, if the window has an endpoint.
@@ -102,8 +108,7 @@ impl TerminalView {
     /// which a child learns the key.
     pub fn new(
         command: Option<Vec<std::ffi::OsString>>,
-        font: crate::config::Font,
-        graphics: crate::config::Graphics,
+        settings: crate::config::Settings,
         environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
         observation: Option<crate::observation::panes::PaneLink>,
         window: &mut Window,
@@ -114,6 +119,13 @@ impl TerminalView {
         // TitlebarOptions only reaches macOS and Windows titlebars, so the
         // Wayland/X11 title is set explicitly here.
         window.set_window_title("Sprite");
+
+        let crate::config::Settings {
+            font,
+            graphics,
+            colors,
+            ..
+        } = settings;
 
         let font_size = px(font.size);
         let (font_family, complaint) = chosen_family(window, font.family.as_deref());
@@ -147,6 +159,26 @@ impl TerminalView {
             enabled: graphics.enabled,
             storage_bytes: graphics.storage_bytes,
             ..sprite_term::GraphicsPolicy::default()
+        };
+        // Kept for the frames before the first snapshot, when there is no
+        // terminal state to ask.
+        let fallback_colors = (
+            colors.foreground.unwrap_or_else(|| unpack(FOREGROUND)),
+            colors.background.unwrap_or_else(|| unpack(BACKGROUND)),
+        );
+        // Written into the pane's *default* colours, so a program that sets its
+        // own still wins.
+        //
+        // Foreground and background are always supplied, configured or not:
+        // libghostty reports the pair only when it knows both, and a pane that
+        // supplied neither would draw its cells in the placeholder black a
+        // render state starts with while its window drew Sprite's own colour
+        // behind them.
+        config.colors = sprite_term::ColorDefaults {
+            foreground: Some(fallback_colors.0),
+            background: Some(fallback_colors.1),
+            cursor: colors.cursor,
+            palette: colors.palette,
         };
         config.environment.extend(environment);
         let initial_size = config.size;
@@ -327,6 +359,7 @@ impl TerminalView {
             cell_width,
             cell_height: px(crate::config::Font::line_height(font.size)),
             font_family,
+            fallback_colors,
             size: Some(initial_size),
             allocated: None,
             scroll: ScrollAccumulator::default(),
@@ -360,6 +393,7 @@ impl TerminalView {
                 crate::config::Font::DEFAULT_SIZE,
             )),
             font_family,
+            fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
             allocated: None,
             status: Some(message.into()),
@@ -479,18 +513,7 @@ impl TerminalView {
                 bundle.render.default_foreground,
                 bundle.render.default_background,
             ),
-            None => (
-                Rgb {
-                    r: 0xd8,
-                    g: 0xd8,
-                    b: 0xe0,
-                },
-                Rgb {
-                    r: 0x10,
-                    g: 0x10,
-                    b: 0x14,
-                },
-            ),
+            None => self.fallback_colors,
         }
     }
 }
@@ -536,6 +559,14 @@ fn resolve(color: SnapshotColor, default: Rgb, palette: Option<&[Rgb; 256]>) -> 
             // consult and nothing on screen to colour.
             None => rgb(pack(default)),
         },
+    }
+}
+
+fn unpack(value: u32) -> Rgb {
+    Rgb {
+        r: ((value >> 16) & 0xff) as u8,
+        g: ((value >> 8) & 0xff) as u8,
+        b: (value & 0xff) as u8,
     }
 }
 
@@ -732,6 +763,7 @@ fn row_element(
     default_fg: sprite_term::Rgb,
     default_bg: sprite_term::Rgb,
     palette: Option<std::sync::Arc<[sprite_term::Rgb; 256]>>,
+    cursor_color: Option<sprite_term::Rgb>,
     cell_width: Pixels,
     cell_height: Pixels,
 ) -> gpui::Div {
@@ -775,7 +807,16 @@ fn row_element(
                 .overflow_hidden();
 
             if pass != RowPass::Text {
-                element = element.bg(if inverted { foreground } else { background });
+                // A configured or program-set cursor colour paints the cursor
+                // cell; everything else inverts as before. The text stays the
+                // inverted colour either way, so a cursor is legible on top of
+                // whatever colour it was given.
+                let block = is_cursor.then_some(cursor_color).flatten();
+                element = element.bg(match block {
+                    Some(color) => rgb(pack(color)),
+                    None if inverted => foreground,
+                    None => background,
+                });
             }
             if pass == RowPass::Background {
                 return Some(element);
@@ -972,6 +1013,10 @@ impl Render for TerminalView {
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
         let cursor = self.bundle.as_ref().map(|bundle| bundle.render.cursor);
+        let cursor_color = self
+            .bundle
+            .as_ref()
+            .and_then(|bundle| bundle.render.cursor_color);
         let status = self.status.clone();
         let preedit = self.preedit.clone();
         let focus_for_input = self.focus.clone();
@@ -1006,6 +1051,7 @@ impl Render for TerminalView {
                         default_fg,
                         default_bg,
                         palette.clone(),
+                        cursor_color,
                         cell_width,
                         cell_height,
                     )
@@ -1024,8 +1070,11 @@ impl Render for TerminalView {
         div()
             .relative()
             .size_full()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(FOREGROUND))
+            // The terminal's own colours, not a constant: a pane whose
+            // background is configured — or set by a program — must not show a
+            // different colour below its last row than inside it.
+            .bg(rgb(pack(default_bg)))
+            .text_color(rgb(pack(default_fg)))
             .font_family(self.font_family.clone())
             .text_size(self.font_size)
             .line_height(self.cell_height)

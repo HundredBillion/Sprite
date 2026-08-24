@@ -112,11 +112,34 @@ use for undo. Sprite takes it, as kitty does by default. `C-/` remains.
 
 **Files:** `sprite-app/src/config.rs`, `sprite-app/src/terminal_view.rs`
 
-- [ ] `colors.background`, `colors.foreground`, `colors.cursor`, and
-  `colors.palette` overrides, in `#rrggbb` form.
-- [ ] Terminal-set colours still win over configured ones: a program that sets
-  its own colours is not overridden by a preference.
-- [ ] An unparseable colour keeps the default and is reported.
+- [x] `colors.background`, `colors.foreground`, `colors.cursor`, and
+  `colors.palette` overrides, in `#rrggbb` form. The palette is a sparse table
+  — `[colors.palette]` with `1 = "#ff0000"` — so changing one shade of blue does
+  not mean restating the other 255 colours.
+- [x] Terminal-set colours still win over configured ones: a program that sets
+  its own colours is not overridden by a preference. Verified both ways on
+  screen: OSC 11 and 12 replaced the configured background and cursor while the
+  program ran, and OSC 111 and 112 returned to the *configured* colours rather
+  than to libghostty's built-ins.
+- [x] An unparseable colour keeps the default and is reported. `blue`, `#abc`,
+  `#gggggg`, a seven-digit hex, a number instead of a string, and a palette key
+  that is not an index each keep the default and produce a complaint; a bad
+  palette entry loses only itself.
+
+**Configured colours are written into the terminal's *default* colours**, which
+is the slot libghostty's own built-ins occupy, rather than merged in by the
+renderer. That is what makes both halves of the rule fall out for free: a
+program's OSC writes an *override* above the default and wins while it runs, and
+a reset drops back to the preference. A renderer-side merge would have had to
+implement the second half by hand, and would have got it wrong.
+
+**Foreground and background are always sent, configured or not.** libghostty
+reports the two as a pair and only when it knows both — its `RenderState` skips
+the assignment entirely if either is unset, leaving the placeholder black and
+white it starts with. Sprite had never supplied either, so until now every pane
+drew its cells on libghostty's placeholder black while the window drew Sprite's
+own `#101014` behind them: a real, if subtle, mismatch at the bottom edge of
+every window. The window now takes its colour from the terminal too.
 
 ### Task 4: Cursor and close safety
 

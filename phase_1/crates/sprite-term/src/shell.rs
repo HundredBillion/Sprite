@@ -44,6 +44,7 @@ pub(crate) fn login_shell() -> Result<SessionConfig, SessionError> {
         size: TerminalSize::DEFAULT,
         scrollback_bytes: crate::default_scrollback_bytes(),
         graphics: crate::GraphicsPolicy::default(),
+        colors: crate::ColorDefaults::default(),
     })
 }
 

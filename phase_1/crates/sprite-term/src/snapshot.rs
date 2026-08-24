@@ -342,6 +342,10 @@ pub(crate) fn capture<'vt>(
             // redefines a colour, and the alternative is a renderer that cannot
             // tell red from white.
             palette: Box::new(colors.palette.map(rgb)),
+            // Already the effective colour: a program that set one through
+            // OSC 12 is reported here, and a pane with no opinion reports none
+            // rather than inventing one.
+            cursor_color: colors.cursor.map(rgb),
         }),
         pane: Arc::new(PaneSnapshot {
             generation,
