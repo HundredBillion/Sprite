@@ -76,10 +76,11 @@ impl Workspace {
             .flatten();
 
         let program = command.clone();
+        let graphics = settings.graphics;
         let tabs = Tabs::new(|tab, pane| {
             let environment = session_environment(endpoint.as_ref(), tab, pane);
             let link = pane_link(&panes, endpoint.as_ref(), tab, pane);
-            cx.new(|cx| TerminalView::new(program, environment, link, window, cx))
+            cx.new(|cx| TerminalView::new(program, graphics, environment, link, window, cx))
         });
         // The window focuses the workspace; the workspace hands the keyboard to
         // a pane, rather than leaving which pane receives typing to chance.
@@ -149,10 +150,11 @@ impl Workspace {
         let endpoint = self.endpoint.as_ref();
         let panes = &self.panes;
         let program = self.command.clone();
+        let graphics = self.settings.graphics;
         let pane = self.tabs.split(orientation, |tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(program, environment, link, window, cx))
+            cx.new(|cx| TerminalView::new(program, graphics, environment, link, window, cx))
         });
         self.request_focus(pane);
         cx.notify();
@@ -162,10 +164,11 @@ impl Workspace {
         let endpoint = self.endpoint.as_ref();
         let panes = &self.panes;
         let program = self.command.clone();
+        let graphics = self.settings.graphics;
         self.tabs.open(|tab, pane| {
             let environment = session_environment(endpoint, tab, pane);
             let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| TerminalView::new(program, environment, link, window, cx))
+            cx.new(|cx| TerminalView::new(program, graphics, environment, link, window, cx))
         });
         self.request_focus(self.tabs.active().focus());
         cx.notify();

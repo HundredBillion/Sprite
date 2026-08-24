@@ -342,3 +342,85 @@ fn a_payload_beyond_the_bound_is_refused_without_wedging_the_pane() {
         "the bound refuses one payload, it does not disable the pane"
     );
 }
+
+/// An image too large for a pane's limits leaves no image and no damage.
+///
+/// **A wart worth knowing about.** When a transmission exceeds either bound —
+/// the storage limit or the APC byte cap — the pinned Ghostty abandons the
+/// escape sequence and prints the rest of it as ordinary text, so a refused
+/// image can spray thousands of characters of base64 across the screen. That is
+/// upstream behaviour rather than something Sprite does, and it is why the
+/// default limits are generous enough that ordinary images never reach it. This
+/// test deliberately asserts only what must be true, so that an upstream fix
+/// does not fail it.
+#[test]
+fn an_image_beyond_a_limit_leaves_no_image_and_a_working_pane() {
+    for policy in [
+        GraphicsPolicy {
+            storage_bytes: 1024,
+            ..GraphicsPolicy::default()
+        },
+        GraphicsPolicy {
+            apc_max_bytes: 4096,
+            ..GraphicsPolicy::default()
+        },
+    ] {
+        let (mut session, events, snapshots) = session(policy);
+        feed(&mut session, &snapshots, transmit_rgba(1, 32, 32));
+
+        assert!(
+            !probe(&mut session, &events).holds(1),
+            "the image was refused: {policy:?}"
+        );
+
+        // The pane is still a terminal afterwards, which is the property that
+        // matters: a limit degrades one image, it does not end the session.
+        let bundle = feed(&mut session, &snapshots, "still-a-terminal\\n".to_owned());
+        assert!(pane_text(&bundle).contains("still-a-terminal"));
+
+        // And a smaller image still works, so the limit refused one image
+        // rather than switching graphics off.
+        feed(&mut session, &snapshots, transmit_rgba(2, 4, 4));
+        assert!(probe(&mut session, &events).holds(2));
+    }
+}
+
+/// A program that transmits images forever must reach a steady state.
+///
+/// This is the pathological case the limits exist for: without them a loop like
+/// this is unbounded growth, and the pane eventually takes the machine with it.
+#[test]
+fn transmitting_images_in_a_loop_reaches_a_steady_state() {
+    let policy = GraphicsPolicy {
+        storage_bytes: 16 * 1024,
+        ..GraphicsPolicy::default()
+    };
+    let (mut session, events, snapshots) = session(policy);
+
+    let mut readings = Vec::new();
+    for id in 1..=40 {
+        feed(&mut session, &snapshots, transmit_rgba(id, 32, 32));
+        if id % 10 == 0 {
+            readings.push(probe(&mut session, &events).stored_bytes());
+        }
+    }
+
+    for reading in &readings {
+        assert!(
+            *reading <= 16 * 1024,
+            "storage stayed inside its limit through the loop: {readings:?}"
+        );
+    }
+    // Steady rather than merely bounded: the last reading is no larger than the
+    // first, so nothing is quietly accumulating beneath the limit.
+    let first = *readings.first().expect("a reading");
+    let last = *readings.last().expect("a reading");
+    assert!(
+        last <= first,
+        "storage settled instead of creeping: {readings:?}"
+    );
+
+    // And the pane still works afterwards.
+    let bundle = feed(&mut session, &snapshots, "still-alive\\n".to_owned());
+    assert!(pane_text(&bundle).contains("still-alive"));
+}

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Settings {
     pub pane_observation: PaneObservation,
+    pub graphics: Graphics,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,9 +29,36 @@ pub struct PaneObservation {
     pub enabled: bool,
 }
 
+/// What a pane will spend on images.
+///
+/// The two limits are separate on purpose, as the PRD requires: the terminal
+/// holds what a program transmitted, the renderer holds what is actually being
+/// drawn, and they are exceeded at different moments. One number covering both
+/// would mean a pane that stopped accepting images because it was drawing many,
+/// or the reverse.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Graphics {
+    pub enabled: bool,
+    /// Decoded image bytes the terminal may hold for one pane.
+    pub storage_bytes: u64,
+    /// Texture bytes the renderer may hold for one pane.
+    pub texture_bytes: usize,
+}
+
+impl Default for Graphics {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            storage_bytes: sprite_term::GraphicsPolicy::DEFAULT_STORAGE_BYTES,
+            texture_bytes: crate::graphics_cache::DEFAULT_BUDGET_BYTES,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            graphics: Graphics::default(),
             // Observation is on by default: the PRD makes it automatically
             // available to local tools without prompting, and a window that
             // silently offered nothing would be indistinguishable from one
@@ -79,6 +107,40 @@ impl Settings {
                 return (settings, complaints);
             }
         };
+
+        if let Some(section) = document.get("graphics") {
+            match section.get("enabled") {
+                Some(toml::Value::Boolean(enabled)) => settings.graphics.enabled = *enabled,
+                Some(other) => complaints.0.push(format!(
+                    "graphics.enabled must be true or false, not {}; leaving images enabled",
+                    other.type_str()
+                )),
+                None => {}
+            }
+            // Read as bytes rather than a friendlier unit because a wrong guess
+            // about the unit is a wrong limit, and a limit nobody notices is
+            // the one that matters.
+            if let Some(value) = section.get("storage_bytes") {
+                match value.as_integer().and_then(|v| u64::try_from(v).ok()) {
+                    Some(bytes) => settings.graphics.storage_bytes = bytes,
+                    None => complaints.0.push(
+                        "graphics.storage_bytes must be a whole number of bytes; \
+                         keeping the default"
+                            .to_owned(),
+                    ),
+                }
+            }
+            if let Some(value) = section.get("texture_bytes") {
+                match value.as_integer().and_then(|v| usize::try_from(v).ok()) {
+                    Some(bytes) => settings.graphics.texture_bytes = bytes,
+                    None => complaints.0.push(
+                        "graphics.texture_bytes must be a whole number of bytes; \
+                         keeping the default"
+                            .to_owned(),
+                    ),
+                }
+            }
+        }
 
         if let Some(section) = document.get("pane_observation") {
             match section.get("enabled") {
@@ -163,6 +225,46 @@ mod tests {
         let broken = "[pane_observation\nenabled = false";
         assert!(parsed(broken).pane_observation.enabled);
         assert!(complaints(broken)[0].contains("not valid TOML"));
+    }
+
+    #[test]
+    fn the_two_graphics_limits_are_read_and_are_separate() {
+        let settings = parsed("[graphics]\nstorage_bytes = 1048576\ntexture_bytes = 2097152\n");
+        assert_eq!(settings.graphics.storage_bytes, 1_048_576);
+        assert_eq!(settings.graphics.texture_bytes, 2_097_152);
+        assert!(settings.graphics.enabled);
+
+        // Setting one leaves the other at its default, which is what makes
+        // them independent rather than two names for one number.
+        let only_storage = parsed("[graphics]\nstorage_bytes = 4096\n");
+        assert_eq!(only_storage.graphics.storage_bytes, 4096);
+        assert_eq!(
+            only_storage.graphics.texture_bytes,
+            Graphics::default().texture_bytes
+        );
+    }
+
+    #[test]
+    fn images_can_be_turned_off_entirely() {
+        assert!(!parsed("[graphics]\nenabled = false\n").graphics.enabled);
+        assert!(Settings::default().graphics.enabled);
+    }
+
+    #[test]
+    fn a_nonsense_graphics_limit_keeps_the_default_and_says_so() {
+        let text = "[graphics]\nstorage_bytes = \"lots\"\n";
+        assert_eq!(
+            parsed(text).graphics.storage_bytes,
+            Graphics::default().storage_bytes
+        );
+        assert!(complaints(text)[0].contains("whole number of bytes"));
+
+        let negative = "[graphics]\ntexture_bytes = -5\n";
+        assert_eq!(
+            parsed(negative).graphics.texture_bytes,
+            Graphics::default().texture_bytes
+        );
+        assert!(!complaints(negative).is_empty());
     }
 
     #[test]

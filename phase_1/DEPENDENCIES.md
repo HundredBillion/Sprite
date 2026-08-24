@@ -193,6 +193,14 @@ then hands `next_frame` a zero-length slice, so it would decode nothing even if
 it could be constructed. Sprite installs its own decoder through
 `set_png_decoder`, which is not gated on that feature.
 
+**A fourth, found while testing the memory limits.** When a Kitty transmission
+exceeds either bound — the image storage limit or the APC byte cap — the parser
+abandons the escape sequence and prints the remainder as ordinary text, so a
+refused image sprays thousands of characters of base64 across the screen. A
+refusal should be swallowed. Sprite cannot intervene, since the parsing is
+libghostty's; the mitigation is that the default limits are generous enough that
+ordinary images never reach them.
+
 **A third defect in the same area, worked around rather than fixed here.**
 `set_kitty_image_from_temp_file_allowed` takes a `bool`, but the option it
 writes expects a string — the permitted directory — so the Zig side

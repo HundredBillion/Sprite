@@ -106,6 +106,7 @@ impl TerminalView {
     /// which a child learns the key.
     pub fn new(
         command: Option<Vec<std::ffi::OsString>>,
+        graphics: crate::config::Graphics,
         environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
         observation: Option<crate::observation::panes::PaneLink>,
         window: &mut Window,
@@ -139,6 +140,12 @@ impl TerminalView {
             cell_width_px: physical(cell_width, scale_factor),
             cell_height_px: physical(LINE_HEIGHT, scale_factor),
             ..config.size
+        };
+        // The terminal's own limit: how much decoded image it will hold.
+        config.graphics = sprite_term::GraphicsPolicy {
+            enabled: graphics.enabled,
+            storage_bytes: graphics.storage_bytes,
+            ..sprite_term::GraphicsPolicy::default()
         };
         config.environment.extend(environment);
         let initial_size = config.size;
@@ -309,7 +316,8 @@ impl TerminalView {
             session,
             observation,
             bundle: None,
-            textures: crate::graphics_cache::GraphicsCache::default(),
+            // The renderer's own limit, separate from the terminal's above.
+            textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
             focus: cx.focus_handle(),
             cell_width,
             cell_height: LINE_HEIGHT,
@@ -859,11 +867,31 @@ impl TerminalView {
             self.textures.clear();
             return;
         };
+        let mut refused: Vec<u32> = Vec::new();
         for image in &frame.images {
             // A refusal here — pixels that disagree with their declared size,
             // or an image larger than the whole budget — costs that one image.
             // The pane keeps its text and its other images.
-            let _ = self.textures.texture(image);
+            if self.textures.texture(image).is_none() {
+                refused.push(image.id);
+            }
+        }
+        if !refused.is_empty() {
+            // Said out loud rather than left as a blank space where a picture
+            // should be: a person seeing nothing cannot tell a refused image
+            // from one the program never sent.
+            let names = refused
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.status = Some(
+                format!(
+                    "image {names} not shown: larger than this pane's texture budget \
+                     (graphics.texture_bytes)"
+                )
+                .into(),
+            );
         }
         let shown: Vec<u32> = frame.images.iter().map(|image| image.id).collect();
         self.textures.retain(&shown);
