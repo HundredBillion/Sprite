@@ -247,11 +247,34 @@ already running and waits for a new pane.
 
 **Files:** new `packaging/`
 
-- [ ] A desktop entry, an icon, and the terminfo database installed to the
-  conventional places, with `/usr/bin/sprite` as the executable.
-- [ ] An Arch package recipe that builds from a clean checkout.
-- [ ] A packaged Sprite finds its terminfo without `SPRITE_TERMINFO_DIR` set.
-- [ ] Both licence texts and third-party notices ship in the artifact.
+- [x] A desktop entry, an icon, and the terminfo database installed to the
+  conventional places, with `/usr/bin/sprite` as the executable. The desktop
+  entry passes `desktop-file-validate` and carries `X-TerminalArgExec=-e`, which
+  is what lets another application ask Sprite to run something. Staged with
+  `DESTDIR` and the tree checked file by file.
+- [x] An Arch package recipe that builds from a clean checkout. Parses under
+  `makepkg --printsrcinfo`. Two deviations from the usual shape are stated in
+  the recipe rather than hidden: the Ghostty submodule is initialised in
+  `prepare()` rather than listed as a second pinned source, and the Zig package
+  cache is resolved there too, so `build()` itself is offline.
+- [x] A packaged Sprite finds its terminfo without `SPRITE_TERMINFO_DIR` set.
+  Verified by running the *staged* `/usr/bin/sprite` with the variable
+  explicitly unset: the pane reported `TERMINFO=unset`,
+  `SPRITE_TERMINFO_DIR=unset`, `tput colors` 256 and `tput sitm` `ESC[3m`. The
+  installed entry is byte-identical to the one compiled from the pinned Ghostty
+  — `infocmp` on both differs only in the pathname inside its own comment
+  header. (On this machine the *system* copy comes from Arch's
+  `ghostty-terminfo`, since `/usr/share` cannot be written to here; the package
+  installs the same entry at the same path.)
+- [x] Both licence texts and third-party notices ship in the artifact.
+  `THIRD-PARTY-NOTICES.md` is **generated** from Cargo's own resolution rather
+  than written by hand — 714 packages with their licences, plus Ghostty's MIT
+  text in full, since Ghostty is vendored source rather than a Cargo package and
+  nothing else would carry it. A hand-written notices file is a list that
+  silently stops being true.
+
+`install.sh` is the only thing that knows where anything goes, so a distribution
+package and a manual install cannot end up disagreeing.
 
 ### Task 8: The command line
 

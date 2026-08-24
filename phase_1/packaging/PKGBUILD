@@ -1,0 +1,81 @@
+# Maintainer: Sprite contributors
+#
+# Builds Sprite from a clean checkout. Two things about this recipe are
+# unusual, and both are stated rather than hidden:
+#
+#   * The Ghostty VT engine is a git submodule, fetched in prepare(). It is not
+#     listed as a `source` because the submodule commit is pinned by the
+#     checkout itself, and a second pin here could disagree with it.
+#   * The Ghostty build resolves its own Zig package cache, which needs the
+#     network. That happens in prepare(), where makepkg expects network access,
+#     so build() itself runs offline — `cargo build --locked --offline` and a
+#     Zig cache that is already populated.
+#
+pkgname=sprite
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A terminal built to be read by programs as well as by people"
+arch=('x86_64' 'aarch64')
+url="https://github.com/HundredBillion/Sprite"
+license=('MIT' 'Apache-2.0')
+depends=(
+    'libxcb'
+    'libxkbcommon'
+    'libxkbcommon-x11'
+    'vulkan-icd-loader'
+    'wayland'
+    'xcb-util-keysyms'
+)
+makedepends=('git' 'ncurses' 'python' 'rustup' 'zig')
+source=("git+$url.git#branch=phase_1")
+sha256sums=('SKIP')
+
+_root="$srcdir/Sprite/phase_1"
+
+prepare() {
+    cd "$srcdir/Sprite"
+    git submodule update --init --recursive
+
+    # Exactly the toolchain rust-toolchain.toml pins, so the package is built
+    # with the compiler the project is tested against.
+    rustup toolchain install --profile minimal "$(sed -n 's/^channel = "\(.*\)"/\1/p' phase_1/rust-toolchain.toml)"
+
+    cd "$_root"
+    export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
+    export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
+    cargo fetch --locked
+    (cd vendor/ghostty && zig build --fetch=all \
+        -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none)
+}
+
+build() {
+    cd "$_root"
+    export GHOSTTY_SOURCE_DIR="$PWD/vendor/ghostty"
+    export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
+    export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
+    # Deliberately without SPRITE_TERMINFO_DIR: a packaged Sprite finds its
+    # terminfo in the system database this package installs it into, and a
+    # build that baked in a path would hide that.
+    cargo build --release --locked --offline --bin sprite
+
+    # The terminfo source comes from the pinned Ghostty rather than from a copy
+    # kept in this repository, so it cannot drift from the engine that produces
+    # the sequences it describes.
+    zig build-exe -lc -femit-bin=target/gen-terminfo \
+        --dep ghostty_terminfo \
+        -Mroot=scripts/gen-terminfo.zig \
+        -Mghostty_terminfo=vendor/ghostty/src/terminfo/ghostty.zig
+    ./target/gen-terminfo > target/ghostty.terminfo
+
+    python3 packaging/third-party-notices.py > THIRD-PARTY-NOTICES.md
+}
+
+check() {
+    cd "$_root"
+    cargo test --workspace --locked --offline
+}
+
+package() {
+    cd "$_root"
+    DESTDIR="$pkgdir" PREFIX=/usr packaging/install.sh
+}

@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Sprite
+GenericName=Terminal
+Comment=A terminal built to be read by programs as well as by people
+Exec=sprite
+TryExec=sprite
+Icon=sprite
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;cmd;terminal;
+StartupNotify=true
+StartupWMClass=sprite
+
+# xdg-terminal-exec: how another application asks this terminal to run
+# something. Sprite takes `-e program args...`, and everything after `-e`
+# belongs to the child, so this is the only argument key it can honestly claim.
+X-TerminalArgExec=-e
