@@ -516,11 +516,19 @@ fn application_shortcut(keystroke: &gpui::Keystroke) -> Option<Shortcut> {
 /// The 256-colour palette is not carried in the snapshot yet, so an indexed
 /// colour falls back to the default foreground rather than being guessed at.
 /// Checkpoint 2's palette work replaces this.
-fn resolve(color: SnapshotColor, default: Rgb, palette_fallback: Rgb) -> Rgba {
+fn resolve(color: SnapshotColor, default: Rgb, palette: Option<&[Rgb; 256]>) -> Rgba {
     match color {
         SnapshotColor::Default => rgb(pack(default)),
         SnapshotColor::Rgb(value) => rgb(pack(value)),
-        SnapshotColor::Palette(_) => rgb(pack(palette_fallback)),
+        // The common case by far: `\x1b[31m` is an index, not a colour. Without
+        // the palette every one of them resolves to the default and a terminal
+        // renders in one shade.
+        SnapshotColor::Palette(index) => match palette {
+            Some(palette) => rgb(pack(palette[usize::from(index)])),
+            // Only before the first snapshot, when there is no palette to
+            // consult and nothing on screen to colour.
+            None => rgb(pack(default)),
+        },
     }
 }
 
@@ -529,9 +537,14 @@ fn pack(color: Rgb) -> u32 {
 }
 
 /// A cell's drawn colours, honouring inverse and invisible.
-fn cell_colors(style: &CellStyle, default_fg: Rgb, default_bg: Rgb) -> (Rgba, Rgba) {
-    let mut foreground = resolve(style.foreground, default_fg, default_fg);
-    let mut background = resolve(style.background, default_bg, default_bg);
+fn cell_colors(
+    style: &CellStyle,
+    default_fg: Rgb,
+    default_bg: Rgb,
+    palette: Option<&[Rgb; 256]>,
+) -> (Rgba, Rgba) {
+    let mut foreground = resolve(style.foreground, default_fg, palette);
+    let mut background = resolve(style.background, default_bg, palette);
     if style.inverse {
         std::mem::swap(&mut foreground, &mut background);
     }
@@ -690,6 +703,7 @@ fn row_element(
     cursor: Option<sprite_term::CursorSnapshot>,
     default_fg: sprite_term::Rgb,
     default_bg: sprite_term::Rgb,
+    palette: Option<std::sync::Arc<[sprite_term::Rgb; 256]>>,
     cell_width: Pixels,
     cell_height: Pixels,
 ) -> gpui::Div {
@@ -703,7 +717,8 @@ fn row_element(
         .h(cell_height)
         .w_full()
         .children(cells.into_iter().filter_map(move |cell| {
-            let (foreground, background) = cell_colors(&cell.style, default_fg, default_bg);
+            let (foreground, background) =
+                cell_colors(&cell.style, default_fg, default_bg, palette.as_deref());
             let is_cursor = on_cursor.is_some_and(|c| c.column == cell.column);
             // Selection and cursor both invert. The cursor wins where they
             // overlap so it stays findable inside a selected run.
@@ -926,7 +941,16 @@ impl Render for TerminalView {
         // is above the text, so the common case never pays for it.
         let split = !below_background.is_empty() || !below_text.is_empty();
 
+        // Cloned per pass because each row closure outlives this call; an
+        // `Arc` of 768 bytes is cheaper than the alternative of resolving
+        // colours before layout.
+        let palette = self
+            .bundle
+            .as_ref()
+            .map(|bundle| std::sync::Arc::new(*bundle.render.palette.clone()));
+
         let build = |pass: RowPass, rows: Vec<Vec<PositionedCell>>| {
+            let palette = palette.clone();
             rows.into_iter()
                 .enumerate()
                 .map(move |(index, cells)| {
@@ -937,6 +961,7 @@ impl Render for TerminalView {
                         cursor,
                         default_fg,
                         default_bg,
+                        palette.clone(),
                         cell_width,
                         cell_height,
                     )

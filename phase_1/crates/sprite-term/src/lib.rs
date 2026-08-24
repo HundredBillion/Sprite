@@ -584,6 +584,17 @@ pub struct RenderSnapshot {
     pub cursor: CursorSnapshot,
     pub default_foreground: Rgb,
     pub default_background: Rgb,
+    /// The 256-colour palette this generation is using.
+    ///
+    /// Carried because a cell's colour is usually an *index* into this, not an
+    /// RGB value: `\x1b[31m` is palette entry 1. A renderer without the
+    /// palette can only fall back to the default foreground, which is how
+    /// every colour in `ls --color`, a git diff, or a shell prompt comes out
+    /// the same shade of white.
+    ///
+    /// It is the *active* palette, so a program that redefines an entry through
+    /// OSC 4 is reflected here rather than overridden by a preference.
+    pub palette: Box<[Rgb; 256]>,
 }
 
 /// Whether a row is part of a shell prompt, as reported by OSC 133.

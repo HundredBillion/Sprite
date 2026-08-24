@@ -338,6 +338,10 @@ pub(crate) fn capture<'vt>(
             cursor,
             default_foreground: rgb(colors.foreground),
             default_background: rgb(colors.background),
+            // Copied wholesale: it is 768 bytes, it changes only when a program
+            // redefines a colour, and the alternative is a renderer that cannot
+            // tell red from white.
+            palette: Box::new(colors.palette.map(rgb)),
         }),
         pane: Arc::new(PaneSnapshot {
             generation,
