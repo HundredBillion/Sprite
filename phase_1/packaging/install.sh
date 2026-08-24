@@ -35,9 +35,15 @@ install -Dm644 LICENSE-MIT                   "$root/share/licenses/sprite/LICENS
 install -Dm644 LICENSE-APACHE                "$root/share/licenses/sprite/LICENSE-APACHE"
 install -Dm644 THIRD-PARTY-NOTICES.md        "$root/share/licenses/sprite/THIRD-PARTY-NOTICES.md"
 
+# Sprite's own database, beside Sprite, and **not** in the shared tree: on Arch,
+# `ncurses` owns /usr/share/terminfo/g/ghostty and `ghostty-terminfo` owns
+# x/xterm-ghostty, so writing there is a file conflict pacman refuses. Sprite
+# adds this directory to the search instead of replacing anything, and this copy
+# is the one built from the pinned Ghostty commit.
+#
 # `-x` keeps the extended capabilities: the entry uses them, and an ncurses
 # built without them produces a terminal that quietly lacks features.
-install -d "$root/share/terminfo"
-tic -x -o "$root/share/terminfo" "$TERMINFO_SOURCE"
+install -d "$root/share/sprite/terminfo"
+tic -x -o "$root/share/sprite/terminfo" "$TERMINFO_SOURCE"
 
 echo "installed sprite into $root"

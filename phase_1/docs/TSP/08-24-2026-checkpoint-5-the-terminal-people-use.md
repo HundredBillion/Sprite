@@ -258,6 +258,16 @@ already running and waits for a new pane.
   `prepare()` rather than listed as a second pinned source, and the Zig package
   cache is resolved there too, so `build()` itself is offline.
 - [x] A packaged Sprite finds its terminfo without `SPRITE_TERMINFO_DIR` set.
+  **Corrected after the first install failed.** The database was going into
+  `/usr/share/terminfo`, which no package may write to: `ncurses` owns
+  `g/ghostty` there and Arch's `ghostty-terminfo` owns `x/xterm-ghostty`, so
+  pacman refused the install — correctly. It now lives beside Sprite at
+  `share/sprite/terminfo`, and a packaged Sprite adds that directory to its
+  children's search with `TERMINFO_DIRS` (trailing colon: "then the usual
+  places"), so Sprite's own entry is preferred and every other terminal's entry
+  still resolves. `TERMINFO` would have put one directory in front of the whole
+  system database and broken `ssh` into a machine expecting `xterm`. Verified by
+  reading a child shell's `/proc/<pid>/environ`.
   Verified by running the *staged* `/usr/bin/sprite` with the variable
   explicitly unset: the pane reported `TERMINFO=unset`,
   `SPRITE_TERMINFO_DIR=unset`, `tput colors` 256 and `tput sitm` `ESC[3m`. The

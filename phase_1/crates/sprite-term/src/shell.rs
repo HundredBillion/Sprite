@@ -152,10 +152,19 @@ fn identity_environment() -> Vec<(OsString, OsString)> {
 
     // When the bootstrapped database is present it overrides any user TERMINFO
     // for this child, because that is the only copy guaranteed to match the
-    // pinned Ghostty source. Without it, the packaged and system search paths
-    // apply; Checkpoint 5 supplies the packaged path.
+    // pinned Ghostty source. That is the development case.
     if let Some(directory) = bootstrapped_terminfo() {
         entries.push((OsString::from("TERMINFO"), directory.into_os_string()));
+    } else if let Some(directory) = packaged_terminfo() {
+        // The packaged case. `TERMINFO_DIRS` rather than `TERMINFO`, and with a
+        // trailing empty element, which ncurses reads as "then the usual
+        // places": Sprite's own entry is preferred, and every other terminal's
+        // entry still resolves for whatever the child goes on to run. Setting
+        // `TERMINFO` here would put a single directory in front of the whole
+        // system database and break `ssh` into a machine expecting `xterm`.
+        let mut value = directory.into_os_string();
+        value.push(":");
+        entries.push((OsString::from("TERMINFO_DIRS"), value));
     }
 
     // Advertised, not injected. Automatic loading differs per shell and each
@@ -183,6 +192,24 @@ fn identity_environment() -> Vec<(OsString, OsString)> {
 /// The installed shell-integration directory, if one is configured and present.
 fn integration_directory() -> Option<PathBuf> {
     let directory = PathBuf::from(env::var_os(INTEGRATION_DIR_VAR)?);
+    directory.is_dir().then_some(directory)
+}
+
+/// The database a packaged Sprite installs beside itself.
+///
+/// **Deliberately not `/usr/share/terminfo`.** A package may not write into the
+/// shared database: `ncurses` owns the `ghostty` entry there and Arch's
+/// `ghostty-terminfo` owns `xterm-ghostty`, so installing over either is a file
+/// conflict that pacman refuses — correctly. Sprite keeps its own copy, which
+/// is also the only one guaranteed to match the pinned Ghostty commit, and adds
+/// it to the search rather than replacing anything.
+///
+/// Found relative to the executable rather than hard-coded, so an install under
+/// `/usr`, `/usr/local`, or `/opt/sprite` all work without a build-time prefix.
+fn packaged_terminfo() -> Option<PathBuf> {
+    let directory = executable_directory()?
+        .parent()?
+        .join("share/sprite/terminfo");
     directory.is_dir().then_some(directory)
 }
 

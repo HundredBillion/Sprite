@@ -8,8 +8,12 @@
 #
 #   cd phase_1
 #   cargo build --release -p sprite-app --locked --offline
-#   makepkg -p packaging/PKGBUILD.local -f
+#   makepkg -p packaging/PKGBUILD.local -fC
 #   sudo pacman -U sprite-*.pkg.tar.zst
+#
+# `-C` matters: without it makepkg reuses a previous staging directory and can
+# package a binary you have since rebuilt. That happened once, and the result
+# was a package that installed cleanly and behaved like the old build.
 #
 # It builds nothing itself, on purpose: what gets installed is what you tested,
 # not a second compilation that might differ.
