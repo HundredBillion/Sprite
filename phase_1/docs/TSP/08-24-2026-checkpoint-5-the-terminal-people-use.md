@@ -280,10 +280,30 @@ package and a manual install cannot end up disagreeing.
 
 **Files:** `sprite-app/src/cli.rs`
 
-- [ ] `sprite --config <path>` selects a file explicitly and wins over
-  discovery.
-- [ ] `sprite config reload`, and a way to print the effective configuration
-  without exposing the observation key.
+- [x] `sprite --config <path>` selects a file explicitly and wins over
+  discovery, **and the window keeps it**: a later `sprite config reload`
+  re-reads that file rather than quietly switching to the one discovery would
+  have found. Verified live with two files that disagree — the window opened in
+  the explicit file's size and colours, and the reload named the explicit path
+  in its own answer.
+- [x] `sprite config reload`, and `sprite config print`.
+
+`config print` asks the *window*, because after a reload the file and what the
+window is using can differ and the second is the useful answer. Outside a window
+— or with `--config <path>` — it reads the file itself and says so in the first
+line, so the output is never ambiguous about what it describes.
+
+The observation key is not in it and could not be: it is generated per window by
+the endpoint, lives in memory and in the environment of that window's own
+children, and no field of `Settings` has ever held it. A test says so out loud,
+because "print the configuration" is exactly the command somebody would later be
+tempted to add it to. A second test reads the printed output back and requires
+it to parse into the same settings — printed configuration that cannot be
+re-read is a report, not a configuration.
+
+Unset values are printed as comments naming what happens instead
+(`# family is unset: Sprite finds an installed monospace font`), so a reader who
+does not know the defaults still learns what the window is doing.
 
 ### Task 9: macOS parity
 

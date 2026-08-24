@@ -146,6 +146,84 @@ pub fn run_config_reload(out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
     }
 }
 
+/// Prints the configuration that is actually in effect.
+///
+/// Inside a window it asks that window, because after a reload the file and
+/// what the window is using can differ, and the useful answer is the second.
+/// Outside one — or when a file is named — it reads the file itself and says
+/// which, so the output is never ambiguous about what it describes.
+pub fn run_config_print(
+    args: &crate::cli::ConfigPrintArgs,
+    out: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> Exit {
+    let environment = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+
+    if let Some(path) = &args.path {
+        let (settings, complaints) = crate::config::Settings::load_from(path);
+        for complaint in complaints.0 {
+            let _ = writeln!(errors, "sprite: {complaint}");
+        }
+        let _ = writeln!(out, "# {}", path.display());
+        let _ = write!(out, "{}", settings.to_toml());
+        return Exit::Ok;
+    }
+
+    match (environment(SOCKET_VARIABLE), environment(KEY_VARIABLE)) {
+        (Some(socket), Some(key)) => {
+            match exchange(&socket, &format!("{key} {PROTOCOL} config print")) {
+                Ok(answer) if !answer.trim().is_empty() => {
+                    let _ = writeln!(out, "# in effect in this window");
+                    let _ = write!(out, "{}", answer.trim_end());
+                    let _ = writeln!(out);
+                    Exit::Ok
+                }
+                Ok(_) => {
+                    let _ = writeln!(
+                        errors,
+                        "sprite: the window closed the connection without answering"
+                    );
+                    Exit::Refused
+                }
+                Err(error) => {
+                    let _ = writeln!(errors, "sprite: could not ask this window: {error}");
+                    Exit::Unreachable
+                }
+            }
+        }
+        _ => {
+            // Not inside a window is not a failure here: what Sprite *would*
+            // load is a real answer, and it is what somebody checking a file
+            // before opening a window is asking for.
+            let path = crate::config::path();
+            let (settings, complaints) = match &path {
+                Some(path) => crate::config::Settings::load_from(path),
+                None => (crate::config::Settings::default(), Default::default()),
+            };
+            for complaint in complaints.0 {
+                let _ = writeln!(errors, "sprite: {complaint}");
+            }
+            match path {
+                Some(path) if path.exists() => {
+                    let _ = writeln!(out, "# {} (not running inside a window)", path.display());
+                }
+                Some(path) => {
+                    let _ = writeln!(
+                        out,
+                        "# {} does not exist, so these are Sprite's defaults",
+                        path.display()
+                    );
+                }
+                None => {
+                    let _ = writeln!(out, "# no configuration file location; Sprite's defaults");
+                }
+            }
+            let _ = write!(out, "{}", settings.to_toml());
+            Exit::Ok
+        }
+    }
+}
+
 /// Builds the request, which carries the key and nothing the window did not ask
 /// for.
 fn request_line(args: &SnapshotArgs, key: &str, pane: Option<&str>) -> Result<String, String> {

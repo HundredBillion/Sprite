@@ -6,6 +6,7 @@
 //! the part that cannot be tested without a display.
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
 /// What the command line asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,8 +17,17 @@ pub enum Invocation {
     Snapshot(SnapshotArgs),
     /// Ask the containing window to re-read its configuration file.
     ConfigReload,
+    /// Print the configuration that is actually in effect.
+    ConfigPrint(ConfigPrintArgs),
     Help,
     Version,
+}
+
+/// Which configuration `config print` should describe.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ConfigPrintArgs {
+    /// Read this file instead of asking the window, or of discovery.
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -28,6 +38,12 @@ pub struct WindowArgs {
     /// Ghostty could not be run at all while the only way to start a program
     /// was to type it.
     pub command: Option<Vec<OsString>>,
+    /// Read settings from here instead of the usual place.
+    ///
+    /// Explicit, so it wins over discovery — and the window keeps it, so a
+    /// later `sprite config reload` re-reads *this* file rather than quietly
+    /// switching to the one discovery would have found.
+    pub config: Option<PathBuf>,
 }
 
 /// Which panes to ask about, and how to print them.
@@ -66,8 +82,13 @@ sprite — a terminal
 
     sprite                       open a window
     sprite -e <program> [args]   open a window running <program>
+    sprite --config <path>       open a window reading settings from <path>
     sprite panes snapshot        print what other panes in this window show
     sprite config reload         re-read the configuration file in this window
+    sprite config print          print the settings that are actually in effect
+
+Options for `config print`:
+    --config <path>              describe this file instead of asking the window
 
 Options for `panes snapshot`:
     --include-self               include the pane making the request
@@ -96,17 +117,13 @@ where
     match text(&first).as_deref() {
         Some("--help" | "-h") => Ok(Invocation::Help),
         Some("--version" | "-V") => Ok(Invocation::Version),
-        Some("-e") => {
-            let command: Vec<OsString> = arguments.collect();
-            if command.is_empty() {
-                return Err(UsageError("-e needs a program to run".to_owned()));
-            }
-            // Everything after `-e` belongs to the child, including anything
-            // that looks like one of Sprite's own options: a program's `--help`
-            // is its own business.
-            Ok(Invocation::Window(WindowArgs {
-                command: Some(command),
-            }))
+        Some("-e" | "--config") => {
+            // Both open a window, and `--config` may precede `-e`, so window
+            // options are read by one loop rather than by matching on the first
+            // word alone.
+            let mut rest = vec![first];
+            rest.extend(arguments);
+            window(rest).map(Invocation::Window)
         }
         Some("config") => {
             let Some(sub) = arguments.next() else {
@@ -115,6 +132,7 @@ where
                 ));
             };
             match text(&sub).as_deref() {
+                Some("print") => config_print(arguments).map(Invocation::ConfigPrint),
                 Some("reload") => match arguments.next() {
                     None => Ok(Invocation::ConfigReload),
                     Some(extra) => Err(UsageError(format!(
@@ -143,6 +161,64 @@ where
         Some(other) => Err(UsageError(format!("unknown argument: {other}"))),
         None => Err(UsageError("arguments must be valid text".to_owned())),
     }
+}
+
+/// Reads the options that open a window.
+fn window(arguments: Vec<OsString>) -> Result<WindowArgs, UsageError> {
+    let mut arguments = arguments.into_iter();
+    let mut parsed = WindowArgs::default();
+
+    while let Some(argument) = arguments.next() {
+        let Some(word) = text(&argument) else {
+            return Err(UsageError("arguments must be valid text".to_owned()));
+        };
+        match word.as_str() {
+            "--config" => {
+                let path = arguments
+                    .next()
+                    .ok_or_else(|| UsageError("--config needs a path".to_owned()))?;
+                if path.is_empty() {
+                    return Err(UsageError("--config needs a path".to_owned()));
+                }
+                parsed.config = Some(PathBuf::from(path));
+            }
+            "-e" => {
+                let command: Vec<OsString> = arguments.collect();
+                if command.is_empty() {
+                    return Err(UsageError("-e needs a program to run".to_owned()));
+                }
+                // Everything after `-e` belongs to the child, including
+                // anything that looks like one of Sprite's own options: a
+                // program's `--help` is its own business.
+                parsed.command = Some(command);
+                return Ok(parsed);
+            }
+            other => return Err(UsageError(format!("unknown argument: {other}"))),
+        }
+    }
+    Ok(parsed)
+}
+
+fn config_print(arguments: impl Iterator<Item = OsString>) -> Result<ConfigPrintArgs, UsageError> {
+    let mut arguments = arguments;
+    let mut parsed = ConfigPrintArgs::default();
+
+    while let Some(argument) = arguments.next() {
+        match text(&argument).as_deref() {
+            Some("--config") => {
+                let path = arguments
+                    .next()
+                    .ok_or_else(|| UsageError("--config needs a path".to_owned()))?;
+                if path.is_empty() {
+                    return Err(UsageError("--config needs a path".to_owned()));
+                }
+                parsed.path = Some(PathBuf::from(path));
+            }
+            Some(other) => return Err(UsageError(format!("unknown option: {other}"))),
+            None => return Err(UsageError("arguments must be valid text".to_owned())),
+        }
+    }
+    Ok(parsed)
 }
 
 fn snapshot(arguments: impl Iterator<Item = OsString>) -> Result<SnapshotArgs, UsageError> {
@@ -211,6 +287,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_explicit_configuration_file_reaches_the_window() {
+        assert_eq!(
+            parsed(&["--config", "/tmp/other.toml"]),
+            Invocation::Window(WindowArgs {
+                command: None,
+                config: Some(PathBuf::from("/tmp/other.toml")),
+            })
+        );
+        // Both, and in this order: `-e` swallows the rest of the line, so
+        // anything of Sprite's own must come before it.
+        assert_eq!(
+            parsed(&["--config", "/tmp/other.toml", "-e", "cat"]),
+            Invocation::Window(WindowArgs {
+                command: Some(vec![OsString::from("cat")]),
+                config: Some(PathBuf::from("/tmp/other.toml")),
+            })
+        );
+        assert_eq!(rejected(&["--config"]), "--config needs a path");
+    }
+
+    #[test]
+    fn config_print_can_be_pointed_at_a_file() {
+        assert_eq!(
+            parsed(&["config", "print"]),
+            Invocation::ConfigPrint(ConfigPrintArgs { path: None })
+        );
+        assert_eq!(
+            parsed(&["config", "print", "--config", "/tmp/other.toml"]),
+            Invocation::ConfigPrint(ConfigPrintArgs {
+                path: Some(PathBuf::from("/tmp/other.toml")),
+            })
+        );
+        assert_eq!(
+            rejected(&["config", "print", "--pretty"]),
+            "unknown option: --pretty"
+        );
+    }
+
+    #[test]
     fn config_reload_is_its_own_invocation() {
         assert_eq!(
             parse_arguments(["config", "reload"]).expect("parse"),
@@ -252,6 +367,7 @@ mod tests {
             parsed(&["-e", "cat", "big-file"]),
             Invocation::Window(WindowArgs {
                 command: Some(vec![OsString::from("cat"), OsString::from("big-file")]),
+                config: None,
             })
         );
         assert_eq!(rejected(&["-e"]), "-e needs a program to run");
@@ -269,6 +385,7 @@ mod tests {
                         .map(OsString::from)
                         .collect()
                 ),
+                config: None,
             })
         );
     }

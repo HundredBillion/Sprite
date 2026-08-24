@@ -223,6 +223,120 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// The settings as TOML, in the shape a configuration file takes.
+    ///
+    /// Everything is written, including what is at its default, because the
+    /// question this answers is "what is this window actually doing" — and a
+    /// reader who has to know the defaults to interpret the answer has not been
+    /// told very much. A setting with no value at all is written as a comment
+    /// naming what happens instead.
+    ///
+    /// **The observation key is not here and could not be.** It is not a
+    /// setting: it is generated per window by the endpoint, lives only in
+    /// memory and in the environment of that window's own children, and no
+    /// field of `Settings` has ever held it. Nor is the socket path.
+    pub fn to_toml(&self) -> String {
+        let mut out = String::new();
+
+        out.push_str("[font]\n");
+        match &self.font.family {
+            Some(family) => out.push_str(&format!("family = {family:?}\n")),
+            None => out.push_str("# family is unset: Sprite finds an installed monospace font\n"),
+        }
+        out.push_str(&format!("size = {}\n", self.font.size));
+
+        out.push_str("\n[colors]\n");
+        for (name, color) in [
+            ("background", self.colors.background),
+            ("foreground", self.colors.foreground),
+            ("cursor", self.colors.cursor),
+        ] {
+            match color {
+                Some(color) => out.push_str(&format!("{name} = \"{}\"\n", hex(color))),
+                None => out.push_str(&format!(
+                    "# {name} is unset: the terminal's own colour is used\n"
+                )),
+            }
+        }
+        if self.colors.palette.is_empty() {
+            out.push_str("# no palette entries are overridden\n");
+        } else {
+            out.push_str("\n[colors.palette]\n");
+            for (index, color) in &self.colors.palette {
+                out.push_str(&format!("{index} = \"{}\"\n", hex(*color)));
+            }
+        }
+
+        out.push_str("\n[cursor]\n");
+        match self.cursor.style {
+            Some(style) => out.push_str(&format!("style = \"{}\"\n", style_name(style))),
+            None => out.push_str("# style is unset: the terminal's own cursor is used\n"),
+        }
+        match self.cursor.blink {
+            Some(blink) => out.push_str(&format!("blink = {blink}\n")),
+            None => out.push_str("# blink is unset: the terminal's own setting is used\n"),
+        }
+
+        out.push_str("\n[shell]\n");
+        match &self.shell.program {
+            Some(program) => {
+                out.push_str(&format!("program = {:?}\n", program.display().to_string()))
+            }
+            None => out.push_str("# program is unset: the login shell is run\n"),
+        }
+        match &self.shell.args {
+            Some(args) => {
+                let rendered: Vec<String> = args
+                    .iter()
+                    .map(|argument| format!("{:?}", argument.to_string_lossy()))
+                    .collect();
+                out.push_str(&format!("args = [{}]\n", rendered.join(", ")));
+            }
+            None => out.push_str("# args is unset\n"),
+        }
+        match &self.shell.startup_directory {
+            Some(directory) => out.push_str(&format!(
+                "startup_directory = {:?}\n",
+                directory.display().to_string()
+            )),
+            None => {
+                out.push_str("# startup_directory is unset: panes start where Sprite did\n");
+            }
+        }
+
+        out.push_str(&format!(
+            "\n[scrollback]\nbytes = {}\n",
+            self.scrollback.bytes
+        ));
+
+        out.push_str(&format!(
+            "\n[graphics]\nenabled = {}\nstorage_bytes = {}\ntexture_bytes = {}\n",
+            self.graphics.enabled, self.graphics.storage_bytes, self.graphics.texture_bytes
+        ));
+
+        out.push_str(&format!(
+            "\n[pane_observation]\nenabled = {}\n",
+            self.pane_observation.enabled
+        ));
+
+        out
+    }
+}
+
+fn hex(color: sprite_term::Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn style_name(style: sprite_term::CursorStyle) -> &'static str {
+    match style {
+        sprite_term::CursorStyle::Block => "block",
+        sprite_term::CursorStyle::Bar => "bar",
+        sprite_term::CursorStyle::Underline => "underline",
+        sprite_term::CursorStyle::BlockHollow => "hollow",
+    }
+}
+
 /// What was ignored while reading a configuration file.
 ///
 /// Carried rather than logged from inside the parser so a caller decides where
@@ -929,6 +1043,49 @@ mod tests {
         assert_eq!(settings.font.size, 20.0, "the good field is kept");
         assert_eq!(settings.font.family, None, "the bad one falls back");
         assert_eq!(complaints.0.len(), 1);
+    }
+
+    /// What is printed must be readable back, or it is a report rather than a
+    /// configuration.
+    #[test]
+    fn the_printed_configuration_parses_back_into_itself() {
+        let text = "[font]\nfamily = \"Fira Code\"\nsize = 18\n\
+                    [colors]\nbackground = \"#101018\"\ncursor = \"#ff8000\"\n\
+                    [colors.palette]\n1 = \"#00ff00\"\n\
+                    [cursor]\nstyle = \"underline\"\nblink = true\n\
+                    [shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\"]\n\
+                    [scrollback]\nbytes = 4096\n";
+        let settings = parsed(text);
+
+        let printed = settings.to_toml();
+        let (round_tripped, complaints) =
+            Settings::parse_candidate(&printed).expect("printed settings are valid TOML");
+
+        assert_eq!(round_tripped, settings, "printed:\n{printed}");
+        assert!(complaints.0.is_empty(), "{:?}", complaints.0);
+    }
+
+    /// The key is not a setting and never has been; this is the test that says
+    /// so out loud, because "print the configuration" is exactly the command
+    /// somebody would later be tempted to add it to.
+    #[test]
+    fn the_printed_configuration_carries_no_secret() {
+        let printed = Settings::default().to_toml();
+        for forbidden in ["key", "secret", "socket", "SPRITE_OBSERVATION"] {
+            assert!(
+                !printed.to_lowercase().contains(&forbidden.to_lowercase()),
+                "{forbidden:?} appears in the printed configuration:\n{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_value_is_printed_as_a_comment_naming_what_happens_instead() {
+        let printed = Settings::default().to_toml();
+        assert!(printed.contains("# family is unset: Sprite finds an installed monospace font"));
+        assert!(printed.contains("# program is unset: the login shell is run"));
+        // And a comment is not a setting: reading it back changes nothing.
+        assert_eq!(parsed(&printed), Settings::default());
     }
 
     #[test]

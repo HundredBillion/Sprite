@@ -12,8 +12,8 @@ use gpui::{
     px, size,
 };
 use sprite_app::{
-    Invocation, Settings, USAGE, WindowArgs, Workspace, parse_arguments, run_config_reload,
-    run_snapshot,
+    Invocation, Settings, USAGE, WindowArgs, Workspace, parse_arguments, run_config_print,
+    run_config_reload, run_snapshot,
 };
 
 fn main() -> ExitCode {
@@ -31,6 +31,11 @@ fn main() -> ExitCode {
             let mut out = std::io::stdout().lock();
             let mut errors = std::io::stderr().lock();
             ExitCode::from(run_config_reload(&mut out, &mut errors) as u8)
+        }
+        Ok(Invocation::ConfigPrint(args)) => {
+            let mut out = std::io::stdout().lock();
+            let mut errors = std::io::stderr().lock();
+            ExitCode::from(run_config_print(&args, &mut out, &mut errors) as u8)
         }
         Ok(Invocation::Help) => {
             println!("{USAGE}");
@@ -53,7 +58,11 @@ fn main() -> ExitCode {
 fn open_window(args: WindowArgs) {
     // Read before the window exists, so a session never starts under one set of
     // settings and is then told about another.
-    let (settings, complaints) = Settings::load();
+    let (settings, complaints) = match &args.config {
+        // Explicit, so it wins over discovery.
+        Some(path) => Settings::load_from(path),
+        None => Settings::load(),
+    };
     for complaint in complaints.0 {
         eprintln!("sprite: {complaint}");
     }
@@ -61,6 +70,7 @@ fn open_window(args: WindowArgs) {
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
         let command = args.command.clone();
+        let config_path = args.config.clone();
         let window = cx
             .open_window(
                 WindowOptions {
@@ -76,7 +86,8 @@ fn open_window(args: WindowArgs) {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| Workspace::new(command, settings, window, cx));
+                    let view =
+                        cx.new(|cx| Workspace::new(command, settings, config_path, window, cx));
                     window.focus(&view.focus_handle(cx));
                     view
                 },

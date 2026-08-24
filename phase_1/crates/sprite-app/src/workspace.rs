@@ -57,6 +57,12 @@ pub struct Workspace {
     command: Option<Vec<std::ffi::OsString>>,
     /// A close waiting on a second press, because something is running.
     pending_close: Option<PendingClose>,
+    /// The file this window was told to read, if it was told.
+    ///
+    /// Kept so a reload re-reads *that* file rather than quietly switching to
+    /// the one discovery would have found: a window started with `--config`
+    /// must not change which file it obeys halfway through its life.
+    config_path: Option<std::path::PathBuf>,
     /// A reloaded configuration, applied during the next render.
     ///
     /// Applied there for the same reason focus is: the panes need a `Window` to
@@ -81,6 +87,7 @@ impl Workspace {
     pub fn new(
         command: Option<Vec<std::ffi::OsString>>,
         settings: crate::config::Settings,
+        config_path: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -118,7 +125,12 @@ impl Workspace {
         let reload_task = cx.spawn(async move |workspace, cx| {
             while let Ok(request) = reload_rx.recv().await {
                 let answer = workspace
-                    .update(cx, |workspace, cx| workspace.reload(cx))
+                    .update(cx, |workspace, cx| match request.what {
+                        ConfigVerb::Reload => workspace.reload(cx),
+                        // Printed from what the window is *using*, which after
+                        // a reload is not necessarily what the file says.
+                        ConfigVerb::Print => workspace.settings.to_toml(),
+                    })
                     .unwrap_or_else(|_| "this window is closing".to_owned());
                 // The endpoint thread is waiting on this with a timeout of its
                 // own, so a failure here costs it a wait rather than a thread.
@@ -139,6 +151,7 @@ impl Workspace {
             pending_focus,
             pending_close: None,
             pending_settings: None,
+            config_path,
             _reload: reload_task,
             reload_sender,
         }
@@ -340,7 +353,7 @@ impl Workspace {
     /// cannot honestly be applied to a session that is already running is said
     /// to be waiting for the next one, rather than silently dropped.
     fn reload(&mut self, cx: &mut Context<Self>) -> String {
-        let Some(path) = crate::config::path() else {
+        let Some(path) = self.config_path.clone().or_else(crate::config::path) else {
             return "there is nowhere to read a configuration file from \
                     (neither XDG_CONFIG_HOME nor HOME is set)"
                 .to_owned();
@@ -496,7 +509,15 @@ fn open_endpoint(
 /// GPUI thread must cost the endpoint one two-second wait, not a thread that
 /// never returns.
 pub(crate) struct ReloadRequest {
+    what: ConfigVerb,
     reply: std::sync::mpsc::SyncSender<String>,
+}
+
+/// The two things a shell command can ask about this window's configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConfigVerb {
+    Reload,
+    Print,
 }
 
 /// How long an endpoint thread will wait for the window to answer a reload.
@@ -516,8 +537,8 @@ fn respond(
     // same key and reachable only from inside this window, which is the same
     // rule observation lives by: a caller that could not read this window's
     // panes cannot reload its settings either.
-    if is_reload_request(body) {
-        return request_reload(reload);
+    if let Some(verb) = config_request(body) {
+        return ask_window(reload, verb);
     }
     let query = match broker::parse(body) {
         Ok(query) => query,
@@ -545,28 +566,29 @@ fn respond(
     }
 }
 
-/// Whether a request body is `config reload` rather than a pane query.
+/// Which configuration verb a request body is, if it is one at all.
 ///
 /// The protocol token is optional here for the same reason it is in the pane
 /// parser: a client older than this window should be understood.
-fn is_reload_request(body: &str) -> bool {
+fn config_request(body: &str) -> Option<ConfigVerb> {
     let mut words = body.split_whitespace().peekable();
     if let Some(word) = words.peek()
         && word.starts_with("sprite-observation/")
     {
         words.next();
     }
-    matches!(
-        (words.next(), words.next(), words.next()),
-        (Some("config"), Some("reload"), None)
-    )
+    match (words.next(), words.next(), words.next()) {
+        (Some("config"), Some("reload"), None) => Some(ConfigVerb::Reload),
+        (Some("config"), Some("print"), None) => Some(ConfigVerb::Print),
+        _ => None,
+    }
 }
 
-/// Hands a reload to the GPUI thread and waits, briefly, for what it made of it.
-fn request_reload(reload: &async_channel::Sender<ReloadRequest>) -> String {
+/// Hands the question to the GPUI thread and waits, briefly, for its answer.
+fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -> String {
     let (reply, answer) = std::sync::mpsc::sync_channel(1);
-    if reload.send_blocking(ReloadRequest { reply }).is_err() {
-        return "this window is no longer accepting reloads".to_owned();
+    if reload.send_blocking(ReloadRequest { what, reply }).is_err() {
+        return "this window is no longer answering".to_owned();
     }
     match answer.recv_timeout(RELOAD_TIMEOUT) {
         Ok(answer) => answer,
@@ -1002,8 +1024,8 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, Direction, WorkspaceAction, classify, describe_running, is_reload_request,
-        workspace_action,
+        CloseScope, ConfigVerb, Direction, WorkspaceAction, classify, config_request,
+        describe_running, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1139,15 +1161,21 @@ mod tests {
     }
 
     #[test]
-    fn a_reload_is_told_from_a_pane_query() {
-        assert!(is_reload_request("config reload"));
-        assert!(is_reload_request("sprite-observation/1 config reload"));
-        assert!(is_reload_request("  config   reload  "));
+    fn a_configuration_request_is_told_from_a_pane_query() {
+        assert_eq!(config_request("config reload"), Some(ConfigVerb::Reload));
+        assert_eq!(
+            config_request("sprite-observation/1 config reload"),
+            Some(ConfigVerb::Reload)
+        );
+        assert_eq!(
+            config_request("  config   print  "),
+            Some(ConfigVerb::Print)
+        );
 
-        assert!(!is_reload_request("panes snapshot"));
-        assert!(!is_reload_request("config"));
-        assert!(!is_reload_request("config reload --now"));
-        assert!(!is_reload_request(""));
+        assert_eq!(config_request("panes snapshot"), None);
+        assert_eq!(config_request("config"), None);
+        assert_eq!(config_request("config reload --now"), None);
+        assert_eq!(config_request(""), None);
     }
 
     /// The distinction the whole command rests on: what may change under a

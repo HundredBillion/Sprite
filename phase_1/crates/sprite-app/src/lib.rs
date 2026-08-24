@@ -5,7 +5,7 @@
 //! libghostty or the PTY.
 
 mod cli;
-mod config;
+pub mod config;
 mod graphics_cache;
 mod grid;
 mod input;
@@ -17,13 +17,15 @@ mod terminal_view;
 mod workspace;
 
 pub use cli::{Invocation, SnapshotArgs, USAGE, UsageError, WindowArgs, parse_arguments};
-pub use config::{Complaints, Font, Graphics, PaneObservation, Settings};
+pub use config::{
+    Colors, Complaints, Cursor, Font, Graphics, PaneObservation, Scrollback, Settings,
+};
 pub use graphics_cache::GraphicsCache;
 pub use observation::broker::{
     DEADLINE, Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report,
     collect as collect_panes, parse as parse_request,
 };
-pub use observation::client::{Exit, run_config_reload, run_snapshot};
+pub use observation::client::{Exit, run_config_print, run_config_reload, run_snapshot};
 pub use observation::endpoint::{DENIED, Endpoint, ObservationKey, Request};
 pub use observation::schema::render as render_schema;
 pub use pane_registry::PaneRegistry;
