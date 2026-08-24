@@ -6,6 +6,7 @@
 
 mod cli;
 mod config;
+mod graphics_cache;
 mod grid;
 mod input;
 mod observation;
@@ -17,6 +18,7 @@ mod workspace;
 
 pub use cli::{Invocation, SnapshotArgs, USAGE, UsageError, WindowArgs, parse_arguments};
 pub use config::{Complaints, PaneObservation, Settings};
+pub use graphics_cache::GraphicsCache;
 pub use observation::broker::{
     DEADLINE, Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report,
     collect as collect_panes, parse as parse_request,

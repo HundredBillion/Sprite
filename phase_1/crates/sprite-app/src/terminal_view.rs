@@ -61,6 +61,12 @@ const STATUS: u32 = 0xf0a0a0;
 pub struct TerminalView {
     session: TerminalSession,
     bundle: Option<Arc<SnapshotBundle>>,
+    /// Textures for the images this pane is showing.
+    ///
+    /// Dropped with the view, so closing a pane releases its textures and
+    /// closing a tab releases every pane's, without a separate teardown path to
+    /// forget to call.
+    textures: crate::graphics_cache::GraphicsCache,
     focus: FocusHandle,
     /// Measured from the font actually rendered, in logical pixels.
     cell_width: Pixels,
@@ -286,6 +292,7 @@ impl TerminalView {
                             .as_ref()
                             .is_none_or(|current| generation > current.generation);
                         if newer {
+                            view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
                             cx.notify();
                         }
@@ -301,6 +308,7 @@ impl TerminalView {
             session,
             observation,
             bundle: None,
+            textures: crate::graphics_cache::GraphicsCache::default(),
             focus: cx.focus_handle(),
             cell_width,
             cell_height: LINE_HEIGHT,
@@ -331,6 +339,7 @@ impl TerminalView {
             // A view that never started a session has nothing to observe.
             observation: None,
             bundle: None,
+            textures: crate::graphics_cache::GraphicsCache::default(),
             focus: cx.focus_handle(),
             cell_width: px(8.0),
             cell_height: LINE_HEIGHT,
@@ -657,6 +666,30 @@ impl Drop for TerminalView {
         if let Some(link) = &self.observation {
             link.panes.forget(link.pane);
         }
+    }
+}
+
+impl TerminalView {
+    /// Builds textures for the images this generation shows, and lets go of the
+    /// rest.
+    ///
+    /// Driven by the snapshot rather than by drawing, so a still image is
+    /// converted once when it arrives instead of once per frame.
+    fn refresh_textures(&mut self, bundle: &SnapshotBundle) {
+        let Some(frame) = bundle.graphics.as_ref() else {
+            // Nothing shown: hold nothing. A pane that displayed images an hour
+            // ago should not still be paying for them.
+            self.textures.clear();
+            return;
+        };
+        for image in &frame.images {
+            // A refusal here — pixels that disagree with their declared size,
+            // or an image larger than the whole budget — costs that one image.
+            // The pane keeps its text and its other images.
+            let _ = self.textures.texture(image);
+        }
+        let shown: Vec<u32> = frame.images.iter().map(|image| image.id).collect();
+        self.textures.retain(&shown);
     }
 }
 

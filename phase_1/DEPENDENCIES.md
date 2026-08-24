@@ -18,7 +18,7 @@ much maintained complexity the dependency removes from Sprite.
 
 ## Current direct dependencies
 
-Eight direct external crates, all pinned to exact versions in
+Nine direct external crates, all pinned to exact versions in
 `phase_1/Cargo.toml` and locked in `phase_1/Cargo.lock`.
 
 ### `toml` `=0.8.23`
@@ -49,6 +49,29 @@ covered by this entry.
 **License and source.** MIT OR Apache-2.0, crates.io.
 
 **Pin and updates.** Exact pin, updated deliberately.
+
+### `image` `=0.25.10`
+
+**Capability.** The pixel buffer type GPUI takes a texture from.
+
+**Not provided.** `RenderImage::new` accepts `image::Frame`, so handing GPUI a
+decoded picture means constructing one. GPUI does not re-export the crate, and
+the type must be the identical version or it is a different type.
+
+**Why not std.** The standard library has no image buffers.
+
+**Adds nothing to the supply chain.** Already in `Cargo.lock` as a dependency of
+GPUI, and there is exactly one version of it there; declaring it directly
+changed the lock by one line.
+
+**Features.** Defaults off — **no codecs**. Sprite decodes PNG itself through
+`png` and accepts no other image format, so none of this crate's decoders are
+compiled in and none of them ever sees a byte a child printed.
+
+**License and source.** MIT OR Apache-2.0, crates.io.
+
+**Pin and updates.** Exact pin, and it must stay equal to whatever version GPUI
+resolves to; a mismatch is a type error rather than a runtime surprise.
 
 ### `png` `=0.18.1`
 
