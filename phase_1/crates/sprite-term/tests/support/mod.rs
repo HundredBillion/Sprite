@@ -12,7 +12,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sprite_term::{EventStream, SessionError, SnapshotBundle, SnapshotStream, TerminalEvent};
+use sprite_term::{
+    EventStream, GraphicsPolicy, GraphicsSnapshot, SessionConfig, SessionError, SnapshotBundle,
+    SnapshotStream, TerminalCommand, TerminalEvent, TerminalSession,
+};
 
 /// Every blocking wait in the suite fails after this long.
 pub const WATCHDOG: Duration = Duration::from_secs(5);
@@ -204,4 +207,84 @@ pub fn png_bytes(width: u32, height: u32, value: u8) -> Vec<u8> {
         writer.write_image_data(&pixels).expect("write the pixels");
     }
     out
+}
+
+/// A shell that reads commands, wired for graphics tests.
+///
+/// The distinction this exists to make: `TerminalCommand::Input` writes to the
+/// child's standard input, where an escape sequence is just bytes the shell may
+/// echo. Only what a child *writes* reaches the terminal's parser, so an image
+/// has to be printed by the child to exist at all.
+pub struct GraphicsSession {
+    pub session: TerminalSession,
+    pub events: EventPump,
+    pub snapshots: SnapshotPump,
+    marks: u32,
+}
+
+impl GraphicsSession {
+    pub fn start(policy: GraphicsPolicy) -> Self {
+        let mut config = SessionConfig::command("/bin/sh", Vec::new());
+        config.graphics = policy;
+        let mut session = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        events.expect_ready();
+        session
+            // `\\n` so printf receives backslash-n; a real newline inside the
+            // quotes would leave the shell waiting for the rest of a string.
+            .send(TerminalCommand::Input(b"printf 'READY\\n'\n".to_vec()))
+            .expect("ask the shell to announce itself");
+        snapshots.wait_for("the shell to start", |bundle| {
+            pane_text(bundle).contains("READY")
+        });
+        Self {
+            session,
+            events,
+            snapshots,
+            marks: 0,
+        }
+    }
+
+    /// Has the child print `escapes`, returning the bundle that shows the
+    /// result.
+    ///
+    /// A marker printed by a second command is what proves the first finished,
+    /// which is a fact about the terminal's parser rather than a guess about
+    /// timing.
+    pub fn feed(&mut self, escapes: &str) -> Arc<SnapshotBundle> {
+        self.session
+            .send(TerminalCommand::Input(
+                format!("printf '{escapes}'\n").into_bytes(),
+            ))
+            .expect("ask the child to print the payload");
+
+        self.marks += 1;
+        let marker = format!("MARK{}", self.marks);
+        self.session
+            .send(TerminalCommand::Input(
+                format!("printf '{marker}\\n'\n").into_bytes(),
+            ))
+            .expect("ask the child to print the marker");
+        self.snapshots
+            .wait_for("the payload to be processed", |bundle| {
+                pane_text(bundle).contains(&marker)
+            })
+    }
+
+    /// Asks what the pane is holding, without any image data.
+    pub fn probe(&mut self) -> GraphicsSnapshot {
+        self.session
+            .send(TerminalCommand::CaptureGraphics)
+            .expect("request graphics");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            match self.events.next() {
+                TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
+                TerminalEvent::Error(error) => panic!("graphics probe failed: {error}"),
+                _ => {}
+            }
+        }
+        panic!("watchdog: no graphics answer arrived");
+    }
 }
