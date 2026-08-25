@@ -1,5 +1,8 @@
 [package]
 name = "sprite-app"
+# The crate ships a second binary for the observation benchmark, so without
+# this `cargo run -p sprite-app` cannot tell which one is meant.
+default-run = "sprite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
