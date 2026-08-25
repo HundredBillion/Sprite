@@ -63,7 +63,7 @@ const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530
 ///
 /// A fraction rather than a constant, because a cursor two logical pixels wide
 /// is a bold stripe at size 8 and nearly invisible at size 48.
-const CURSOR_STROKE: f32 = 0.12;
+pub(crate) const CURSOR_STROKE: f32 = 0.12;
 
 pub struct TerminalView {
     session: TerminalSession,
@@ -684,12 +684,12 @@ fn unpack(value: u32) -> Rgb {
     }
 }
 
-fn pack(color: Rgb) -> u32 {
+pub(crate) fn pack(color: Rgb) -> u32 {
     (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
 }
 
 /// A cell's drawn colours, honouring inverse and invisible.
-fn cell_colors(
+pub(crate) fn cell_colors(
     style: &CellStyle,
     default_fg: Rgb,
     default_bg: Rgb,
@@ -758,13 +758,21 @@ fn monospace_family(window: &Window) -> SharedString {
     "monospace".into()
 }
 
-fn terminal_font(family: &SharedString) -> Font {
+pub(crate) fn terminal_font(family: &SharedString, bold: bool, italic: bool) -> Font {
     Font {
         family: family.clone(),
         features: FontFeatures::default(),
         fallbacks: None,
-        weight: FontWeight::NORMAL,
-        style: FontStyle::Normal,
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
     }
 }
 
@@ -774,7 +782,7 @@ fn measure_cell_width(window: &Window, family: &SharedString, size: Pixels) -> P
     let text: SharedString = "M".into();
     let run = TextRun {
         len: text.len(),
-        font: terminal_font(family),
+        font: terminal_font(family, false, false),
         color: rgb(FOREGROUND).into(),
         background_color: None,
         underline: None,
@@ -864,145 +872,6 @@ impl Drop for TerminalView {
     }
 }
 
-/// One row's elements for a given pass.
-///
-/// Every cell is placed by its grid column, so a glyph that renders wider than
-/// its cell is clipped instead of displacing the rest of the row.
-#[allow(clippy::too_many_arguments)]
-fn row_element(
-    index: usize,
-    cells: Vec<PositionedCell>,
-    pass: RowPass,
-    cursor: Option<sprite_term::CursorSnapshot>,
-    default_fg: sprite_term::Rgb,
-    default_bg: sprite_term::Rgb,
-    palette: Option<std::sync::Arc<[sprite_term::Rgb; 256]>>,
-    cursor_color: Option<sprite_term::Rgb>,
-    cell_width: Pixels,
-    cell_height: Pixels,
-) -> gpui::Div {
-    let row_top = px(index as f32 * f32::from(cell_height));
-    let on_cursor = cursor.filter(|c| c.visible && usize::from(c.row) == index);
-
-    div()
-        .absolute()
-        .top(row_top)
-        .left(px(0.0))
-        .h(cell_height)
-        .w_full()
-        .children(cells.into_iter().filter_map(move |cell| {
-            let (foreground, background) =
-                cell_colors(&cell.style, default_fg, default_bg, palette.as_deref());
-            let here = on_cursor.filter(|c| c.column == cell.column);
-            // Only a block covers the cell it sits on. A bar or an underline is
-            // a mark drawn beside the glyph, so the text under them keeps the
-            // colours it would have had.
-            let is_block = here.is_some_and(|c| c.style == sprite_term::CursorStyle::Block);
-            // Selection and a block cursor both invert. The cursor wins where
-            // they overlap so it stays findable inside a selected run.
-            let inverted = is_block || cell.selected;
-            // "Painted" means the cell asked for a colour of its own, whether
-            // directly or by being inverted. A cell showing the terminal's
-            // default background has asked for nothing, and is where an image
-            // behind the text is meant to show through.
-            let painted = inverted
-                || here.is_some()
-                || !matches!(cell.style.background, SnapshotColor::Default)
-                || cell.style.inverse;
-
-            // In a split pass a cell whose background is the terminal's default
-            // is left unpainted, so an image behind it shows through. A cell
-            // with a background of its own still covers the image, which is
-            // what an explicit background means.
-            if pass == RowPass::Background && !painted {
-                return None;
-            }
-
-            let mut element = div()
-                .absolute()
-                .left(cell.left(cell_width))
-                .w(cell.width(cell_width))
-                .h(cell_height)
-                .overflow_hidden();
-
-            // A configured or program-set cursor colour paints the cursor;
-            // without one it is drawn in the cell's own foreground, which is
-            // legible against that cell's background by definition.
-            let cursor_paint = cursor_color.map_or(foreground, |color| rgb(pack(color)));
-
-            if pass != RowPass::Text {
-                element = element.bg(match (is_block, inverted) {
-                    (true, _) => cursor_paint,
-                    (false, true) => foreground,
-                    (false, false) => background,
-                });
-            }
-            if pass == RowPass::Background {
-                return Some(element);
-            }
-
-            element = element.text_color(if inverted { background } else { foreground });
-            if cell.style.bold {
-                element = element.font_weight(FontWeight::BOLD);
-            }
-            if cell.style.italic {
-                element = element.italic();
-            }
-            element = element.child(SharedString::from(cell.text));
-            // Added after the glyph so it draws over it, which is what makes a
-            // bar between two characters visible at all.
-            if let Some(mark) = cursor_mark(here, cursor_paint, cell_width, cell_height) {
-                element = element.child(mark);
-            }
-            Some(element)
-        }))
-}
-
-/// The mark a non-block cursor leaves on the cell it sits on.
-///
-/// `None` for a block, which is drawn by painting the whole cell instead, and
-/// for a cell the cursor is not on.
-fn cursor_mark(
-    cursor: Option<sprite_term::CursorSnapshot>,
-    paint: Rgba,
-    cell_width: Pixels,
-    cell_height: Pixels,
-) -> Option<gpui::Div> {
-    use sprite_term::CursorStyle;
-
-    // At least one logical pixel: a stroke that rounds to nothing is a cursor
-    // nobody can find.
-    let stroke = |extent: Pixels| px((f32::from(extent) * CURSOR_STROKE).max(1.0));
-
-    Some(match cursor?.style {
-        CursorStyle::Block => return None,
-        CursorStyle::Bar => div()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .h(cell_height)
-            .w(stroke(cell_width))
-            .bg(paint),
-        CursorStyle::Underline => div()
-            .absolute()
-            .left(px(0.0))
-            .bottom(px(0.0))
-            .w(cell_width)
-            .h(stroke(cell_height))
-            .bg(paint),
-        // An outline: the shape a terminal shows for an unfocused cursor, and
-        // the one DECSCUSR cannot ask for.
-        CursorStyle::BlockHollow => div()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .w(cell_width)
-            .h(cell_height)
-            .border(px(1.0))
-            .border_color(paint),
-    })
-}
-
 /// Which part of a row a pass draws.
 ///
 /// Cells normally paint their background and their glyph together, which is
@@ -1011,7 +880,7 @@ fn cursor_mark(
 /// under the glyphs — can only be drawn if they are separate passes, so the
 /// split is made only when such an image exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RowPass {
+pub(crate) enum RowPass {
     Whole,
     Background,
     Text,
@@ -1276,33 +1145,32 @@ impl Render for TerminalView {
             .as_ref()
             .map(|bundle| std::sync::Arc::new(*bundle.render.palette.clone()));
 
+        let font_family = self.font_family.clone();
+        let font_size = self.font_size;
         let build = |pass: RowPass, rows: Vec<Vec<PositionedCell>>| {
-            let palette = palette.clone();
-            rows.into_iter()
-                .enumerate()
-                .map(move |(index, cells)| {
-                    row_element(
-                        index,
-                        cells,
-                        pass,
-                        cursor,
-                        default_fg,
-                        default_bg,
-                        palette.clone(),
-                        cursor_color,
-                        cell_width,
-                        cell_height,
-                    )
-                })
-                .collect::<Vec<_>>()
+            crate::grid_paint::GridPaint::new(
+                rows,
+                pass,
+                cursor,
+                cursor_color,
+                default_fg,
+                default_bg,
+                palette.clone(),
+                cell_width,
+                cell_height,
+                font_family.clone(),
+                font_size,
+            )
         };
-        let (background_rows, text_rows) = if split {
+        // One element for the whole grid rather than one per cell: see
+        // `grid_paint` for why a layout pass cannot be trusted with a grid.
+        let (background_grid, text_grid) = if split {
             (
                 build(RowPass::Background, rows.clone()),
-                build(RowPass::Text, rows),
+                Some(build(RowPass::Text, rows)),
             )
         } else {
-            (build(RowPass::Whole, rows), Vec::new())
+            (build(RowPass::Whole, rows), None)
         };
 
         div()
@@ -1451,9 +1319,9 @@ impl Render for TerminalView {
                     })
                     .overflow_hidden()
                     .children(below_background)
-                    .children(background_rows)
+                    .child(background_grid)
                     .children(below_text)
-                    .children(text_rows)
+                    .children(text_grid)
                     .children(above_text)
                     // Composition is drawn at the cursor and nowhere else. It is
                     // view state: the terminal has not been told anything about

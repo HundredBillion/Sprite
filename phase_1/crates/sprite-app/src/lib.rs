@@ -8,6 +8,7 @@ mod cli;
 pub mod config;
 mod graphics_cache;
 mod grid;
+mod grid_paint;
 mod input;
 mod observation;
 mod pane_registry;

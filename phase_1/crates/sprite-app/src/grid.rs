@@ -34,14 +34,13 @@ pub(crate) struct PositionedCell {
 }
 
 impl PositionedCell {
-    /// Horizontal offset of this cell's left edge.
-    pub fn left(&self, cell_width: Pixels) -> Pixels {
-        px(f32::from(self.column) * f32::from(cell_width))
-    }
-
-    /// Total width this cell occupies.
-    pub fn width(&self, cell_width: Pixels) -> Pixels {
-        px(f32::from(self.columns) * f32::from(cell_width))
+    /// The columns this cell covers, as a half-open range.
+    ///
+    /// Where those columns fall in pixels is not decided here: a grid knows
+    /// which column a cell is in, and the painter knows what a column is worth.
+    pub fn span(&self) -> std::ops::Range<u32> {
+        let start = u32::from(self.column);
+        start..start + u32::from(self.columns.max(1))
     }
 }
 
@@ -195,18 +194,17 @@ mod tests {
     }
 
     #[test]
-    fn positions_convert_to_pixels_from_the_cell_width() {
+    fn a_cell_covers_the_columns_it_occupies() {
         let laid = lay_out_row(&row(vec![
             cell("a", CellWidth::Narrow),
             cell("界", CellWidth::Wide),
             cell("", CellWidth::SpacerTail),
         ]));
 
-        let width = px(9.0);
-        assert_eq!(laid[0].left(width), px(0.0));
-        assert_eq!(laid[0].width(width), px(9.0));
-        assert_eq!(laid[1].left(width), px(9.0));
-        assert_eq!(laid[1].width(width), px(18.0));
+        assert_eq!(laid[0].span(), 0..1);
+        // The wide character covers its spacer's column too, which is why the
+        // spacer draws nothing.
+        assert_eq!(laid[1].span(), 1..3);
     }
 
     #[test]
