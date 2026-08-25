@@ -22,7 +22,10 @@ use sprite_term::{
     TerminalSession, TerminalSize,
 };
 
-use crate::grid::{PositionedCell, ScrollAccumulator, cell_at, lay_out_row};
+use crate::grid::{
+    PANE_PADDING, PositionedCell, ScrollAccumulator, cell_at, content_area, grid_origin,
+    lay_out_row,
+};
 use crate::input::gpui_key_event;
 
 /// The largest grid Terminal Core will accept, mirrored here so the view never
@@ -98,8 +101,21 @@ pub struct TerminalView {
     status: Option<SharedString>,
     /// Sub-row scroll remainder, so trackpad gestures are not rounded away.
     scroll: ScrollAccumulator,
-    /// Where a drag began, while a selection is being dragged out.
-    drag_anchor: Option<CellPosition>,
+    /// The selection gesture in progress, if the pointer is down.
+    drag: Option<Drag>,
+    /// Where the grid's top-left corner sits inside the pane.
+    ///
+    /// Not the pane's own corner: the padding and the leftover from rounding
+    /// the pane down to whole cells sit between the two.
+    origin: gpui::Point<Pixels>,
+    /// The same corner in window coordinates, learned during paint.
+    ///
+    /// Mouse positions arrive in window coordinates, and a pane is not
+    /// necessarily at the window's origin — it may sit under a tab strip or
+    /// beside a sibling. Only the laid-out element knows where it ended up, so
+    /// hit testing uses what paint reported rather than a position computed
+    /// twice and liable to disagree.
+    content_origin: Option<gpui::Point<Pixels>>,
     /// A paste withheld as unsafe, awaiting a second explicit request.
     pending_unsafe_paste: Option<String>,
     /// Whether the cursor is in the visible half of its blink.
@@ -404,7 +420,9 @@ impl TerminalView {
             size: Some(initial_size),
             allocated: None,
             scroll: ScrollAccumulator::default(),
-            drag_anchor: None,
+            drag: None,
+            origin: point(px(PANE_PADDING), px(PANE_PADDING)),
+            content_origin: None,
             pending_unsafe_paste: None,
             preedit: None,
             blink_on: true,
@@ -441,7 +459,9 @@ impl TerminalView {
             allocated: None,
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
-            drag_anchor: None,
+            drag: None,
+            origin: point(px(PANE_PADDING), px(PANE_PADDING)),
+            content_origin: None,
             pending_unsafe_paste: None,
             preedit: None,
             blink_on: true,
@@ -457,11 +477,15 @@ impl TerminalView {
     }
 
     /// The cell under a window position, using the grid this view drew.
+    ///
+    /// Measured from the grid's corner rather than the pane's, so a click in
+    /// the padding lands on the edge cell nearest it instead of a cell one
+    /// column over.
     fn cell_under(&self, position: gpui::Point<Pixels>) -> Option<CellPosition> {
         let size = self.size?;
         cell_at(
             position,
-            point(px(0.0), px(0.0)),
+            self.content_origin.unwrap_or(self.origin),
             self.cell_width,
             self.cell_height,
             size,
@@ -529,13 +553,18 @@ impl TerminalView {
     fn synchronise_size(&mut self, window: &Window) {
         let available = self.allocated.unwrap_or_else(|| window.viewport_size());
         let Some(size) = grid_size(
-            available,
+            content_area(available),
             self.cell_width,
             self.cell_height,
             window.scale_factor(),
         ) else {
             return;
         };
+
+        // Recomputed before the grid is compared, because a pane can be resized
+        // by less than a cell: the grid is then unchanged but the gap around it
+        // is not.
+        self.origin = grid_origin(available, size, self.cell_width, self.cell_height);
 
         if self.size == Some(size) {
             return;
@@ -586,6 +615,21 @@ impl TerminalView {
             None => self.fallback_colors,
         }
     }
+}
+
+/// A selection being dragged out with the pointer down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Drag {
+    /// The cell the gesture started in.
+    anchor: CellPosition,
+    /// Whether the pointer has since left that cell.
+    ///
+    /// A press on its own selects nothing. Selecting the cell under the
+    /// pointer the moment a button goes down puts an inverted block on screen
+    /// for every click — a second cursor, as far as anyone looking at it is
+    /// concerned — when all the click was for was giving the pane focus. A
+    /// selection begins at the first movement and not before.
+    moved: bool,
 }
 
 /// An application binding, resolved before anything reaches the terminal.
@@ -1203,6 +1247,18 @@ impl Render for TerminalView {
         let preedit = self.preedit.clone();
         let focus_for_input = self.focus.clone();
         let entity_for_input = cx.entity();
+        let entity_for_bounds = cx.entity();
+        // Where the grid sits inside the pane, and how much of it it covers.
+        // Both are needed here: the padding is what separates the two, and the
+        // extent is what clips a glyph wider than its cell to the grid rather
+        // than letting it run out into the padding.
+        let origin = self.origin;
+        let extent = self.size.map(|size| {
+            gpui::size(
+                px(f32::from(size.cols) * f32::from(cell_width)),
+                px(f32::from(size.rows) * f32::from(cell_height)),
+            )
+        });
 
         // Images first, because whether any belong below the text decides how
         // the rows themselves are drawn.
@@ -1304,13 +1360,14 @@ impl Render for TerminalView {
                     }
                     let shift = event.modifiers.shift;
                     if view.route_mouse(cell, MouseAction::Press, shift) {
-                        view.drag_anchor = Some(cell);
-                        view.send(TerminalCommand::Select {
+                        // The press drops whatever was selected and remembers
+                        // where a drag would start from. It selects nothing
+                        // itself — see `Drag::moved`.
+                        view.drag = Some(Drag {
                             anchor: cell,
-                            head: cell,
-                            mode: SelectionMode::Character,
-                            rectangle: false,
+                            moved: false,
                         });
+                        view.send(TerminalCommand::ClearSelection);
                     }
                 }),
             )
@@ -1321,16 +1378,26 @@ impl Render for TerminalView {
                 if event.pressed_button.is_none() {
                     return;
                 }
-                if let Some(anchor) = view.drag_anchor {
-                    view.send(TerminalCommand::Select {
-                        anchor,
-                        head: cell,
-                        mode: SelectionMode::Character,
-                        rectangle: false,
-                    });
-                } else {
+                let Some(drag) = view.drag else {
                     view.route_mouse(cell, MouseAction::Motion, event.modifiers.shift);
+                    return;
+                };
+                // Movement inside the cell the press landed in is not yet a
+                // drag; a selection that has already left it stays live even
+                // when the pointer comes back, so it can be shrunk again.
+                if !drag.moved && cell == drag.anchor {
+                    return;
                 }
+                view.drag = Some(Drag {
+                    anchor: drag.anchor,
+                    moved: true,
+                });
+                view.send(TerminalCommand::Select {
+                    anchor: drag.anchor,
+                    head: cell,
+                    mode: SelectionMode::Character,
+                    rectangle: false,
+                });
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -1338,12 +1405,18 @@ impl Render for TerminalView {
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
-                    if view.drag_anchor.take().is_some() {
+                    match view.drag.take() {
                         // A completed drag copies, which is what a terminal
                         // user expects from a selection gesture.
-                        view.send(TerminalCommand::CopySelection);
-                    } else {
-                        view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
+                        Some(drag) if drag.moved => {
+                            view.send(TerminalCommand::CopySelection);
+                        }
+                        // A click that never moved selected nothing, so there
+                        // is nothing to copy and the clipboard is left alone.
+                        Some(_) => {}
+                        None => {
+                            view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
+                        }
                     }
                 }),
             )
@@ -1363,48 +1436,72 @@ impl Render for TerminalView {
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);
                 view.send(TerminalCommand::Key(key));
             }))
-            .children(below_background)
-            .children(background_rows)
-            .children(below_text)
-            .children(text_rows)
-            .children(above_text)
-            // Composition is drawn at the cursor and nowhere else. It is view
-            // state: the terminal has not been told anything about it.
-            .children(preedit.map(|text| {
+            // Everything the terminal draws lives inside the grid box, which
+            // is inset from the pane by the padding. Row and cell offsets are
+            // measured from its corner, so nothing below here knows the
+            // padding exists.
+            .child(
                 div()
                     .absolute()
-                    .top(px(
-                        f32::from(cursor.map_or(0, |c| c.row)) * f32::from(cell_height)
+                    .left(origin.x)
+                    .top(origin.y)
+                    .map(|element| match extent {
+                        Some(extent) => element.w(extent.width).h(extent.height),
+                        None => element.size_full(),
+                    })
+                    .overflow_hidden()
+                    .children(below_background)
+                    .children(background_rows)
+                    .children(below_text)
+                    .children(text_rows)
+                    .children(above_text)
+                    // Composition is drawn at the cursor and nowhere else. It is
+                    // view state: the terminal has not been told anything about
+                    // it.
+                    .children(preedit.map(|text| {
+                        div()
+                            .absolute()
+                            .top(px(
+                                f32::from(cursor.map_or(0, |c| c.row)) * f32::from(cell_height)
+                            ))
+                            .left(px(
+                                f32::from(cursor.map_or(0, |c| c.column)) * f32::from(cell_width)
+                            ))
+                            .h(cell_height)
+                            .bg(rgb(pack(default_fg)))
+                            .text_color(rgb(pack(default_bg)))
+                            .underline()
+                            .child(SharedString::from(text))
+                    }))
+                    // Installs the input handler during paint, which is the only
+                    // point GPUI accepts one. `canvas` exists to reach paint
+                    // from a `div`, and it sits inside the grid box so the
+                    // bounds it reports are the grid's own — which is where an
+                    // input method should place its window, and what mouse
+                    // positions are measured against.
+                    .child(canvas(
+                        move |bounds, _window, cx| {
+                            entity_for_bounds.update(cx, |view, _cx| {
+                                view.content_origin = Some(bounds.origin);
+                            });
+                        },
+                        move |bounds, (), window, cx| {
+                            window.handle_input(
+                                &focus_for_input,
+                                ElementInputHandler::new(bounds, entity_for_input),
+                                cx,
+                            );
+                        },
                     ))
-                    .left(px(
-                        f32::from(cursor.map_or(0, |c| c.column)) * f32::from(cell_width)
-                    ))
-                    .h(cell_height)
-                    .bg(rgb(pack(default_fg)))
-                    .text_color(rgb(pack(default_bg)))
-                    .underline()
-                    .child(SharedString::from(text))
-            }))
-            // Installs the input handler during paint, which is the only point
-            // GPUI accepts one. `canvas` exists to reach paint from a `div`.
-            .child(canvas(
-                move |_bounds, _window, _cx| {},
-                move |bounds, (), window, cx| {
-                    window.handle_input(
-                        &focus_for_input,
-                        ElementInputHandler::new(bounds, entity_for_input),
-                        cx,
-                    );
-                },
-            ))
-            .children(status.map(|status| {
-                div()
-                    .absolute()
-                    .bottom(px(0.0))
-                    .left(px(0.0))
-                    .text_color(rgb(STATUS))
-                    .child(status)
-            }))
+                    .children(status.map(|status| {
+                        div()
+                            .absolute()
+                            .bottom(px(0.0))
+                            .left(px(0.0))
+                            .text_color(rgb(STATUS))
+                            .child(status)
+                    })),
+            )
     }
 }
 

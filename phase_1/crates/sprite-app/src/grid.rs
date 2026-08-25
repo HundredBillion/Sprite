@@ -9,8 +9,17 @@
 //! position depends only on the terminal grid. A glyph that renders wider than
 //! its cell is clipped rather than allowed to displace its neighbours.
 
-use gpui::{Pixels, px};
-use sprite_term::{CellStyle, CellWidth, RenderRow};
+use gpui::{Pixels, Point, Size, px, size};
+use sprite_term::{CellStyle, CellWidth, RenderRow, TerminalSize};
+
+/// The gap Sprite keeps between the grid and every edge of its pane, in logical
+/// pixels.
+///
+/// A terminal that starts its first column on the window's own border reads as
+/// clipped rather than as full: the prompt sits against the frame with nowhere
+/// for a descender or a box-drawing glyph to go. This is the smallest gap; the
+/// leftover from rounding the pane down to whole cells is added to it.
+pub(crate) const PANE_PADDING: f32 = 8.0;
 
 /// One drawable cell, positioned in grid columns.
 #[derive(Clone, Debug, PartialEq)]
@@ -311,6 +320,44 @@ mod scroll_tests {
     }
 }
 
+/// The area a pane leaves for its grid, once the padding is taken off.
+///
+/// Never below one pixel in either direction: a pane too small to hold the
+/// padding still reports something a grid can be measured against, and
+/// `grid_size` refuses it there rather than here.
+pub(crate) fn content_area(available: Size<Pixels>) -> Size<Pixels> {
+    let inset = |extent: Pixels| px((f32::from(extent) - 2.0 * PANE_PADDING).max(1.0));
+    size(inset(available.width), inset(available.height))
+}
+
+/// Where the grid's top-left corner sits inside its pane.
+///
+/// A grid is a whole number of cells, so it almost never fills the pane
+/// exactly. The remainder — the padding plus whatever rounding left over — is
+/// split evenly between the two sides, which is the only way the gap on the
+/// left can match the gap on the right at every window width.
+pub(crate) fn grid_origin(
+    available: Size<Pixels>,
+    grid: TerminalSize,
+    cell_width: Pixels,
+    cell_height: Pixels,
+) -> Point<Pixels> {
+    let centre = |extent: Pixels, cells: u16, cell: Pixels| {
+        let used = f32::from(cells) * f32::from(cell);
+        let spare = f32::from(extent) - used;
+        px(if spare.is_finite() {
+            (spare / 2.0).max(0.0)
+        } else {
+            PANE_PADDING
+        })
+    };
+
+    Point {
+        x: centre(available.width, grid.cols, cell_width),
+        y: centre(available.height, grid.rows, cell_height),
+    }
+}
+
 /// Converts a window position into the cell under it.
 ///
 /// Positions outside the grid are clamped rather than rejected: a drag that
@@ -342,6 +389,86 @@ pub(crate) fn cell_at(
         row: row as u16,
         column: column as u16,
     })
+}
+
+#[cfg(test)]
+mod padding_tests {
+    use super::*;
+    use gpui::size;
+
+    fn grid(cols: u16, rows: u16) -> TerminalSize {
+        TerminalSize {
+            rows,
+            cols,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        }
+    }
+
+    #[test]
+    fn the_content_area_is_the_pane_less_the_padding_on_both_sides() {
+        let area = content_area(size(px(800.0), px(600.0)));
+        assert_eq!(area.width, px(800.0 - 2.0 * PANE_PADDING));
+        assert_eq!(area.height, px(600.0 - 2.0 * PANE_PADDING));
+    }
+
+    /// A pane smaller than its own padding still measures as something; it is
+    /// the grid that refuses to fit, not the arithmetic that goes negative.
+    #[test]
+    fn a_pane_smaller_than_its_padding_still_has_a_positive_area() {
+        let area = content_area(size(px(4.0), px(2.0)));
+        assert!(area.width > px(0.0) && area.height > px(0.0));
+    }
+
+    /// The bug this exists for: the first column must not sit on the pane's
+    /// edge, and the gap it gets must be the gap on the other side.
+    #[test]
+    fn the_leftover_is_split_evenly_between_the_two_sides() {
+        let available = size(px(800.0), px(608.0));
+        // 784 logical pixels of content is 98 columns of 8, and 592 is 37 rows
+        // of 16 — both exact, so the whole gap is the padding itself.
+        let origin = grid_origin(available, grid(98, 37), px(8.0), px(16.0));
+
+        assert_eq!(origin.x, px(PANE_PADDING));
+        let right = f32::from(available.width) - f32::from(origin.x) - 98.0 * 8.0;
+        assert_eq!(right, f32::from(origin.x), "left and right gaps match");
+
+        assert_eq!(origin.y, px(PANE_PADDING));
+        let bottom = f32::from(available.height) - f32::from(origin.y) - 37.0 * 16.0;
+        assert_eq!(bottom, f32::from(origin.y), "top and bottom gaps match");
+    }
+
+    #[test]
+    fn rounding_leftover_is_added_to_the_padding_not_dropped_at_one_edge() {
+        // 810 - 16 = 794 of content, which is 99 columns of 8 with 2 spare.
+        let available = size(px(810.0), px(600.0));
+        let origin = grid_origin(available, grid(99, 37), px(8.0), px(16.0));
+
+        assert_eq!(origin.x, px(PANE_PADDING + 1.0));
+        let right = f32::from(available.width) - f32::from(origin.x) - 99.0 * 8.0;
+        assert_eq!(right, f32::from(origin.x));
+    }
+
+    /// A grid wider than the pane it is drawn in cannot be centred, and a
+    /// negative origin would put its first column off screen.
+    #[test]
+    fn a_grid_wider_than_its_pane_starts_at_the_edge_rather_than_before_it() {
+        let origin = grid_origin(size(px(100.0), px(100.0)), grid(80, 24), px(8.0), px(16.0));
+        assert_eq!(origin.x, px(0.0));
+        assert_eq!(origin.y, px(0.0));
+    }
+
+    #[test]
+    fn a_pane_of_no_measurable_size_falls_back_to_the_padding() {
+        let origin = grid_origin(
+            size(px(f32::NAN), px(f32::NAN)),
+            grid(80, 24),
+            px(8.0),
+            px(16.0),
+        );
+        assert_eq!(origin.x, px(PANE_PADDING));
+        assert_eq!(origin.y, px(PANE_PADDING));
+    }
 }
 
 #[cfg(test)]
