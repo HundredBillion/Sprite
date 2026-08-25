@@ -6,10 +6,13 @@
 # package so `pacman -Qo /usr/bin/sprite` answers, an upgrade replaces it, and
 # `pacman -R sprite` removes it whole.
 #
-#   cd phase_1
 #   cargo build --release -p sprite-app --locked --offline
-#   makepkg -p packaging/PKGBUILD.local -fC
-#   sudo pacman -U sprite-*.pkg.tar.zst
+#   cd packaging && makepkg -p PKGBUILD.local -fC
+#   sudo pacman -U sprite-0.1.0-1-x86_64.pkg.tar.zst
+#
+# From `packaging`, not from the workspace root: makepkg refuses a recipe that
+# is not in the current directory, and `package()` finds the tree by walking up
+# from there.
 #
 # `-C` matters: without it makepkg reuses a previous staging directory and can
 # package a binary you have since rebuilt. That happened once, and the result

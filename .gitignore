@@ -1,3 +1,8 @@
 .DS_Store
 .worktrees/
 /phase_1/target/
+
+# makepkg's staging directory and its output, from packaging/PKGBUILD.local
+/phase_1/packaging/pkg/
+/phase_1/packaging/src/
+/phase_1/packaging/*.pkg.tar.zst
