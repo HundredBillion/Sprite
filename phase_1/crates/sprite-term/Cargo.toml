@@ -1,0 +1,22 @@
+[package]
+name = "sprite-term"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-channel = { workspace = true }
+libghostty-vt = { workspace = true }
+png = { workspace = true }
+portable-pty = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[dev-dependencies]
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+
+[[bin]]
+name = "sprite-graphics-bench"
+path = "src/bin/sprite-graphics-bench.rs"

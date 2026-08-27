@@ -1,0 +1,31 @@
+[workspace]
+members = ["crates/sprite-app", "crates/sprite-term"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+async-channel = "=2.5.0"
+gpui = { version = "=0.2.2", default-features = false }
+# `png` is deliberately not enabled: the decoder it provides,
+# `RustPngDecoder`, has a private field and no constructor, so it cannot be
+# built from outside the crate — and its `decode_png` reserves capacity without
+# resizing, then hands `next_frame` a zero-length buffer, so it would decode
+# nothing even if it could be constructed. Sprite installs its own decoder
+# through `set_png_decoder`, which is not gated on that feature.
+libghostty-vt = { version = "=0.2.1", default-features = false, features = [
+    "kitty-graphics",
+] }
+serde_json = { version = "=1.0.151" }
+toml = { version = "=0.8.23", default-features = false, features = ["parse"] }
+png = { version = "=0.18.1", default-features = false }
+# Only the pixel buffer types, to hand GPUI a texture. No codecs: Sprite
+# decodes PNG itself and accepts no other image format.
+image = { version = "=0.25.10", default-features = false }
+nix = { version = "=0.28.0", default-features = false, features = ["poll", "process", "signal"] }
+portable-pty = { version = "=0.9.0", default-features = false }
+sprite-term = { path = "crates/sprite-term" }

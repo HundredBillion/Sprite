@@ -1,0 +1,33 @@
+[package]
+name = "sprite-app"
+# The crate ships a second binary for the observation benchmark, so without
+# this `cargo run -p sprite-app` cannot tell which one is meant.
+default-run = "sprite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sprite"
+path = "src/main.rs"
+
+[[bin]]
+name = "sprite-observation-bench"
+path = "src/bin/sprite-observation-bench.rs"
+
+[dependencies]
+async-channel = { workspace = true }
+image = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+sprite-term = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { workspace = true }

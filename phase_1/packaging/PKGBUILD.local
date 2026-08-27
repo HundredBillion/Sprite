@@ -1,0 +1,58 @@
+# Packages the tree as it stands, without rebuilding it from git.
+#
+# The recipe beside this one builds Sprite from a clean checkout, which is what
+# a distribution wants. This is for the other case: you have just built and
+# tested a change here, and you want that exact binary installed as a tracked
+# package so `pacman -Qo /usr/bin/sprite` answers, an upgrade replaces it, and
+# `pacman -R sprite` removes it whole.
+#
+#   cargo build --release -p sprite-app --locked --offline
+#   cd packaging && makepkg -p PKGBUILD.local -fC
+#   sudo pacman -U sprite-0.1.0-1-x86_64.pkg.tar.zst
+#
+# From `packaging`, not from the workspace root: makepkg refuses a recipe that
+# is not in the current directory, and `package()` finds the tree by walking up
+# from there.
+#
+# `-C` matters: without it makepkg reuses a previous staging directory and can
+# package a binary you have since rebuilt. That happened once, and the result
+# was a package that installed cleanly and behaved like the old build.
+#
+# It builds nothing itself, on purpose: what gets installed is what you tested,
+# not a second compilation that might differ.
+pkgname=sprite
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A terminal built to be read by programs as well as by people (local build)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/HundredBillion/Sprite"
+license=('MIT' 'Apache-2.0')
+depends=(
+    'libxcb'
+    'libxkbcommon'
+    'libxkbcommon-x11'
+    'vulkan-icd-loader'
+    'wayland'
+    'xcb-util-keysyms'
+)
+makedepends=('ncurses' 'python')
+source=()
+sha256sums=()
+
+package() {
+    local root
+    root="$(realpath "$startdir/..")"
+    cd "$root"
+
+    if [ ! -x target/release/sprite ]; then
+        echo "no release build at $root/target/release/sprite" >&2
+        echo "run: cargo build --release -p sprite-app --locked --offline" >&2
+        return 1
+    fi
+
+    # Regenerated here so the notices match whatever the tree currently
+    # resolves, which is the whole point of packaging the tree as it stands.
+    python3 packaging/third-party-notices.py > THIRD-PARTY-NOTICES.md
+
+    DESTDIR="$pkgdir" PREFIX=/usr packaging/install.sh
+}
