@@ -572,7 +572,12 @@ cargo test -p sprite-app --locked --offline --lib terminal_events
 ```
 Expected: **PASS**, `8 passed`.
 
-- [ ] **Step 5: Commit the pure half**
+- [ ] **Step 5: Commit the pure half *together with* Step 6's rewiring**
+
+Do Step 6 before committing. The two cannot be separated: until the view calls
+`decide`, it is `pub(crate)` code with no non-test caller, so `dead_code` fires
+and `-D warnings` refuses the commit — and `#[allow(dead_code)]` is forbidden.
+Commit once the pure function and its caller are both in place.
 
 ```bash
 git add crates/sprite-app/src/terminal_events.rs crates/sprite-app/src/lib.rs \
