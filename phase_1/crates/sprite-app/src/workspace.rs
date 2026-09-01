@@ -181,11 +181,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Whether this window currently offers observation.
-    pub fn observation_enabled(&self) -> bool {
-        self.endpoint.is_some()
-    }
-
     /// Hands over every pane's worker so the window can wait for all of them.
     ///
     /// Every tab, not only the visible one: a background tab's child is still

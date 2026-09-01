@@ -246,6 +246,11 @@ impl PaneTree {
         self.panes().len()
     }
 
+    /// Always false: a tree is never empty.
+    ///
+    /// `new` seeds one leaf and `close` refuses to remove the last, so there is
+    /// no sequence of operations that empties a tree. Present because `len`
+    /// exists and clippy pairs the two; kept honest by saying why.
     pub fn is_empty(&self) -> bool {
         false
     }
@@ -280,6 +285,10 @@ impl PaneTree {
             self.focus = successor
                 .unwrap_or_else(|| self.panes().first().map(|(id, _)| *id).unwrap_or(pane));
         }
+        // The early return above is what makes `is_empty` always false; check
+        // it here so the invariant is enforced where it is claimed, not just
+        // asserted in a doc comment nobody re-verifies.
+        debug_assert!(!self.is_empty(), "close leaves at least one pane behind");
         Some(self.focus)
     }
 

@@ -66,16 +66,8 @@ impl<T> Tabs<T> {
         &self.tabs[self.active].1
     }
 
-    pub fn active_mut(&mut self) -> &mut PaneRegistry<T> {
-        &mut self.tabs[self.active].1
-    }
-
     fn index_of(&self, tab: TabId) -> Option<usize> {
         self.tabs.iter().position(|(id, _)| *id == tab)
-    }
-
-    pub fn get(&self, tab: TabId) -> Option<&PaneRegistry<T>> {
-        self.index_of(tab).map(|index| &self.tabs[index].1)
     }
 
     /// Opens a tab at the end of the window's order, holding one new pane, and

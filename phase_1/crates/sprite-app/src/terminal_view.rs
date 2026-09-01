@@ -338,6 +338,13 @@ impl TerminalView {
                         }
                     }
                     Ok(TerminalEvent::Error(error)) => {
+                        // A pane in a bad state must not leave an observation
+                        // request waiting out the deadline. Any session error
+                        // fails an in-flight request: the pane cannot answer,
+                        // and the reason it cannot is this one.
+                        if let Some(link) = &event_link {
+                            link.panes.deliver_failure(link.pane, error.to_string());
+                        }
                         if view
                             .update(cx, |view, cx| {
                                 view.status = Some(error.to_string().into());
