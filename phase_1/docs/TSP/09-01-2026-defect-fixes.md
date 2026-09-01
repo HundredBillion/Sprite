@@ -412,9 +412,23 @@ Leave `broker::parse`'s own token handling **untouched**. It is public API
 an older client's token. After this change it simply never receives one from
 the endpoint path, so its branch is a correct no-op for direct callers.
 
-Leave `config_request`'s token-skipping untouched for the same reason — it is
-directly unit-tested by `a_configuration_request_is_told_from_a_pane_query`,
-and that test must keep passing.
+**Tighten `config_request`'s token handling to an equality check.** It currently
+consumes any word beginning `sprite-observation/` without comparing it, which is
+what made the original divergence possible. Consume the token **only** when it
+equals `broker::PROTOCOL`; leave any other token in place so the request falls
+through to `broker::parse` and is refused there.
+
+Without this, the fix is bypassable and the defect survives: `protocol_check`
+strips only the *first* token, so a body carrying two —
+`sprite-observation/1 sprite-observation/999 config reload` — passes the gate on
+the first and has the second silently discarded by `config_request`, honouring a
+write verb that names a version this window does not speak. The identically
+shaped `… panes snapshot` is correctly refused, because `broker::parse` does
+compare its token. That is the exact asymmetry this task exists to remove.
+
+`config_request` is private, so there is no API concern, and
+`a_configuration_request_is_told_from_a_pane_query` passes untouched — it only
+ever supplies no-token or exactly-`PROTOCOL` bodies, never a mismatched one.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
