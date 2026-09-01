@@ -288,6 +288,18 @@ impl Workspace {
         self.after_close(cx);
     }
 
+    /// Whether the window may close now, or must ask first.
+    ///
+    /// The title-bar X is a close like any other: a pane running a program is
+    /// asked about before the window goes. Returning `false` keeps the window
+    /// open and leaves the question on screen; the second click answers it.
+    ///
+    /// Public because the close handler lives in the `sprite` binary rather
+    /// than in this library. `CloseScope` stays private.
+    pub fn confirm_close(&mut self, cx: &mut Context<Self>) -> bool {
+        self.may_close(CloseScope::Window, cx)
+    }
+
     /// Whether a close may go ahead now, or must be asked about first.
     ///
     /// PRD story 11, and the last thing between a mistyped binding and an hour
@@ -327,6 +339,12 @@ impl Workspace {
                 .tabs
                 .active()
                 .layout()
+                .into_iter()
+                .map(|(_, _, view)| view)
+                .collect(),
+            CloseScope::Window => self
+                .tabs
+                .all_panes()
                 .into_iter()
                 .map(|(_, _, view)| view)
                 .collect(),
@@ -753,6 +771,7 @@ struct PendingClose {
 enum CloseScope {
     Pane,
     Tab,
+    Window,
 }
 
 impl CloseScope {
@@ -760,6 +779,18 @@ impl CloseScope {
         match self {
             Self::Pane => "pane",
             Self::Tab => "tab",
+            Self::Window => "window",
+        }
+    }
+
+    /// How to repeat the gesture that raised the question.
+    ///
+    /// The confirmation model is "do the same thing again", and the title-bar
+    /// close is a click rather than a binding.
+    fn again(self) -> &'static str {
+        match self {
+            Self::Pane | Self::Tab => "press the same keys again",
+            Self::Window => "click close again",
         }
     }
 }
@@ -1041,8 +1072,9 @@ impl Render for Workspace {
                     .bg(rgb(CONFIRM_BG))
                     .text_color(rgb(CONFIRM_FG))
                     .child(SharedString::from(format!(
-                        "{} — press the same keys again to close this {}, Esc to keep it",
+                        "{} — {} to close this {}, Esc to keep it",
                         pending.running,
+                        pending.scope.again(),
                         pending.scope.noun()
                     )))
             }))
@@ -1198,6 +1230,16 @@ mod tests {
     fn a_close_question_says_what_it_would_close() {
         assert_eq!(CloseScope::Pane.noun(), "pane");
         assert_eq!(CloseScope::Tab.noun(), "tab");
+        assert_eq!(CloseScope::Window.noun(), "window");
+    }
+
+    /// The banner tells a person how to answer. A title-bar close was not a
+    /// keystroke, so it must not be described as one.
+    #[test]
+    fn a_close_question_names_the_gesture_that_answers_it() {
+        assert_eq!(CloseScope::Pane.again(), "press the same keys again");
+        assert_eq!(CloseScope::Tab.again(), "press the same keys again");
+        assert_eq!(CloseScope::Window.again(), "click close again");
     }
 
     #[test]
