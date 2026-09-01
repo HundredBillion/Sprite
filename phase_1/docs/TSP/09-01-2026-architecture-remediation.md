@@ -141,9 +141,15 @@ see that one. Steps 3–7 handle each warning, and Step 4 handles the invisible 
 In `crates/sprite-app/src/tabs.rs`, delete `active_mut` (:69) and `get` (:77) in
 full, including their doc comments.
 
-In `crates/sprite-app/src/pane_registry.rs`, delete `get_mut` (:48),
-`focused_mut` (:56) and `len` (:36) in full. `get_mut`'s only caller was
-`focused_mut`, which is itself dead.
+In `crates/sprite-app/src/pane_registry.rs`, delete `get_mut` (:48) and
+`focused_mut` (:56) in full. `get_mut`'s only caller was `focused_mut`, which is
+itself dead.
+
+`len` (:36) is **gated, not deleted** — the same treatment Step 6 gives
+`GraphicsCache`. Eight existing assertions call it (six here, two in `tabs.rs`
+via `tabs.active().len()`), so deleting it would force editing test assertions,
+which the global constraints forbid. `#[cfg(test)]` removes it from the
+production surface just as effectively.
 
 - [ ] **Step 4: Delete the method the compiler cannot see**
 
