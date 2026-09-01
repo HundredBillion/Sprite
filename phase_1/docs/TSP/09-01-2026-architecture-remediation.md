@@ -163,26 +163,33 @@ seeds one leaf, and `close` refuses to remove the last (`pane_tree.rs:270`,
 `len` is live at that same line, so deleting `is_empty` would trip clippy's
 `len_without_is_empty`.
 
-Replace it with the same code plus the invariant it asserts:
+**Compute it, and give it one real call site.** A literal `false` would be
+*correct* — the tree is never empty — but it cannot be checked, and an assertion
+built on it asserts nothing. Since `PaneTree` loses its `lib.rs` export, `dead_code`
+also needs a non-test caller, and `len` has a live production caller so `is_empty`
+cannot be `#[cfg(test)]`-gated without waking `clippy::len_without_is_empty`.
 
 ```rust
-    /// Always false: a tree is never empty.
+    /// Whether the tree holds no panes.
     ///
-    /// `new` seeds one leaf and `close` refuses to remove the last, so there is
-    /// no sequence of operations that empties a tree. Present because `len`
-    /// exists and clippy pairs the two; kept honest by saying why.
-    #[expect(
-        clippy::unused_self,
-        reason = "the invariant is the point; a caller should read it"
-    )]
+    /// Always false in practice: `new` seeds one leaf and `close` refuses to
+    /// remove the last, so no sequence of operations empties a tree. Computed
+    /// rather than returned as a constant so that the assertion in `close` is a
+    /// real check — a constant would make it assert nothing.
     pub fn is_empty(&self) -> bool {
-        false
+        self.panes().is_empty()
     }
 ```
 
-If `clippy::unused_self` does not actually fire here, drop the `#[expect]`
-attribute — `#[expect]` on a lint that does not trigger is itself a warning.
-Run clippy and let it tell you.
+and in `close`, immediately before returning:
+
+```rust
+        // The tree keeps its final leaf, so a close can never empty it. Checked
+        // here rather than trusted: this is the function that maintains the
+        // invariant, so it is the function that can break it. Debug-only, so
+        // the traversal costs release builds nothing.
+        debug_assert!(!self.is_empty(), "close emptied the tree");
+```
 
 - [ ] **Step 6: Gate the cache's test observers**
 
