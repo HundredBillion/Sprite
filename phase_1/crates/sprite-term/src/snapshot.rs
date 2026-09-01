@@ -212,6 +212,17 @@ pub(crate) fn capture<'vt>(
     let colors = snapshot.colors().map_err(vt("render_colors"))?;
     let cursor = cursor_snapshot(&snapshot)?;
 
+    // Colours come from the Terminal rather than the render snapshot. A live
+    // configuration reload writes them straight to the terminal, but the render
+    // state re-reads its own copy only when terminal output marks it dirty — so
+    // reading them there leaves a reload invisible until the next keystroke.
+    // The render state's values stay the fallback for a terminal with no
+    // opinion of its own.
+    let live_fg = terminal.fg_color().map_err(vt("fg_color"))?;
+    let live_bg = terminal.bg_color().map_err(vt("bg_color"))?;
+    let live_cursor = terminal.cursor_color().map_err(vt("cursor_color"))?;
+    let live_palette = terminal.color_palette().map_err(vt("color_palette"))?;
+
     let mut render_rows: Vec<RenderRow> = Vec::with_capacity(usize::from(size.rows));
     let mut pane_rows: Vec<PaneRow> = Vec::with_capacity(usize::from(size.rows));
 
@@ -336,16 +347,16 @@ pub(crate) fn capture<'vt>(
             mouse_tracking,
             rows: render_rows,
             cursor,
-            default_foreground: rgb(colors.foreground),
-            default_background: rgb(colors.background),
+            default_foreground: live_fg.map_or_else(|| rgb(colors.foreground), rgb),
+            default_background: live_bg.map_or_else(|| rgb(colors.background), rgb),
             // Copied wholesale: it is 768 bytes, it changes only when a program
             // redefines a colour, and the alternative is a renderer that cannot
             // tell red from white.
-            palette: Box::new(colors.palette.map(rgb)),
+            palette: Box::new(live_palette.0.map(rgb)),
             // Already the effective colour: a program that set one through
             // OSC 12 is reported here, and a pane with no opinion reports none
             // rather than inventing one.
-            cursor_color: colors.cursor.map(rgb),
+            cursor_color: live_cursor.or(colors.cursor).map(rgb),
         }),
         pane: Arc::new(PaneSnapshot {
             generation,

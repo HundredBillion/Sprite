@@ -435,6 +435,10 @@ pub(crate) fn run(
                     }
                 }
             }
+            // Not a no-op: a wake. The snapshot slot holds one bundle
+            // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
+            // leaves `dirty` set with the loop blocked on `recv`. This gives
+            // the gate below a second pass once the app has drained the slot.
             Message::CaptureRequested => {}
             Message::Command(command) => match command {
                 TerminalCommand::Input(bytes) => {
@@ -665,6 +669,7 @@ pub(crate) fn run(
                     }
                     // The colours live in the render state, so a frame has to be
                     // taken for anyone to see them.
+                    dirty = true;
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
                 TerminalCommand::SetCursor(cursor) => {
@@ -673,6 +678,7 @@ pub(crate) fn run(
                     {
                         break;
                     }
+                    dirty = true;
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
                 TerminalCommand::CaptureGraphics => {
