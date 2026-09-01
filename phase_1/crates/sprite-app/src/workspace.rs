@@ -13,7 +13,7 @@ use sprite_term::ShutdownHandle;
 
 use std::sync::Arc;
 
-use crate::observation::broker::{self, Refusal};
+use crate::observation::broker::{self, PaneSource, Refusal};
 use crate::observation::endpoint::{DENIED, Endpoint};
 use crate::observation::panes::{PaneLink, Placement, WindowPanes};
 use crate::observation::schema;
@@ -529,10 +529,23 @@ const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// able to hold up drawing, and the deadline inside `collect` is what keeps it
 /// from holding up the endpoint either.
 fn respond(
-    panes: &WindowPanes,
+    panes: &dyn PaneSource,
     reload: &async_channel::Sender<ReloadRequest>,
     body: &str,
 ) -> String {
+    // One check, both verbs. Previously `broker::parse` compared the token to
+    // PROTOCOL while `config_request` discarded it, so a newer client's config
+    // reload was honoured and only its snapshot request refused — the write
+    // verb being the one that got through.
+    let body = match protocol_check(body) {
+        Ok(rest) => rest,
+        Err(_) => {
+            return format!(
+                "unsupported protocol; this window speaks {}",
+                broker::PROTOCOL
+            );
+        }
+    };
     // One verb that is not a question about panes. It is authenticated by the
     // same key and reachable only from inside this window, which is the same
     // rule observation lives by: a caller that could not read this window's
@@ -564,6 +577,26 @@ fn respond(
         }
         Err(Refusal::Denied) => DENIED.to_owned(),
     }
+}
+
+/// Validates and strips the optional protocol token.
+///
+/// Optional so that a client *older* than this window is understood rather than
+/// refused. A *newer* one names a version this window does not know and is told
+/// so — for every verb, which is the whole point of checking here rather than
+/// inside each parser.
+fn protocol_check(body: &str) -> Result<&str, Refusal> {
+    let trimmed = body.trim_start();
+    if !trimmed.starts_with("sprite-observation/") {
+        return Ok(body);
+    }
+    let (token, rest) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
+    if token != broker::PROTOCOL {
+        return Err(Refusal::UnsupportedProtocol);
+    }
+    Ok(rest)
 }
 
 /// Which configuration verb a request body is, if it is one at all.
@@ -1025,7 +1058,7 @@ impl Render for Workspace {
 mod tests {
     use super::{
         CloseScope, ConfigVerb, Direction, WorkspaceAction, classify, config_request,
-        describe_running, workspace_action,
+        describe_running, respond, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1176,6 +1209,57 @@ mod tests {
         assert_eq!(config_request("config"), None);
         assert_eq!(config_request("config reload --now"), None);
         assert_eq!(config_request(""), None);
+    }
+
+    /// A `PaneSource` with nothing in it. A refused request never reaches a
+    /// pane, so `begin` is unreachable.
+    struct NoPanes;
+
+    impl crate::observation::broker::PaneSource for NoPanes {
+        fn panes(&self) -> Vec<crate::observation::broker::PaneAddress> {
+            Vec::new()
+        }
+
+        fn begin(
+            &self,
+            _pane: crate::pane_tree::PaneId,
+            _lines: sprite_term::HistoryLines,
+        ) -> Result<crate::observation::broker::Pending, String> {
+            unreachable!("a refused request never reaches a pane")
+        }
+    }
+
+    /// The divergence: `config reload` is a write, and it was the verb that got
+    /// through. Both verbs must refuse a version this window does not speak.
+    #[test]
+    fn a_newer_protocol_is_refused_for_every_verb() {
+        let (reload, _keep_open) = async_channel::bounded(1);
+
+        for body in [
+            "sprite-observation/99 config reload",
+            "sprite-observation/99 panes snapshot",
+        ] {
+            let answer = respond(&NoPanes, &reload, body);
+            assert!(
+                answer.starts_with("unsupported protocol"),
+                "{body:?} was answered with {answer:?}"
+            );
+        }
+    }
+
+    /// The version this window does speak still reaches the parser.
+    #[test]
+    fn the_spoken_protocol_still_reaches_the_parser() {
+        let (reload, _keep_open) = async_channel::bounded(1);
+        let answer = respond(
+            &NoPanes,
+            &reload,
+            "sprite-observation/1 panes snapshot --window",
+        );
+        assert!(
+            !answer.starts_with("unsupported protocol"),
+            "the current protocol was refused: {answer:?}"
+        );
     }
 
     /// The distinction the whole command rests on: what may change under a
