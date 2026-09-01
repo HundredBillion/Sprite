@@ -246,13 +246,14 @@ impl PaneTree {
         self.panes().len()
     }
 
-    /// Always false: a tree is never empty.
+    /// Whether the tree holds no panes.
     ///
-    /// `new` seeds one leaf and `close` refuses to remove the last, so there is
-    /// no sequence of operations that empties a tree. Present because `len`
-    /// exists and clippy pairs the two; kept honest by saying why.
+    /// Always false in practice: `new` seeds one leaf and `close` refuses to
+    /// remove the last, so no sequence of operations empties a tree. Computed
+    /// rather than returned as a constant so that the assertion in `close` is a
+    /// real check — a constant would make it assert nothing.
     pub fn is_empty(&self) -> bool {
-        false
+        self.panes().is_empty()
     }
 
     /// Splits the focused pane, focusing the new one.
@@ -285,10 +286,11 @@ impl PaneTree {
             self.focus = successor
                 .unwrap_or_else(|| self.panes().first().map(|(id, _)| *id).unwrap_or(pane));
         }
-        // The early return above is what makes `is_empty` always false; check
-        // it here so the invariant is enforced where it is claimed, not just
-        // asserted in a doc comment nobody re-verifies.
-        debug_assert!(!self.is_empty(), "close leaves at least one pane behind");
+        // The tree keeps its final leaf, so a close can never empty it. Checked
+        // here rather than trusted: this is the function that maintains the
+        // invariant, so it is the function that can break it. Debug-only, so
+        // the traversal costs release builds nothing.
+        debug_assert!(!self.is_empty(), "close emptied the tree");
         Some(self.focus)
     }
 
