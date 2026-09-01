@@ -602,11 +602,18 @@ fn protocol_check(body: &str) -> Result<&str, Refusal> {
 /// Which configuration verb a request body is, if it is one at all.
 ///
 /// The protocol token is optional here for the same reason it is in the pane
-/// parser: a client older than this window should be understood.
+/// parser: a client older than this window should be understood. It is only
+/// ever *dropped*, though, not merely stepped over — a leading word that
+/// looks like a protocol token but names a version this window does not
+/// speak is left in place, so it lands in the `config`-verb position, fails
+/// to match, and the request falls through to `broker::parse`, which does
+/// compare it and refuses. Skipping any `sprite-observation/`-shaped word
+/// unconditionally, as this once did, let a second embedded token carry an
+/// unchecked version past this function and into `ask_window`.
 fn config_request(body: &str) -> Option<ConfigVerb> {
     let mut words = body.split_whitespace().peekable();
     if let Some(word) = words.peek()
-        && word.starts_with("sprite-observation/")
+        && *word == broker::PROTOCOL
     {
         words.next();
     }
@@ -1238,6 +1245,26 @@ mod tests {
         for body in [
             "sprite-observation/99 config reload",
             "sprite-observation/99 panes snapshot",
+        ] {
+            let answer = respond(&NoPanes, &reload, body);
+            assert!(
+                answer.starts_with("unsupported protocol"),
+                "{body:?} was answered with {answer:?}"
+            );
+        }
+    }
+
+    /// A second, embedded token once slipped past `config_request` unchecked:
+    /// the first token satisfied `protocol_check` and was stripped, leaving a
+    /// *second* `sprite-observation/`-shaped word that `config_request` used
+    /// to skip on sight rather than compare. Both verbs must still refuse.
+    #[test]
+    fn a_second_embedded_protocol_token_is_also_refused() {
+        let (reload, _keep_open) = async_channel::bounded(1);
+
+        for body in [
+            "sprite-observation/1 sprite-observation/999 config reload",
+            "sprite-observation/1 sprite-observation/999 panes snapshot",
         ] {
             let answer = respond(&NoPanes, &reload, body);
             assert!(
