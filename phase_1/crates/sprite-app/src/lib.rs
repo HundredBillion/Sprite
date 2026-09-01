@@ -14,6 +14,7 @@ mod observation;
 mod pane_registry;
 mod pane_tree;
 mod tabs;
+mod terminal_events;
 mod terminal_view;
 mod workspace;
 

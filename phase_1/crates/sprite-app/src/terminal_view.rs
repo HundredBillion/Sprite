@@ -18,8 +18,8 @@ use gpui::{
 };
 use sprite_term::{
     CellPosition, CellStyle, KeyAction, MouseAction, MouseEvent, Rgb, Scroll, SelectionMode,
-    SessionConfig, ShutdownHandle, SnapshotBundle, SnapshotColor, TerminalCommand, TerminalEvent,
-    TerminalSession, TerminalSize,
+    SessionConfig, ShutdownHandle, SnapshotBundle, SnapshotColor, TerminalCommand, TerminalSession,
+    TerminalSize,
 };
 
 use crate::grid::{
@@ -240,132 +240,26 @@ impl TerminalView {
 
         let events = session.take_event_stream();
         let snapshots = session.take_snapshot_stream();
-        let event_link = observation.clone();
 
         let event_task = cx.spawn(async move |view, cx| {
             let Ok(mut events) = events else { return };
             loop {
-                match events.next().await {
-                    Ok(TerminalEvent::Ready) => {}
-                    Ok(TerminalEvent::UnsafePaste(text)) => {
-                        // Held, not performed. The person sees why and repeats
-                        // the paste to go ahead.
-                        let lines = text.lines().count();
-                        if view
-                            .update(cx, |view, cx| {
-                                view.pending_unsafe_paste = Some(text);
-                                view.status = Some(
-                                    format!(
-                                        "[paste held: {lines} lines would run as commands — \
-                                         press Ctrl+Shift+V again to paste anyway]"
-                                    )
-                                    .into(),
-                                );
-                                cx.notify();
-                            })
-                            .is_err()
-                        {
-                            return;
+                let decision = crate::terminal_events::decide(events.next().await);
+                if !decision.effects.is_empty() {
+                    let applied = view.update(cx, |view, cx| {
+                        for effect in decision.effects {
+                            view.apply(effect, cx);
                         }
-                    }
-                    Ok(TerminalEvent::Hyperlink { uri: Some(uri), .. }) => {
-                        // Terminal Core already applied the scheme policy, so
-                        // reaching here means the target is allowed. The parsed
-                        // URI goes straight to the platform opener: Sprite never
-                        // builds a command line from terminal-provided text.
-                        if view
-                            .update(cx, |_view, cx| {
-                                cx.open_url(&uri);
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    // No link, or a refused scheme. Indistinguishable on
-                    // purpose, and nothing is opened either way.
-                    Ok(TerminalEvent::Hyperlink { uri: None, .. }) => {}
-                    Ok(TerminalEvent::TitleChanged(title)) => {
-                        // The window title follows the child, which is how a
-                        // long-running command announces itself.
-                        let _ = view.update(cx, |_view, cx| {
-                            cx.notify();
-                            let _ = &title;
-                        });
-                    }
-                    // Working directory and bell are carried for Checkpoint 3's
-                    // observation and for a future bell policy; neither has a
-                    // presentation yet, so neither is acted on here.
-                    Ok(TerminalEvent::WorkingDirectoryChanged(_)) | Ok(TerminalEvent::Bell) => {}
-                    // A graphics probe, answered to whoever asked. The view
-                    // does not draw from it: Checkpoint 4 Task 5 gives images a
-                    // texture cache, and until then a pane draws only text.
-                    Ok(TerminalEvent::Graphics(_)) => {}
-                    // Nothing to draw: this belongs to whoever asked for it.
-                    // The view forwards it because it is the single consumer of
-                    // this session's events, and forwarding in arrival order is
-                    // what lets the registry pair answers with waiters.
-                    Ok(TerminalEvent::History(history)) => {
-                        if let Some(link) = &event_link {
-                            link.panes.deliver(link.pane, history);
-                        }
-                    }
-                    Ok(TerminalEvent::ClipboardWrite(text)) => {
-                        // Terminal Core already applied the OSC 52 policy, so
-                        // reaching here means the write was allowed.
-                        if !text.is_empty()
-                            && view
-                                .update(cx, |_view, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                })
-                                .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(TerminalEvent::SelectionCopied(text)) => {
-                        // User-initiated copy needs no policy: the person asked
-                        // for it. Task 7's policy governs OSC 52, where the
-                        // *terminal* asks on a child's behalf.
-                        if !text.is_empty()
-                            && view
-                                .update(cx, |_view, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                })
-                                .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(TerminalEvent::Error(error)) => {
-                        // A pane in a bad state must not leave an observation
-                        // request waiting out the deadline. Any session error
-                        // fails an in-flight request: the pane cannot answer,
-                        // and the reason it cannot is this one.
-                        if let Some(link) = &event_link {
-                            link.panes.deliver_failure(link.pane, error.to_string());
-                        }
-                        if view
-                            .update(cx, |view, cx| {
-                                view.status = Some(error.to_string().into());
-                                cx.notify();
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(TerminalEvent::Exited(exit)) => {
-                        let text = describe_exit(&exit);
-                        let _ = view.update(cx, |view, cx| {
-                            view.status = Some(text.into());
-                            cx.notify();
-                        });
+                        // One notify for the batch: an event that asked for
+                        // nothing does not repaint.
+                        cx.notify();
+                    });
+                    if applied.is_err() {
                         return;
                     }
-                    // After the session ends the stream simply closes. That is
-                    // completion, not a new failure to report.
-                    Err(_) => return,
+                }
+                if decision.stop {
+                    return;
                 }
             }
         });
@@ -475,6 +369,30 @@ impl TerminalView {
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
             _blink: Task::ready(()),
+        }
+    }
+
+    /// Performs one decided effect. Everything here needs `cx`; nothing here
+    /// decides anything.
+    fn apply(&mut self, effect: crate::terminal_events::Effect, cx: &mut Context<Self>) {
+        use crate::terminal_events::Effect;
+        match effect {
+            Effect::Status(line) => self.status = Some(line),
+            Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
+            Effect::OpenUrl(uri) => cx.open_url(&uri),
+            Effect::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Effect::DeliverHistory(history) => {
+                if let Some(link) = &self.observation {
+                    link.panes.deliver(link.pane, history);
+                }
+            }
+            // A pane in a bad state must not leave an observation request
+            // waiting out the deadline: the pane cannot answer, and this is why.
+            Effect::FailRequest(reason) => {
+                if let Some(link) = &self.observation {
+                    link.panes.deliver_failure(link.pane, reason);
+                }
+            }
         }
     }
 
@@ -713,7 +631,7 @@ pub(crate) fn cell_colors(
     (foreground, background)
 }
 
-fn describe_exit(exit: &sprite_term::ChildExit) -> String {
+pub(crate) fn describe_exit(exit: &sprite_term::ChildExit) -> String {
     match (&exit.signal, exit.code) {
         (Some(signal), _) => format!("[session ended on {signal}]"),
         (None, Some(0)) => "[session ended]".to_owned(),
