@@ -66,7 +66,11 @@ const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530
 pub(crate) const CURSOR_STROKE: f32 = 0.12;
 
 pub struct TerminalView {
-    session: TerminalSession,
+    /// The pane's terminal, or `None` for a view that never started one.
+    ///
+    /// A pane whose configured program could not be run still has to draw the
+    /// reason it could not, and nothing it draws needs a terminal behind it.
+    session: Option<TerminalSession>,
     bundle: Option<Arc<SnapshotBundle>>,
     /// Textures for the images this pane is showing.
     ///
@@ -145,8 +149,6 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // The cell is shaped before the session starts, so the child never
-        // observes scale-1 metrics for a moment on a HiDPI display.
         // TitlebarOptions only reaches macOS and Windows titlebars, so the
         // Wayland/X11 title is set explicitly here.
         window.set_window_title("Sprite");
@@ -161,6 +163,8 @@ impl TerminalView {
             ..
         } = settings;
 
+        // The cell is shaped before the session starts, so the child never
+        // observes scale-1 metrics for a moment on a HiDPI display.
         let font_size = px(font.size);
         let (font_family, mut complaints) = chosen_family(window, font.family.as_deref());
         let cell_width = measure_cell_width(window, &font_family, font_size);
@@ -304,7 +308,7 @@ impl TerminalView {
         });
 
         Self {
-            session,
+            session: Some(session),
             observation,
             font_size,
             // A setting that did nothing is shown rather than silently
@@ -333,17 +337,15 @@ impl TerminalView {
         }
     }
 
-    /// A view that shows why it could not start. It owns no session, so its
-    /// streams are already-closed no-ops.
+    /// A view that shows why it could not start.
+    ///
+    /// It owns no session at all, so there is nothing to pump and nothing to
+    /// shut down: its event and snapshot tasks are already finished. Spawning
+    /// a throwaway shell just to fill the field would fork a process on the
+    /// one path where the person's own program has already failed to start.
     fn failed(message: String, font_family: SharedString, cx: &mut Context<Self>) -> Self {
-        // A session that never spawned still needs a placeholder to hold the
-        // view's shape; this one is closed immediately.
-        let mut session = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec![]))
-            .expect("a minimal session for a failed view");
-        let _ = session.begin_shutdown();
-
         Self {
-            session,
+            session: None,
             // A view that never started a session has nothing to observe.
             observation: None,
             font_size: px(crate::config::Font::DEFAULT_SIZE),
@@ -398,7 +400,10 @@ impl TerminalView {
 
     /// Hands over the worker so the window can wait for it off the GPUI thread.
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
-        self.session.begin_shutdown().ok().flatten()
+        // A view with no session has no worker to wait for, so there is
+        // nothing to hand over.
+        let session = self.session.as_mut()?;
+        session.begin_shutdown().ok().flatten()
     }
 
     /// The cell under a window position, using the grid this view drew.
@@ -462,19 +467,25 @@ impl TerminalView {
     }
 
     fn send(&mut self, command: TerminalCommand) {
-        if let Err(error) = self.session.send(command) {
+        // Sending to a view with no session is a no-op, not an error: a failed
+        // pane has nothing to send to, and reporting a send failure over its
+        // status line would replace the reason it failed with a symptom.
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if let Err(error) = session.send(command) {
             self.status = Some(error.to_string().into());
         }
     }
 
-    /// Recomputes the grid for the current layout and sends a resize only when
-    /// it actually changed.
     /// Tells this pane how much room it has. The workspace knows; the pane does
     /// not, because a pane cannot see its siblings.
     pub fn set_allocated(&mut self, allocated: Size<Pixels>) {
         self.allocated = Some(allocated);
     }
 
+    /// Recomputes the grid for the current layout and sends a resize only when
+    /// it actually changed.
     fn synchronise_size(&mut self, window: &Window) {
         let available = self.allocated.unwrap_or_else(|| window.viewport_size());
         let Some(size) = grid_size(
@@ -528,7 +539,12 @@ impl TerminalView {
     /// What this pane is running, asked of the kernel rather than of the
     /// worker — see [`sprite_term::ForegroundWatch`].
     pub fn foreground(&self) -> sprite_term::ForegroundState {
-        self.session.foreground()
+        // Nothing is running in a pane that never started, so closing it must
+        // not ask for confirmation.
+        let Some(session) = self.session.as_ref() else {
+            return sprite_term::ForegroundState::Idle;
+        };
+        session.foreground()
     }
 
     fn default_colors(&self) -> (Rgb, Rgb) {
@@ -640,7 +656,6 @@ pub(crate) fn describe_exit(exit: &sprite_term::ChildExit) -> String {
     }
 }
 
-/// The first genuinely monospaced family the system offers.
 /// The family to render with, and a complaint if the configured one was not
 /// usable.
 ///
@@ -664,6 +679,7 @@ fn chosen_family(window: &Window, configured: Option<&str>) -> (SharedString, Ve
     (monospace_family(window), Vec::new())
 }
 
+/// The first genuinely monospaced family the system offers.
 fn monospace_family(window: &Window) -> SharedString {
     let available = window.text_system().all_font_names();
 
@@ -903,11 +919,6 @@ impl TerminalView {
         layers
     }
 
-    /// Re-measures the cell at a new text size and tells the child.
-    ///
-    /// The measurement has to be redone rather than scaled: a font's advance
-    /// width is not linear in its size, and a grid computed from a guess drifts
-    /// away from what is drawn.
     /// Applies a reloaded configuration to this pane, live.
     ///
     /// Only what *can* change without restarting a session: the font, the
@@ -939,25 +950,32 @@ impl TerminalView {
                 .background
                 .unwrap_or_else(|| unpack(BACKGROUND)),
         );
-        let _ = self.session.send(sprite_term::TerminalCommand::SetColors(
-            sprite_term::ColorDefaults {
-                foreground: Some(self.fallback_colors.0),
-                background: Some(self.fallback_colors.1),
-                cursor: settings.colors.cursor,
-                palette: settings.colors.palette.clone(),
-            },
-        ));
-        let _ = self.session.send(sprite_term::TerminalCommand::SetCursor(
-            sprite_term::CursorDefaults {
-                style: settings.cursor.style,
-                blink: settings.cursor.blink,
-            },
-        ));
+        if let Some(session) = self.session.as_mut() {
+            let _ = session.send(sprite_term::TerminalCommand::SetColors(
+                sprite_term::ColorDefaults {
+                    foreground: Some(self.fallback_colors.0),
+                    background: Some(self.fallback_colors.1),
+                    cursor: settings.colors.cursor,
+                    palette: settings.colors.palette.clone(),
+                },
+            ));
+            let _ = session.send(sprite_term::TerminalCommand::SetCursor(
+                sprite_term::CursorDefaults {
+                    style: settings.cursor.style,
+                    blink: settings.cursor.blink,
+                },
+            ));
+        }
 
         self.textures.set_budget(settings.graphics.texture_bytes);
         cx.notify();
     }
 
+    /// Re-measures the cell at a new text size and tells the child.
+    ///
+    /// The measurement has to be redone rather than scaled: a font's advance
+    /// width is not linear in its size, and a grid computed from a guess drifts
+    /// away from what is drawn.
     pub fn set_font_size(&mut self, size: f32, window: &Window, cx: &mut Context<Self>) {
         self.font_size = px(size);
         self.cell_height = px(crate::config::Font::line_height(size));
