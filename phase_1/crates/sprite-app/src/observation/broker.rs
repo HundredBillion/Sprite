@@ -80,6 +80,12 @@ pub trait PaneSource: Send + Sync {
 /// Every variant reads. There is deliberately no variant that writes, sends
 /// input, subscribes, or opens a stream: a request that could mutate cannot be
 /// constructed, so no code downstream has to refuse one.
+///
+/// That is a promise about this type, not about everything the socket accepts.
+/// The endpoint also takes one verb that writes — a configuration reload — and
+/// it is turned away from these types before it reaches them. Anyone auditing
+/// what a request can do has to read `request` beside this module, which is
+/// where the whole grammar lives and where that one write is handled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scope {
     /// The requester's own tab. The default, and by default without the
@@ -129,6 +135,14 @@ pub enum Refusal {
     /// reporting its own request as nonsense.
     UnsupportedProtocol,
 }
+
+/// The only refusal a carried-out request can produce.
+///
+/// A request that reached `collect` has already parsed, so it cannot be
+/// malformed and cannot name an unknown protocol. Saying so in the type is what
+/// removes the two arms every caller had to write and no caller could reach.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Denied;
 
 /// One pane's answer.
 #[derive(Clone, Debug)]
@@ -272,7 +286,7 @@ pub fn parse(body: &str) -> Result<Query, Refusal> {
 ///
 /// Every address comes from `source.panes()`, so a pane belonging to another
 /// window cannot appear in the result no matter what the caller asked for.
-fn resolve(query: &Query, source: &dyn PaneSource) -> Result<Vec<PaneAddress>, Refusal> {
+fn resolve(query: &Query, source: &dyn PaneSource) -> Result<Vec<PaneAddress>, Denied> {
     let panes = source.panes();
     match query.scope {
         Scope::Window => Ok(panes),
@@ -283,16 +297,16 @@ fn resolve(query: &Query, source: &dyn PaneSource) -> Result<Vec<PaneAddress>, R
             // A pane in another window and a pane that never existed are the
             // same answer, because telling them apart would confirm the
             // existence of panes outside this window.
-            .ok_or(Refusal::Denied),
+            .ok_or(Denied),
         Scope::Tab { include_self } => {
-            let from = query.from.ok_or(Refusal::Denied)?;
+            let from = query.from.ok_or(Denied)?;
             let tab = panes
                 .iter()
                 .find(|address| address.pane == from)
                 .map(|address| address.tab)
                 // A caller claiming to be a pane this window does not have gets
                 // the same refusal as any other unseeable pane.
-                .ok_or(Refusal::Denied)?;
+                .ok_or(Denied)?;
             Ok(panes
                 .into_iter()
                 .filter(|address| address.tab == tab)
@@ -307,7 +321,7 @@ pub fn collect(
     query: &Query,
     source: &dyn PaneSource,
     deadline: Duration,
-) -> Result<Report, Refusal> {
+) -> Result<Report, Denied> {
     let addresses = resolve(query, source)?;
     let started = Instant::now();
 
@@ -629,10 +643,10 @@ mod tests {
             TEST_DEADLINE,
         );
 
-        assert_eq!(elsewhere.unwrap_err(), Refusal::Denied);
+        assert_eq!(elsewhere.unwrap_err(), Denied);
         assert_eq!(
             never_existed.unwrap_err(),
-            Refusal::Denied,
+            Denied,
             "indistinguishable from a pane in another window"
         );
         assert!(
@@ -645,14 +659,14 @@ mod tests {
     fn a_caller_claiming_a_pane_this_window_does_not_have_is_refused() {
         let window = FakeWindow::new(&[(0, 0)]);
         let report = collect(&query("panes snapshot --from 42"), &window, TEST_DEADLINE);
-        assert_eq!(report.unwrap_err(), Refusal::Denied);
+        assert_eq!(report.unwrap_err(), Denied);
     }
 
     #[test]
     fn a_default_scoped_request_that_does_not_say_who_it_is_is_refused() {
         let window = FakeWindow::new(&[(0, 0), (0, 1)]);
         let report = collect(&query("panes snapshot"), &window, TEST_DEADLINE);
-        assert_eq!(report.unwrap_err(), Refusal::Denied);
+        assert_eq!(report.unwrap_err(), Denied);
     }
 
     // ---- read-only -------------------------------------------------------
