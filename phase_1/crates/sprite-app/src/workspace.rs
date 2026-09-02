@@ -105,22 +105,14 @@ impl Workspace {
             .flatten();
         let reload_sender = reload_tx.clone();
 
-        let program = command.clone();
-        let pane_settings = settings.clone();
-        let tabs = Tabs::new(|tab, pane| {
-            let environment = session_environment(endpoint.as_ref(), tab, pane);
-            let link = pane_link(&panes, endpoint.as_ref(), tab, pane);
-            cx.new(|cx| {
-                TerminalView::new(
-                    program,
-                    pane_settings.clone(),
-                    environment,
-                    link,
-                    window,
-                    cx,
-                )
-            })
-        });
+        let tabs = Tabs::new(make_pane(
+            command.clone(),
+            settings.clone(),
+            &panes,
+            endpoint.as_ref(),
+            window,
+            cx,
+        ));
         // The window focuses the workspace; the workspace hands the keyboard to
         let reload_task = cx.spawn(async move |workspace, cx| {
             while let Ok(request) = reload_rx.recv().await {
@@ -203,47 +195,30 @@ impl Workspace {
 
     fn split(&mut self, orientation: Orientation, window: &mut Window, cx: &mut Context<Self>) {
         // A split starts a fresh session; panes never share one.
-        let endpoint = self.endpoint.as_ref();
-        let panes = &self.panes;
-        let program = self.command.clone();
-        let pane_settings = self.settings.clone();
-        let pane = self.tabs.split(orientation, |tab, pane| {
-            let environment = session_environment(endpoint, tab, pane);
-            let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| {
-                TerminalView::new(
-                    program,
-                    pane_settings.clone(),
-                    environment,
-                    link,
-                    window,
-                    cx,
-                )
-            })
-        });
+        let pane = self.tabs.split(
+            orientation,
+            make_pane(
+                self.command.clone(),
+                self.settings.clone(),
+                &self.panes,
+                self.endpoint.as_ref(),
+                window,
+                cx,
+            ),
+        );
         self.request_focus(pane);
         cx.notify();
     }
 
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let endpoint = self.endpoint.as_ref();
-        let panes = &self.panes;
-        let program = self.command.clone();
-        let pane_settings = self.settings.clone();
-        self.tabs.open(|tab, pane| {
-            let environment = session_environment(endpoint, tab, pane);
-            let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| {
-                TerminalView::new(
-                    program,
-                    pane_settings.clone(),
-                    environment,
-                    link,
-                    window,
-                    cx,
-                )
-            })
-        });
+        self.tabs.open(make_pane(
+            self.command.clone(),
+            self.settings.clone(),
+            &self.panes,
+            self.endpoint.as_ref(),
+            window,
+            cx,
+        ));
         self.request_focus(self.tabs.active().focus());
         cx.notify();
     }
@@ -646,6 +621,27 @@ fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -
     match answer.recv_timeout(RELOAD_TIMEOUT) {
         Ok(answer) => answer,
         Err(_) => "this window did not answer in time; nothing was changed".to_owned(),
+    }
+}
+
+/// Builds one Pane, wherever a Pane is built.
+///
+/// Free rather than a method on `Workspace`: every call site holds `&mut
+/// self.tabs` while this closure runs, so a `&self` method could not be
+/// called from inside it. Everything a Pane needs is passed in instead, which
+/// is also what lets `Workspace::new` use this before `self` exists.
+fn make_pane<'a>(
+    command: Option<Vec<std::ffi::OsString>>,
+    settings: crate::config::Settings,
+    panes: &'a Arc<WindowPanes>,
+    endpoint: Option<&'a Endpoint>,
+    window: &'a mut Window,
+    cx: &'a mut Context<Workspace>,
+) -> impl FnOnce(TabId, PaneId) -> gpui::Entity<TerminalView> + 'a {
+    move |tab, pane| {
+        let environment = session_environment(endpoint, tab, pane);
+        let link = pane_link(panes, endpoint, tab, pane);
+        cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx))
     }
 }
 
