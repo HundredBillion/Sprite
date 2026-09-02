@@ -1767,6 +1767,43 @@ git commit -m "Let a projection own the state it projects with"
 
 ---
 
+## Open follow-ups
+
+Tracked here rather than in a task report, because nothing in the build will
+raise them on its own.
+
+### Narrow `broker::parse`'s error type
+
+After Task 6, `Refusal::Denied` has **no constructor anywhere**. Its one
+remaining mention is the arm at `observation/request.rs:65`, handling
+`broker::parse`'s error — and `parse` constructs only `Malformed` and
+`UnsupportedProtocol`. So an unreachable arm survives, the same defect class
+Task 6 removed one function over.
+
+It was deliberately left: narrowing `parse` is a second type change, and keeping
+it out is what made Task 6 reviewable as a pure move. But a `pub` enum variant
+with no constructor never draws a `dead_code` warning, so unlike every other dead
+item on this branch the compiler will not prompt this one.
+
+The fix is to give `parse` an error type that cannot express `Denied`. Note
+`parse` is public API — re-exported as `parse_request` and called by
+`sprite-observation-bench` — so its error type is part of that surface; the bench
+only calls `.expect(…)`, so any `Debug` error satisfies it.
+
+**When this is done, move the security rationale with it.** `Refusal::Denied`'s
+doc comment carries the reason that matters — one answer for "no such pane" and
+"not your pane", so a caller cannot map the window by watching the refusal change
+— and the `Denied` struct that now carries that meaning documents only the
+exhaustiveness argument. That sentence must land on `Denied`, not be deleted with
+the variant.
+
+### Assert `respond`'s refusal path end to end
+
+`NoPanes` now lives in `request.rs`'s test module, so the path returning `DENIED`
+— the security-relevant answer — could be asserted in one line:
+`respond(&NoPanes, &reload, "panes snapshot --from 42")`. Today it is covered only
+at the `collect` level in `broker.rs`.
+
 ## Definition of done
 
 Per-task acceptance criteria, which a reviewer checks rather than judges:
