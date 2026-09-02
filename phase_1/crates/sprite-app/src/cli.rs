@@ -8,6 +8,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+use crate::observation::request::Scope;
+use crate::pane_tree::PaneId;
+
 /// What the command line asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Invocation {
@@ -47,24 +50,15 @@ pub struct WindowArgs {
 }
 
 /// Which panes to ask about, and how to print them.
+///
+/// The scope is the same type the wire parser produces, so the command line and
+/// the window cannot disagree about what a scope is or which combinations of
+/// flags exist.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SnapshotArgs {
     pub scope: Scope,
     pub lines: Option<usize>,
     pub pretty: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Scope {
-    /// This pane's own tab, without this pane. The default.
-    #[default]
-    Tab,
-    /// This pane's own tab, including this pane.
-    TabWithSelf,
-    /// One named pane.
-    Pane(u64),
-    /// Every pane in this window.
-    Window,
 }
 
 /// Why a command line could not be acted on.
@@ -243,21 +237,21 @@ fn snapshot(arguments: impl Iterator<Item = OsString>) -> Result<SnapshotArgs, U
                             .to_owned(),
                     ));
                 }
-                parsed.scope = Scope::TabWithSelf;
+                parsed.scope = Scope::Tab { include_self: true };
             }
             "--window" => {
-                if scope_given || parsed.scope == Scope::TabWithSelf {
+                if scope_given || matches!(parsed.scope, Scope::Tab { include_self: true }) {
                     return Err(UsageError("choose one of --window or --pane".to_owned()));
                 }
                 scope_given = true;
                 parsed.scope = Scope::Window;
             }
             "--pane" => {
-                if scope_given || parsed.scope == Scope::TabWithSelf {
+                if scope_given || matches!(parsed.scope, Scope::Tab { include_self: true }) {
                     return Err(UsageError("choose one of --window or --pane".to_owned()));
                 }
                 scope_given = true;
-                parsed.scope = Scope::Pane(number(&mut arguments, "--pane")?);
+                parsed.scope = Scope::Pane(PaneId(number(&mut arguments, "--pane")?));
             }
             "--lines" => {
                 let lines = number(&mut arguments, "--lines")?;
@@ -395,7 +389,9 @@ mod tests {
         assert_eq!(
             parsed(&["panes", "snapshot"]),
             Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Tab,
+                scope: Scope::Tab {
+                    include_self: false,
+                },
                 lines: None,
                 pretty: false,
             })
@@ -414,21 +410,23 @@ mod tests {
         assert_eq!(
             parsed(&["panes", "snapshot", "--pane", "7"]),
             Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Pane(7),
+                scope: Scope::Pane(PaneId(7)),
                 ..SnapshotArgs::default()
             })
         );
         assert_eq!(
             parsed(&["panes", "snapshot", "--include-self"]),
             Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::TabWithSelf,
+                scope: Scope::Tab { include_self: true },
                 ..SnapshotArgs::default()
             })
         );
         assert_eq!(
             parsed(&["panes", "snapshot", "--lines", "12", "--pretty"]),
             Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Tab,
+                scope: Scope::Tab {
+                    include_self: false,
+                },
                 lines: Some(12),
                 pretty: true,
             })

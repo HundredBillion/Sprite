@@ -1,15 +1,197 @@
-//! The observation endpoint's request grammar, in one place.
+//! The observation endpoint's request grammar, in one place, in both
+//! directions.
 //!
-//! `broker` promises that a request which could mutate cannot be constructed,
-//! and that is true of everything it defines. The endpoint is where the whole
-//! grammar meets — every read, and the one write — so it belongs beside that
-//! promise rather than inside the window view, where an auditor reading
-//! `broker.rs` would never find it.
+//! A request crosses two processes as a line of text, and this module is the
+//! only description of what that line may say: `parse` reads one a client sent,
+//! `render` writes one a client is about to send, and the types between them
+//! are shared with the command line that fills them in. Two separate
+//! descriptions of a scope — one for the flags a person types, one for the
+//! words that go over the socket — is what lets an option be added to one and
+//! forgotten in the other.
+//!
+//! It sits beside `broker` rather than inside the window view because `broker`
+//! promises that a request which could mutate cannot be constructed, and this
+//! is where that promise is kept: every read, and the one write, meet here, so
+//! an auditor reading `broker.rs` finds the whole grammar next to it.
+
+use sprite_term::HistoryLines;
 
 use crate::observation::broker::{self, Denied, PaneSource, Refusal};
 use crate::observation::endpoint::DENIED;
 use crate::observation::schema;
+use crate::pane_tree::PaneId;
 use crate::workspace::ReloadRequest;
+
+/// Which panes a caller asked about.
+///
+/// Every variant reads. There is deliberately no variant that writes, sends
+/// input, subscribes, or opens a stream: a request that could mutate cannot be
+/// constructed, so no code downstream has to refuse one.
+///
+/// That is a promise about this type, not about everything the socket accepts.
+/// The endpoint also takes one verb that writes — a configuration reload — and
+/// `respond`, below, turns it away before it can reach these types. Anyone
+/// auditing what a request can do therefore has to read this whole module,
+/// which is where the grammar lives and where that one write is handled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Scope {
+    /// The requester's own tab. The default, and by default without the
+    /// requester itself — a pane asking "what else is going on" rarely means
+    /// its own output.
+    Tab { include_self: bool },
+    /// One named pane.
+    Pane(PaneId),
+    /// Every pane in the window. Never beyond it.
+    Window,
+}
+
+impl Default for Scope {
+    /// What a request that names no scope at all means: the caller's own tab,
+    /// without the caller. Spelled once here so the command line and the wire
+    /// parser cannot drift about what "no flags" is short for.
+    fn default() -> Self {
+        Self::Tab {
+            include_self: false,
+        }
+    }
+}
+
+/// A parsed, authorised request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Query {
+    /// The pane the caller says it is.
+    ///
+    /// Self-reported, and only used to shape the default scope. It is not a
+    /// privilege: see the threat model at the top of `broker`.
+    pub from: Option<PaneId>,
+    pub scope: Scope,
+    pub lines: HistoryLines,
+    /// Lay the JSON out for a human. Whitespace only; never a second schema.
+    pub pretty: bool,
+}
+
+/// Reads a request body into a query.
+///
+/// The grammar is deliberately tiny. Anything unrecognised is refused rather
+/// than ignored, so a client cannot smuggle a verb past a lenient parser.
+pub fn parse(body: &str) -> Result<Query, Refusal> {
+    let mut words = body.split_whitespace().peekable();
+    // The protocol token is optional so that a client older than this window
+    // is understood rather than refused; a *newer* one names a version this
+    // window does not know, and is told so.
+    if let Some(word) = words.peek()
+        && word.starts_with("sprite-observation/")
+    {
+        let spoken = *word;
+        words.next();
+        if spoken != broker::PROTOCOL {
+            return Err(Refusal::UnsupportedProtocol);
+        }
+    }
+    match (words.next(), words.next()) {
+        (Some("panes"), Some("snapshot")) => {}
+        _ => return Err(Refusal::Malformed("the only request is: panes snapshot")),
+    }
+
+    let mut from = None;
+    let mut scope = None;
+    let mut include_self = false;
+    let mut pretty = false;
+    let mut lines = HistoryLines::default();
+
+    while let Some(word) = words.next() {
+        match word {
+            "--include-self" => include_self = true,
+            "--pretty" => pretty = true,
+            "--window" => {
+                if scope.is_some() {
+                    return Err(Refusal::Malformed("scope given twice"));
+                }
+                scope = Some(Scope::Window);
+            }
+            "--pane" => {
+                if scope.is_some() {
+                    return Err(Refusal::Malformed("scope given twice"));
+                }
+                let value = words
+                    .next()
+                    .ok_or(Refusal::Malformed("--pane needs a number"))?;
+                let pane = value
+                    .parse()
+                    .map_err(|_| Refusal::Malformed("--pane needs a number"))?;
+                scope = Some(Scope::Pane(PaneId(pane)));
+            }
+            "--from" => {
+                let value = words
+                    .next()
+                    .ok_or(Refusal::Malformed("--from needs a number"))?;
+                let pane = value
+                    .parse()
+                    .map_err(|_| Refusal::Malformed("--from needs a number"))?;
+                from = Some(PaneId(pane));
+            }
+            "--lines" => {
+                let value = words
+                    .next()
+                    .ok_or(Refusal::Malformed("--lines needs a number"))?;
+                let count: usize = value
+                    .parse()
+                    .map_err(|_| Refusal::Malformed("--lines needs a number"))?;
+                // Clamped, not refused, exactly as the extraction path does.
+                lines = HistoryLines::new(count);
+            }
+            _ => return Err(Refusal::Malformed("unknown option")),
+        }
+    }
+
+    if include_self && !matches!(scope, None | Some(Scope::Tab { .. })) {
+        return Err(Refusal::Malformed("--include-self only applies to a tab"));
+    }
+
+    Ok(Query {
+        from,
+        scope: scope.unwrap_or(Scope::Tab { include_self }),
+        lines,
+        pretty,
+    })
+}
+
+/// Renders a query as the wire text a client sends.
+///
+/// The inverse of `parse`, and kept beside it so the two cannot drift: this is
+/// the seam between the two processes, and both sides of it are now written
+/// from the same type.
+///
+/// The word order is the order the client assembled by hand before this
+/// function existed. `parse` accepts the flags in any order, so nothing here
+/// depends on it — but a window is long-lived and the command is a fresh
+/// process each time, so an upgraded client routinely talks to a window that
+/// started before it. Keep sending the line that has always been sent.
+pub fn render(query: &Query) -> String {
+    let mut text = format!("{} panes snapshot", broker::PROTOCOL);
+    if let Some(from) = query.from {
+        text.push_str(&format!(" --from {}", from.0));
+    }
+    match query.scope {
+        // The default scope is written by saying nothing, which is what makes
+        // the common request short.
+        Scope::Tab {
+            include_self: false,
+        } => {}
+        Scope::Tab { include_self: true } => text.push_str(" --include-self"),
+        Scope::Pane(pane) => text.push_str(&format!(" --pane {}", pane.0)),
+        Scope::Window => text.push_str(" --window"),
+    }
+    // Said only when it differs from what a silent request would get, so that
+    // asking for the usual amount of history still sends the usual short line.
+    if query.lines != HistoryLines::default() {
+        text.push_str(&format!(" --lines {}", query.lines.get()));
+    }
+    if query.pretty {
+        text.push_str(" --pretty");
+    }
+    text
+}
 
 /// The two things a shell command can ask about this window's configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +233,7 @@ pub(crate) fn respond(
     if let Some(verb) = config_request(body) {
         return ask_window(reload, verb);
     }
-    let query = match broker::parse(body) {
+    let query = match parse(body) {
         Ok(query) => query,
         // A malformed request describes the caller's own words and reveals
         // nothing about the window's contents, so it may say so.
@@ -129,7 +311,129 @@ fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigVerb, config_request, respond};
+    use super::{ConfigVerb, Query, Scope, config_request, parse, render, respond};
+    use crate::pane_tree::PaneId;
+    use sprite_term::HistoryLines;
+
+    /// The grammar has two directions and they must be the same grammar.
+    ///
+    /// This is the test that could not be written while `cli` and `broker` each
+    /// defined their own idea of a scope: there was no single value to send one
+    /// way and read back the other. It walks every scope against every
+    /// combination of the remaining flags rather than a hand-picked few, because
+    /// a disagreement between the directions would otherwise hide in whichever
+    /// combination nobody thought to list.
+    #[test]
+    fn every_request_survives_the_wire_and_back() {
+        let scopes = [
+            Scope::Tab {
+                include_self: false,
+            },
+            Scope::Tab { include_self: true },
+            Scope::Pane(PaneId(7)),
+            Scope::Window,
+        ];
+        // The default is included because it is the one length `render`
+        // deliberately leaves off the wire, and both ends of the clamp because
+        // a value that survives one direction may not survive the other.
+        let lengths = [
+            HistoryLines::default(),
+            HistoryLines::new(0),
+            HistoryLines::new(12),
+            HistoryLines::new(HistoryLines::MAX),
+        ];
+
+        for scope in scopes {
+            for from in [None, Some(PaneId(4))] {
+                for pretty in [false, true] {
+                    for lines in lengths {
+                        let original = Query {
+                            from,
+                            scope,
+                            lines,
+                            pretty,
+                        };
+                        let text = render(&original);
+                        let parsed = parse(&text).unwrap_or_else(|error| {
+                            panic!("{text:?} did not parse back: {error:?}")
+                        });
+                        assert_eq!(parsed, original, "round trip changed {text:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Two history lengths the client used to send verbatim are normalised
+    /// before they leave, because a `Query` holds a `HistoryLines` and that type
+    /// has no way to say "the usual amount" or to hold more than the maximum:
+    /// the default goes unsaid, and an over-large request is clamped here
+    /// instead of at the window. Neither changes what the window does, and this
+    /// is what says so.
+    #[test]
+    fn a_normalised_history_length_still_means_what_it_always_meant() {
+        let asked_for = |text: &str| parse(text).expect("a request").lines;
+
+        assert_eq!(
+            asked_for("panes snapshot"),
+            asked_for(&format!("panes snapshot --lines {}", HistoryLines::DEFAULT))
+        );
+        assert_eq!(
+            asked_for(&format!("panes snapshot --lines {}", HistoryLines::MAX + 1)),
+            asked_for(&format!("panes snapshot --lines {}", HistoryLines::MAX))
+        );
+    }
+
+    /// Self-consistency is not compatibility: the window is still spoken to by
+    /// clients built before this module owned the grammar. These are the exact
+    /// lines the client used to assemble by hand, minus the key it puts in
+    /// front, so a change of word order here fails rather than reaching a
+    /// released window.
+    #[test]
+    fn the_rendered_text_is_what_the_client_has_always_sent() {
+        let asked = |scope, from, lines, pretty| {
+            render(&Query {
+                from,
+                scope,
+                lines,
+                pretty,
+            })
+        };
+        let tab = Scope::Tab {
+            include_self: false,
+        };
+
+        assert_eq!(
+            asked(tab, Some(PaneId(4)), HistoryLines::default(), false),
+            "sprite-observation/1 panes snapshot --from 4"
+        );
+        assert_eq!(
+            asked(Scope::Window, Some(PaneId(0)), HistoryLines::new(12), true),
+            "sprite-observation/1 panes snapshot --from 0 --window --lines 12 --pretty"
+        );
+        assert_eq!(
+            asked(
+                Scope::Pane(PaneId(9)),
+                Some(PaneId(0)),
+                HistoryLines::default(),
+                false
+            ),
+            "sprite-observation/1 panes snapshot --from 0 --pane 9"
+        );
+        assert_eq!(
+            asked(
+                Scope::Tab { include_self: true },
+                Some(PaneId(0)),
+                HistoryLines::default(),
+                false
+            ),
+            "sprite-observation/1 panes snapshot --from 0 --include-self"
+        );
+        assert_eq!(
+            asked(Scope::Window, None, HistoryLines::default(), false),
+            "sprite-observation/1 panes snapshot --window"
+        );
+    }
 
     #[test]
     fn a_configuration_request_is_told_from_a_pane_query() {
