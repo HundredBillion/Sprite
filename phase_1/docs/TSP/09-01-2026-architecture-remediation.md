@@ -1024,6 +1024,17 @@ git commit -m "Traverse graphics layers once, in one place"
 Ten sites repeat the same shape — `Some(other) => complaints.0.push(format!(…
 other.type_str() …))` / `None => {}` — totalling 61 lines measured span by span.
 
+**Correction, measured after implementation:** that 61-line figure counts each
+whole arm, but the message text inside it is *per-case content*, not repetition.
+The genuinely duplicated scaffold is only `push(format!(… other.type_str() …))`,
+roughly two lines per site. This task therefore **adds** about 28 lines rather
+than removing 41. It is still worth doing, but for locality rather than size:
+the message template `"{key} must be {wanted}, not {type}; {consequence}"` ends
+up in exactly one place, so the wording cannot drift between the ten sites and
+changing it — adding the file path, say — is one edit instead of ten. Folding
+away ten `None => {}` arms is a real control-flow simplification. Do not judge
+this task by its line count.
+
 The author already factored this once: the named closure at `:476` handles three
 colour settings in 19 lines where open-coding would take about 42. This task
 extends that treatment to the remaining sites.
@@ -1117,7 +1128,8 @@ cargo test --workspace --locked --offline
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 cargo fmt --all -- --check
 ```
-Expected: all green, roughly 41 lines net removed. The 165-plus lines of
+Expected: all green. The net line change is **positive** — around +28 — for the
+reasons given above; that is the expected outcome, not a failure. The 165-plus lines of
 genuinely per-case logic — clamp-and-report for `font.size` and
 `scrollback.bytes`, per-entry survival in `colors.palette`, whole-list rejection
 for `shell.args`, empty-string handling — are untouched.
