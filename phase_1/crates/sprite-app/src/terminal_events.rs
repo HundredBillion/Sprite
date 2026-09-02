@@ -23,6 +23,20 @@ pub(crate) struct Decision {
     pub stop: bool,
 }
 
+/// The line a pane shows once its child is gone.
+///
+/// A signal is reported ahead of a status because a killed child usually has
+/// no meaningful one, and an ordinary success says only that it ended: a
+/// person closing a shell should not be shown "status 0".
+fn describe_exit(exit: &sprite_term::ChildExit) -> String {
+    match (&exit.signal, exit.code) {
+        (Some(signal), _) => format!("[session ended on {signal}]"),
+        (None, Some(0)) => "[session ended]".to_owned(),
+        (None, Some(code)) => format!("[session ended with status {code}]"),
+        (None, None) => "[session ended]".to_owned(),
+    }
+}
+
 /// One event in, the effects it implies out.
 ///
 /// Pure on purpose. Every arm of the view's old event loop only *wrote* view
@@ -88,9 +102,7 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
         }
 
         Ok(TerminalEvent::Exited(exit)) => {
-            effects.push(Effect::Status(
-                crate::terminal_view::describe_exit(&exit).into(),
-            ));
+            effects.push(Effect::Status(describe_exit(&exit).into()));
             stop = true;
         }
 
@@ -107,8 +119,18 @@ mod tests {
     use super::*;
     use sprite_term::CellPosition;
 
+    /// The effects of an event that must leave the pump running.
+    ///
+    /// Asserting `stop` here rather than in each test means no arm can quietly
+    /// gain a `stop = true`: an event that ends the pump early costs the pane
+    /// every later snapshot, status line and exit report.
     fn effects(event: TerminalEvent) -> Vec<Effect> {
-        decide(Ok(event)).effects
+        let decision = decide(Ok(event));
+        assert!(
+            !decision.stop,
+            "only an exit or a closed stream ends the pump"
+        );
+        decision.effects
     }
 
     /// `SessionError::new` is crate-private to `sprite-term`, so a test builds
@@ -184,13 +206,32 @@ mod tests {
     fn an_error_both_reports_and_fails_the_waiter() {
         let raised = effects(TerminalEvent::Error(error("read", "broke")));
         assert_eq!(raised.len(), 2);
-        assert!(matches!(raised[0], Effect::FailRequest(_)));
+        // The reason, not just the fact: this string is what the waiter gets
+        // back in place of an observation timeout, so an empty one would leave
+        // the requester no better off than the deadline it replaced.
+        assert!(
+            matches!(&raised[0], Effect::FailRequest(reason) if reason.contains("broke")),
+            "the waiter is told why, not just that it failed"
+        );
         assert!(matches!(raised[1], Effect::Status(_)));
+    }
+
+    /// A session error is a report, not an ending. Stopping the pump here would
+    /// cost the pane every later snapshot, status line and exit report over one
+    /// recoverable failure.
+    #[test]
+    fn a_session_error_does_not_end_the_pump() {
+        let decision = decide(Ok(TerminalEvent::Error(error("read", "broke"))));
+        assert!(
+            !decision.stop,
+            "a session error is reported, not fatal to the pump"
+        );
     }
 
     #[test]
     fn a_finished_stream_stops_the_loop() {
         assert!(decide(Err(error("ended", "closed"))).stop);
+        assert!(decide(Err(error("ended", "closed"))).effects.is_empty());
         assert!(decide(Ok(TerminalEvent::Ready)).effects.is_empty());
         assert!(!decide(Ok(TerminalEvent::Ready)).stop);
     }

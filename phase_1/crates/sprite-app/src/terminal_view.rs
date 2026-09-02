@@ -647,15 +647,6 @@ pub(crate) fn cell_colors(
     (foreground, background)
 }
 
-pub(crate) fn describe_exit(exit: &sprite_term::ChildExit) -> String {
-    match (&exit.signal, exit.code) {
-        (Some(signal), _) => format!("[session ended on {signal}]"),
-        (None, Some(0)) => "[session ended]".to_owned(),
-        (None, Some(code)) => format!("[session ended with status {code}]"),
-        (None, None) => "[session ended]".to_owned(),
-    }
-}
-
 /// The family to render with, and a complaint if the configured one was not
 /// usable.
 ///
