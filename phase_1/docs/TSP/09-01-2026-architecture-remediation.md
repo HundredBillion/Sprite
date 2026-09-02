@@ -883,7 +883,12 @@ cargo test --workspace --locked --offline
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 cargo fmt --all -- --check
 ```
-Expected: all green. Roughly 26 lines net removed.
+Expected: all green. The net line change is small — around four lines — because
+the new function costs about twenty lines and each of the three sites sheds
+about eight. **Line count is not the point of this task and is not a measure of
+whether it worked.** The win is locality: Pane construction moves from three
+sites to one, so adding an environment variable or a per-Pane title becomes a
+single edit rather than three, with nothing to forget.
 
 ```bash
 git add crates/sprite-app/src/workspace.rs
