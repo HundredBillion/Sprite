@@ -561,8 +561,11 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
 }
 ```
 
-`describe_exit` is currently private to `terminal_view`. Change it to
-`pub(crate) fn describe_exit` so this module can call it. Do not move it.
+**Move `describe_exit` into this module**, above `decide`, keeping it private.
+It is pure presentation text with no view state, and the arm in `decide` is its
+only caller. Leaving it behind would force it to widen to `pub(crate)` and leave
+this Window-free module depending on the 1,500-line view it was extracted from —
+unreadable and unmovable without it, which defeats the point of the extraction.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1756,7 +1759,10 @@ Per-task acceptance criteria, which a reviewer checks rather than judges:
   carries the amendment with a freshly measured figure.
 - [ ] **Task 2** — `decide` is unit-tested across all thirteen arms with no GPUI
   in the test binary, including the two that emit two effects, and an `Error`
-  event produces `Effect::FailRequest`.
+  event produces `Effect::FailRequest` carrying the reason. Tests must assert
+  **both** halves of `Decision` — a helper that returns only `effects` lets a
+  wrong `stop` pass unnoticed, and a stray `stop = true` on the `Error` arm would
+  silently end the pump on the first recoverable error.
 - [ ] **Task 3** — existing suite green.
 - [ ] **Task 4** — `the_image_itself_never_reaches_the_response` passes unchanged.
 - [ ] **Task 5** — every complaint string is byte-identical; no config test edited.
