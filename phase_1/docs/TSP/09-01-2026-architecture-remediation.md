@@ -1611,8 +1611,19 @@ implicitly a future reader would have *less* signal than the explicit list.
 **Keep the explicit `drop()` list exactly as it is**, now against the struct's
 fields.
 
-**Open question for whoever picks up C3b:** must `placements` drop before
-`terminal`? If yes, the current code has a latent bug and that is a defect, not a
+**Open question for whoever picks up C3b — now with evidence.** Task 9 moved
+`placements` and `pixels` to drop with the `Projector`, ahead of `terminal`, and
+the full suite passed across dozens of real session teardowns with no test
+touched: `graphics_projection` 8/8, `graphics_policy` 8/8, `lifecycle` 8/8.
+
+That is **evidence, not proof.** These are FFI objects whose ordering constraint
+lives in libghostty's internal state, and no sanitizer run was performed — a
+latent use-after-free could pass a green suite. What the result does support is
+that the old list's omission of `placements` was an oversight rather than a
+deliberate exclusion, since dropping it earlier broke nothing.
+
+The original question stands for anyone encoding this in a `Drop` impl: must
+`placements` drop before `terminal`? If yes, the current code has a latent bug and that is a defect, not a
 refactor. If no, the comment at `:792` is wrong and should name the three values
 that do matter. This is a libghostty question, and it blocks nothing here.
 
@@ -1742,7 +1753,14 @@ the open question above — record it and stop.
 
 - [ ] **Step 4: Shrink `snapshot::capture`**
 
-Move `Projector` to `snapshot.rs` if `capture` is the only caller of its fields,
+**`capture` is *not* the only caller of the projector's fields** — `worker::run`
+also passes `placements` to `graphics::capture_graphics`, and `render_state`
+plus `placements` to `capture_history`. Steps 1-3 as printed do not compile
+without handling that. Give `Projector` all three methods rather than one; that
+is also what makes its own doc claim — that nothing outside a projection needs
+these individually — actually true.
+
+Move `Projector` to `snapshot.rs`,
 and reduce `capture` to taking `&mut Projector` plus the four scalars. Remove
 `#[allow(clippy::too_many_arguments)]` from both `snapshot.rs:169` and the now
 deleted `publish`.
