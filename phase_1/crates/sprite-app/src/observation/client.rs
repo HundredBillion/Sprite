@@ -347,6 +347,26 @@ mod tests {
         );
     }
 
+    /// The clamp used to happen at the window, which saw whatever number was
+    /// typed; it now happens here, because a `Query` holds a `HistoryLines` and
+    /// that type cannot carry more than the maximum. Both lines still mean the
+    /// same to the window, and this is the only place the client-side clamp can
+    /// be seen going wrong.
+    #[test]
+    fn a_history_length_above_the_maximum_is_clamped_before_it_is_sent() {
+        let request = line(
+            &SnapshotArgs {
+                lines: Some(HistoryLines::MAX + 1),
+                ..SnapshotArgs::default()
+            },
+            Some("0"),
+        );
+        assert!(
+            request.ends_with(&format!("--lines {}", HistoryLines::MAX)),
+            "{request}"
+        );
+    }
+
     /// A session with no pane identity can still ask about named panes, but
     /// "my tab" has no meaning, and saying so beats sending a request the
     /// window will refuse.

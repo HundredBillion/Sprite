@@ -184,6 +184,14 @@ pub fn render(query: &Query) -> String {
     }
     // Said only when it differs from what a silent request would get, so that
     // asking for the usual amount of history still sends the usual short line.
+    //
+    // That rests on `HistoryLines::DEFAULT` being the same number at both ends
+    // of the socket. It is today, and while it holds the omission is exact. But
+    // this line may be read by a window that started before the client was
+    // built, so changing that constant would mean somebody who explicitly typed
+    // the old default silently receives the new one: the number is no longer on
+    // the wire to say otherwise. Changing `DEFAULT` is therefore a change to the
+    // protocol, not an implementation detail, and needs the version to say so.
     if query.lines != HistoryLines::default() {
         text.push_str(&format!(" --lines {}", query.lines.get()));
     }
