@@ -1373,6 +1373,12 @@ Move `broker::parse` into `request.rs` as `parse`. In `broker.rs`, re-export it:
 /// puts the seam at this text; this function is one side of it.
 pub fn render(query: &Query) -> String {
     let mut text = format!("{} panes snapshot", broker::PROTOCOL);
+    // `--from` precedes the scope. Not cosmetic: this is the order the client
+    // has always sent, and an existing test asserts the exact suffix
+    // "panes snapshot --from 0 --window --lines 12 --pretty".
+    if let Some(from) = query.from {
+        text.push_str(&format!(" --from {}", from.0));
+    }
     match query.scope {
         Scope::Window => text.push_str(" --window"),
         Scope::Pane(pane) => text.push_str(&format!(" --pane {}", pane.0)),
@@ -1381,9 +1387,6 @@ pub fn render(query: &Query) -> String {
                 text.push_str(" --include-self");
             }
         }
-    }
-    if let Some(from) = query.from {
-        text.push_str(&format!(" --from {}", from.0));
     }
     if query.pretty {
         text.push_str(" --pretty");
