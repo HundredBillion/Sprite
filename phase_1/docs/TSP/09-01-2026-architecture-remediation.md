@@ -1651,9 +1651,13 @@ In `crates/sprite-term/src/worker.rs`, replacing `RenderObjects`:
 ///
 /// Drop order is still the explicit list in `run`, deliberately. See the TSP.
 pub(crate) struct Projector<'vt> {
-    render_state: RenderState<'vt>,
-    rows: RowIterator<'vt>,
+    // Declaration order IS release order — a struct's fields drop in the order
+    // they are written. This order reproduces the worker's old hand-written
+    // list: the derived iterators go before the state they read from. Writing
+    // them in any other order silently changes how a terminal is torn down.
     cells: CellIterator<'vt>,
+    rows: RowIterator<'vt>,
+    render_state: RenderState<'vt>,
     placements: PlacementIterator<'vt>,
     pixels: crate::graphics::PixelCache,
 }
@@ -1748,7 +1752,10 @@ Keep the closing `drop()` list, rewritten against the struct's fields:
 
 **Note this changes the observable order**: `placements` and `pixels` now drop
 with the projector, before `terminal`, where previously they dropped at end of
-scope. If any test fails or the app misbehaves at shutdown, that is the answer to
+scope. That is the *only* sanctioned change. The three objects the worker
+dropped by hand must keep their relative order, which is why the field order
+above is not arbitrary — an earlier draft of this plan listed them the other way
+round and would have reversed the teardown with nothing to say so. If any test fails or the app misbehaves at shutdown, that is the answer to
 the open question above — record it and stop.
 
 - [ ] **Step 4: Shrink `snapshot::capture`**
