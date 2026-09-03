@@ -319,7 +319,7 @@ fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigVerb, Query, Scope, config_request, parse, render, respond};
+    use super::{ConfigVerb, DENIED, Query, Scope, config_request, parse, render, respond};
     use crate::pane_tree::PaneId;
     use sprite_term::HistoryLines;
 
@@ -529,6 +529,21 @@ mod tests {
         assert!(
             !answer.starts_with("unsupported protocol"),
             "the current protocol was refused: {answer:?}"
+        );
+    }
+
+    /// A pane this window cannot see gets the one refusal, all the way out.
+    ///
+    /// Covered at the broker level already, but this is the answer that
+    /// actually leaves the socket, and the reason it is one answer rather than
+    /// two is a property of the response text rather than of the resolver.
+    #[test]
+    fn a_pane_this_window_cannot_see_is_refused() {
+        let (reload, _keep_open) = async_channel::bounded(1);
+        let answer = respond(&NoPanes, &reload, "panes snapshot --from 42");
+        assert_eq!(
+            answer, DENIED,
+            "a pane outside this window must get the plain refusal"
         );
     }
 }

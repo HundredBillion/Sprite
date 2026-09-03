@@ -29,17 +29,12 @@ use crate::{
 /// once a frame. They were nine parameters threaded through four call sites;
 /// nothing outside a projection ever needs them individually.
 ///
-/// Releasing them happens in two places, and both matter. The explicit list at
-/// the end of the session worker's `run` fixes where this whole value goes —
-/// before the encoder and the terminal. The field order below fixes the order
-/// among the objects themselves. Neither belongs to Rust's borrows: the
-/// constraint is libghostty's internal state, which the compiler cannot check.
+/// The whole value is released before the terminal, which the session worker's
+/// closing list is there to guarantee. The order *within* it does not matter:
+/// each of these is an independently allocated handle whose free destroys only
+/// itself, and the borrows between them live in the short-lived iteration
+/// values that every capture drops before it returns.
 pub(crate) struct Projector<'vt> {
-    // Declaration order is release order, and it is deliberate: a struct's
-    // fields drop in the order they are written. The derived iterators go
-    // before the state they read from, which is the order the worker spelled
-    // out by hand before these lived together. Reordering these for tidiness
-    // would change how a terminal is torn down, and nothing would say so.
     cells: CellIterator<'vt>,
     rows: RowIterator<'vt>,
     render_state: RenderState<'vt>,
@@ -57,9 +52,6 @@ impl Projector<'static> {
             .map_err(|error| SessionError::new("create_cell_iterator", error))?;
         let placements = PlacementIterator::new()
             .map_err(|error| SessionError::new("create_placement_iterator", error))?;
-        // Written in declaration order, matching the field list above. The
-        // literal's order does not govern anything, but spelling the reverse
-        // here would put the wrong sequence in front of the next reader.
         Ok(Self {
             cells,
             rows,

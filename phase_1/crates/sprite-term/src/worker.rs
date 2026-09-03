@@ -762,17 +762,16 @@ pub(crate) fn run(
 
     // ---- Closing ----
     //
-    // Every libghostty value goes first — the projector owns four of them —
-    // which also removes the PTY-write callback: from here the terminal can
+    // The projection state goes before the terminal it reads from. Dropping
+    // the terminal also removes the PTY-write callback, so from here it can
     // neither be mutated nor generate a reply, and application commands are
     // read only to be discarded.
     //
-    // Still an explicit list rather than a Drop impl: this ordering lives in
-    // libghostty's own state rather than in Rust's borrows, so nothing checks
-    // it and a reader has to be able to see it.
-    //
-    // This list fixes where the projector goes. The order *within* it is the
-    // projector's field order, for the same unchecked reason.
+    // Explicit rather than left to scope order because that one relationship
+    // is the only ordering here that matters, and nothing in Rust expresses
+    // it: these are handles into libghostty rather than borrows the compiler
+    // can see. The order among the projector's own objects is free — each
+    // frees only itself.
     drop(projector);
     drop(encoder);
     drop(terminal);

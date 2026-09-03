@@ -5,7 +5,7 @@
 //! libghostty or the PTY.
 
 mod cli;
-pub mod config;
+mod config;
 mod graphics_cache;
 mod grid;
 mod grid_paint;

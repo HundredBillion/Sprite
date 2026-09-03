@@ -1066,24 +1066,33 @@ change in this task.** If a test fails later, you altered wording.
 - [ ] **Step 2: Add the helper beside the existing closure**
 
 ```rust
-        /// Records "this key is the wrong type" in the one shape the file uses.
-        ///
-        /// Returns nothing and takes no decision: a key that is absent is not a
-        /// complaint, and a key that is present but wrong keeps its default.
-        /// This is the same treatment the `named` closure below already gives
-        /// the three colour settings.
-        let mut wrong_type = |key: &str, value: Option<&toml::Value>, wanted: &str| {
-            if let Some(other) = value {
-                complaints.0.push(format!(
-                    "{key} must be {wanted}, not {}; keeping the default",
-                    other.type_str()
-                ));
-            }
-        };
+/// Builds "this key is the wrong type" in the one shape a settings file
+/// complaint about a mistyped key takes.
+///
+/// A module-level function rather than a closure: capturing `complaints` here
+/// conflicts with the borrow the existing colour closure already holds.
+/// `consequence` is a parameter rather than a fixed "keeping the default"
+/// because seven of the ten sites fall back to something more specific — the
+/// login shell, a monospace font, the previous value — and hardcoding the
+/// phrase would silently rewrite seven user-facing messages.
+fn wrong_type(
+    value: Option<&toml::Value>,
+    key: &str,
+    wanted: &str,
+    consequence: &str,
+) -> Option<String> {
+    let other = value?;
+    Some(format!(
+        "{key} must be {wanted}, not {}; {consequence}",
+        other.type_str()
+    ))
+}
 ```
 
-Place it immediately after `let mut complaints = Complaints::default();` so every
-section can reach it.
+Place it at module level, beside `parse_candidate`. Call sites read
+`complaints.0.extend(wrong_type(section.get("size"), "font.size", "a number",
+"keeping the default"))`, with the whole `Some`/`None` pair collapsing into one
+arm because `wrong_type` returns `None` for an absent key.
 
 - [ ] **Step 3: Convert the sites one at a time**
 
@@ -1611,189 +1620,30 @@ implicitly a future reader would have *less* signal than the explicit list.
 **Keep the explicit `drop()` list exactly as it is**, now against the struct's
 fields.
 
-**Open question for whoever picks up C3b — now with evidence.** Task 9 moved
-`placements` and `pixels` to drop with the `Projector`, ahead of `terminal`, and
-the full suite passed across dozens of real session teardowns with no test
-touched: `graphics_projection` 8/8, `graphics_policy` 8/8, `lifecycle` 8/8.
+**Answered — the ordering constraint does not exist.** The question was whether
+`placements` must drop before `terminal`. It does not, and neither does any
+order among the projector's own objects. From the vendored source:
 
-That is **evidence, not proof.** These are FFI objects whose ordering constraint
-lives in libghostty's internal state, and no sanitizer run was performed — a
-latent use-after-free could pass a green suite. What the result does support is
-that the old list's omission of `placements` was an oversight rather than a
-deliberate exclusion, since dropping it earlier broke nothing.
+- `vendor/ghostty/src/terminal/c/render.zig:421` `row_iterator_free` — `alloc.destroy(iterator)`
+- `vendor/ghostty/src/terminal/c/render.zig:472` `row_cells_free` — `alloc.destroy(cells)`
+- `vendor/ghostty/src/terminal/c/kitty_graphics.zig:290` `placement_iterator_free` — `iter.alloc.destroy(iter)`
+- `vendor/ghostty/src/terminal/c/render.zig:173` render state `free` — `state.state.deinit(alloc); alloc.destroy(state)`
 
-The original question stands for anyone encoding this in a `Drop` impl: must
-`placements` drop before `terminal`? If yes, the current code has a latent bug and that is a defect, not a
-refactor. If no, the comment at `:792` is wrong and should name the three values
-that do matter. This is a libghostty question, and it blocks nothing here.
+Each is an independently allocated handle; every free destroys only itself and
+dereferences nothing else. The borrows between them live in the short-lived
+iteration values that each capture drops before returning. Corroborating this:
+`mouse_encoder` was never in the worker's explicit list either, and has always
+fallen out at end of scope after `terminal`.
 
-**Files:**
-- Modify: `crates/sprite-term/src/snapshot.rs` (`capture`'s signature)
-- Modify: `crates/sprite-term/src/worker.rs` (`Projector`, `run`, delete `publish`)
+The one ordering that *is* real — the projection state before the terminal it
+reads from — is what the explicit list guarantees, and that is why the list
+stays. C3b is therefore not merely gated but unnecessary: there is no invariant
+for a `Drop` impl to encode.
 
-**Interfaces:**
-- Consumes: `RenderObjects` and `render_objects()` (`worker.rs:1160`), which
-  already exist and are half of this task.
-- Produces: `pub(crate) struct Projector<'vt>` with
-  `fn capture(&mut self, generation: u64, size: TerminalSize, has_selection: bool, terminal: &Terminal<'vt, '_>) -> Result<SnapshotBundle, SessionError>`.
+This was settled by reading `vendor/ghostty/`, not by a sanitizer run. Earlier
+notes in this plan claimed only a sanitizer or a libghostty maintainer could
+answer it; that was wrong, and the answer was in the repository the whole time.
 
-- [ ] **Step 1: Introduce the value**
-
-In `crates/sprite-term/src/worker.rs`, replacing `RenderObjects`:
-
-```rust
-/// The scratch state a projection needs, owned in one place.
-///
-/// The four libghostty objects share one allocator lifetime, and the pixel
-/// cache is reused across captures so an unchanged image is copied once rather
-/// than once per frame. They were nine parameters threaded through four call
-/// sites; nothing outside a projection ever needs them individually.
-///
-/// Drop order is still the explicit list in `run`, deliberately. See the TSP.
-pub(crate) struct Projector<'vt> {
-    // Declaration order IS release order — a struct's fields drop in the order
-    // they are written. This order reproduces the worker's old hand-written
-    // list: the derived iterators go before the state they read from. Writing
-    // them in any other order silently changes how a terminal is torn down.
-    cells: CellIterator<'vt>,
-    rows: RowIterator<'vt>,
-    render_state: RenderState<'vt>,
-    placements: PlacementIterator<'vt>,
-    pixels: crate::graphics::PixelCache,
-}
-
-impl Projector<'static> {
-    fn new() -> Result<Self, SessionError> {
-        let render_state =
-            RenderState::new().map_err(|error| SessionError::new("create_render_state", error))?;
-        let rows =
-            RowIterator::new().map_err(|error| SessionError::new("create_row_iterator", error))?;
-        let cells =
-            CellIterator::new().map_err(|error| SessionError::new("create_cell_iterator", error))?;
-        let placements = PlacementIterator::new()
-            .map_err(|error| SessionError::new("create_placement_iterator", error))?;
-        Ok(Self {
-            render_state,
-            rows,
-            cells,
-            placements,
-            pixels: crate::graphics::PixelCache::default(),
-        })
-    }
-}
-```
-
-Copy the exact error strings from the existing `render_objects()` — tests may
-assert them.
-
-- [ ] **Step 2: Give it the capture method**
-
-```rust
-impl<'vt> Projector<'vt> {
-    /// One projection, against one generation of one terminal.
-    fn capture(
-        &mut self,
-        generation: u64,
-        size: TerminalSize,
-        has_selection: bool,
-        terminal: &Terminal<'vt, '_>,
-    ) -> Result<SnapshotBundle, SessionError> {
-        snapshot::capture(
-            generation,
-            size,
-            has_selection,
-            terminal,
-            &mut self.render_state,
-            &mut self.rows,
-            &mut self.cells,
-            &mut self.placements,
-            &mut self.pixels,
-        )
-    }
-}
-```
-
-Leave `snapshot::capture`'s signature alone for now — this step alone removes the
-threading. Removing its `#[allow]` is Step 4.
-
-- [ ] **Step 3: Delete `publish`, and call the projector**
-
-`publish` (31 lines, `worker.rs:1132`) becomes a three-line closure over the
-projector. Replace all three of its call sites — the initial one at `:378`, the
-gate at `:756`, and the final capture at `:775` — with:
-
-```rust
-        if dirty && snapshots.is_empty() {
-            dirty = match projector.capture(generation, size, has_selection, &terminal) {
-                Ok(bundle) => !snapshots.try_send(Arc::new(bundle)).is_ok(),
-                Err(error) => {
-                    let _ = events.send_blocking(TerminalEvent::Error(error));
-                    true
-                }
-            };
-        }
-```
-
-Keep the closing `drop()` list, rewritten against the struct's fields:
-
-```rust
-    // ---- Closing ----
-    //
-    // Every libghostty value goes first, which also removes the PTY-write
-    // callback: from here the terminal can neither be mutated nor generate a
-    // reply, and application commands are read only to be discarded.
-    //
-    // Still explicit rather than a Drop impl: see the open question in
-    // docs/TSP/09-01-2026-architecture-remediation.md Task 9.
-    drop(projector);
-    drop(encoder);
-    drop(terminal);
-```
-
-**Note this changes the observable order**: `placements` and `pixels` now drop
-with the projector, before `terminal`, where previously they dropped at end of
-scope. That is the *only* sanctioned change. The three objects the worker
-dropped by hand must keep their relative order, which is why the field order
-above is not arbitrary — an earlier draft of this plan listed them the other way
-round and would have reversed the teardown with nothing to say so. If any test fails or the app misbehaves at shutdown, that is the answer to
-the open question above — record it and stop.
-
-- [ ] **Step 4: Shrink `snapshot::capture`**
-
-**`capture` is *not* the only caller of the projector's fields** — `worker::run`
-also passes `placements` to `graphics::capture_graphics`, and `render_state`
-plus `placements` to `capture_history`. Steps 1-3 as printed do not compile
-without handling that. Give `Projector` all three methods rather than one; that
-is also what makes its own doc claim — that nothing outside a projection needs
-these individually — actually true.
-
-Move `Projector` to `snapshot.rs`,
-and reduce `capture` to taking `&mut Projector` plus the four scalars. Remove
-`#[allow(clippy::too_many_arguments)]` from both `snapshot.rs:169` and the now
-deleted `publish`.
-
-If moving `Projector` across modules fights the `'vt` lifetime, leave it in
-`worker.rs` and keep `capture`'s existing signature — Steps 1–3 already deliver
-the threading win. Do not spend more than one attempt on this step.
-
-- [ ] **Step 5: Verify and commit**
-
-Run:
-```bash
-cargo test -p sprite-term --locked --offline
-cargo test --workspace --locked --offline
-cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-cargo fmt --all -- --check
-```
-Expected: all green. `graphics_projection.rs` and `graphics_policy.rs` exercise
-the capture path end-to-end and are the real check here.
-
-```bash
-git add crates/sprite-term/src/worker.rs crates/sprite-term/src/snapshot.rs
-git commit -m "Let a projection own the state it projects with"
-```
-
----
 
 ## Open follow-ups
 
