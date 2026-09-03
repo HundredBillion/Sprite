@@ -691,4 +691,159 @@ mod tests {
         assert_eq!(foreground, rgb(pack(default_bg)));
         assert_eq!(background, rgb(pack(default_fg)));
     }
+
+    /// An invisible cell must vanish into its background, not just match
+    /// itself: the foreground has to take on the background's colour, so a
+    /// bug that collapsed the pair the other way round (background eating
+    /// the foreground) would still leave text visible in the wrong shade.
+    #[test]
+    fn invisible_collapses_the_foreground_onto_the_background() {
+        let default_fg = Rgb {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        };
+        let default_bg = Rgb {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33,
+        };
+        let fg_color = Rgb {
+            r: 0x10,
+            g: 0x20,
+            b: 0x30,
+        };
+        let bg_color = Rgb {
+            r: 0x40,
+            g: 0x50,
+            b: 0x60,
+        };
+        let mut style = plain_style(
+            SnapshotColor::Rgb(fg_color),
+            SnapshotColor::Rgb(bg_color),
+            false,
+        );
+        style.invisible = true;
+        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
+        assert_eq!(foreground, background);
+        assert_eq!(
+            foreground,
+            rgb(pack(bg_color)),
+            "invisible should collapse toward the background, not the foreground"
+        );
+    }
+
+    /// A palette index is looked up in the supplied palette rather than
+    /// ignored: the chosen index's entry has to differ from both defaults, so
+    /// an implementation that fell back to a default (or read the wrong
+    /// slot) would be caught rather than accidentally matching by luck.
+    #[test]
+    fn a_palette_index_resolves_through_the_supplied_palette() {
+        let default_fg = Rgb {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        };
+        let default_bg = Rgb {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33,
+        };
+        // Every slot gets a distinct colour derived from its own index, so a
+        // lookup that landed on the wrong slot (off by one, or any other
+        // slot) would read back a different, and therefore wrong, colour.
+        let palette: [Rgb; 256] = std::array::from_fn(|i| Rgb {
+            r: i as u8,
+            g: i as u8,
+            b: i as u8,
+        });
+        let style = plain_style(SnapshotColor::Palette(42), SnapshotColor::Default, false);
+        let (foreground, _background) = cell_colors(&style, default_fg, default_bg, Some(&palette));
+        assert_eq!(
+            foreground,
+            rgb(pack(Rgb {
+                r: 42,
+                g: 42,
+                b: 42
+            }))
+        );
+    }
+
+    /// An explicit RGB colour is not a default and not a palette index: it
+    /// must reach the drawn cell unchanged.
+    #[test]
+    fn an_explicit_rgb_colour_passes_through_unchanged() {
+        let default_fg = Rgb {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        };
+        let default_bg = Rgb {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33,
+        };
+        let fg_color = Rgb {
+            r: 0x01,
+            g: 0x02,
+            b: 0x03,
+        };
+        let bg_color = Rgb {
+            r: 0xfd,
+            g: 0xfe,
+            b: 0xff,
+        };
+        let style = plain_style(
+            SnapshotColor::Rgb(fg_color),
+            SnapshotColor::Rgb(bg_color),
+            false,
+        );
+        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
+        assert_eq!(foreground, rgb(pack(fg_color)));
+        assert_eq!(background, rgb(pack(bg_color)));
+    }
+
+    /// Inverse and invisible both rewrite the same pair, and the order they
+    /// run in changes the answer: inverse swaps first, so an invisible cell
+    /// that is also reversed collapses onto its *original* foreground, not
+    /// its background. A version that ran invisible before inverse, or that
+    /// treated the two as independent, would land on the wrong colour here
+    /// even though each rule looks right in isolation.
+    #[test]
+    fn inverse_and_invisible_together_collapse_onto_the_original_foreground() {
+        let default_fg = Rgb {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        };
+        let default_bg = Rgb {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33,
+        };
+        let fg_color = Rgb {
+            r: 0x10,
+            g: 0x20,
+            b: 0x30,
+        };
+        let bg_color = Rgb {
+            r: 0x40,
+            g: 0x50,
+            b: 0x60,
+        };
+        let mut style = plain_style(
+            SnapshotColor::Rgb(fg_color),
+            SnapshotColor::Rgb(bg_color),
+            true,
+        );
+        style.invisible = true;
+        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
+        assert_eq!(foreground, background);
+        assert_eq!(
+            foreground,
+            rgb(pack(fg_color)),
+            "reversed and invisible together should settle on the pre-swap \
+             foreground, since invisible acts after the swap"
+        );
+    }
 }
