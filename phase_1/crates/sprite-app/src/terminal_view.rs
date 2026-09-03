@@ -11,21 +11,20 @@ use std::ops::Range;
 
 use gpui::{
     Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    Focusable, Font, FontFeatures, FontStyle, FontWeight, ImageSource, KeyDownEvent, KeyUpEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollDelta,
-    ScrollWheelEvent, SharedString, Size, Task, TextRun, UTF16Selection, Window, canvas, div, img,
-    point, px, rgb,
+    Focusable, ImageSource, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, Size, Task, TextRun,
+    UTF16Selection, Window, canvas, div, img, point, px, rgb,
 };
 use sprite_term::{
-    CellPosition, CellStyle, KeyAction, MouseAction, MouseEvent, Rgb, Scroll, SelectionMode,
-    SessionConfig, ShutdownHandle, SnapshotBundle, SnapshotColor, TerminalCommand, TerminalSession,
-    TerminalSize,
+    CellPosition, KeyAction, MouseAction, MouseEvent, Rgb, Scroll, SelectionMode, SessionConfig,
+    ShutdownHandle, SnapshotBundle, TerminalCommand, TerminalSession, TerminalSize,
 };
 
 use crate::grid::{
     PANE_PADDING, PositionedCell, ScrollAccumulator, cell_at, content_area, grid_origin,
     lay_out_row,
 };
+use crate::grid_paint::{RowPass, pack, terminal_font};
 use crate::input::gpui_key_event;
 
 /// The largest grid Terminal Core will accept, mirrored here so the view never
@@ -58,12 +57,6 @@ const STATUS: u32 = 0xf0a0a0;
 
 /// Half a blink. The rate every terminal has used since the VT100.
 const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
-
-/// How thick a bar or underline cursor is drawn, as a fraction of a cell.
-///
-/// A fraction rather than a constant, because a cursor two logical pixels wide
-/// is a bold stripe at size 8 and nearly invisible at size 48.
-pub(crate) const CURSOR_STROKE: f32 = 0.12;
 
 pub struct TerminalView {
     /// The pane's terminal, or `None` for a view that never started one.
@@ -596,55 +589,12 @@ fn application_shortcut(keystroke: &gpui::Keystroke) -> Option<Shortcut> {
     }
 }
 
-/// Resolves a snapshot colour against the terminal's current defaults.
-///
-/// The 256-colour palette is not carried in the snapshot yet, so an indexed
-/// colour falls back to the default foreground rather than being guessed at.
-/// Checkpoint 2's palette work replaces this.
-fn resolve(color: SnapshotColor, default: Rgb, palette: Option<&[Rgb; 256]>) -> Rgba {
-    match color {
-        SnapshotColor::Default => rgb(pack(default)),
-        SnapshotColor::Rgb(value) => rgb(pack(value)),
-        // The common case by far: `\x1b[31m` is an index, not a colour. Without
-        // the palette every one of them resolves to the default and a terminal
-        // renders in one shade.
-        SnapshotColor::Palette(index) => match palette {
-            Some(palette) => rgb(pack(palette[usize::from(index)])),
-            // Only before the first snapshot, when there is no palette to
-            // consult and nothing on screen to colour.
-            None => rgb(pack(default)),
-        },
-    }
-}
-
 fn unpack(value: u32) -> Rgb {
     Rgb {
         r: ((value >> 16) & 0xff) as u8,
         g: ((value >> 8) & 0xff) as u8,
         b: (value & 0xff) as u8,
     }
-}
-
-pub(crate) fn pack(color: Rgb) -> u32 {
-    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
-}
-
-/// A cell's drawn colours, honouring inverse and invisible.
-pub(crate) fn cell_colors(
-    style: &CellStyle,
-    default_fg: Rgb,
-    default_bg: Rgb,
-    palette: Option<&[Rgb; 256]>,
-) -> (Rgba, Rgba) {
-    let mut foreground = resolve(style.foreground, default_fg, palette);
-    let mut background = resolve(style.background, default_bg, palette);
-    if style.inverse {
-        std::mem::swap(&mut foreground, &mut background);
-    }
-    if style.invisible {
-        foreground = background;
-    }
-    (foreground, background)
 }
 
 /// The family to render with, and a complaint if the configured one was not
@@ -688,24 +638,6 @@ fn monospace_family(window: &Window) -> SharedString {
         return found.clone().into();
     }
     "monospace".into()
-}
-
-pub(crate) fn terminal_font(family: &SharedString, bold: bool, italic: bool) -> Font {
-    Font {
-        family: family.clone(),
-        features: FontFeatures::default(),
-        fallbacks: None,
-        weight: if bold {
-            FontWeight::BOLD
-        } else {
-            FontWeight::NORMAL
-        },
-        style: if italic {
-            FontStyle::Italic
-        } else {
-            FontStyle::Normal
-        },
-    }
 }
 
 /// Shapes `M` with the exact font run the view renders, so grid geometry and
@@ -802,20 +734,6 @@ impl Drop for TerminalView {
             link.panes.forget(link.pane);
         }
     }
-}
-
-/// Which part of a row a pass draws.
-///
-/// Cells normally paint their background and their glyph together, which is
-/// cheapest and is what a pane without images does. An image that belongs
-/// *between* those two — Ghostty's below-text band is above the background and
-/// under the glyphs — can only be drawn if they are separate passes, so the
-/// split is made only when such an image exists.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RowPass {
-    Whole,
-    Background,
-    Text,
 }
 
 /// One placement's element: the image, cropped to its source rectangle and
@@ -1082,19 +1000,19 @@ impl Render for TerminalView {
         let font_family = self.font_family.clone();
         let font_size = self.font_size;
         let build = |pass: RowPass, rows: Vec<Vec<PositionedCell>>| {
-            crate::grid_paint::GridPaint::new(
+            crate::grid_paint::GridPaint::new(crate::grid_paint::GridPaintSpec {
                 rows,
                 pass,
                 cursor,
                 cursor_color,
                 default_fg,
                 default_bg,
-                palette.clone(),
+                palette: palette.clone(),
                 cell_width,
                 cell_height,
-                font_family.clone(),
+                font_family: font_family.clone(),
                 font_size,
-            )
+            })
         };
         // One element for the whole grid rather than one per cell: see
         // `grid_paint` for why a layout pass cannot be trusted with a grid.

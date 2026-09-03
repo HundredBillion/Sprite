@@ -52,14 +52,94 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, Pixels, Position, Rgba, SharedString, Style, TextRun, Window, fill, outline, point,
-    px, relative, rgb,
+    App, Bounds, ContentMask, Element, ElementId, Font, FontFeatures, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Position, Rgba,
+    SharedString, Style, TextRun, Window, fill, outline, point, px, relative, rgb,
 };
-use sprite_term::{CursorSnapshot, CursorStyle, Rgb, SnapshotColor};
+use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor};
 
 use crate::grid::PositionedCell;
-use crate::terminal_view::{CURSOR_STROKE, RowPass, cell_colors, pack, terminal_font};
+
+/// How thick a bar or underline cursor is drawn, as a fraction of a cell.
+///
+/// A fraction rather than a constant, because a cursor two logical pixels wide
+/// is a bold stripe at size 8 and nearly invisible at size 48.
+pub(crate) const CURSOR_STROKE: f32 = 0.12;
+
+/// Which part of a row a pass draws.
+///
+/// Cells normally paint their background and their glyph together, which is
+/// cheapest and is what a pane without images does. An image that belongs
+/// *between* those two — Ghostty's below-text band is above the background and
+/// under the glyphs — can only be drawn if they are separate passes, so the
+/// split is made only when such an image exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RowPass {
+    Whole,
+    Background,
+    Text,
+}
+
+/// Resolves a snapshot colour against the terminal's current defaults.
+///
+/// The 256-colour palette is not carried in the snapshot yet, so an indexed
+/// colour falls back to the default foreground rather than being guessed at.
+/// Checkpoint 2's palette work replaces this.
+fn resolve(color: SnapshotColor, default: Rgb, palette: Option<&[Rgb; 256]>) -> Rgba {
+    match color {
+        SnapshotColor::Default => rgb(pack(default)),
+        SnapshotColor::Rgb(value) => rgb(pack(value)),
+        // The common case by far: `\x1b[31m` is an index, not a colour. Without
+        // the palette every one of them resolves to the default and a terminal
+        // renders in one shade.
+        SnapshotColor::Palette(index) => match palette {
+            Some(palette) => rgb(pack(palette[usize::from(index)])),
+            // Only before the first snapshot, when there is no palette to
+            // consult and nothing on screen to colour.
+            None => rgb(pack(default)),
+        },
+    }
+}
+
+pub(crate) fn pack(color: Rgb) -> u32 {
+    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+}
+
+/// A cell's drawn colours, honouring inverse and invisible.
+pub(crate) fn cell_colors(
+    style: &CellStyle,
+    default_fg: Rgb,
+    default_bg: Rgb,
+    palette: Option<&[Rgb; 256]>,
+) -> (Rgba, Rgba) {
+    let mut foreground = resolve(style.foreground, default_fg, palette);
+    let mut background = resolve(style.background, default_bg, palette);
+    if style.inverse {
+        std::mem::swap(&mut foreground, &mut background);
+    }
+    if style.invisible {
+        foreground = background;
+    }
+    (foreground, background)
+}
+
+pub(crate) fn terminal_font(family: &SharedString, bold: bool, italic: bool) -> Font {
+    Font {
+        family: family.clone(),
+        features: FontFeatures::default(),
+        fallbacks: None,
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
+    }
+}
 
 /// The grid of one pane, painted without a layout pass.
 pub(crate) struct GridPaint {
@@ -76,33 +156,39 @@ pub(crate) struct GridPaint {
     font_size: Pixels,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Everything one row pass needs to paint itself.
+///
+/// A struct rather than eleven positional arguments: five of them are colours
+/// and three are lengths, so at a call site the positional form is unreadable
+/// and a transposition would be invisible.
+pub(crate) struct GridPaintSpec {
+    pub rows: Vec<Vec<PositionedCell>>,
+    pub pass: RowPass,
+    pub cursor: Option<CursorSnapshot>,
+    pub cursor_color: Option<Rgb>,
+    pub default_fg: Rgb,
+    pub default_bg: Rgb,
+    pub palette: Option<Arc<[Rgb; 256]>>,
+    pub cell_width: Pixels,
+    pub cell_height: Pixels,
+    pub font_family: SharedString,
+    pub font_size: Pixels,
+}
+
 impl GridPaint {
-    pub(crate) fn new(
-        rows: Vec<Vec<PositionedCell>>,
-        pass: RowPass,
-        cursor: Option<CursorSnapshot>,
-        cursor_color: Option<Rgb>,
-        default_fg: Rgb,
-        default_bg: Rgb,
-        palette: Option<Arc<[Rgb; 256]>>,
-        cell_width: Pixels,
-        cell_height: Pixels,
-        font_family: SharedString,
-        font_size: Pixels,
-    ) -> Self {
+    pub(crate) fn new(spec: GridPaintSpec) -> Self {
         Self {
-            rows,
-            pass,
-            cursor,
-            cursor_color,
-            default_fg,
-            default_bg,
-            palette,
-            cell_width,
-            cell_height,
-            font_family,
-            font_size,
+            rows: spec.rows,
+            pass: spec.pass,
+            cursor: spec.cursor,
+            cursor_color: spec.cursor_color,
+            default_fg: spec.default_fg,
+            default_bg: spec.default_bg,
+            palette: spec.palette,
+            cell_width: spec.cell_width,
+            cell_height: spec.cell_height,
+            font_family: spec.font_family,
+            font_size: spec.font_size,
         }
     }
 }
@@ -197,6 +283,19 @@ struct Run {
     start: u32,
     end: u32,
     color: Rgba,
+}
+
+/// The snapped rectangle one cell occupies.
+///
+/// Bundled rather than passed as four separate lengths: the glyph and cursor
+/// passes both need a cell's edges, and four positional `Pixels` at a call
+/// site is exactly the kind of argument list a transposition hides in.
+#[derive(Clone, Copy)]
+struct CellBounds {
+    left: Pixels,
+    right: Pixels,
+    top: Pixels,
+    bottom: Pixels,
 }
 
 impl Element for GridPaint {
@@ -333,10 +432,14 @@ impl Element for GridPaint {
 
             for (cell, drawn) in cells.iter().zip(&resolved) {
                 let span = cell.span();
-                let left = edge(span.start);
-                let right = edge(span.end);
-                self.paint_glyph(cell, drawn, left, right, top, window, cx);
-                self.paint_cursor(drawn, left, right, top, bottom, scale, window);
+                let bounds = CellBounds {
+                    left: edge(span.start),
+                    right: edge(span.end),
+                    top,
+                    bottom,
+                };
+                self.paint_glyph(cell, drawn, bounds, window, cx);
+                self.paint_cursor(drawn, bounds, scale, window);
             }
         }
         self.rows = rows;
@@ -345,14 +448,11 @@ impl Element for GridPaint {
 
 impl GridPaint {
     /// Draws one cell's text on its own pixel, clipped to its own column.
-    #[allow(clippy::too_many_arguments)]
     fn paint_glyph(
         &self,
         cell: &PositionedCell,
         drawn: &Drawn,
-        left: Pixels,
-        right: Pixels,
-        top: Pixels,
+        bounds: CellBounds,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -386,7 +486,7 @@ impl GridPaint {
         // continuous. The cell *width* is still the font's own 8.4, so the
         // columns do not drift: only where each one starts is rounded, by less
         // than half a device pixel.
-        let origin = point(left, top);
+        let origin = point(bounds.left, bounds.top);
 
         // Every cell is clipped to its own column, not only the ones holding a
         // glyph too wide for it. A character that fills its cell — a rule, a
@@ -399,8 +499,11 @@ impl GridPaint {
         // between them exactly.
         let mask = ContentMask {
             bounds: Bounds::from_corners(
-                point(left, top),
-                point(right, px(f32::from(top) + f32::from(self.cell_height))),
+                point(bounds.left, bounds.top),
+                point(
+                    bounds.right,
+                    px(f32::from(bounds.top) + f32::from(self.cell_height)),
+                ),
             ),
         };
         window.with_content_mask(Some(mask), |window| {
@@ -413,18 +516,14 @@ impl GridPaint {
     /// A block is not drawn here: it is the cell's background, painted with the
     /// rest of the row. Everything else goes over the glyph, which is what
     /// makes a bar between two characters visible at all.
-    #[allow(clippy::too_many_arguments)]
-    fn paint_cursor(
-        &self,
-        drawn: &Drawn,
-        left: Pixels,
-        right: Pixels,
-        top: Pixels,
-        bottom: Pixels,
-        scale: f32,
-        window: &mut Window,
-    ) {
+    fn paint_cursor(&self, drawn: &Drawn, bounds: CellBounds, scale: f32, window: &mut Window) {
         let Some(cursor) = drawn.cursor else { return };
+        let CellBounds {
+            left,
+            right,
+            top,
+            bottom,
+        } = bounds;
         // At least one logical pixel: a stroke that rounds to nothing is a
         // cursor nobody can find.
         let stroke = |extent: Pixels| px((f32::from(extent) * CURSOR_STROKE).max(1.0));
@@ -480,6 +579,7 @@ impl IntoElement for GridPaint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sprite_term::UnderlineStyle;
 
     #[test]
     fn snapping_lands_on_whole_device_pixels() {
@@ -529,5 +629,66 @@ mod tests {
     fn a_degenerate_scale_leaves_coordinates_alone() {
         assert_eq!(snap(px(10.3), 0.0), px(10.3));
         assert_eq!(snap(px(10.3), f32::NAN), px(10.3));
+    }
+
+    /// A style with no colour of its own and a cell style carrying every other
+    /// field at its quietest setting.
+    fn plain_style(
+        foreground: SnapshotColor,
+        background: SnapshotColor,
+        inverse: bool,
+    ) -> CellStyle {
+        CellStyle {
+            foreground,
+            background,
+            underline_color: SnapshotColor::Default,
+            bold: false,
+            italic: false,
+            faint: false,
+            blink: false,
+            inverse,
+            invisible: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+        }
+    }
+
+    /// Colour resolution is arithmetic, not painting: it needs no Window.
+    #[test]
+    fn a_cell_with_no_opinion_takes_the_defaults() {
+        let default_fg = Rgb {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        };
+        let default_bg = Rgb {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33,
+        };
+        let style = plain_style(SnapshotColor::Default, SnapshotColor::Default, false);
+        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
+        assert_eq!(foreground, rgb(pack(default_fg)));
+        assert_eq!(background, rgb(pack(default_bg)));
+    }
+
+    /// Reverse video swaps them, which is the one rule worth pinning.
+    #[test]
+    fn reverse_video_swaps_foreground_and_background() {
+        let default_fg = Rgb {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        };
+        let default_bg = Rgb {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33,
+        };
+        let style = plain_style(SnapshotColor::Default, SnapshotColor::Default, true);
+        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
+        assert_eq!(foreground, rgb(pack(default_bg)));
+        assert_eq!(background, rgb(pack(default_fg)));
     }
 }
