@@ -770,6 +770,9 @@ pub(crate) fn run(
     // Still an explicit list rather than a Drop impl: this ordering lives in
     // libghostty's own state rather than in Rust's borrows, so nothing checks
     // it and a reader has to be able to see it.
+    //
+    // This list fixes where the projector goes. The order *within* it is the
+    // projector's field order, for the same unchecked reason.
     drop(projector);
     drop(encoder);
     drop(terminal);

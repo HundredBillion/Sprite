@@ -57,10 +57,13 @@ impl Projector<'static> {
             .map_err(|error| SessionError::new("create_cell_iterator", error))?;
         let placements = PlacementIterator::new()
             .map_err(|error| SessionError::new("create_placement_iterator", error))?;
+        // Written in declaration order, matching the field list above. The
+        // literal's order does not govern anything, but spelling the reverse
+        // here would put the wrong sequence in front of the next reader.
         Ok(Self {
-            render_state,
-            rows,
             cells,
+            rows,
+            render_state,
             placements,
             pixels: crate::graphics::PixelCache::default(),
         })
