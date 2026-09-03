@@ -29,13 +29,20 @@ use crate::{
 /// once a frame. They were nine parameters threaded through four call sites;
 /// nothing outside a projection ever needs them individually.
 ///
-/// The order these are released in is still the explicit list at the end of the
-/// session worker's `run`, deliberately: it belongs to libghostty's internal
-/// state rather than to Rust's borrows, so a reader has to be able to see it.
+/// Releasing them happens in two places, and both matter. The explicit list at
+/// the end of the session worker's `run` fixes where this whole value goes —
+/// before the encoder and the terminal. The field order below fixes the order
+/// among the objects themselves. Neither belongs to Rust's borrows: the
+/// constraint is libghostty's internal state, which the compiler cannot check.
 pub(crate) struct Projector<'vt> {
-    render_state: RenderState<'vt>,
-    rows: RowIterator<'vt>,
+    // Declaration order is release order, and it is deliberate: a struct's
+    // fields drop in the order they are written. The derived iterators go
+    // before the state they read from, which is the order the worker spelled
+    // out by hand before these lived together. Reordering these for tidiness
+    // would change how a terminal is torn down, and nothing would say so.
     cells: CellIterator<'vt>,
+    rows: RowIterator<'vt>,
+    render_state: RenderState<'vt>,
     placements: PlacementIterator<'vt>,
     pixels: crate::graphics::PixelCache,
 }
