@@ -13,10 +13,9 @@ use sprite_term::ShutdownHandle;
 
 use std::sync::Arc;
 
-use crate::observation::broker::{self, Refusal};
-use crate::observation::endpoint::{DENIED, Endpoint};
+use crate::observation::endpoint::Endpoint;
 use crate::observation::panes::{PaneLink, Placement, WindowPanes};
-use crate::observation::schema;
+use crate::observation::request::ConfigVerb;
 use crate::pane_tree::{Direction, Orientation, PaneId};
 use crate::tabs::{TabId, Tabs};
 use crate::terminal_view::TerminalView;
@@ -105,22 +104,14 @@ impl Workspace {
             .flatten();
         let reload_sender = reload_tx.clone();
 
-        let program = command.clone();
-        let pane_settings = settings.clone();
-        let tabs = Tabs::new(|tab, pane| {
-            let environment = session_environment(endpoint.as_ref(), tab, pane);
-            let link = pane_link(&panes, endpoint.as_ref(), tab, pane);
-            cx.new(|cx| {
-                TerminalView::new(
-                    program,
-                    pane_settings.clone(),
-                    environment,
-                    link,
-                    window,
-                    cx,
-                )
-            })
-        });
+        let tabs = Tabs::new(make_pane(
+            command.clone(),
+            settings.clone(),
+            &panes,
+            endpoint.as_ref(),
+            window,
+            cx,
+        ));
         // The window focuses the workspace; the workspace hands the keyboard to
         let reload_task = cx.spawn(async move |workspace, cx| {
             while let Ok(request) = reload_rx.recv().await {
@@ -181,11 +172,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Whether this window currently offers observation.
-    pub fn observation_enabled(&self) -> bool {
-        self.endpoint.is_some()
-    }
-
     /// Hands over every pane's worker so the window can wait for all of them.
     ///
     /// Every tab, not only the visible one: a background tab's child is still
@@ -208,47 +194,30 @@ impl Workspace {
 
     fn split(&mut self, orientation: Orientation, window: &mut Window, cx: &mut Context<Self>) {
         // A split starts a fresh session; panes never share one.
-        let endpoint = self.endpoint.as_ref();
-        let panes = &self.panes;
-        let program = self.command.clone();
-        let pane_settings = self.settings.clone();
-        let pane = self.tabs.split(orientation, |tab, pane| {
-            let environment = session_environment(endpoint, tab, pane);
-            let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| {
-                TerminalView::new(
-                    program,
-                    pane_settings.clone(),
-                    environment,
-                    link,
-                    window,
-                    cx,
-                )
-            })
-        });
+        let pane = self.tabs.split(
+            orientation,
+            make_pane(
+                self.command.clone(),
+                self.settings.clone(),
+                &self.panes,
+                self.endpoint.as_ref(),
+                window,
+                cx,
+            ),
+        );
         self.request_focus(pane);
         cx.notify();
     }
 
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let endpoint = self.endpoint.as_ref();
-        let panes = &self.panes;
-        let program = self.command.clone();
-        let pane_settings = self.settings.clone();
-        self.tabs.open(|tab, pane| {
-            let environment = session_environment(endpoint, tab, pane);
-            let link = pane_link(panes, endpoint, tab, pane);
-            cx.new(|cx| {
-                TerminalView::new(
-                    program,
-                    pane_settings.clone(),
-                    environment,
-                    link,
-                    window,
-                    cx,
-                )
-            })
-        });
+        self.tabs.open(make_pane(
+            self.command.clone(),
+            self.settings.clone(),
+            &self.panes,
+            self.endpoint.as_ref(),
+            window,
+            cx,
+        ));
         self.request_focus(self.tabs.active().focus());
         cx.notify();
     }
@@ -286,6 +255,18 @@ impl Workspace {
             self.shut_down(view, cx);
         }
         self.after_close(cx);
+    }
+
+    /// Whether the window may close now, or must ask first.
+    ///
+    /// The title-bar X is a close like any other: a pane running a program is
+    /// asked about before the window goes. Returning `false` keeps the window
+    /// open and leaves the question on screen; the second click answers it.
+    ///
+    /// Public because the close handler lives in the `sprite` binary rather
+    /// than in this library. `CloseScope` stays private.
+    pub fn confirm_close(&mut self, cx: &mut Context<Self>) -> bool {
+        self.may_close(CloseScope::Window, cx)
     }
 
     /// Whether a close may go ahead now, or must be asked about first.
@@ -327,6 +308,12 @@ impl Workspace {
                 .tabs
                 .active()
                 .layout()
+                .into_iter()
+                .map(|(_, _, view)| view)
+                .collect(),
+            CloseScope::Window => self
+                .tabs
+                .all_panes()
                 .into_iter()
                 .map(|(_, _, view)| view)
                 .collect(),
@@ -499,7 +486,10 @@ fn open_endpoint(
 ) -> Option<Endpoint> {
     let panes = Arc::clone(panes);
     let reload = reload.clone();
-    Endpoint::open(move |request| respond(panes.as_ref(), &reload, &request.body)).ok()
+    Endpoint::open(move |request| {
+        crate::observation::request::respond(panes.as_ref(), &reload, &request.body)
+    })
+    .ok()
 }
 
 /// A reload asked for from an endpoint thread, and where to put the answer.
@@ -509,90 +499,28 @@ fn open_endpoint(
 /// GPUI thread must cost the endpoint one two-second wait, not a thread that
 /// never returns.
 pub(crate) struct ReloadRequest {
-    what: ConfigVerb,
-    reply: std::sync::mpsc::SyncSender<String>,
+    pub(crate) what: ConfigVerb,
+    pub(crate) reply: std::sync::mpsc::SyncSender<String>,
 }
 
-/// The two things a shell command can ask about this window's configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConfigVerb {
-    Reload,
-    Print,
-}
-
-/// How long an endpoint thread will wait for the window to answer a reload.
-const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Answers one authenticated request.
+/// Builds one Pane, wherever a Pane is built.
 ///
-/// Runs on an endpoint thread, never the GPUI thread: a request must not be
-/// able to hold up drawing, and the deadline inside `collect` is what keeps it
-/// from holding up the endpoint either.
-fn respond(
-    panes: &WindowPanes,
-    reload: &async_channel::Sender<ReloadRequest>,
-    body: &str,
-) -> String {
-    // One verb that is not a question about panes. It is authenticated by the
-    // same key and reachable only from inside this window, which is the same
-    // rule observation lives by: a caller that could not read this window's
-    // panes cannot reload its settings either.
-    if let Some(verb) = config_request(body) {
-        return ask_window(reload, verb);
-    }
-    let query = match broker::parse(body) {
-        Ok(query) => query,
-        // A malformed request describes the caller's own words and reveals
-        // nothing about the window's contents, so it may say so.
-        Err(Refusal::Malformed(why)) => return format!("malformed: {why}"),
-        Err(Refusal::UnsupportedProtocol) => {
-            return format!(
-                "unsupported protocol; this window speaks {}",
-                broker::PROTOCOL
-            );
-        }
-        Err(Refusal::Denied) => return DENIED.to_owned(),
-    };
-    match broker::collect(&query, panes, broker::DEADLINE) {
-        Ok(report) => schema::render(&report, query.pretty),
-        Err(Refusal::Malformed(why)) => format!("malformed: {why}"),
-        Err(Refusal::UnsupportedProtocol) => {
-            format!(
-                "unsupported protocol; this window speaks {}",
-                broker::PROTOCOL
-            )
-        }
-        Err(Refusal::Denied) => DENIED.to_owned(),
-    }
-}
-
-/// Which configuration verb a request body is, if it is one at all.
-///
-/// The protocol token is optional here for the same reason it is in the pane
-/// parser: a client older than this window should be understood.
-fn config_request(body: &str) -> Option<ConfigVerb> {
-    let mut words = body.split_whitespace().peekable();
-    if let Some(word) = words.peek()
-        && word.starts_with("sprite-observation/")
-    {
-        words.next();
-    }
-    match (words.next(), words.next(), words.next()) {
-        (Some("config"), Some("reload"), None) => Some(ConfigVerb::Reload),
-        (Some("config"), Some("print"), None) => Some(ConfigVerb::Print),
-        _ => None,
-    }
-}
-
-/// Hands the question to the GPUI thread and waits, briefly, for its answer.
-fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -> String {
-    let (reply, answer) = std::sync::mpsc::sync_channel(1);
-    if reload.send_blocking(ReloadRequest { what, reply }).is_err() {
-        return "this window is no longer answering".to_owned();
-    }
-    match answer.recv_timeout(RELOAD_TIMEOUT) {
-        Ok(answer) => answer,
-        Err(_) => "this window did not answer in time; nothing was changed".to_owned(),
+/// Free rather than a method on `Workspace`: every call site holds `&mut
+/// self.tabs` while this closure runs, so a `&self` method could not be
+/// called from inside it. Everything a Pane needs is passed in instead, which
+/// is also what lets `Workspace::new` use this before `self` exists.
+fn make_pane<'a>(
+    command: Option<Vec<std::ffi::OsString>>,
+    settings: crate::config::Settings,
+    panes: &'a Arc<WindowPanes>,
+    endpoint: Option<&'a Endpoint>,
+    window: &'a mut Window,
+    cx: &'a mut Context<Workspace>,
+) -> impl FnOnce(TabId, PaneId) -> gpui::Entity<TerminalView> + 'a {
+    move |tab, pane| {
+        let environment = session_environment(endpoint, tab, pane);
+        let link = pane_link(panes, endpoint, tab, pane);
+        cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx))
     }
 }
 
@@ -713,6 +641,7 @@ struct PendingClose {
 enum CloseScope {
     Pane,
     Tab,
+    Window,
 }
 
 impl CloseScope {
@@ -720,6 +649,18 @@ impl CloseScope {
         match self {
             Self::Pane => "pane",
             Self::Tab => "tab",
+            Self::Window => "window",
+        }
+    }
+
+    /// How to repeat the gesture that raised the question.
+    ///
+    /// The confirmation model is "do the same thing again", and the title-bar
+    /// close is a click rather than a binding.
+    fn again(self) -> &'static str {
+        match self {
+            Self::Pane | Self::Tab => "press the same keys again",
+            Self::Window => "click close again",
         }
     }
 }
@@ -1001,8 +942,9 @@ impl Render for Workspace {
                     .bg(rgb(CONFIRM_BG))
                     .text_color(rgb(CONFIRM_FG))
                     .child(SharedString::from(format!(
-                        "{} — press the same keys again to close this {}, Esc to keep it",
+                        "{} — {} to close this {}, Esc to keep it",
                         pending.running,
+                        pending.scope.again(),
                         pending.scope.noun()
                     )))
             }))
@@ -1024,8 +966,7 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, ConfigVerb, Direction, WorkspaceAction, classify, config_request,
-        describe_running, workspace_action,
+        CloseScope, Direction, WorkspaceAction, classify, describe_running, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1158,24 +1099,16 @@ mod tests {
     fn a_close_question_says_what_it_would_close() {
         assert_eq!(CloseScope::Pane.noun(), "pane");
         assert_eq!(CloseScope::Tab.noun(), "tab");
+        assert_eq!(CloseScope::Window.noun(), "window");
     }
 
+    /// The banner tells a person how to answer. A title-bar close was not a
+    /// keystroke, so it must not be described as one.
     #[test]
-    fn a_configuration_request_is_told_from_a_pane_query() {
-        assert_eq!(config_request("config reload"), Some(ConfigVerb::Reload));
-        assert_eq!(
-            config_request("sprite-observation/1 config reload"),
-            Some(ConfigVerb::Reload)
-        );
-        assert_eq!(
-            config_request("  config   print  "),
-            Some(ConfigVerb::Print)
-        );
-
-        assert_eq!(config_request("panes snapshot"), None);
-        assert_eq!(config_request("config"), None);
-        assert_eq!(config_request("config reload --now"), None);
-        assert_eq!(config_request(""), None);
+    fn a_close_question_names_the_gesture_that_answers_it() {
+        assert_eq!(CloseScope::Pane.again(), "press the same keys again");
+        assert_eq!(CloseScope::Tab.again(), "press the same keys again");
+        assert_eq!(CloseScope::Window.again(), "click close again");
     }
 
     /// The distinction the whole command rests on: what may change under a

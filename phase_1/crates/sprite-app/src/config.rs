@@ -337,6 +337,28 @@ fn style_name(style: sprite_term::CursorStyle) -> &'static str {
     }
 }
 
+/// Builds "this key is the wrong type" in the one shape a settings file
+/// complaint about a mistyped key takes.
+///
+/// `None` covers both an absent key (not a complaint) and one already
+/// handled by an earlier match arm, so a call site can fold its whole
+/// "wrong type" arm into one line whatever else that key's match does.
+/// `consequence` is spelled out by the caller rather than fixed to "keeping
+/// the default", because most of these settings fall back to something more
+/// specific — the login shell, a monospace font, the previous value.
+fn wrong_type(
+    value: Option<&toml::Value>,
+    key: &str,
+    wanted: &str,
+    consequence: &str,
+) -> Option<String> {
+    let other = value?;
+    Some(format!(
+        "{key} must be {wanted}, not {}; {consequence}",
+        other.type_str()
+    ))
+}
+
 /// What was ignored while reading a configuration file.
 ///
 /// Carried rather than logged from inside the parser so a caller decides where
@@ -407,12 +429,12 @@ impl Settings {
                 Some(toml::Value::String(_)) => complaints
                     .0
                     .push("font.family is empty; finding a monospace font instead".to_owned()),
-                Some(other) => complaints.0.push(format!(
-                    "font.family must be a name in quotes, not {}; finding a monospace font \
-                     instead",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "font.family",
+                    "a name in quotes",
+                    "finding a monospace font instead",
                 )),
-                None => {}
             }
             if let Some(value) = section.get("size") {
                 match value
@@ -441,11 +463,12 @@ impl Settings {
         if let Some(section) = document.get("graphics") {
             match section.get("enabled") {
                 Some(toml::Value::Boolean(enabled)) => settings.graphics.enabled = *enabled,
-                Some(other) => complaints.0.push(format!(
-                    "graphics.enabled must be true or false, not {}; leaving images enabled",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "graphics.enabled",
+                    "true or false",
+                    "leaving images enabled",
                 )),
-                None => {}
             }
             // Read as bytes rather than a friendlier unit because a wrong guess
             // about the unit is a wrong limit, and a limit nobody notices is
@@ -482,12 +505,12 @@ impl Settings {
                              keeping the default"
                     )),
                 },
-                Some(other) => complaints.0.push(format!(
-                    "colors.{key} must be a #rrggbb colour in quotes, not {}; \
-                         keeping the default",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    &format!("colors.{key}"),
+                    "a #rrggbb colour in quotes",
+                    "keeping the default",
                 )),
-                None => {}
             };
             named("background", &mut settings.colors.background);
             named("foreground", &mut settings.colors.foreground);
@@ -515,12 +538,12 @@ impl Settings {
                     // does not change what Sprite does with it.
                     settings.colors.palette.sort_by_key(|&(index, _)| index);
                 }
-                Some(other) => complaints.0.push(format!(
-                    "colors.palette must be a table of index = \"#rrggbb\", not {}; \
-                     keeping the palette",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "colors.palette",
+                    "a table of index = \"#rrggbb\"",
+                    "keeping the palette",
                 )),
-                None => {}
             }
         }
 
@@ -533,19 +556,21 @@ impl Settings {
                          keeping the default"
                     )),
                 },
-                Some(other) => complaints.0.push(format!(
-                    "cursor.style must be a name in quotes, not {}; keeping the default",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "cursor.style",
+                    "a name in quotes",
+                    "keeping the default",
                 )),
-                None => {}
             }
             match section.get("blink") {
                 Some(toml::Value::Boolean(blink)) => settings.cursor.blink = Some(*blink),
-                Some(other) => complaints.0.push(format!(
-                    "cursor.blink must be true or false, not {}; keeping the default",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "cursor.blink",
+                    "true or false",
+                    "keeping the default",
                 )),
-                None => {}
             }
         }
 
@@ -557,11 +582,12 @@ impl Settings {
                 Some(toml::Value::String(_)) => complaints
                     .0
                     .push("shell.program is empty; using the login shell".to_owned()),
-                Some(other) => complaints.0.push(format!(
-                    "shell.program must be a path in quotes, not {}; using the login shell",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "shell.program",
+                    "a path in quotes",
+                    "using the login shell",
                 )),
-                None => {}
             }
             match section.get("args") {
                 Some(toml::Value::Array(values)) => {
@@ -583,12 +609,12 @@ impl Settings {
                         );
                     }
                 }
-                Some(other) => complaints.0.push(format!(
-                    "shell.args must be a list of strings, not {}; \
-                     running the shell with no arguments of its own",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "shell.args",
+                    "a list of strings",
+                    "running the shell with no arguments of its own",
                 )),
-                None => {}
             }
             match section.get("startup_directory") {
                 Some(toml::Value::String(directory)) if !directory.trim().is_empty() => {
@@ -599,12 +625,12 @@ impl Settings {
                      starting where Sprite was started"
                         .to_owned(),
                 ),
-                Some(other) => complaints.0.push(format!(
-                    "shell.startup_directory must be a path in quotes, not {}; \
-                     starting where Sprite was started",
-                    other.type_str()
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "shell.startup_directory",
+                    "a path in quotes",
+                    "starting where Sprite was started",
                 )),
-                None => {}
             }
         }
 
@@ -634,17 +660,19 @@ impl Settings {
                 Some(toml::Value::Boolean(enabled)) => {
                     settings.pane_observation.enabled = *enabled;
                 }
-                Some(other) => complaints.0.push(format!(
-                    "pane_observation.enabled must be true or false, not {}; \
-                     leaving observation {}",
-                    other.type_str(),
-                    if settings.pane_observation.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "pane_observation.enabled",
+                    "true or false",
+                    &format!(
+                        "leaving observation {}",
+                        if settings.pane_observation.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    ),
                 )),
-                None => {}
             }
         }
 

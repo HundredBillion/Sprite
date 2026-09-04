@@ -33,6 +33,9 @@ impl<T> PaneRegistry<T> {
         self.tree.focus()
     }
 
+    // Only the tests measure a registry's size directly; production code asks
+    // `is_empty` (a tab ending) or reads panes through `layout`.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.contents.len()
     }
@@ -45,17 +48,8 @@ impl<T> PaneRegistry<T> {
         self.contents.get(&pane)
     }
 
-    pub fn get_mut(&mut self, pane: PaneId) -> Option<&mut T> {
-        self.contents.get_mut(&pane)
-    }
-
     pub fn focused(&self) -> Option<&T> {
         self.get(self.focus())
-    }
-
-    pub fn focused_mut(&mut self) -> Option<&mut T> {
-        let focus = self.focus();
-        self.get_mut(focus)
     }
 
     /// Splits the focused pane. `content` is built only if the split happens,

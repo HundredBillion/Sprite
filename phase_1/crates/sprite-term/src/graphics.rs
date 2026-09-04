@@ -18,6 +18,43 @@ use libghostty_vt::kitty::graphics::PlacementIterator;
 
 use crate::SessionError;
 
+/// The three layer bands, in paint order.
+///
+/// Three passes rather than one, because the binding classifies placements by
+/// filtering rather than by reporting a z-index. Each pass is proportional to
+/// the number of placements, never to cells on screen.
+const LAYERS: [(libghostty_vt::kitty::graphics::Layer, Layer); 3] = [
+    (
+        libghostty_vt::kitty::graphics::Layer::BelowBg,
+        Layer::BelowBackground,
+    ),
+    (
+        libghostty_vt::kitty::graphics::Layer::BelowText,
+        Layer::BelowText,
+    ),
+    (
+        libghostty_vt::kitty::graphics::Layer::AboveText,
+        Layer::AboveText,
+    ),
+];
+
+/// The wire vocabulary for a transmitted image format.
+///
+/// Deliberately total: an unknown format is reported as unknown rather than
+/// guessed at, so a future libghostty format cannot silently become the wrong
+/// one on the wire.
+fn transmitted_format(format: libghostty_vt::kitty::graphics::ImageFormat) -> TransmittedFormat {
+    use libghostty_vt::kitty::graphics::ImageFormat;
+    match format {
+        ImageFormat::Rgb => TransmittedFormat::Rgb,
+        ImageFormat::Rgba => TransmittedFormat::Rgba,
+        ImageFormat::Png => TransmittedFormat::Png,
+        ImageFormat::Gray => TransmittedFormat::Gray,
+        ImageFormat::GrayAlpha => TransmittedFormat::GrayAlpha,
+        _ => TransmittedFormat::Unknown,
+    }
+}
+
 /// One image the terminal is holding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImageSummary {
@@ -305,23 +342,7 @@ pub(crate) fn capture_frame(
 
     let mut found: Vec<Placement> = Vec::new();
 
-    // Three passes, one per layer band, because the binding classifies
-    // placements by filtering rather than by reporting a z-index. Each pass is
-    // proportional to the number of placements, never to cells on screen.
-    for layer in [
-        (
-            libghostty_vt::kitty::graphics::Layer::BelowBg,
-            Layer::BelowBackground,
-        ),
-        (
-            libghostty_vt::kitty::graphics::Layer::BelowText,
-            Layer::BelowText,
-        ),
-        (
-            libghostty_vt::kitty::graphics::Layer::AboveText,
-            Layer::AboveText,
-        ),
-    ] {
+    for layer in LAYERS {
         let mut iteration = placements
             .update(&graphics)
             .map_err(vt("placement_iterator"))?;
@@ -397,20 +418,7 @@ pub(crate) fn capture_frame(
                     generation: image_generation,
                     width: image.width().map_err(vt("image_width"))?,
                     height: image.height().map_err(vt("image_height"))?,
-                    transmitted: match image.format().map_err(vt("image_format"))? {
-                        libghostty_vt::kitty::graphics::ImageFormat::Rgb => TransmittedFormat::Rgb,
-                        libghostty_vt::kitty::graphics::ImageFormat::Rgba => {
-                            TransmittedFormat::Rgba
-                        }
-                        libghostty_vt::kitty::graphics::ImageFormat::Png => TransmittedFormat::Png,
-                        libghostty_vt::kitty::graphics::ImageFormat::Gray => {
-                            TransmittedFormat::Gray
-                        }
-                        libghostty_vt::kitty::graphics::ImageFormat::GrayAlpha => {
-                            TransmittedFormat::GrayAlpha
-                        }
-                        _ => TransmittedFormat::Unknown,
-                    },
+                    transmitted: transmitted_format(image.format().map_err(vt("image_format"))?),
                     pixels: image.data().map_err(vt("image_data"))?.to_vec(),
                 });
                 cache.images.insert(placement.image, Arc::clone(&pixels));
@@ -449,20 +457,7 @@ pub(crate) fn capture_placements(
     let graphics = terminal.kitty_graphics().map_err(vt("kitty_graphics"))?;
     let mut found = Vec::new();
 
-    for layer in [
-        (
-            libghostty_vt::kitty::graphics::Layer::BelowBg,
-            Layer::BelowBackground,
-        ),
-        (
-            libghostty_vt::kitty::graphics::Layer::BelowText,
-            Layer::BelowText,
-        ),
-        (
-            libghostty_vt::kitty::graphics::Layer::AboveText,
-            Layer::AboveText,
-        ),
-    ] {
+    for layer in LAYERS {
         let mut iteration = placements
             .update(&graphics)
             .map_err(vt("placement_iterator"))?;
@@ -484,16 +479,7 @@ pub(crate) fn capture_placements(
                 placement: iteration.placement_id().map_err(vt("placement_id"))?,
                 is_virtual: iteration.is_virtual().map_err(vt("placement_virtual"))?,
                 layer: layer.1,
-                format: match image.format().map_err(vt("image_format"))? {
-                    libghostty_vt::kitty::graphics::ImageFormat::Rgb => TransmittedFormat::Rgb,
-                    libghostty_vt::kitty::graphics::ImageFormat::Rgba => TransmittedFormat::Rgba,
-                    libghostty_vt::kitty::graphics::ImageFormat::Png => TransmittedFormat::Png,
-                    libghostty_vt::kitty::graphics::ImageFormat::Gray => TransmittedFormat::Gray,
-                    libghostty_vt::kitty::graphics::ImageFormat::GrayAlpha => {
-                        TransmittedFormat::GrayAlpha
-                    }
-                    _ => TransmittedFormat::Unknown,
-                },
+                format: transmitted_format(image.format().map_err(vt("image_format"))?),
                 image_width: image.width().map_err(vt("image_width"))?,
                 image_height: image.height().map_err(vt("image_height"))?,
                 columns: info.grid_cols,

@@ -313,6 +313,30 @@ mod tests {
         assert_eq!(answer.expect("a snapshot").rows[0].text, "answer");
     }
 
+    /// A session that errors must tell its waiter why, not leave it to time
+    /// out and be reported for the wrong reason.
+    #[test]
+    fn a_failure_reaches_the_caller_that_asked_for_it() {
+        let panes = WindowPanes::new();
+        let session = session();
+        panes.register(PaneId(0), TabId(0), session.commands());
+
+        let pending = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+        panes.deliver_failure(PaneId(0), "the child exited".to_owned());
+
+        let answer = pending
+            .answer
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a failure arrived");
+        assert_eq!(
+            answer.expect_err("the pane failed"),
+            "the child exited",
+            "the waiter learns the actual reason, not a timeout"
+        );
+    }
+
     /// Two callers asking one pane at once must each get an answer, and must
     /// not both be handed the same one while the other waits forever.
     #[test]

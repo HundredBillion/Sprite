@@ -132,3 +132,27 @@ fn a_reset_returns_to_the_configured_colour() {
         "and a reset palette entry is the configured one"
     );
 }
+
+/// A live colour reload must repaint on its own, with the new colours.
+#[test]
+fn a_live_colour_reload_repaints_on_its_own() {
+    let config = SessionConfig::command("/bin/sh", args(&["-c", "printf 'A\\n'; sleep 30"]));
+    let mut session = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains('A'));
+
+    session
+        .send(sprite_term::TerminalCommand::SetColors(ColorDefaults {
+            foreground: Some(color(0x11, 0x22, 0x33)),
+            ..ColorDefaults::default()
+        }))
+        .expect("send SetColors");
+
+    // No keystroke and no child output follow: the reload alone must repaint.
+    let bundle = snapshots.wait_for("the reloaded foreground", |bundle| {
+        bundle.render.default_foreground == color(0x11, 0x22, 0x33)
+    });
+    assert_eq!(bundle.render.default_foreground, color(0x11, 0x22, 0x33));
+}

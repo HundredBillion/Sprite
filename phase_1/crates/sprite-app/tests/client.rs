@@ -222,6 +222,27 @@ fn a_client_holding_the_wrong_key_is_refused_by_the_window() {
     assert!(outcome.errors.contains("denied"), "{:?}", outcome.errors);
 }
 
+/// The window is what sets `SPRITE_PANE`, so a value that is not a pane id
+/// means something outside Sprite replaced it. The command says so and stops.
+///
+/// `--window` is the scope that makes this worth a test: it needs no pane
+/// identity, so treating the bad value as simply absent would let the request
+/// through and report success on a tampered environment.
+#[test]
+fn a_pane_identity_that_is_not_a_pane_id_is_refused_before_the_window_is_asked() {
+    let endpoint = window(|| r#"{"schema_version":1}"#.to_owned());
+    let environment = credentials(&endpoint, "not-a-pane");
+    let outcome = run(&["panes", "snapshot", "--window"], &borrowed(&environment));
+
+    assert_eq!(outcome.status, 2, "a usage error is its own status");
+    assert!(outcome.out.is_empty(), "{:?}", outcome.out);
+    assert!(
+        outcome.errors.contains("SPRITE_PANE"),
+        "the diagnostic names the variable a person has to fix: {:?}",
+        outcome.errors
+    );
+}
+
 #[test]
 fn a_misspelled_option_fails_before_anything_is_asked() {
     let outcome = run(&["panes", "snapshot", "--windwo"], &[]);

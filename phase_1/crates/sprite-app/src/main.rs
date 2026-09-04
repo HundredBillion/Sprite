@@ -98,6 +98,12 @@ fn open_window(args: WindowArgs) {
             .update(cx, |_view, window, cx| {
                 let view = cx.entity();
                 window.on_window_should_close(cx, move |_window, cx| {
+                    // A close that would interrupt work asks first, exactly as
+                    // Ctrl+Shift+W and Ctrl+Shift+Q do. Returning false keeps
+                    // the window open; the banner explains how to answer.
+                    if !view.update(cx, |view, cx| view.confirm_close(cx)) {
+                        return false;
+                    }
                     // The first close takes the worker and waits for it off the
                     // GPUI thread, so the native window can shut immediately
                     // while the child and helper threads finish joining.

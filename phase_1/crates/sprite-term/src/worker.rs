@@ -18,14 +18,12 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::Terminal;
 use libghostty_vt::key;
-use libghostty_vt::kitty::graphics::PlacementIterator;
-use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::terminal::Options as TerminalOptions;
 use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
 use crate::pty_unix;
 use crate::pty_unix::{GroupSignal, Pump};
-use crate::snapshot;
+use crate::snapshot::Projector;
 use crate::{
     CellPosition, ChildExit, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton,
     MouseEvent, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle,
@@ -342,11 +340,8 @@ pub(crate) fn run(
         }
     };
 
-    // Kept across captures so a still image is copied once rather than once
-    // a frame.
-    let mut pixels = crate::graphics::PixelCache::default();
-    let (mut render_state, mut rows, mut cells, mut placements) = match render_objects() {
-        Ok(objects) => objects,
+    let mut projector = match Projector::new() {
+        Ok(projector) => projector,
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));
             return;
@@ -375,19 +370,13 @@ pub(crate) fn run(
     let mut exit_status: Option<Result<ExitStatus, String>> = None;
     let mut pump_stopped = false;
     let mut fatal: Option<SessionError> = None;
-    let mut dirty = !publish(
-        generation,
-        size,
-        has_selection,
-        &terminal,
-        &mut render_state,
-        &mut rows,
-        &mut cells,
-        &mut placements,
-        &mut pixels,
-        &snapshots,
-        &events,
-    );
+    let mut dirty = match projector.capture(generation, size, has_selection, &terminal) {
+        Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
+        Err(error) => {
+            let _ = events.send_blocking(TerminalEvent::Error(error));
+            true
+        }
+    };
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -435,6 +424,10 @@ pub(crate) fn run(
                     }
                 }
             }
+            // Not a no-op: a wake. The snapshot slot holds one bundle
+            // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
+            // leaves `dirty` set with the loop blocked on `recv`. This gives
+            // the gate below a second pass once the app has drained the slot.
             Message::CaptureRequested => {}
             Message::Command(command) => match command {
                 TerminalCommand::Input(bytes) => {
@@ -665,6 +658,7 @@ pub(crate) fn run(
                     }
                     // The colours live in the render state, so a frame has to be
                     // taken for anyone to see them.
+                    dirty = true;
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
                 TerminalCommand::SetCursor(cursor) => {
@@ -673,38 +667,35 @@ pub(crate) fn run(
                     {
                         break;
                     }
+                    dirty = true;
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
-                TerminalCommand::CaptureGraphics => {
-                    match crate::graphics::capture_graphics(&terminal, &mut placements) {
-                        Ok(snapshot) => {
-                            if events
-                                .send_blocking(TerminalEvent::Graphics(snapshot))
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
-                                break;
-                            }
+                TerminalCommand::CaptureGraphics => match projector.capture_graphics(&terminal) {
+                    Ok(snapshot) => {
+                        if events
+                            .send_blocking(TerminalEvent::Graphics(snapshot))
+                            .is_err()
+                        {
+                            break;
                         }
                     }
-                }
+                    Err(error) => {
+                        if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                            break;
+                        }
+                    }
+                },
                 TerminalCommand::CaptureHistory(lines) => {
                     // Answered once, from this thread, against the same
                     // terminal the snapshots come from — so the rows returned
                     // belong to one generation rather than a moving target.
                     let foreground = foreground_executable(master.as_ref());
-                    match snapshot::capture_history(
+                    match projector.capture_history(
                         generation,
                         size,
                         lines.get(),
                         foreground,
                         &terminal,
-                        &mut render_state,
-                        &mut placements,
                     ) {
                         Ok(history) => {
                             if events
@@ -753,48 +744,35 @@ pub(crate) fn run(
         // newer generation would immediately replace wastes the terminal
         // owner's time and delivers nothing.
         if dirty && snapshots.is_empty() {
-            dirty = !publish(
-                generation,
-                size,
-                has_selection,
-                &terminal,
-                &mut render_state,
-                &mut rows,
-                &mut cells,
-                &mut placements,
-                &mut pixels,
-                &snapshots,
-                &events,
-            );
+            dirty = match projector.capture(generation, size, has_selection, &terminal) {
+                Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
+                Err(error) => {
+                    let _ = events.send_blocking(TerminalEvent::Error(error));
+                    true
+                }
+            };
         }
     }
 
     // The final generation still deserves delivery, so the last projection
     // displaces any stale one left in the slot.
-    if dirty
-        && let Ok(bundle) = snapshot::capture(
-            generation,
-            size,
-            has_selection,
-            &terminal,
-            &mut render_state,
-            &mut rows,
-            &mut cells,
-            &mut placements,
-            &mut pixels,
-        )
-    {
+    if dirty && let Ok(bundle) = projector.capture(generation, size, has_selection, &terminal) {
         let _ = snapshots.force_send(Arc::new(bundle));
     }
 
     // ---- Closing ----
     //
-    // Every libghostty value goes first, which also removes the PTY-write
-    // callback: from here the terminal can neither be mutated nor generate a
-    // reply, and application commands are read only to be discarded.
-    drop(cells);
-    drop(rows);
-    drop(render_state);
+    // The projection state goes before the terminal it reads from. Dropping
+    // the terminal also removes the PTY-write callback, so from here it can
+    // neither be mutated nor generate a reply, and application commands are
+    // read only to be discarded.
+    //
+    // Explicit rather than left to scope order because that one relationship
+    // is the only ordering here that matters, and nothing in Rust expresses
+    // it: these are handles into libghostty rather than borrows the compiler
+    // can see. The order among the projector's own objects is free — each
+    // frees only itself.
+    drop(projector);
     drop(encoder);
     drop(terminal);
 
@@ -1125,59 +1103,6 @@ fn signal_groups(groups: &[i32], signal: &GroupSignal) {
 
 fn group_is_alive(group: i32) -> bool {
     pty_unix::group_is_alive(group)
-}
-
-/// Builds one coherent bundle and delivers it. Returns whether it was sent.
-#[allow(clippy::too_many_arguments)]
-fn publish<'vt>(
-    generation: u64,
-    size: TerminalSize,
-    has_selection: bool,
-    terminal: &Terminal<'vt, '_>,
-    render_state: &mut RenderState<'vt>,
-    rows: &mut RowIterator<'vt>,
-    cells: &mut CellIterator<'vt>,
-    placements: &mut PlacementIterator<'vt>,
-    pixels: &mut crate::graphics::PixelCache,
-    snapshots: &async_channel::Sender<Arc<SnapshotBundle>>,
-    events: &async_channel::Sender<TerminalEvent>,
-) -> bool {
-    match snapshot::capture(
-        generation,
-        size,
-        has_selection,
-        terminal,
-        render_state,
-        rows,
-        cells,
-        placements,
-        pixels,
-    ) {
-        Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_ok(),
-        Err(error) => {
-            let _ = events.send_blocking(TerminalEvent::Error(error));
-            false
-        }
-    }
-}
-
-type RenderObjects = (
-    RenderState<'static>,
-    RowIterator<'static>,
-    CellIterator<'static>,
-    PlacementIterator<'static>,
-);
-
-fn render_objects() -> Result<RenderObjects, SessionError> {
-    let render_state =
-        RenderState::new().map_err(|error| SessionError::new("create_render_state", error))?;
-    let rows =
-        RowIterator::new().map_err(|error| SessionError::new("create_row_iterator", error))?;
-    let cells =
-        CellIterator::new().map_err(|error| SessionError::new("create_cell_iterator", error))?;
-    let placements = PlacementIterator::new()
-        .map_err(|error| SessionError::new("create_placement_iterator", error))?;
-    Ok((render_state, rows, cells, placements))
 }
 
 /// Opens the PTY, launches the child, and hands the child to its waiter.

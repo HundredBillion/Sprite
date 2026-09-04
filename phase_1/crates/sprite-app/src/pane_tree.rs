@@ -246,8 +246,14 @@ impl PaneTree {
         self.panes().len()
     }
 
+    /// Whether the tree holds no panes.
+    ///
+    /// Always false in practice: `new` seeds one leaf and `close` refuses to
+    /// remove the last, so no sequence of operations empties a tree. Computed
+    /// rather than returned as a constant so that the assertion in `close` is a
+    /// real check — a constant would make it assert nothing.
     pub fn is_empty(&self) -> bool {
-        false
+        self.panes().is_empty()
     }
 
     /// Splits the focused pane, focusing the new one.
@@ -280,6 +286,11 @@ impl PaneTree {
             self.focus = successor
                 .unwrap_or_else(|| self.panes().first().map(|(id, _)| *id).unwrap_or(pane));
         }
+        // The tree keeps its final leaf, so a close can never empty it. Checked
+        // here rather than trusted: this is the function that maintains the
+        // invariant, so it is the function that can break it. Debug-only, so
+        // the traversal costs release builds nothing.
+        debug_assert!(!self.is_empty(), "close emptied the tree");
         Some(self.focus)
     }
 

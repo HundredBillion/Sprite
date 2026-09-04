@@ -13,8 +13,12 @@ use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use crate::cli::{Scope, SnapshotArgs};
+use sprite_term::HistoryLines;
+
+use crate::cli::SnapshotArgs;
 use crate::observation::broker::PROTOCOL;
+use crate::observation::request::{self, Query, Scope};
+use crate::pane_tree::PaneId;
 
 /// The environment a window gives each of its sessions.
 pub const SOCKET_VARIABLE: &str = "SPRITE_OBSERVATION_SOCKET";
@@ -226,35 +230,50 @@ pub fn run_config_print(
 
 /// Builds the request, which carries the key and nothing the window did not ask
 /// for.
+///
+/// Only the key is written here. Everything after it is the request grammar,
+/// and `request::render` is the one place that knows how to write it — the same
+/// module the window reads it back with.
 fn request_line(args: &SnapshotArgs, key: &str, pane: Option<&str>) -> Result<String, String> {
-    let mut request = format!("{key} {PROTOCOL} panes snapshot");
-
     // The pane says who it is so the default scope can mean "my tab". It is
     // read from the environment rather than accepted as an argument: a caller
     // naming someone else's pane would learn nothing it could not already ask
     // for, but it would make the common request easy to get wrong.
-    if let Some(pane) = pane {
-        request.push_str(&format!(" --from {pane}"));
-    } else if matches!(args.scope, Scope::Tab | Scope::TabWithSelf) {
-        return Err(format!(
-            "this session was not told which pane it is, so \"my tab\" has no meaning here \
-             (expected {PANE_VARIABLE}); try --window or --pane"
-        ));
-    }
+    let from = match pane {
+        Some(text) => {
+            let id = text.parse().map_err(|_| {
+                // The window sets this variable, so a value that is not a pane
+                // id means something outside Sprite replaced it. Saying so
+                // beats asking as though no pane had been named, which would
+                // quietly widen a `--window` request into a success.
+                format!("{PANE_VARIABLE} is set to {text:?}, which is not a pane id")
+            })?;
+            Some(PaneId(id))
+        }
+        None => {
+            if matches!(args.scope, Scope::Tab { .. }) {
+                return Err(format!(
+                    "this session was not told which pane it is, so \"my tab\" has no meaning here \
+                     (expected {PANE_VARIABLE}); try --window or --pane"
+                ));
+            }
+            None
+        }
+    };
 
-    match args.scope {
-        Scope::Tab => {}
-        Scope::TabWithSelf => request.push_str(" --include-self"),
-        Scope::Pane(pane) => request.push_str(&format!(" --pane {pane}")),
-        Scope::Window => request.push_str(" --window"),
-    }
-    if let Some(lines) = args.lines {
-        request.push_str(&format!(" --lines {lines}"));
-    }
-    if args.pretty {
-        request.push_str(" --pretty");
-    }
-    Ok(request)
+    let query = Query {
+        from,
+        scope: args.scope,
+        // The command line can leave history unmentioned; the wire type cannot.
+        // They still describe the same request, because what `HistoryLines`
+        // defaults to is exactly what the window gives a request that says
+        // nothing — so `render` leaves it unmentioned again.
+        lines: args
+            .lines
+            .map_or_else(HistoryLines::default, HistoryLines::new),
+        pretty: args.pretty,
+    };
+    Ok(format!("{key} {}", request::render(&query)))
 }
 
 /// One request, one answer, with a bound on every step.
@@ -309,7 +328,7 @@ mod tests {
         assert!(
             line(
                 &SnapshotArgs {
-                    scope: Scope::Pane(9),
+                    scope: Scope::Pane(PaneId(9)),
                     ..SnapshotArgs::default()
                 },
                 Some("0")
@@ -319,12 +338,32 @@ mod tests {
         assert!(
             line(
                 &SnapshotArgs {
-                    scope: Scope::TabWithSelf,
+                    scope: Scope::Tab { include_self: true },
                     ..SnapshotArgs::default()
                 },
                 Some("0")
             )
             .ends_with("--include-self")
+        );
+    }
+
+    /// The clamp used to happen at the window, which saw whatever number was
+    /// typed; it now happens here, because a `Query` holds a `HistoryLines` and
+    /// that type cannot carry more than the maximum. Both lines still mean the
+    /// same to the window, and this is the only place the client-side clamp can
+    /// be seen going wrong.
+    #[test]
+    fn a_history_length_above_the_maximum_is_clamped_before_it_is_sent() {
+        let request = line(
+            &SnapshotArgs {
+                lines: Some(HistoryLines::MAX + 1),
+                ..SnapshotArgs::default()
+            },
+            Some("0"),
+        );
+        assert!(
+            request.ends_with(&format!("--lines {}", HistoryLines::MAX)),
+            "{request}"
         );
     }
 

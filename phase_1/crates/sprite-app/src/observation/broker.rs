@@ -75,36 +75,10 @@ pub trait PaneSource: Send + Sync {
     fn begin(&self, pane: PaneId, lines: HistoryLines) -> Result<Pending, String>;
 }
 
-/// Which panes a caller asked about.
-///
-/// Every variant reads. There is deliberately no variant that writes, sends
-/// input, subscribes, or opens a stream: a request that could mutate cannot be
-/// constructed, so no code downstream has to refuse one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Scope {
-    /// The requester's own tab. The default, and by default without the
-    /// requester itself — a pane asking "what else is going on" rarely means
-    /// its own output.
-    Tab { include_self: bool },
-    /// One named pane.
-    Pane(PaneId),
-    /// Every pane in the window. Never beyond it.
-    Window,
-}
-
-/// A parsed, authorised request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Query {
-    /// The pane the caller says it is.
-    ///
-    /// Self-reported, and only used to shape the default scope. It is not a
-    /// privilege: see the note at the top of this module.
-    pub from: Option<PaneId>,
-    pub scope: Scope,
-    pub lines: HistoryLines,
-    /// Lay the JSON out for a human. Whitespace only; never a second schema.
-    pub pretty: bool,
-}
+/// The request grammar lives in `request`, beside the text it is read from
+/// and written to. Re-exported so this module's own signatures still read as
+/// though it owned them.
+pub use crate::observation::request::{Query, Scope, parse};
 
 /// The private request protocol between the bundled client and the window.
 ///
@@ -129,6 +103,14 @@ pub enum Refusal {
     /// reporting its own request as nonsense.
     UnsupportedProtocol,
 }
+
+/// The only refusal a carried-out request can produce.
+///
+/// A request that reached `collect` has already parsed, so it cannot be
+/// malformed and cannot name an unknown protocol. Saying so in the type is what
+/// removes the two arms every caller had to write and no caller could reach.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Denied;
 
 /// One pane's answer.
 #[derive(Clone, Debug)]
@@ -182,97 +164,11 @@ pub struct Report {
     pub failures: Vec<Failure>,
 }
 
-/// Reads a request body into a query.
-///
-/// The grammar is deliberately tiny. Anything unrecognised is refused rather
-/// than ignored, so a client cannot smuggle a verb past a lenient parser.
-pub fn parse(body: &str) -> Result<Query, Refusal> {
-    let mut words = body.split_whitespace().peekable();
-    // The protocol token is optional so that a client older than this window
-    // is understood rather than refused; a *newer* one names a version this
-    // window does not know, and is told so.
-    if let Some(word) = words.peek()
-        && word.starts_with("sprite-observation/")
-    {
-        let spoken = *word;
-        words.next();
-        if spoken != PROTOCOL {
-            return Err(Refusal::UnsupportedProtocol);
-        }
-    }
-    match (words.next(), words.next()) {
-        (Some("panes"), Some("snapshot")) => {}
-        _ => return Err(Refusal::Malformed("the only request is: panes snapshot")),
-    }
-
-    let mut from = None;
-    let mut scope = None;
-    let mut include_self = false;
-    let mut pretty = false;
-    let mut lines = HistoryLines::default();
-
-    while let Some(word) = words.next() {
-        match word {
-            "--include-self" => include_self = true,
-            "--pretty" => pretty = true,
-            "--window" => {
-                if scope.is_some() {
-                    return Err(Refusal::Malformed("scope given twice"));
-                }
-                scope = Some(Scope::Window);
-            }
-            "--pane" => {
-                if scope.is_some() {
-                    return Err(Refusal::Malformed("scope given twice"));
-                }
-                let value = words
-                    .next()
-                    .ok_or(Refusal::Malformed("--pane needs a number"))?;
-                let pane = value
-                    .parse()
-                    .map_err(|_| Refusal::Malformed("--pane needs a number"))?;
-                scope = Some(Scope::Pane(PaneId(pane)));
-            }
-            "--from" => {
-                let value = words
-                    .next()
-                    .ok_or(Refusal::Malformed("--from needs a number"))?;
-                let pane = value
-                    .parse()
-                    .map_err(|_| Refusal::Malformed("--from needs a number"))?;
-                from = Some(PaneId(pane));
-            }
-            "--lines" => {
-                let value = words
-                    .next()
-                    .ok_or(Refusal::Malformed("--lines needs a number"))?;
-                let count: usize = value
-                    .parse()
-                    .map_err(|_| Refusal::Malformed("--lines needs a number"))?;
-                // Clamped, not refused, exactly as the extraction path does.
-                lines = HistoryLines::new(count);
-            }
-            _ => return Err(Refusal::Malformed("unknown option")),
-        }
-    }
-
-    if include_self && !matches!(scope, None | Some(Scope::Tab { .. })) {
-        return Err(Refusal::Malformed("--include-self only applies to a tab"));
-    }
-
-    Ok(Query {
-        from,
-        scope: scope.unwrap_or(Scope::Tab { include_self }),
-        lines,
-        pretty,
-    })
-}
-
 /// Resolves a query to the panes it may see.
 ///
 /// Every address comes from `source.panes()`, so a pane belonging to another
 /// window cannot appear in the result no matter what the caller asked for.
-fn resolve(query: &Query, source: &dyn PaneSource) -> Result<Vec<PaneAddress>, Refusal> {
+fn resolve(query: &Query, source: &dyn PaneSource) -> Result<Vec<PaneAddress>, Denied> {
     let panes = source.panes();
     match query.scope {
         Scope::Window => Ok(panes),
@@ -283,16 +179,16 @@ fn resolve(query: &Query, source: &dyn PaneSource) -> Result<Vec<PaneAddress>, R
             // A pane in another window and a pane that never existed are the
             // same answer, because telling them apart would confirm the
             // existence of panes outside this window.
-            .ok_or(Refusal::Denied),
+            .ok_or(Denied),
         Scope::Tab { include_self } => {
-            let from = query.from.ok_or(Refusal::Denied)?;
+            let from = query.from.ok_or(Denied)?;
             let tab = panes
                 .iter()
                 .find(|address| address.pane == from)
                 .map(|address| address.tab)
                 // A caller claiming to be a pane this window does not have gets
                 // the same refusal as any other unseeable pane.
-                .ok_or(Refusal::Denied)?;
+                .ok_or(Denied)?;
             Ok(panes
                 .into_iter()
                 .filter(|address| address.tab == tab)
@@ -307,7 +203,7 @@ pub fn collect(
     query: &Query,
     source: &dyn PaneSource,
     deadline: Duration,
-) -> Result<Report, Refusal> {
+) -> Result<Report, Denied> {
     let addresses = resolve(query, source)?;
     let started = Instant::now();
 
@@ -629,10 +525,10 @@ mod tests {
             TEST_DEADLINE,
         );
 
-        assert_eq!(elsewhere.unwrap_err(), Refusal::Denied);
+        assert_eq!(elsewhere.unwrap_err(), Denied);
         assert_eq!(
             never_existed.unwrap_err(),
-            Refusal::Denied,
+            Denied,
             "indistinguishable from a pane in another window"
         );
         assert!(
@@ -645,14 +541,14 @@ mod tests {
     fn a_caller_claiming_a_pane_this_window_does_not_have_is_refused() {
         let window = FakeWindow::new(&[(0, 0)]);
         let report = collect(&query("panes snapshot --from 42"), &window, TEST_DEADLINE);
-        assert_eq!(report.unwrap_err(), Refusal::Denied);
+        assert_eq!(report.unwrap_err(), Denied);
     }
 
     #[test]
     fn a_default_scoped_request_that_does_not_say_who_it_is_is_refused() {
         let window = FakeWindow::new(&[(0, 0), (0, 1)]);
         let report = collect(&query("panes snapshot"), &window, TEST_DEADLINE);
-        assert_eq!(report.unwrap_err(), Refusal::Denied);
+        assert_eq!(report.unwrap_err(), Denied);
     }
 
     // ---- read-only -------------------------------------------------------
