@@ -319,7 +319,9 @@ fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigVerb, DENIED, Query, Scope, config_request, parse, render, respond};
+    use super::{
+        ConfigVerb, DENIED, Query, ReloadRequest, Scope, config_request, parse, render, respond,
+    };
     use crate::pane_tree::PaneId;
     use sprite_term::HistoryLines;
 
@@ -529,6 +531,34 @@ mod tests {
         assert!(
             !answer.starts_with("unsupported protocol"),
             "the current protocol was refused: {answer:?}"
+        );
+    }
+
+    /// The one verb that writes reaches the window, and its answer comes back.
+    ///
+    /// The read path and both refusals are covered above; this is the third
+    /// route through `respond`, and the only one that leaves the module. A
+    /// stand-in window answers from another thread so the assertion is about
+    /// routing rather than about the reload timeout.
+    #[test]
+    fn a_configuration_verb_reaches_the_window_and_returns_its_answer() {
+        let (reload, requests) = async_channel::bounded::<ReloadRequest>(1);
+        let window = std::thread::spawn(move || {
+            let request = requests
+                .recv_blocking()
+                .expect("a request reached the window");
+            let verb = request.what;
+            let _ = request.reply.send("the window answered".to_owned());
+            verb
+        });
+
+        let answer = respond(&NoPanes, &reload, "sprite-observation/1 config print");
+
+        assert_eq!(answer, "the window answered");
+        assert_eq!(
+            window.join().expect("the stand-in window ran"),
+            ConfigVerb::Print,
+            "the verb the window was asked about must be the one that was sent"
         );
     }
 
