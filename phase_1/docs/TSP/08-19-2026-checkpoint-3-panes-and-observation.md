@@ -646,12 +646,16 @@ printed a plain explanation and exited 3.
   matches only prose. Provenance holds: the Ghostty submodule is at the pinned
   commit, offline metadata resolves, `xterm-ghostty` is installed, both licences
   are present, and the whole locked offline gate passes.
-- [ ] **OUTSTANDING — Security review**, separately from general review,
+- [x] **Security review performed, 2026-09-05**, separately from general review,
   covering key handling, scope enforcement, the deadline, and the exclusion
-  list. Prepared, not performed:
-  [checkpoint-3-security-review-request.md](../review/checkpoint-3-security-review-request.md)
-  sets out each area, what it is meant to guarantee, and where to push hardest.
-  A review by the author of the code is not a review.
+  list: [checkpoint-3-security-review.md](../review/checkpoint-3-security-review.md),
+  against the brief in
+  [checkpoint-3-security-review-request.md](../review/checkpoint-3-security-review-request.md).
+  Verdict: the ADR 0013 model is implemented as described and the window
+  boundary is structural. Three findings, none of them a boundary defect — the
+  socket-path guard that makes macOS CI red (F1), a captured key living for the
+  window's life with no rotation (F2), and a `Drop` wipe that defends less than
+  it appears to (F3). A code review, not a penetration test; no fuzzing was run.
 
 **Configuration is a slice, not the subsystem.** What exists is the one setting
 this checkpoint owns, read once when a window opens, with defaults surviving an
