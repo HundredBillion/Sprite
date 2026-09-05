@@ -830,6 +830,19 @@ fn strip_leading(boundary: f32) -> f32 {
     boundary - (DIVIDER_GRAB_PX + DIVIDER_PX) / 2.0
 }
 
+/// The pointer's position along the axis a boundary of this orientation moves
+/// on.
+///
+/// A left-right boundary follows x and an up-down one follows y. Both the press
+/// and the moves that follow it ask here rather than each re-deriving it: the
+/// swapped pair reads perfectly plausibly and would be wrong everywhere.
+fn along_axis(orientation: Orientation, position: gpui::Point<Pixels>) -> f32 {
+    match orientation {
+        Orientation::Horizontal => f32::from(position.x),
+        Orientation::Vertical => f32::from(position.y),
+    }
+}
+
 /// One divider's geometry in window pixels, ready to draw and to drag.
 ///
 /// Everything is in window coordinates rather than the pane container's,
@@ -850,6 +863,12 @@ struct DividerPlacement {
     across: f32,
     /// How long the strip is across that axis.
     span: f32,
+}
+
+impl DividerPlacement {
+    fn along(&self, position: gpui::Point<Pixels>) -> f32 {
+        along_axis(self.orientation, position)
+    }
 }
 
 /// Turns each boundary's normalised area into the pixels it occupies.
@@ -941,10 +960,7 @@ impl DividerDrag {
 
     /// The pointer's position along the axis this drag moves on.
     fn along(&self, position: gpui::Point<Pixels>) -> f32 {
-        match self.orientation {
-            Orientation::Horizontal => f32::from(position.x),
-            Orientation::Vertical => f32::from(position.y),
-        }
+        along_axis(self.orientation, position)
     }
 }
 
@@ -1114,12 +1130,11 @@ impl Render for Workspace {
                                     workspace.reset_divider(placed.pane, placed.direction, cx);
                                     return;
                                 }
-                                let pointer = if horizontal {
-                                    f32::from(event.position.x)
-                                } else {
-                                    f32::from(event.position.y)
-                                };
-                                workspace.begin_divider_drag(placed, pointer, cx);
+                                workspace.begin_divider_drag(
+                                    placed,
+                                    placed.along(event.position),
+                                    cx,
+                                );
                             },
                         ),
                     )
@@ -1719,5 +1734,36 @@ mod tests {
         let upright = drag(Orientation::Vertical, Direction::Down);
         assert!((upright.along(pointer) - 450.0).abs() < 1e-4);
         assert_eq!(upright.cursor(), CursorStyle::ResizeUpDown);
+    }
+
+    /// The press reads the same axis the drag then follows. The two probe
+    /// coordinates differ so a transposition cannot pass by landing on a
+    /// number that happens to be right for both axes.
+    #[test]
+    fn a_placement_reads_the_axis_its_own_orientation_moves_on() {
+        let place = |orientation, direction| {
+            divider_placements(
+                &[crate::pane_tree::Divider {
+                    pane: PaneId(0),
+                    direction,
+                    orientation,
+                    ratio: 0.5,
+                    area: crate::pane_tree::Rect::FULL,
+                }],
+                800.0,
+                600.0,
+                0.0,
+            )[0]
+        };
+        let pointer = gpui::Point {
+            x: gpui::px(120.0),
+            y: gpui::px(450.0),
+        };
+
+        let sideways = place(Orientation::Horizontal, Direction::Right);
+        assert!((sideways.along(pointer) - 120.0).abs() < 1e-4);
+
+        let upright = place(Orientation::Vertical, Direction::Down);
+        assert!((upright.along(pointer) - 450.0).abs() < 1e-4);
     }
 }
