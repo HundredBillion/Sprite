@@ -7,7 +7,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    Context, FocusHandle, Focusable, KeyDownEvent, Pixels, SharedString, Size, Window, div, px, rgb,
+    Context, CursorStyle, FocusHandle, Focusable, KeyDownEvent, Pixels, SharedString, Size, Window,
+    div, px, rgb,
 };
 use sprite_term::ShutdownHandle;
 
@@ -773,6 +774,70 @@ fn divider_ratio(origin: f32, extent: f32, pointer: f32, floor: f32) -> f32 {
     ((pointer - origin) / extent).clamp(low, 1.0 - low)
 }
 
+/// One divider's geometry in window pixels, ready to draw and to drag.
+///
+/// Everything is in window coordinates rather than the pane container's,
+/// because a pointer event arrives in window coordinates and a drag has to
+/// compare the two without remembering how tall the tab strip was.
+#[derive(Clone, Copy, Debug)]
+struct DividerPlacement {
+    pane: PaneId,
+    direction: Direction,
+    orientation: Orientation,
+    /// The split's start along the axis the boundary moves on.
+    origin: f32,
+    /// The split's size along that axis.
+    extent: f32,
+    /// Where the line itself sits along that axis.
+    boundary: f32,
+    /// The strip's start across the other axis.
+    across: f32,
+    /// How long the strip is across that axis.
+    span: f32,
+}
+
+/// Turns each boundary's normalised area into the pixels it occupies.
+///
+/// `width` and `height` are the pane container's, and `strip` is how tall the
+/// tab strip above it is — added back here so the answer is in window space.
+fn divider_placements(
+    dividers: &[crate::pane_tree::Divider],
+    width: f32,
+    height: f32,
+    strip: f32,
+) -> Vec<DividerPlacement> {
+    dividers
+        .iter()
+        .map(|divider| {
+            let area = divider.area;
+            let (origin, extent, across, span) = match divider.orientation {
+                Orientation::Horizontal => (
+                    area.x * width,
+                    area.width * width,
+                    strip + area.y * height,
+                    area.height * height,
+                ),
+                Orientation::Vertical => (
+                    strip + area.y * height,
+                    area.height * height,
+                    area.x * width,
+                    area.width * width,
+                ),
+            };
+            DividerPlacement {
+                pane: divider.pane,
+                direction: divider.direction,
+                orientation: divider.orientation,
+                origin,
+                extent,
+                boundary: origin + extent * divider.ratio,
+                across,
+                span,
+            }
+        })
+        .collect()
+}
+
 impl Focusable for Workspace {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -870,6 +935,62 @@ impl Render for Workspace {
             })
             .collect();
 
+        // Each pane is drawn a pixel short on its far edge, so the gap a
+        // boundary shows through sits just before it. The strip is centred on
+        // that gap, which puts the target where the eye already is.
+        let dividers = divider_placements(&self.tabs.dividers(), width, height, strip);
+        let divider_children: Vec<gpui::Div> = dividers
+            .iter()
+            .enumerate()
+            .map(|(index, placed)| {
+                // A group per divider, so the line can answer its own strip
+                // being hovered without the workspace keeping any state.
+                let group: SharedString = format!("divider-{index}").into();
+                let horizontal = placed.orientation == Orientation::Horizontal;
+                let leading = placed.boundary - (DIVIDER_GRAB_PX + DIVIDER_PX) / 2.0;
+                // The container is a flex child below the tab strip, so a
+                // window coordinate down the window has to lose that height
+                // before it means anything to an absolutely placed child.
+                let (element, line) = if horizontal {
+                    (
+                        div()
+                            .left(px(leading))
+                            .top(px(placed.across - strip))
+                            .w(px(DIVIDER_GRAB_PX))
+                            .h(px(placed.span)),
+                        div().w(px(DIVIDER_PX)).h_full(),
+                    )
+                } else {
+                    (
+                        div()
+                            .left(px(placed.across))
+                            .top(px(leading - strip))
+                            .w(px(placed.span))
+                            .h(px(DIVIDER_GRAB_PX)),
+                        div().w_full().h(px(DIVIDER_PX)),
+                    )
+                };
+                element
+                    .absolute()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .group(group.clone())
+                    // The strip answers the pointer rather than the pane under
+                    // it: a gesture on a divider is not a gesture in a pane.
+                    .occlude()
+                    .cursor(if horizontal {
+                        CursorStyle::ResizeLeftRight
+                    } else {
+                        CursorStyle::ResizeUpDown
+                    })
+                    .child(
+                        line.bg(rgb(DIVIDER))
+                            .group_hover(group, |style| style.bg(rgb(DIVIDER_HOVER))),
+                    )
+            })
+            .collect();
+
         let tab_children: Vec<gpui::Div> = tab_order
             .into_iter()
             .enumerate()
@@ -904,7 +1025,9 @@ impl Render for Workspace {
             .w_full()
             .h(px(height))
             .bg(rgb(DIVIDER))
-            .children(pane_children);
+            .children(pane_children)
+            // After the panes, so a strip is never buried by one.
+            .children(divider_children);
 
         div()
             .flex()
@@ -996,8 +1119,8 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, DIVIDER_FLOOR_PX, Direction, WorkspaceAction, classify, describe_running,
-        divider_ratio, workspace_action,
+        CloseScope, DIVIDER_FLOOR_PX, Direction, Orientation, PaneId, WorkspaceAction, classify,
+        describe_running, divider_placements, divider_ratio, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1258,5 +1381,69 @@ mod tests {
     #[test]
     fn the_floor_is_the_one_the_product_promises() {
         assert!((DIVIDER_FLOOR_PX - 120.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_horizontal_split_places_its_strip_down_the_middle() {
+        let divider = crate::pane_tree::Divider {
+            pane: PaneId(0),
+            direction: Direction::Right,
+            orientation: Orientation::Horizontal,
+            ratio: 0.5,
+            area: crate::pane_tree::Rect::FULL,
+        };
+        let placed = divider_placements(&[divider], 800.0, 600.0, 28.0);
+
+        assert_eq!(placed.len(), 1);
+        let placed = placed[0];
+        assert!((placed.boundary - 400.0).abs() < 1e-4, "half of 800");
+        assert!((placed.origin - 0.0).abs() < 1e-4);
+        assert!((placed.extent - 800.0).abs() < 1e-4);
+        // Down the full height of the panes area, which starts below the strip.
+        assert!((placed.across - 28.0).abs() < 1e-4);
+        assert!((placed.span - 600.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_vertical_split_measures_from_below_the_tab_strip() {
+        let divider = crate::pane_tree::Divider {
+            pane: PaneId(0),
+            direction: Direction::Down,
+            orientation: Orientation::Vertical,
+            ratio: 0.25,
+            area: crate::pane_tree::Rect::FULL,
+        };
+        let placed = divider_placements(&[divider], 800.0, 600.0, 28.0);
+
+        let placed = placed[0];
+        // The pointer arrives in window coordinates, so everything a drag
+        // compares it against is in window coordinates too.
+        assert!((placed.origin - 28.0).abs() < 1e-4);
+        assert!((placed.extent - 600.0).abs() < 1e-4);
+        assert!((placed.boundary - (28.0 + 150.0)).abs() < 1e-4);
+        assert!((placed.across - 0.0).abs() < 1e-4);
+        assert!((placed.span - 800.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_nested_split_is_placed_inside_its_own_area_only() {
+        let divider = crate::pane_tree::Divider {
+            pane: PaneId(0),
+            direction: Direction::Right,
+            orientation: Orientation::Horizontal,
+            ratio: 0.5,
+            area: crate::pane_tree::Rect {
+                x: 0.5,
+                y: 0.0,
+                width: 0.5,
+                height: 1.0,
+            },
+        };
+        let placed = divider_placements(&[divider], 800.0, 600.0, 0.0);
+
+        let placed = placed[0];
+        assert!((placed.origin - 400.0).abs() < 1e-4);
+        assert!((placed.extent - 400.0).abs() < 1e-4);
+        assert!((placed.boundary - 600.0).abs() < 1e-4);
     }
 }
