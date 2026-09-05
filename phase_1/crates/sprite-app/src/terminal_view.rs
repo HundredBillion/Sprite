@@ -16,8 +16,8 @@ use gpui::{
     UTF16Selection, Window, canvas, div, img, point, px, rgb,
 };
 use sprite_term::{
-    CellPosition, KeyAction, MouseAction, MouseEvent, Rgb, Scroll, SelectionMode, SessionConfig,
-    ShutdownHandle, SnapshotBundle, TerminalCommand, TerminalSession, TerminalSize,
+    CellPosition, KeyAction, MouseAction, MouseEvent, Rgb, SelectionMode, SessionConfig,
+    ShutdownHandle, SnapshotBundle, TerminalCommand, TerminalSession, TerminalSize, WheelEvent,
 };
 
 use crate::grid::{
@@ -1148,9 +1148,24 @@ impl Render for TerminalView {
                     ScrollDelta::Lines(delta) => delta.y * f32::from(view.cell_height),
                 };
                 let rows = view.scroll.accumulate(pixels, view.cell_height);
-                if rows != 0 {
-                    view.send(TerminalCommand::Scroll(Scroll::Delta(rows)));
+                if rows == 0 {
+                    return;
                 }
+                // Sent as a wheel turn rather than a viewport move: a
+                // full-screen child has no scrollback to move over, and only
+                // Terminal Core knows whether this belongs to the child. A
+                // position outside the grid still scrolls, at the nearest edge
+                // cell, which is what the padding does for a click.
+                let position = view
+                    .cell_under(event.position)
+                    .unwrap_or(CellPosition { row: 0, column: 0 });
+                view.send(TerminalCommand::Wheel(WheelEvent {
+                    rows,
+                    position,
+                    shift: event.modifiers.shift,
+                    alt: event.modifiers.alt,
+                    control: event.modifiers.control,
+                }));
             }))
             .on_key_up(cx.listener(|view, event: &KeyUpEvent, _window, _cx| {
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);
