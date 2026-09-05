@@ -1374,8 +1374,9 @@ impl Render for Workspace {
                         .cursor(drag.cursor())
                         .on_mouse_move(cx.listener(
                             |workspace, event: &gpui::MouseMoveEvent, _window, cx| {
-                                // A move with no button held means the release
-                                // happened somewhere this window never saw.
+                                // A move with the left button no longer held
+                                // means the release happened somewhere this
+                                // window never saw.
                                 if event.dragging() {
                                     workspace.drag_divider(event.position, cx);
                                 } else {
