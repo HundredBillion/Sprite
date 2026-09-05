@@ -460,6 +460,57 @@ impl Workspace {
         }
     }
 
+    /// Moves the focused pane's boundary on one side by a step.
+    ///
+    /// A pane with no boundary there — one already against the edge of its tab
+    /// — does nothing. Growing it by moving the *opposite* boundary would make
+    /// one key mean two different motions depending on where the pane sits.
+    fn nudge_divider(&mut self, direction: Direction, window: &Window, cx: &mut Context<Self>) {
+        let focused = self.tabs.active().focus();
+        let Some(divider) = self.tabs.divider(focused, direction) else {
+            return;
+        };
+
+        let (width, height, _) = self.pane_area(window);
+        let extent = match divider.orientation {
+            Orientation::Horizontal => divider.area.width * width,
+            Orientation::Vertical => divider.area.height * height,
+        };
+        // Left and up always move the boundary towards its split's origin;
+        // right and down away from it.
+        let step = match direction {
+            Direction::Left | Direction::Up => -DIVIDER_NUDGE_PX,
+            Direction::Right | Direction::Down => DIVIDER_NUDGE_PX,
+        };
+        // Expressed as a pointer position within the split, so the keyboard
+        // goes through the same clamp the mouse does and the two cannot
+        // disagree about where the floor is.
+        let ratio = divider_ratio(0.0, extent, divider.ratio * extent + step, DIVIDER_FLOOR_PX);
+        if self.tabs.set_divider_ratio(focused, direction, ratio) {
+            cx.notify();
+        }
+    }
+
+    /// The pane container's width and height in pixels, and the height the tab
+    /// strip took above it.
+    ///
+    /// Asked here by both the layout and the keyboard, so a nudge is measured
+    /// against the same space the boundary was drawn in.
+    fn pane_area(&self, window: &Window) -> (f32, f32, f32) {
+        let viewport: Size<Pixels> = window.viewport_size();
+        // A tab strip is only worth its height when there is more than one tab.
+        let strip = if self.tabs.len() > 1 {
+            TAB_STRIP_HEIGHT
+        } else {
+            0.0
+        };
+        (
+            f32::from(viewport.width),
+            (f32::from(viewport.height) - strip).max(1.0),
+            strip,
+        )
+    }
+
     fn switch_tab(&mut self, forwards: bool, cx: &mut Context<Self>) {
         if forwards {
             self.tabs.next_tab();
@@ -766,11 +817,12 @@ enum WorkspaceAction {
     NextTab,
     PreviousTab,
     Focus(Direction),
+    Resize(Direction),
 }
 
 fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
     let modifiers = &keystroke.modifiers;
-    if !modifiers.control || modifiers.alt || modifiers.platform {
+    if !modifiers.control || modifiers.platform {
         return None;
     }
     let key = keystroke.key.as_str();
@@ -779,6 +831,18 @@ fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
     // which is what a program that binds it expects.
     if !(modifiers.shift || matches!(key, "_" | "+" | ")")) {
         return None;
+    }
+    // Alt belongs to the child, with one exception: the arrows move a boundary.
+    // Carving out four keystrokes costs the child nothing a program is likely
+    // to want, and resizing without a mouse has to be spelled somehow.
+    if modifiers.alt {
+        return match key {
+            "left" => Some(WorkspaceAction::Resize(Direction::Left)),
+            "right" => Some(WorkspaceAction::Resize(Direction::Right)),
+            "up" => Some(WorkspaceAction::Resize(Direction::Up)),
+            "down" => Some(WorkspaceAction::Resize(Direction::Down)),
+            _ => None,
+        };
     }
     match key {
         "d" => Some(WorkspaceAction::SplitRight),
@@ -972,15 +1036,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let viewport: Size<Pixels> = window.viewport_size();
-        let width = f32::from(viewport.width);
-        // A tab strip is only worth its height when there is more than one tab.
-        let strip = if self.tabs.len() > 1 {
-            TAB_STRIP_HEIGHT
-        } else {
-            0.0
-        };
-        let height = (f32::from(viewport.height) - strip).max(1.0);
+        let (width, height, strip) = self.pane_area(window);
         let focused = self.tabs.active().focus();
         let active_tab = self.tabs.active_tab();
         let tab_order = self.tabs.order();
@@ -1245,6 +1301,9 @@ impl Render for Workspace {
                     WorkspaceAction::Focus(direction) => {
                         workspace.focus_direction(direction, cx);
                     }
+                    WorkspaceAction::Resize(direction) => {
+                        workspace.nudge_divider(direction, window, cx);
+                    }
                 }
             }))
             .children(self.pending_close.as_ref().map(|pending| {
@@ -1316,8 +1375,8 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction,
-        DividerDrag, Orientation, PaneId, WorkspaceAction, classify, describe_running,
+        CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_NUDGE_PX, DIVIDER_PX,
+        Direction, DividerDrag, Orientation, PaneId, WorkspaceAction, classify, describe_running,
         divider_placements, divider_ratio, strip_leading, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
@@ -1529,6 +1588,70 @@ mod tests {
             Some(WorkspaceAction::NextTab)
         );
         assert_eq!(workspace_action(&press("f5", ctrl_shift())), None);
+    }
+
+    #[test]
+    fn ctrl_shift_alt_arrows_resize() {
+        let modifiers = Modifiers {
+            control: true,
+            shift: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            workspace_action(&press("left", modifiers)),
+            Some(WorkspaceAction::Resize(Direction::Left))
+        );
+        assert_eq!(
+            workspace_action(&press("down", modifiers)),
+            Some(WorkspaceAction::Resize(Direction::Down))
+        );
+    }
+
+    /// Alt still belongs to the child everywhere else, so a program that binds
+    /// an alt key keeps it.
+    #[test]
+    fn alt_disqualifies_every_binding_but_the_arrows() {
+        let modifiers = Modifiers {
+            control: true,
+            shift: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        for key in ["d", "e", "w", "t", "q", "=", "-", "0", "pageup", "pagedown"] {
+            assert_eq!(workspace_action(&press(key, modifiers)), None, "{key}");
+        }
+    }
+
+    /// Without alt the arrows still move focus rather than a boundary.
+    #[test]
+    fn arrows_without_alt_still_move_focus() {
+        assert_eq!(
+            workspace_action(&press("left", ctrl_shift())),
+            Some(WorkspaceAction::Focus(Direction::Left))
+        );
+    }
+
+    /// One nudge is 20 px of the split it moves, through the same clamp the
+    /// mouse uses — so the two cannot disagree about where the floor is.
+    #[test]
+    fn a_nudge_moves_one_step_and_stops_at_the_floor() {
+        let extent = 800.0;
+        let stepped = divider_ratio(
+            0.0,
+            extent,
+            0.5 * extent + DIVIDER_NUDGE_PX,
+            DIVIDER_FLOOR_PX,
+        );
+        assert!((stepped - ((400.0 + 20.0) / 800.0)).abs() < 1e-6);
+
+        let floored = divider_ratio(
+            0.0,
+            extent,
+            DIVIDER_FLOOR_PX * 0.5 - DIVIDER_NUDGE_PX,
+            DIVIDER_FLOOR_PX,
+        );
+        assert!((floored - (DIVIDER_FLOOR_PX / extent)).abs() < 1e-6);
     }
 
     #[test]
