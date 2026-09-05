@@ -10,7 +10,7 @@
 //! schema exposes tab and pane IDs and a window holds many tabs.
 
 use crate::pane_registry::PaneRegistry;
-use crate::pane_tree::{Direction, Orientation, PaneId, PaneIds, Rect};
+use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneIds, Rect};
 
 /// One tab within a window. Never reused once its tab has closed.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -170,6 +170,22 @@ impl<T> Tabs<T> {
     /// tab is laid out: the others are running, not shown.
     pub fn layout(&self) -> Vec<(PaneId, Rect, &T)> {
         self.active().layout()
+    }
+
+    /// The active tab's boundaries. Only the active tab is laid out, so only
+    /// its boundaries can be grabbed.
+    pub fn dividers(&self) -> Vec<Divider> {
+        self.active().dividers()
+    }
+
+    pub fn divider(&self, pane: PaneId, direction: Direction) -> Option<Divider> {
+        self.active().divider(pane, direction)
+    }
+
+    pub fn set_divider_ratio(&mut self, pane: PaneId, direction: Direction, ratio: f32) -> bool {
+        self.tabs[self.active]
+            .1
+            .set_divider_ratio(pane, direction, ratio)
     }
 
     /// Every pane in the window, tabs in window order.
@@ -446,6 +462,35 @@ mod tests {
             3,
             "but every session is still there"
         );
+    }
+
+    #[test]
+    fn dividers_belong_to_the_active_tab() {
+        let mut tabs = Tabs::new(|_, pane| pane);
+        tabs.split(Orientation::Horizontal, |_, pane| pane);
+        assert_eq!(tabs.dividers().len(), 1);
+
+        // A second tab starts with one pane, so it has no boundary at all.
+        tabs.open(|_, pane| pane);
+        assert!(tabs.dividers().is_empty());
+        assert!(!tabs.set_divider_ratio(PaneId(0), Direction::Right, 0.3));
+    }
+
+    #[test]
+    fn a_boundary_moves_only_in_the_tab_that_owns_it() {
+        let mut tabs = Tabs::new(|_, pane| pane);
+        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane);
+        let first_tab = tabs.active_tab();
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.25));
+
+        tabs.open(|_, pane| pane);
+        assert!(tabs.dividers().is_empty());
+
+        assert!(tabs.focus_tab(first_tab));
+        let divider = tabs
+            .divider(split_pane, Direction::Left)
+            .expect("the first tab still has its boundary");
+        assert!((divider.ratio - 0.25).abs() < 1e-6);
     }
 
     #[test]
