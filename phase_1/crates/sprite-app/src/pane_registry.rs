@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::pane_tree::{Direction, Orientation, PaneId, PaneTree, Rect};
+use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneTree, Rect};
 
 /// One tab: a split tree, plus whatever each pane owns.
 pub struct PaneRegistry<T> {
@@ -105,6 +105,21 @@ impl<T> PaneRegistry<T> {
             .into_iter()
             .filter_map(|(pane, rect)| self.contents.get(&pane).map(|item| (pane, rect, item)))
             .collect()
+    }
+
+    /// Every boundary in this tab, for a caller that draws them.
+    pub fn dividers(&self) -> Vec<Divider> {
+        self.tree.dividers()
+    }
+
+    pub fn divider(&self, pane: PaneId, direction: Direction) -> Option<Divider> {
+        self.tree.divider(pane, direction)
+    }
+
+    /// Moves a boundary. Contents are untouched: a share of space is not a
+    /// session.
+    pub fn set_divider_ratio(&mut self, pane: PaneId, direction: Direction, ratio: f32) -> bool {
+        self.tree.set_divider_ratio(pane, direction, ratio)
     }
 
     pub fn focus_direction(&mut self, direction: Direction) -> Option<PaneId> {
@@ -300,6 +315,27 @@ mod tests {
             .map(|(_, rect, _)| rect.width * rect.height)
             .sum();
         assert!((area - 1.0).abs() < 1e-5, "panes tile the tab: {area}");
+    }
+
+    #[test]
+    fn moving_a_boundary_ends_no_session() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut registry = PaneRegistry::new(ids.allocate(), spy("first", &log));
+        let second = registry.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        });
+
+        assert_eq!(registry.dividers().len(), 1);
+        assert!(registry.set_divider_ratio(PaneId(0), Direction::Right, 0.8));
+
+        assert!(log.borrow().is_empty(), "nothing has been shut down");
+        assert_eq!(registry.len(), 2);
+        assert_eq!(
+            registry.focus(),
+            second,
+            "focus is not the layout's to move"
+        );
     }
 
     #[test]
