@@ -195,10 +195,11 @@
               <span class="band text-emerald-700">pure · normalised · fully testable</span>
             </div>
             <div class="px-5 py-4 space-y-3 text-[15px]">
-              <p class="text-slate-700">Two operations, no pixels, no GPUI:</p>
+              <p class="text-slate-700">Three operations, no pixels, no GPUI:</p>
               <ul class="space-y-2 font-mono text-sm">
                 <li class="pl-4 border-l-2 border-emerald-400">dividers() → Vec&lt;Divider&gt;<span class="font-sans text-slate-600 text-[13px] block pt-1">one per split: naming pane, direction, orientation, current ratio, the split's own area. Ratio and area both, because the area converts pixels to a ratio and the ratio seeds a drag from where it was grabbed.</span></li>
-                <li class="pl-4 border-l-2 border-emerald-400">set_divider_ratio(pane, direction, ratio) → bool<span class="font-sans text-slate-600 text-[13px] block pt-1">resolves by the rule above; reports whether a divider was found.</span></li>
+                <li class="pl-4 border-l-2 border-emerald-400">divider(pane, direction) → Option&lt;Divider&gt;<span class="font-sans text-slate-600 text-[13px] block pt-1">resolves an address and reports the boundary it names. Its own operation because the keyboard nudge reads a boundary before moving it, and enumeration cannot answer for it — enumeration names a boundary by the last leaf of its first subtree, not by the focused pane.</span></li>
+                <li class="pl-4 border-l-2 border-emerald-400">set_divider_ratio(pane, direction, ratio) → bool<span class="font-sans text-slate-600 text-[13px] block pt-1">resolves the same way; reports whether a divider was found.</span></li>
               </ul>
               <p class="text-slate-600 text-sm">Neither touches pane identity, focus, or session ownership — the property Phase 1 already states about resize, and one the tree's tests already know how to assert.</p>
             </div>

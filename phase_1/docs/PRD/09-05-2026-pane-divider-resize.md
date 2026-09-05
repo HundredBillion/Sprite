@@ -110,15 +110,22 @@ subtree** — B, in that example. The walk up from the last leaf skips every
 intermediate split of matching orientation, because the last leaf is by
 construction in each of their `second` children.
 
-### `PaneTree` gains exactly two operations
+### `PaneTree` gains three operations
 
 - `dividers() -> Vec<Divider>`, one entry per split node, each carrying the
   naming pane, the direction, the orientation, the current ratio, and the
   split's own normalised area. Ratio and area are both needed: the area
   converts pixels to a ratio, and the ratio seeds a drag so that the divider
   tracks the pointer from where it was grabbed.
-- `set_divider_ratio(pane, direction, ratio) -> bool`, which resolves by the
-  rule above and reports whether a divider was found.
+- `divider(pane, direction) -> Option<Divider>`, which resolves an address and
+  reports the boundary it names.
+- `set_divider_ratio(pane, direction, ratio) -> bool`, which resolves the same
+  way and reports whether a divider was found.
+
+Resolution is its own operation because the keyboard nudge has to read a
+boundary before it moves one, and enumeration cannot answer for it: enumeration
+names each boundary by the last leaf of its `first` subtree, which is not the
+focused pane.
 
 Both are pure. Neither touches pane identity, focus, or session ownership,
 which is the property Phase 1 already states about resize and which the tree's
