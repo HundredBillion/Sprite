@@ -58,6 +58,7 @@ use gpui::{
 };
 use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor};
 
+use crate::block_elements::{block_fill, fill_rects};
 use crate::grid::PositionedCell;
 
 /// How thick a bar or underline cursor is drawn, as a fraction of a cell.
@@ -271,11 +272,31 @@ impl GridPaint {
 ///
 /// Two edges snapped this way are either the same edge or a whole pixel apart,
 /// which is what lets neighbouring quads tile without a seam.
-fn snap(value: Pixels, scale: f32) -> Pixels {
+pub(crate) fn snap(value: Pixels, scale: f32) -> Pixels {
     if !scale.is_finite() || scale <= 0.0 {
         return value;
     }
     px((f32::from(value) * scale).round() / scale)
+}
+
+/// Snaps one edge-to-edge span to the device grid, without letting a span the
+/// terminal asked for round away to nothing.
+///
+/// The endpoints a block fill is placed against are already snapped, so
+/// snapping them again changes nothing and the tiling holds. What this adds is
+/// the floor: an eighth of a small cell can be half a device pixel, and both
+/// its edges would otherwise land on the same one.
+fn snapped_span(start: f32, end: f32, scale: f32) -> (Pixels, Pixels) {
+    let (left, right) = (snap(px(start), scale), snap(px(end), scale));
+    if right > left || end <= start {
+        return (left, right);
+    }
+    let device_pixel = if scale.is_finite() && scale > 0.0 {
+        1.0 / scale
+    } else {
+        1.0
+    };
+    (left, px(f32::from(left) + device_pixel))
 }
 
 /// One stretch of cells sharing a background colour.
@@ -438,7 +459,7 @@ impl Element for GridPaint {
                     top,
                     bottom,
                 };
-                self.paint_glyph(cell, drawn, bounds, window, cx);
+                self.paint_glyph(cell, drawn, bounds, scale, window, cx);
                 self.paint_cursor(drawn, bounds, scale, window);
             }
         }
@@ -453,12 +474,21 @@ impl GridPaint {
         cell: &PositionedCell,
         drawn: &Drawn,
         bounds: CellBounds,
+        scale: f32,
         window: &mut Window,
         cx: &mut App,
     ) {
         // A cell holding nothing but blanks has no ink, and shaping one costs
         // the same as shaping a letter. Most of a terminal is blank.
         if cell.text.is_empty() || cell.text.chars().all(char::is_whitespace) {
+            return;
+        }
+
+        // A block element is drawn as geometry against the cell's own snapped
+        // edges, never shaped: a glyph's ink is as wide as the font's advance,
+        // which is not the snapped cell width, so a run of shaped blocks is
+        // beaded with seams. See `block_elements`.
+        if self.paint_block(cell, drawn, bounds, scale, window) {
             return;
         }
 
@@ -509,6 +539,49 @@ impl GridPaint {
         window.with_content_mask(Some(mask), |window| {
             let _ = line.paint(origin, self.cell_height, window, cx);
         });
+    }
+
+    /// Fills a Block Elements character as rectangles, returning whether it
+    /// drew: anything outside that range is still the font's to draw.
+    fn paint_block(
+        &self,
+        cell: &PositionedCell,
+        drawn: &Drawn,
+        bounds: CellBounds,
+        scale: f32,
+        window: &mut Window,
+    ) -> bool {
+        let mut chars = cell.text.chars();
+        // A cell carrying a combining mark on top of a block is left to the
+        // font, which is the only half of the pair that can place the mark.
+        let (Some(ch), None) = (chars.next(), chars.next()) else {
+            return false;
+        };
+        let Some(shape) = block_fill(ch) else {
+            return false;
+        };
+
+        // The shades are a proportion of ink rather than a smaller area of it,
+        // so coverage rides on the alpha channel of the cell's own foreground.
+        let color = Rgba {
+            a: drawn.foreground.a * shape.alpha,
+            ..drawn.foreground
+        };
+        for (left, top, right, bottom) in fill_rects(
+            &shape,
+            f32::from(bounds.left),
+            f32::from(bounds.top),
+            f32::from(bounds.right),
+            f32::from(bounds.bottom),
+        ) {
+            let (left, right) = snapped_span(left, right, scale);
+            let (top, bottom) = snapped_span(top, bottom, scale);
+            window.paint_quad(fill(
+                Bounds::from_corners(point(left, top), point(right, bottom)),
+                color,
+            ));
+        }
+        true
     }
 
     /// Draws the mark a non-block cursor leaves on the cell it sits on.
@@ -629,6 +702,25 @@ mod tests {
     fn a_degenerate_scale_leaves_coordinates_alone() {
         assert_eq!(snap(px(10.3), 0.0), px(10.3));
         assert_eq!(snap(px(10.3), f32::NAN), px(10.3));
+    }
+
+    /// One eighth of a small cell is thinner than a device pixel, and snapping
+    /// both its edges to the same pixel would erase it. A block the terminal
+    /// asked for has to leave a mark, so the thinnest one is a single pixel
+    /// rather than nothing.
+    #[test]
+    fn a_block_thinner_than_a_device_pixel_still_leaves_a_mark() {
+        // An eighth of a 4px cell: 0.5 device pixels at scale 2.
+        let (left, right) = snapped_span(10.0, 10.25, 2.0);
+        assert!(right > left, "the block was snapped out of existence");
+        assert_eq!(right, px(10.5), "a vanishing block should take one pixel");
+    }
+
+    /// An empty span is empty on purpose and must not be inflated into a mark.
+    #[test]
+    fn an_empty_span_stays_empty() {
+        let (left, right) = snapped_span(10.0, 10.0, 2.0);
+        assert_eq!(left, right);
     }
 
     /// A style with no colour of its own and a cell style carrying every other
