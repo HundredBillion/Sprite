@@ -750,9 +750,10 @@ Add to `mod tests` in `crates/sprite-app/src/workspace.rs` (extend the existing
 
     #[test]
     fn a_pointer_is_measured_from_the_splits_own_origin() {
-        // A nested split starting 100 px in: the pointer at 200 is a quarter
-        // of the way across it, not halfway across the window.
-        assert!((divider_ratio(100.0, 400.0, 200.0, 120.0) - 0.25).abs() < 1e-6);
+        // A nested split starting 100 px in: the pointer at 260 is two fifths
+        // of the way across it. Measured against the window instead it would
+        // read as 0.65, so this fails if the origin is ignored.
+        assert!((divider_ratio(100.0, 400.0, 260.0, 120.0) - 0.4).abs() < 1e-6);
     }
 
     #[test]
@@ -769,7 +770,10 @@ Add to `mod tests` in `crates/sprite-app/src/workspace.rs` (extend the existing
     fn a_boundary_pushed_past_the_floor_comes_straight_back() {
         let floor = 120.0;
         assert!((divider_ratio(0.0, 400.0, -500.0, floor) - 0.3).abs() < 1e-6);
-        assert!((divider_ratio(0.0, 400.0, 300.0, floor) - 0.75).abs() < 1e-6);
+        // Back inside the legal range, the boundary is under the pointer again.
+        // An implementation that accumulated the overshoot would answer with
+        // the 500 px it was shoved by still subtracted.
+        assert!((divider_ratio(0.0, 400.0, 240.0, floor) - 0.6).abs() < 1e-6);
     }
 
     #[test]
@@ -1100,7 +1104,7 @@ Then add them to the container, after the panes so they sit on top
 Run: `cargo build --release -p sprite-app --locked --offline`
 Expected: builds clean.
 
-Run: `./target/release/sprite-app` (a running window keeps the old binary — this
+Run: `./target/release/sprite` (a running window keeps the old binary — this
 must be a new one). Split with `Ctrl+Shift+D`, then `Ctrl+Shift+E`. Confirm by
 hand: the pointer over a boundary shows a resize cursor matching the boundary's
 direction, the line brightens under the pointer and dims when the pointer
@@ -1392,7 +1396,7 @@ divider children, so it sits above everything while a drag is live:
 - [ ] **Step 8: Build and drag it**
 
 Run: `cargo build --release -p sprite-app --locked --offline`
-Then run a new window: `./target/release/sprite-app`
+Then run a new window: `./target/release/sprite`
 
 By hand, in a two-pane window:
 - Drag the boundary slowly: both panes follow, the line stays lit.
