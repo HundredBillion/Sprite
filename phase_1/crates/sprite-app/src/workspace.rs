@@ -774,6 +774,17 @@ fn divider_ratio(origin: f32, extent: f32, pointer: f32, floor: f32) -> f32 {
     ((pointer - origin) / extent).clamp(low, 1.0 - low)
 }
 
+/// Where a divider's grab strip starts along the axis the boundary moves on.
+///
+/// A pane is drawn a pixel short on its *far* edge, so a boundary at 400 leaves
+/// its visible gap at `[399, 400)` — centred on 399.5, not on 400. The strip
+/// has to centre on the gap rather than on the boundary, which costs it half a
+/// divider's width on top of half its own: that lands the flex-centred line
+/// exactly on the gap and reaches equally far into the pane on either side.
+fn strip_leading(boundary: f32) -> f32 {
+    boundary - (DIVIDER_GRAB_PX + DIVIDER_PX) / 2.0
+}
+
 /// One divider's geometry in window pixels, ready to draw and to drag.
 ///
 /// Everything is in window coordinates rather than the pane container's,
@@ -947,7 +958,7 @@ impl Render for Workspace {
                 // being hovered without the workspace keeping any state.
                 let group: SharedString = format!("divider-{index}").into();
                 let horizontal = placed.orientation == Orientation::Horizontal;
-                let leading = placed.boundary - (DIVIDER_GRAB_PX + DIVIDER_PX) / 2.0;
+                let leading = strip_leading(placed.boundary);
                 // The container is a flex child below the tab strip, so a
                 // window coordinate down the window has to lose that height
                 // before it means anything to an absolutely placed child.
@@ -1119,8 +1130,9 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, DIVIDER_FLOOR_PX, Direction, Orientation, PaneId, WorkspaceAction, classify,
-        describe_running, divider_placements, divider_ratio, workspace_action,
+        CloseScope, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction, Orientation, PaneId,
+        WorkspaceAction, classify, describe_running, divider_placements, divider_ratio,
+        strip_leading, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1445,5 +1457,19 @@ mod tests {
         assert!((placed.origin - 400.0).abs() < 1e-4);
         assert!((placed.extent - 400.0).abs() < 1e-4);
         assert!((placed.boundary - 600.0).abs() < 1e-4);
+    }
+
+    /// A pane is shortened on its far edge, so the gap a boundary shows through
+    /// sits just before the boundary rather than astride it.
+    #[test]
+    fn a_strip_centres_on_the_gap_rather_than_on_the_line() {
+        // A boundary at 400 leaves its gap at [399, 400), whose middle is
+        // 399.5 — so a seven-pixel strip starts at 396, not at 396.5.
+        let leading = strip_leading(400.0);
+        assert!((leading - 396.0).abs() < 1e-4);
+        // Which is what lands the flex-centred line exactly on the gap, and
+        // reaches the same three pixels into the pane on either side of it.
+        assert!((leading + (DIVIDER_GRAB_PX - DIVIDER_PX) / 2.0 - 399.0).abs() < 1e-4);
+        assert!((leading + DIVIDER_GRAB_PX - 403.0).abs() < 1e-4);
     }
 }
