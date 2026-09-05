@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "sample_count": 20,
+  "transmit_loop_storage_bytes": {
+    "after_30_images": 65536,
+    "after_60_images": 65536
+  },
+  "metrics": {
+    "transmit_to_placement": {
+      "unit": "ms",
+      "samples": 20,
+      "median": 3.533337,
+      "p95": 3.878196,
+      "max": 4.152014,
+      "budget": 4.266016
+    },
+    "transmit_to_placement_large": {
+      "unit": "ms",
+      "samples": 10,
+      "median": 15.369530,
+      "p95": 23.840760,
+      "max": 23.840760,
+      "budget": 26.224836
+    },
+    "text_capture_without_images": {
+      "unit": "ms",
+      "samples": 20,
+      "median": 0.155685,
+      "p95": 0.867553,
+      "max": 2.055978,
+      "budget": 0.954308
+    },
+    "text_capture_with_an_image": {
+      "unit": "ms",
+      "samples": 20,
+      "median": 0.201054,
+      "p95": 0.235797,
+      "max": 0.242894,
+      "budget": 0.259377
+    }
+  }
+}
