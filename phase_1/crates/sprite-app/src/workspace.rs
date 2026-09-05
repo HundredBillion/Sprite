@@ -1607,6 +1607,18 @@ mod tests {
             Some(WorkspaceAction::Focus(Direction::Left))
         );
         assert_eq!(
+            workspace_action(&press("right", ctrl_shift())),
+            Some(WorkspaceAction::Focus(Direction::Right))
+        );
+        assert_eq!(
+            workspace_action(&press("up", ctrl_shift())),
+            Some(WorkspaceAction::Focus(Direction::Up))
+        );
+        assert_eq!(
+            workspace_action(&press("down", ctrl_shift())),
+            Some(WorkspaceAction::Focus(Direction::Down))
+        );
+        assert_eq!(
             workspace_action(&press("pagedown", ctrl_shift())),
             Some(WorkspaceAction::NextTab)
         );
@@ -1624,6 +1636,14 @@ mod tests {
         assert_eq!(
             workspace_action(&press("left", modifiers)),
             Some(WorkspaceAction::Resize(Direction::Left))
+        );
+        assert_eq!(
+            workspace_action(&press("right", modifiers)),
+            Some(WorkspaceAction::Resize(Direction::Right))
+        );
+        assert_eq!(
+            workspace_action(&press("up", modifiers)),
+            Some(WorkspaceAction::Resize(Direction::Up))
         );
         assert_eq!(
             workspace_action(&press("down", modifiers)),
