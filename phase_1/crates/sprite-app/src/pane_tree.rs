@@ -32,6 +32,25 @@ pub enum Direction {
     Down,
 }
 
+/// One split's boundary, named by the pane on its low side.
+///
+/// `pane` is the last leaf of the split's `first` subtree and `direction` is the
+/// side of that pane the boundary sits on, so resolving this address walks back
+/// to the split that produced it. One name therefore serves both enumeration
+/// and movement, and a drag can hold it without the tree minting an identity
+/// for its interior nodes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Divider {
+    pub pane: PaneId,
+    pub direction: Direction,
+    pub orientation: Orientation,
+    /// The share of `area` given to the side before the boundary.
+    pub ratio: f32,
+    /// The rectangle this boundary divides — the split's own space, not the
+    /// tab's. A drag needs it to turn pixels into a ratio.
+    pub area: Rect,
+}
+
 /// A pane's normalised rectangle within its tab: every value in 0.0..=1.0.
 ///
 /// Normalised so a client learns left/right and above/below without being
@@ -97,6 +116,50 @@ impl Node {
             Self::Leaf(leaf) => *leaf == pane,
             Self::Split { first, second, .. } => first.contains(pane) || second.contains(pane),
         }
+    }
+
+    /// The last leaf along a split's axis: the rightmost of a horizontal
+    /// split's subtree, the lowest of a vertical one's.
+    ///
+    /// Always the `second` child, at every level. For a split of matching
+    /// orientation that is what makes the name resolve back here rather than to
+    /// a nearer boundary; for one of the other orientation both children touch
+    /// this boundary, so either would do.
+    fn last_leaf(&self) -> PaneId {
+        match self {
+            Self::Leaf(pane) => *pane,
+            Self::Split { second, .. } => second.last_leaf(),
+        }
+    }
+
+    fn collect_dividers(&self, area: Rect, into: &mut Vec<Divider>) {
+        let Self::Split {
+            orientation,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return;
+        };
+        let (a, b) = split_area(area, *orientation, *ratio);
+        into.push(Divider {
+            pane: first.last_leaf(),
+            direction: match orientation {
+                Orientation::Horizontal => Direction::Right,
+                Orientation::Vertical => Direction::Down,
+            },
+            orientation: *orientation,
+            // Reported as the layout uses it, so a caller that draws the
+            // boundary and a caller that moves it agree about where it is.
+            ratio: match orientation {
+                Orientation::Horizontal => a.width / area.width,
+                Orientation::Vertical => a.height / area.height,
+            },
+            area,
+        });
+        first.collect_dividers(a, into);
+        second.collect_dividers(b, into);
     }
 
     /// Replaces `pane`'s leaf with a split of `pane` and `new_pane`.
@@ -240,6 +303,16 @@ impl PaneTree {
                 .then(left_id.cmp(right_id))
         });
         panes
+    }
+
+    /// Every boundary between panes, outermost first.
+    ///
+    /// Order is the tree's own, which is stable for a given shape. Nothing
+    /// depends on it: a caller draws all of them, and addresses name a pane.
+    pub fn dividers(&self) -> Vec<Divider> {
+        let mut dividers = Vec::new();
+        self.root.collect_dividers(Rect::FULL, &mut dividers);
+        dividers
     }
 
     pub fn len(&self) -> usize {
@@ -742,5 +815,92 @@ mod tests {
 
         assert_eq!(tree.close(PaneId(999)), Some(focus));
         assert_eq!(pane_ids(&tree), before);
+    }
+
+    #[test]
+    fn one_pane_has_no_dividers() {
+        let mut ids = PaneIds::new();
+        let tree = PaneTree::new(ids.allocate());
+        assert!(tree.dividers().is_empty());
+    }
+
+    #[test]
+    fn a_split_reports_one_divider_across_the_middle() {
+        let mut ids = PaneIds::new();
+        let mut tree = PaneTree::new(ids.allocate());
+        tree.split(Orientation::Horizontal, ids.allocate());
+
+        let dividers = tree.dividers();
+        assert_eq!(dividers.len(), 1);
+        let divider = dividers[0];
+        // Named by the pane on its low side, which is the original pane.
+        assert_eq!(divider.pane, PaneId(0));
+        assert_eq!(divider.direction, Direction::Right);
+        assert_eq!(divider.orientation, Orientation::Horizontal);
+        assert!((divider.ratio - 0.5).abs() < 1e-6);
+        assert_eq!(divider.area, Rect::FULL);
+    }
+
+    #[test]
+    fn a_vertical_split_names_the_boundary_below_its_first_pane() {
+        let mut ids = PaneIds::new();
+        let mut tree = PaneTree::new(ids.allocate());
+        tree.split(Orientation::Vertical, ids.allocate());
+
+        let divider = tree.dividers()[0];
+        assert_eq!(divider.pane, PaneId(0));
+        assert_eq!(divider.direction, Direction::Down);
+        assert_eq!(divider.orientation, Orientation::Vertical);
+    }
+
+    /// `[[A|B] | C]`: the root's boundary is named by B — the *last* leaf of its
+    /// first subtree — not by A. Naming it A would make resolution land on the
+    /// A|B divider instead.
+    #[test]
+    fn a_nested_split_names_its_boundary_by_the_last_leaf_before_it() {
+        let mut ids = PaneIds::new();
+        // A, then C to A's right, then B between them by splitting A.
+        let mut tree = PaneTree::new(ids.allocate());
+        let c = tree.split(Orientation::Horizontal, ids.allocate());
+        assert!(tree.focus_pane(PaneId(0)));
+        let b = tree.split(Orientation::Horizontal, ids.allocate());
+
+        let dividers = tree.dividers();
+        assert_eq!(dividers.len(), 2);
+
+        let root = dividers
+            .iter()
+            .find(|divider| divider.area == Rect::FULL)
+            .expect("the root split divides the whole tab");
+        assert_eq!(root.pane, b, "named by the last leaf of [A|B]");
+
+        let inner = dividers
+            .iter()
+            .find(|divider| divider.area != Rect::FULL)
+            .expect("the nested split divides the left half");
+        assert_eq!(inner.pane, PaneId(0));
+        assert!((inner.area.width - 0.5).abs() < 1e-6);
+        assert_eq!(c, PaneId(1));
+    }
+
+    /// The area a divider reports is the space it actually divides, which is
+    /// what turns a pointer position into a ratio.
+    #[test]
+    fn a_dividers_area_is_the_split_it_divides() {
+        let mut ids = PaneIds::new();
+        let mut tree = PaneTree::new(ids.allocate());
+        tree.split(Orientation::Horizontal, ids.allocate());
+        let lower = tree.split(Orientation::Vertical, ids.allocate());
+
+        let vertical = tree
+            .dividers()
+            .into_iter()
+            .find(|divider| divider.orientation == Orientation::Vertical)
+            .expect("the vertical split has a divider");
+        assert_eq!(vertical.pane, PaneId(1));
+        assert!((vertical.area.x - 0.5).abs() < 1e-6);
+        assert!((vertical.area.width - 0.5).abs() < 1e-6);
+        assert!((vertical.area.height - 1.0).abs() < 1e-6);
+        assert_eq!(lower, PaneId(2));
     }
 }
