@@ -474,6 +474,10 @@ mod tests {
         tabs.open(|_, pane| pane);
         assert!(tabs.dividers().is_empty());
         assert!(!tabs.set_divider_ratio(PaneId(0), Direction::Right, 0.3));
+        // Same reasoning as `dividers` and `set_divider_ratio` just above: a
+        // lookup that reached into tab 0 regardless of which tab is active
+        // would find the first tab's boundary and answer `Some` here.
+        assert!(tabs.divider(PaneId(0), Direction::Right).is_none());
     }
 
     #[test]
