@@ -472,20 +472,7 @@ impl Workspace {
         };
 
         let (width, height, _) = self.pane_area(window);
-        let extent = match divider.orientation {
-            Orientation::Horizontal => divider.area.width * width,
-            Orientation::Vertical => divider.area.height * height,
-        };
-        // Left and up always move the boundary towards its split's origin;
-        // right and down away from it.
-        let step = match direction {
-            Direction::Left | Direction::Up => -DIVIDER_NUDGE_PX,
-            Direction::Right | Direction::Down => DIVIDER_NUDGE_PX,
-        };
-        // Expressed as a pointer position within the split, so the keyboard
-        // goes through the same clamp the mouse does and the two cannot
-        // disagree about where the floor is.
-        let ratio = divider_ratio(0.0, extent, divider.ratio * extent + step, DIVIDER_FLOOR_PX);
+        let ratio = nudged_ratio(&divider, width, height, direction);
         if self.tabs.set_divider_ratio(focused, direction, ratio) {
             cx.notify();
         }
@@ -881,6 +868,35 @@ fn divider_ratio(origin: f32, extent: f32, pointer: f32, floor: f32) -> f32 {
     }
     let low = floor / extent;
     ((pointer - origin) / extent).clamp(low, 1.0 - low)
+}
+
+/// Where a nudged boundary should land: one keyboard step of `divider` in
+/// `direction`, measured against the pane container's `width` and `height`.
+///
+/// Pulled out of `nudge_divider` so the two choices a keyboard step has to
+/// get right — which way each direction pushes the boundary, and which of
+/// `width` or `height` its split's extent is measured against — sit where a
+/// test can call them without a window.
+fn nudged_ratio(
+    divider: &crate::pane_tree::Divider,
+    width: f32,
+    height: f32,
+    direction: Direction,
+) -> f32 {
+    let extent = match divider.orientation {
+        Orientation::Horizontal => divider.area.width * width,
+        Orientation::Vertical => divider.area.height * height,
+    };
+    // Left and up always move the boundary towards its split's origin;
+    // right and down away from it.
+    let step = match direction {
+        Direction::Left | Direction::Up => -DIVIDER_NUDGE_PX,
+        Direction::Right | Direction::Down => DIVIDER_NUDGE_PX,
+    };
+    // Expressed as a pointer position within the split, so the keyboard
+    // goes through the same clamp the mouse does and the two cannot
+    // disagree about where the floor is.
+    divider_ratio(0.0, extent, divider.ratio * extent + step, DIVIDER_FLOOR_PX)
 }
 
 /// Where a divider's grab strip starts along the axis the boundary moves on.
@@ -1375,9 +1391,9 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_NUDGE_PX, DIVIDER_PX,
-        Direction, DividerDrag, Orientation, PaneId, WorkspaceAction, classify, describe_running,
-        divider_placements, divider_ratio, strip_leading, workspace_action,
+        CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction,
+        DividerDrag, Orientation, PaneId, WorkspaceAction, classify, describe_running,
+        divider_placements, divider_ratio, nudged_ratio, strip_leading, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1632,26 +1648,94 @@ mod tests {
         );
     }
 
-    /// One nudge is 20 px of the split it moves, through the same clamp the
-    /// mouse uses — so the two cannot disagree about where the floor is.
+    /// Left and right must move opposite ways, up and down must move opposite
+    /// ways, and each pair has to be sized against the right dimension of a
+    /// non-square container — not the four ways this has quietly gone wrong
+    /// before. The container is 800 by 400 and the divider's own area is a
+    /// quarter of it on one axis and three quarters on the other, so a sign
+    /// swap sends the ratio the wrong way and an axis swap lands on a
+    /// different number rather than coincidentally the right one.
     #[test]
-    fn a_nudge_moves_one_step_and_stops_at_the_floor() {
-        let extent = 800.0;
-        let stepped = divider_ratio(
-            0.0,
-            extent,
-            0.5 * extent + DIVIDER_NUDGE_PX,
-            DIVIDER_FLOOR_PX,
-        );
-        assert!((stepped - ((400.0 + 20.0) / 800.0)).abs() < 1e-6);
+    fn a_nudge_steps_the_boundary_the_right_way_on_each_axis() {
+        let area = crate::pane_tree::Rect {
+            x: 0.25,
+            y: 0.1,
+            width: 0.5,
+            height: 0.75,
+        };
+        let divider = |orientation, direction| crate::pane_tree::Divider {
+            pane: PaneId(0),
+            direction,
+            orientation,
+            ratio: 0.5,
+            area,
+        };
 
-        let floored = divider_ratio(
-            0.0,
-            extent,
-            DIVIDER_FLOOR_PX * 0.5 - DIVIDER_NUDGE_PX,
-            DIVIDER_FLOOR_PX,
+        // Horizontal extent is 0.5 * 800 = 400, so a 20 px step is 0.05 of it.
+        let right = nudged_ratio(
+            &divider(Orientation::Horizontal, Direction::Right),
+            800.0,
+            400.0,
+            Direction::Right,
         );
-        assert!((floored - (DIVIDER_FLOOR_PX / extent)).abs() < 1e-6);
+        assert!((right - 0.55).abs() < 1e-6, "right grows the ratio");
+
+        let left = nudged_ratio(
+            &divider(Orientation::Horizontal, Direction::Left),
+            800.0,
+            400.0,
+            Direction::Left,
+        );
+        assert!((left - 0.45).abs() < 1e-6, "left shrinks the ratio");
+
+        // Vertical extent is 0.75 * 400 = 300, a different number from the
+        // horizontal case above, so measuring against the wrong dimension
+        // would not pass by accident.
+        let down = nudged_ratio(
+            &divider(Orientation::Vertical, Direction::Down),
+            800.0,
+            400.0,
+            Direction::Down,
+        );
+        assert!(
+            (down - (170.0 / 300.0)).abs() < 1e-6,
+            "down grows the ratio"
+        );
+
+        let up = nudged_ratio(
+            &divider(Orientation::Vertical, Direction::Up),
+            800.0,
+            400.0,
+            Direction::Up,
+        );
+        assert!((up - (130.0 / 300.0)).abs() < 1e-6, "up shrinks the ratio");
+    }
+
+    /// A nudge goes through the same clamp the mouse does, so a boundary
+    /// already at the floor stays there instead of a keyboard step pushing it
+    /// past what a drag would ever allow.
+    #[test]
+    fn a_nudge_still_stops_at_the_floor() {
+        let area = crate::pane_tree::Rect {
+            x: 0.25,
+            y: 0.1,
+            width: 0.5,
+            height: 0.75,
+        };
+        // Horizontal extent is 400, so the floor sits at 120 / 400 = 0.3 —
+        // exactly where this divider already is.
+        let divider = crate::pane_tree::Divider {
+            pane: PaneId(0),
+            direction: Direction::Left,
+            orientation: Orientation::Horizontal,
+            ratio: DIVIDER_FLOOR_PX / (area.width * 800.0),
+            area,
+        };
+        let ratio = nudged_ratio(&divider, 800.0, 400.0, Direction::Left);
+        assert!(
+            (ratio - 0.3).abs() < 1e-6,
+            "another step left must not cross the floor"
+        );
     }
 
     #[test]
