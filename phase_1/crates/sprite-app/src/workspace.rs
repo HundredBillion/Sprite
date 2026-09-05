@@ -94,6 +94,11 @@ pub struct Workspace {
     /// next split divides the wrong one. Recording the intention and applying
     /// it during render means focus lands on a pane that exists.
     pending_focus: Option<PaneId>,
+    /// The boundary the pointer is currently moving, if any.
+    ///
+    /// While this is set the pane area wears an overlay, which is what keeps
+    /// the moves coming when the pointer outruns a seven-pixel strip.
+    divider_drag: Option<DividerDrag>,
 }
 
 impl Workspace {
@@ -154,6 +159,7 @@ impl Workspace {
             settings,
             focus: cx.focus_handle(),
             pending_focus,
+            divider_drag: None,
             pending_close: None,
             pending_settings: None,
             config_path,
@@ -411,6 +417,38 @@ impl Workspace {
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
         if let Some(pane) = self.tabs.focus_direction(direction) {
             self.request_focus(pane);
+            cx.notify();
+        }
+    }
+
+    fn begin_divider_drag(
+        &mut self,
+        placed: DividerPlacement,
+        pointer: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.divider_drag = Some(DividerDrag::begin(placed, pointer));
+        cx.notify();
+    }
+
+    fn drag_divider(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.divider_drag else {
+            return;
+        };
+        let ratio = drag.ratio_for(drag.along(position));
+        if self
+            .tabs
+            .set_divider_ratio(drag.pane, drag.direction, ratio)
+        {
+            cx.notify();
+        } else {
+            // The boundary is gone, so there is nothing left to move.
+            self.end_divider_drag(cx);
+        }
+    }
+
+    fn end_divider_drag(&mut self, cx: &mut Context<Self>) {
+        if self.divider_drag.take().is_some() {
             cx.notify();
         }
     }
@@ -849,6 +887,60 @@ fn divider_placements(
         .collect()
 }
 
+/// A boundary being dragged, and the geometry it was grabbed with.
+///
+/// The split's geometry is taken once, at the press: the layout it describes is
+/// the one the drag is moving, and re-deriving it per move would let the
+/// boundary chase its own change.
+#[derive(Clone, Copy, Debug)]
+struct DividerDrag {
+    pane: PaneId,
+    direction: Direction,
+    orientation: Orientation,
+    origin: f32,
+    extent: f32,
+    /// How far the press landed from the line, so the boundary does not jump
+    /// to centre itself under the pointer.
+    grab_offset: f32,
+}
+
+impl DividerDrag {
+    fn begin(placed: DividerPlacement, pointer: f32) -> Self {
+        Self {
+            pane: placed.pane,
+            direction: placed.direction,
+            orientation: placed.orientation,
+            origin: placed.origin,
+            extent: placed.extent,
+            grab_offset: pointer - placed.boundary,
+        }
+    }
+
+    fn ratio_for(&self, pointer: f32) -> f32 {
+        divider_ratio(
+            self.origin,
+            self.extent,
+            pointer - self.grab_offset,
+            DIVIDER_FLOOR_PX,
+        )
+    }
+
+    fn cursor(&self) -> CursorStyle {
+        match self.orientation {
+            Orientation::Horizontal => CursorStyle::ResizeLeftRight,
+            Orientation::Vertical => CursorStyle::ResizeUpDown,
+        }
+    }
+
+    /// The pointer's position along the axis this drag moves on.
+    fn along(&self, position: gpui::Point<Pixels>) -> f32 {
+        match self.orientation {
+            Orientation::Horizontal => f32::from(position.x),
+            Orientation::Vertical => f32::from(position.y),
+        }
+    }
+}
+
 impl Focusable for Workspace {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -954,11 +1046,17 @@ impl Render for Workspace {
             .iter()
             .enumerate()
             .map(|(index, placed)| {
+                let placed = *placed;
                 // A group per divider, so the line can answer its own strip
                 // being hovered without the workspace keeping any state.
                 let group: SharedString = format!("divider-{index}").into();
                 let horizontal = placed.orientation == Orientation::Horizontal;
                 let leading = strip_leading(placed.boundary);
+                // A dragged line stays lit even once the pointer has left the
+                // strip behind, which it does the moment the drag gets going.
+                let dragging = self.divider_drag.is_some_and(|drag| {
+                    drag.pane == placed.pane && drag.direction == placed.direction
+                });
                 // The container is a flex child below the tab strip, so a
                 // window coordinate down the window has to lose that height
                 // before it means anything to an absolutely placed child.
@@ -995,8 +1093,21 @@ impl Render for Workspace {
                     } else {
                         CursorStyle::ResizeUpDown
                     })
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(
+                            move |workspace, event: &gpui::MouseDownEvent, _window, cx| {
+                                let pointer = if horizontal {
+                                    f32::from(event.position.x)
+                                } else {
+                                    f32::from(event.position.y)
+                                };
+                                workspace.begin_divider_drag(placed, pointer, cx);
+                            },
+                        ),
+                    )
                     .child(
-                        line.bg(rgb(DIVIDER))
+                        line.bg(rgb(if dragging { DIVIDER_HOVER } else { DIVIDER }))
                             .group_hover(group, |style| style.bg(rgb(DIVIDER_HOVER))),
                     )
             })
@@ -1038,7 +1149,39 @@ impl Render for Workspace {
             .bg(rgb(DIVIDER))
             .children(pane_children)
             // After the panes, so a strip is never buried by one.
-            .children(divider_children);
+            .children(divider_children)
+            .when_some(self.divider_drag, |element, drag| {
+                // GPUI delivers a move only while the element under the pointer
+                // is hovered, and a pointer outruns a seven-pixel strip at
+                // once. The overlay is what keeps the moves coming — and it
+                // stops the drag becoming a text selection in the pane below.
+                element.child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .size_full()
+                        .occlude()
+                        .cursor(drag.cursor())
+                        .on_mouse_move(cx.listener(
+                            |workspace, event: &gpui::MouseMoveEvent, _window, cx| {
+                                // A move with no button held means the release
+                                // happened somewhere this window never saw.
+                                if event.dragging() {
+                                    workspace.drag_divider(event.position, cx);
+                                } else {
+                                    workspace.end_divider_drag(cx);
+                                }
+                            },
+                        ))
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(|workspace, _event, _window, cx| {
+                                workspace.end_divider_drag(cx);
+                            }),
+                        ),
+                )
+            });
 
         div()
             .flex()
@@ -1130,9 +1273,9 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction, Orientation, PaneId,
-        WorkspaceAction, classify, describe_running, divider_placements, divider_ratio,
-        strip_leading, workspace_action,
+        CloseScope, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction, DividerDrag,
+        Orientation, PaneId, WorkspaceAction, classify, describe_running, divider_placements,
+        divider_ratio, strip_leading, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1471,5 +1614,47 @@ mod tests {
         // reaches the same three pixels into the pane on either side of it.
         assert!((leading + (DIVIDER_GRAB_PX - DIVIDER_PX) / 2.0 - 399.0).abs() < 1e-4);
         assert!((leading + DIVIDER_GRAB_PX - 403.0).abs() < 1e-4);
+    }
+
+    /// The press records where inside the strip it landed, so the boundary does
+    /// not jump to centre itself under the pointer on the first move.
+    #[test]
+    fn a_grab_keeps_its_offset_within_the_strip() {
+        let placed = divider_placements(
+            &[crate::pane_tree::Divider {
+                pane: PaneId(0),
+                direction: Direction::Right,
+                orientation: Orientation::Horizontal,
+                ratio: 0.5,
+                area: crate::pane_tree::Rect::FULL,
+            }],
+            800.0,
+            600.0,
+            0.0,
+        )[0];
+        // Pressed 3 px to the right of the line itself.
+        let drag = DividerDrag::begin(placed, 403.0);
+        assert!((drag.grab_offset - 3.0).abs() < 1e-4);
+
+        // Moving to 500 should put the *line* at 497, not at 500.
+        assert!((drag.ratio_for(500.0) - (497.0 / 800.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_drag_holds_the_floor_it_was_given() {
+        let placed = divider_placements(
+            &[crate::pane_tree::Divider {
+                pane: PaneId(0),
+                direction: Direction::Right,
+                orientation: Orientation::Horizontal,
+                ratio: 0.5,
+                area: crate::pane_tree::Rect::FULL,
+            }],
+            800.0,
+            600.0,
+            0.0,
+        )[0];
+        let drag = DividerDrag::begin(placed, 400.0);
+        assert!((drag.ratio_for(-200.0) - (DIVIDER_FLOOR_PX / 800.0)).abs() < 1e-4);
     }
 }
