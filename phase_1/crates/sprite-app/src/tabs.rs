@@ -503,6 +503,12 @@ mod tests {
             .ratio;
 
         assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.85));
+        let dragged = tabs.divider(split_pane, Direction::Left).unwrap().ratio;
+        assert!(
+            (dragged - 0.85).abs() < 1e-6,
+            "the boundary has to have moved for evening it to mean anything"
+        );
+
         assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.5));
         let evened = tabs.divider(split_pane, Direction::Left).unwrap().ratio;
         assert!(
