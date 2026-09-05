@@ -29,9 +29,9 @@ their children resized as the cell count changes. Double-clicking a divider
 returns that split to even. `Ctrl+Shift+Alt` with an arrow key moves the
 focused pane's boundary on that side without reaching for the mouse.
 
-Neither pane may be driven below a floor of 120 pixels — roughly fifteen
-columns or six rows at the default font size. The divider simply stops when a
-side reaches its floor.
+Neither side of the split being dragged may be driven below a floor of 120
+pixels — roughly fifteen columns or six rows at the default font size. The
+divider simply stops when a side reaches its floor.
 
 Three pieces carry this, and the split between them is the point:
 
@@ -69,6 +69,10 @@ Three pieces carry this, and the split between them is the point:
    scrollback, or focus, so that layout work is safe during real work.
 9. As a terminal user, I want neither side of a split to shrink below a usable
    size, so that a pane cannot be dragged into something visible but unusable.
+10. As a mouse user, I want the divider under the pointer to brighten, so that I
+    can see which boundary I am about to move.
+11. As a keyboard user, I want resizing never to move focus, so that adjusting a
+    layout cannot redirect my next command to another shell.
 
 ## Implementation Decisions
 
@@ -181,6 +185,56 @@ nothing. Growing a pane by moving its *opposite* boundary was considered and
 rejected: it makes one key mean two different motions depending on where the
 pane sits, and predictability is worth more here than reach.
 
+### The floor protects a side, not every pane inside it
+
+The clamp is local to the split being dragged, because that is the only split
+`divider_ratio` knows about. In a nested layout the two are not the same thing:
+in `[[A|B] | C]`, the left side of the root split holds A and B beside each
+other, so dragging the root divider hard left stops that *side* at 120 pixels
+while leaving A and B about 60 pixels each.
+
+This is accepted rather than overlooked. A real per-pane guarantee means asking
+the tree for the narrowest leaf a side would produce — a third tree operation
+and a subtree walk on every mouse move — and it makes a divider stop for a
+reason two levels away from the thing being dragged. The squeezed case is
+recoverable by dragging back or double-clicking to even, and a person who
+nests three panes across a window is already choosing narrow panes.
+
+### A divider brightens when it is hovered or held
+
+The hit strip is a group; the one-pixel line inside it lightens on group-hover
+and stays lit for the length of a drag. Pure styling, no state and no extra
+render.
+
+The affordance is needed because a `0x2a2a34` line on a dark background gives
+the eye nothing to aim at, and the resize cursor only appears once the pointer
+is already on target. The line brightens rather than the strip tinting, so that
+the cue sits exactly where the boundary is instead of advertising a
+seven-pixel-thick divider that then snaps back to one.
+
+### Touching a divider never moves focus
+
+A divider belongs to the layout rather than to either pane, so pressing or
+dragging one leaves keyboard focus where it was. Focusing the pane a drag began
+in was rejected: it would let a layout adjustment silently redirect the next
+command to a different shell.
+
+The cost is that the three pixels of each pane nearest a divider no longer
+focus-click, because the strip occludes them. That is invisible in practice —
+missing it requires aiming at the divider.
+
+### A workspace action ends a live drag before it acts
+
+The key handler runs on capture and acts regardless of what the mouse is doing,
+so closing a pane, splitting, or switching tabs mid-drag would rearrange the
+tree while a drag still holds an address into it. Every workspace action
+therefore ends a live drag first.
+
+`set_divider_ratio` reporting that no divider was found ends a drag too, as a
+second line of defence. Nothing else can pull a pane out from under a drag: a
+pane closes only through `close_focused_pane` or `close_active_tab`, and a child
+exiting does not close its pane.
+
 ### What is already handled
 
 - **Child resize.** A pane's `TerminalView` is told its allocation on every
@@ -209,11 +263,16 @@ Pixel arithmetic is asserted as pure functions:
 - It clamps at both floors, and a pointer pushed past a floor and brought back
   returns the divider to the pointer rather than leaving it offset.
 - A keyboard nudge moves by the expected amount and stops at the same floors.
+- The floor is applied to the dragged split's own area, so a nested side reports
+  the value this decision says it does rather than one a per-pane rule would
+  give.
 
 The gestures themselves have no test seam and are verified by hand on a real
 window: hover shows the cursor, a fast drag keeps the divider, a drag that
-began on a divider selects no text, a double-click evens the split, and a
-resized pane's `stty size` reports its new dimensions. The divider's resulting
+began on a divider selects no text, a double-click evens the split, a hovered
+divider brightens, focus stays where it was through a drag, a workspace key
+pressed mid-drag ends the drag rather than corrupting the layout, and a resized
+pane's `stty size` reports its new dimensions. The divider's resulting
 pixel position is measured from a `grim` capture rather than judged by eye.
 
 ## Out of Scope

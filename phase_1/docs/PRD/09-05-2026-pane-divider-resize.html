@@ -28,7 +28,7 @@
           <div><p class="band text-slate-400">Closes</p><p class="font-mono">Phase 1 story 15</p></div>
           <div><p class="band text-slate-400">Touches</p><p class="font-mono">pane_tree.rs · workspace.rs</p></div>
           <div><p class="band text-slate-400">New concepts</p><p class="font-mono">1 <span class="text-slate-400">(divider address)</span></p></div>
-          <div><p class="band text-slate-400">Minimum pane</p><p class="font-mono num">120 px</p></div>
+          <div><p class="band text-slate-400">Minimum side</p><p class="font-mono num">120 px</p></div>
         </div>
       </header>
 
@@ -72,12 +72,12 @@
           <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2">
             <p class="band text-slate-400">Hover</p>
             <p class="font-mono text-sm grabme inline-block border-b border-dotted border-slate-400">↔ resize cursor</p>
-            <p class="text-sm text-slate-600 leading-relaxed">A 7 px strip over the 1 px gap. One pixel cannot be hit with a mouse.</p>
+            <p class="text-sm text-slate-600 leading-relaxed">A 7 px strip over the 1 px gap — one pixel cannot be hit with a mouse. The line brightens under the pointer and stays lit through the drag.</p>
           </div>
           <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2">
             <p class="band text-slate-400">Drag</p>
             <p class="font-mono text-sm">continuous</p>
-            <p class="text-sm text-slate-600 leading-relaxed">Both panes follow the pointer. Neither may go below 120 px — the divider simply stops.</p>
+            <p class="text-sm text-slate-600 leading-relaxed">Both panes follow the pointer. Neither side may go below 120 px — the divider simply stops.</p>
           </div>
           <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2">
             <p class="band text-slate-400">Double-click</p>
@@ -250,6 +250,59 @@
         </div>
       </section>
 
+      <!-- ═══════════ GRILLED ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">Four rules the grilling pinned down</h2>
+        <div class="grid md:grid-cols-2 gap-4">
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-3">
+            <p class="band text-slate-400">Floor scope</p>
+            <p class="font-serif text-lg">The floor protects a side, not every pane inside it</p>
+            <svg viewBox="0 0 380 112" class="w-full">
+              <rect x="2" y="6" width="52" height="52" rx="2" fill="#0f172a"/>
+              <rect x="58" y="6" width="52" height="52" rx="2" fill="#0f172a"/>
+              <rect x="116" y="6" width="262" height="52" rx="2" fill="#0f172a"/>
+              <text x="28" y="37" fill="#e2e8f0" font-size="11" text-anchor="middle" font-family="ui-monospace,monospace">A</text>
+              <text x="84" y="37" fill="#e2e8f0" font-size="11" text-anchor="middle" font-family="ui-monospace,monospace">B</text>
+              <text x="247" y="37" fill="#e2e8f0" font-size="11" text-anchor="middle" font-family="ui-monospace,monospace">C</text>
+              <line x1="113" y1="4" x2="113" y2="60" stroke="#10b981" stroke-width="2"/>
+              <line x1="3" y1="70" x2="111" y2="70" stroke="#059669" stroke-width="1"/>
+              <line x1="3" y1="66" x2="3" y2="74" stroke="#059669" stroke-width="1"/>
+              <line x1="111" y1="66" x2="111" y2="74" stroke="#059669" stroke-width="1"/>
+              <text x="3" y="86" fill="#059669" font-size="9" font-family="ui-monospace,monospace">the side stops at 120 px</text>
+              <text x="3" y="102" fill="#dc2626" font-size="9" font-family="ui-monospace,monospace">A and B: about 60 px each</text>
+            </svg>
+            <p class="text-sm text-slate-600 leading-relaxed">A real per-pane guarantee needs a third tree operation and a subtree walk on every mouse move, and makes a divider stop for a reason two levels away from what you grabbed. The squeezed case is recoverable — drag back, or double-click to even.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-3">
+            <p class="band text-slate-400">Affordance</p>
+            <p class="font-serif text-lg">A divider brightens when hovered or held</p>
+            <svg viewBox="0 0 380 100" class="w-full">
+              <rect x="2" y="6" width="182" height="56" rx="2" fill="#0f172a"/>
+              <rect x="196" y="6" width="182" height="56" rx="2" fill="#0f172a"/>
+              <line x1="190" y1="6" x2="190" y2="62" stroke="#2a2a34" stroke-width="1"/>
+              <rect x="186" y="6" width="9" height="56" fill="#38bdf8" opacity="0.10"/>
+              <line x1="190.5" y1="6" x2="190.5" y2="62" stroke="#7dd3fc" stroke-width="1.5"/>
+              <text x="94" y="78" fill="#64748b" font-size="9" text-anchor="middle" font-family="ui-monospace,monospace">at rest · 1 px #2a2a34</text>
+              <text x="286" y="78" fill="#0284c7" font-size="9" text-anchor="middle" font-family="ui-monospace,monospace">hovered · the line lights</text>
+              <text x="286" y="92" fill="#0284c7" font-size="9" text-anchor="middle" font-family="ui-monospace,monospace">not the 7 px strip</text>
+            </svg>
+            <p class="text-sm text-slate-600 leading-relaxed">The strip is a group and the line inside it lightens on group-hover — pure styling, no state. The line rather than the strip, so the cue sits exactly where the boundary is instead of advertising a 7 px divider that snaps back to 1 px.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-2">
+            <p class="band text-slate-400">Focus</p>
+            <p class="font-serif text-lg">Touching a divider never moves focus</p>
+            <p class="text-sm text-slate-600 leading-relaxed">A divider belongs to the layout, not to either pane. Focusing the pane a drag began in was rejected: a layout adjustment would silently redirect your next command to a different shell.</p>
+            <p class="text-sm text-slate-600 leading-relaxed">The cost is 3 px along each pane edge that no longer focus-clicks, because the strip occludes them. Missing it requires aiming at the divider.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-2">
+            <p class="band text-slate-400">Mid-drag keys</p>
+            <p class="font-serif text-lg">A workspace action ends a live drag first</p>
+            <p class="text-sm text-slate-600 leading-relaxed">The key handler runs on capture regardless of what the mouse is doing, so closing a pane or switching tabs mid-drag would rearrange the tree under a drag that still holds an address into it.</p>
+            <p class="text-sm text-slate-600 leading-relaxed">Nothing else can: a pane closes only through <code>close_focused_pane</code> or <code>close_active_tab</code>, and a child exiting does not close its pane. <code>set_divider_ratio</code> reporting no divider ends a drag as a second line of defence.</p>
+          </div>
+        </div>
+      </section>
+
       <!-- ═══════════ ALREADY HANDLED ═══════════ -->
       <section class="space-y-5">
         <h2 class="font-serif text-2xl">What needs no work</h2>
@@ -278,6 +331,8 @@
           <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">07</span><p class="text-[15px] leading-relaxed">As a <strong>shell user</strong>, I want a resized pane's child to learn its new dimensions, so that full-screen programs redraw at the size they are actually given.</p></li>
           <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">08</span><p class="text-[15px] leading-relaxed">As a <strong>shell user</strong>, I want resizing a pane never to disturb any pane's session, scrollback, or focus, so that layout work is safe during real work.</p></li>
           <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">09</span><p class="text-[15px] leading-relaxed">As a <strong>terminal user</strong>, I want neither side of a split to shrink below a usable size, so that a pane cannot be dragged into something visible but unusable.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">10</span><p class="text-[15px] leading-relaxed">As a <strong>mouse user</strong>, I want the divider under the pointer to brighten, so that I can see which boundary I am about to move.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">11</span><p class="text-[15px] leading-relaxed">As a <strong>keyboard user</strong>, I want resizing never to move focus, so that adjusting a layout cannot redirect my next command to another shell.</p></li>
         </ol>
       </section>
 
@@ -298,7 +353,8 @@
               <tr><td class="px-5 py-3"><code>divider_ratio</code> maps a pointer position to the expected ratio</td><td class="px-5 py-3 font-mono text-xs text-sky-700">free function</td></tr>
               <tr><td class="px-5 py-3">It clamps at both floors, and a pointer pushed past a floor and brought back returns the divider to the pointer rather than leaving it offset</td><td class="px-5 py-3 font-mono text-xs text-sky-700">free function</td></tr>
               <tr><td class="px-5 py-3">A keyboard nudge moves by the expected amount and stops at the same floors</td><td class="px-5 py-3 font-mono text-xs text-sky-700">free function</td></tr>
-              <tr class="bg-amber-50/50"><td class="px-5 py-3">Hover shows the cursor; a fast drag keeps the divider; a drag begun on a divider selects no text; a double-click evens the split; a resized pane's <code>stty size</code> reports its new dimensions</td><td class="px-5 py-3 font-mono text-xs text-amber-700">by hand</td></tr>
+              <tr><td class="px-5 py-3">The floor is applied to the dragged split's own area, so a nested side reports the value this decision says it does</td><td class="px-5 py-3 font-mono text-xs text-sky-700">free function</td></tr>
+              <tr class="bg-amber-50/50"><td class="px-5 py-3">Hover brightens the line; focus stays put through a drag; a workspace key mid-drag ends the drag rather than corrupting the layout; the cursor changes; a fast drag keeps the divider; a drag begun on a divider selects no text; a double-click evens the split; a resized pane's <code>stty size</code> reports its new dimensions</td><td class="px-5 py-3 font-mono text-xs text-amber-700">by hand</td></tr>
               <tr class="bg-amber-50/50"><td class="px-5 py-3">The divider's resulting pixel position</td><td class="px-5 py-3 font-mono text-xs text-amber-700"><code>grim</code> capture, measured — not judged by eye</td></tr>
             </tbody>
           </table>
@@ -319,7 +375,7 @@
 
       <footer class="pt-4 space-y-3">
         <div class="rule"></div>
-        <p class="font-mono text-xs text-slate-500">Sprite Terminal · Phase 1 · docs/PRD/09-05-2026-pane-divider-resize.md is the source of record for this document.</p>
+        <p class="font-mono text-xs text-slate-500">Sprite Terminal · Phase 1 · docs/PRD/09-05-2026-pane-divider-resize.md is the source of record · addressing decision recorded as ADR 0014 · Divider defined in CONTEXT.md</p>
       </footer>
     </main>
   </body>
