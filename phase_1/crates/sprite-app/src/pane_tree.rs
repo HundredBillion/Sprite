@@ -1082,6 +1082,35 @@ mod tests {
         assert!(!tree.set_divider_ratio(PaneId(0), Direction::Left, 0.3));
     }
 
+    #[test]
+    fn a_pane_finds_the_boundary_above_and_below_it() {
+        let mut ids = PaneIds::new();
+        let mut tree = PaneTree::new(ids.allocate());
+        let bottom = tree.split(Orientation::Vertical, ids.allocate());
+
+        let from_top = tree
+            .divider(PaneId(0), Direction::Down)
+            .expect("the top pane has a boundary below it");
+        let from_bottom = tree
+            .divider(bottom, Direction::Up)
+            .expect("the bottom pane has the same boundary above it");
+        assert_eq!(from_top.area, from_bottom.area);
+        assert!((from_top.ratio - from_bottom.ratio).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pane_against_the_top_or_bottom_edge_has_no_boundary_there() {
+        let mut ids = PaneIds::new();
+        let mut tree = PaneTree::new(ids.allocate());
+        let bottom = tree.split(Orientation::Vertical, ids.allocate());
+
+        assert!(tree.divider(PaneId(0), Direction::Up).is_none());
+        assert!(tree.divider(bottom, Direction::Down).is_none());
+        // A vertical split has no boundary to either side of anything.
+        assert!(tree.divider(PaneId(0), Direction::Right).is_none());
+        assert!(!tree.set_divider_ratio(PaneId(0), Direction::Up, 0.3));
+    }
+
     /// The case a naive "nearest ancestor of matching orientation" rule gets
     /// wrong: in `[[A|B] | C]` the boundary to B's right is the root's, not the
     /// A|B split's.
@@ -1163,6 +1192,45 @@ mod tests {
 
         assert!(tree.set_divider_ratio(right, Direction::Left, 0.25));
         assert!((rect_of(&tree, 0).width - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn moving_a_vertical_boundary_moves_both_sides_and_nothing_else() {
+        let mut ids = PaneIds::new();
+        let mut tree = PaneTree::new(ids.allocate());
+        let bottom = tree.split(Orientation::Vertical, ids.allocate());
+        let focus_before = tree.focus();
+
+        assert!(tree.set_divider_ratio(PaneId(0), Direction::Down, 0.75));
+
+        let top_rect = rect_of(&tree, 0);
+        let bottom_rect = rect_of(&tree, bottom.0);
+        assert!((top_rect.height - 0.75).abs() < 1e-6);
+        assert!((bottom_rect.y - 0.75).abs() < 1e-6);
+        assert!((bottom_rect.height - 0.25).abs() < 1e-6);
+        // The boundary moved on the y axis; x is a vertical split's business
+        // never to touch.
+        assert!((top_rect.x - 0.0).abs() < 1e-6);
+        assert!((bottom_rect.x - 0.0).abs() < 1e-6);
+        assert!((top_rect.width - 1.0).abs() < 1e-6);
+        assert!((bottom_rect.width - 1.0).abs() < 1e-6);
+
+        assert_eq!(
+            tree.focus(),
+            focus_before,
+            "focus is not the layout's to move"
+        );
+        assert_eq!(pane_ids(&tree), vec![0, 1], "identities are untouched");
+    }
+
+    #[test]
+    fn either_side_may_move_the_same_vertical_boundary() {
+        let mut ids = PaneIds::new();
+        let mut tree = PaneTree::new(ids.allocate());
+        let bottom = tree.split(Orientation::Vertical, ids.allocate());
+
+        assert!(tree.set_divider_ratio(bottom, Direction::Up, 0.25));
+        assert!((rect_of(&tree, 0).height - 0.25).abs() < 1e-6);
     }
 
     #[test]
