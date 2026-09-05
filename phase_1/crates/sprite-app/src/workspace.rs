@@ -923,6 +923,19 @@ fn along_axis(orientation: Orientation, position: gpui::Point<Pixels>) -> f32 {
     }
 }
 
+/// The pointer this orientation's boundary asks the platform to show, while it
+/// is hovered and while it is dragged.
+///
+/// One mapping rather than two, so the strip that is drawn and the drag it
+/// starts cannot come to different conclusions about which way a boundary
+/// moves.
+fn cursor_for(orientation: Orientation) -> CursorStyle {
+    match orientation {
+        Orientation::Horizontal => CursorStyle::ResizeLeftRight,
+        Orientation::Vertical => CursorStyle::ResizeUpDown,
+    }
+}
+
 /// One divider's geometry in window pixels, ready to draw and to drag.
 ///
 /// Everything is in window coordinates rather than the pane container's,
@@ -1032,10 +1045,7 @@ impl DividerDrag {
     }
 
     fn cursor(&self) -> CursorStyle {
-        match self.orientation {
-            Orientation::Horizontal => CursorStyle::ResizeLeftRight,
-            Orientation::Vertical => CursorStyle::ResizeUpDown,
-        }
+        cursor_for(self.orientation)
     }
 
     /// The pointer's position along the axis this drag moves on.
@@ -1183,11 +1193,7 @@ impl Render for Workspace {
                     // The strip answers the pointer rather than the pane under
                     // it: a gesture on a divider is not a gesture in a pane.
                     .occlude()
-                    .cursor(if horizontal {
-                        CursorStyle::ResizeLeftRight
-                    } else {
-                        CursorStyle::ResizeUpDown
-                    })
+                    .cursor(cursor_for(placed.orientation))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(
