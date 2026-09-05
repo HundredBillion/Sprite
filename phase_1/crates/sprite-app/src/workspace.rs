@@ -1273,9 +1273,9 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction, DividerDrag,
-        Orientation, PaneId, WorkspaceAction, classify, describe_running, divider_placements,
-        divider_ratio, strip_leading, workspace_action,
+        CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction,
+        DividerDrag, Orientation, PaneId, WorkspaceAction, classify, describe_running,
+        divider_placements, divider_ratio, strip_leading, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1656,5 +1656,40 @@ mod tests {
         )[0];
         let drag = DividerDrag::begin(placed, 400.0);
         assert!((drag.ratio_for(-200.0) - (DIVIDER_FLOOR_PX / 800.0)).abs() < 1e-4);
+    }
+
+    /// A left-right boundary moves with the pointer's x and an up-down one with
+    /// its y. Swapping the two reads plausibly and would be wrong everywhere.
+    #[test]
+    fn a_drag_reads_the_axis_its_own_orientation_moves_on() {
+        let drag = |orientation, direction| {
+            DividerDrag::begin(
+                divider_placements(
+                    &[crate::pane_tree::Divider {
+                        pane: PaneId(0),
+                        direction,
+                        orientation,
+                        ratio: 0.5,
+                        area: crate::pane_tree::Rect::FULL,
+                    }],
+                    800.0,
+                    600.0,
+                    0.0,
+                )[0],
+                0.0,
+            )
+        };
+        let pointer = gpui::Point {
+            x: gpui::px(120.0),
+            y: gpui::px(450.0),
+        };
+
+        let sideways = drag(Orientation::Horizontal, Direction::Right);
+        assert!((sideways.along(pointer) - 120.0).abs() < 1e-4);
+        assert_eq!(sideways.cursor(), CursorStyle::ResizeLeftRight);
+
+        let upright = drag(Orientation::Vertical, Direction::Down);
+        assert!((upright.along(pointer) - 450.0).abs() < 1e-4);
+        assert_eq!(upright.cursor(), CursorStyle::ResizeUpDown);
     }
 }
