@@ -24,6 +24,19 @@ const BACKGROUND: u32 = 0x101014;
 /// Drawn between panes so a split is visible without a separate widget.
 const DIVIDER: u32 = 0x2a2a34;
 const DIVIDER_PX: f32 = 1.0;
+/// How wide a divider's grab area is. One pixel cannot be hit with a mouse, so
+/// the strip is wider than the line it moves.
+const DIVIDER_GRAB_PX: f32 = 7.0;
+/// The narrowest either side of a dragged split may become.
+///
+/// Roughly fifteen columns or six rows at the default font size. It holds the
+/// side, not the panes nested inside it: a side that is itself split shares
+/// this width among its own panes.
+const DIVIDER_FLOOR_PX: f32 = 120.0;
+/// How far one keyboard nudge moves a boundary.
+const DIVIDER_NUDGE_PX: f32 = 20.0;
+/// The divider under the pointer, or being dragged.
+const DIVIDER_HOVER: u32 = 0x6a6a80;
 const TAB_STRIP_HEIGHT: f32 = 28.0;
 const TAB_ACTIVE_BG: u32 = 0x1d1d24;
 const TAB_INACTIVE_FG: u32 = 0x8a8a99;
@@ -743,6 +756,23 @@ fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
     }
 }
 
+/// Where a boundary should sit within its split, as a share of that split.
+///
+/// `origin`, `pointer` and `extent` are all along the axis being dragged, in
+/// the same pixel space. The answer is absolute rather than accumulated, so a
+/// pointer shoved past the floor and brought back puts the boundary under the
+/// pointer again instead of leaving it offset by however far it was shoved.
+fn divider_ratio(origin: f32, extent: f32, pointer: f32, floor: f32) -> f32 {
+    // A split with no room, or too little to honour the floor on both sides,
+    // has no position that obeys the rule. Even is the least surprising of the
+    // answers that break it.
+    if extent <= 0.0 || extent < floor * 2.0 {
+        return 0.5;
+    }
+    let low = floor / extent;
+    ((pointer - origin) / extent).clamp(low, 1.0 - low)
+}
+
 impl Focusable for Workspace {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -966,7 +996,8 @@ impl Render for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseScope, Direction, WorkspaceAction, classify, describe_running, workspace_action,
+        CloseScope, DIVIDER_FLOOR_PX, Direction, WorkspaceAction, classify, describe_running,
+        divider_ratio, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1177,5 +1208,55 @@ mod tests {
             Some(WorkspaceAction::NextTab)
         );
         assert_eq!(workspace_action(&press("f5", ctrl_shift())), None);
+    }
+
+    #[test]
+    fn a_pointer_in_the_middle_gives_an_even_split() {
+        assert!((divider_ratio(100.0, 400.0, 300.0, 120.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pointer_is_measured_from_the_splits_own_origin() {
+        // A nested split starting 100 px in: the pointer at 260 is two fifths
+        // of the way across it. Measured against the window instead it would
+        // read as 0.65, so this fails if the origin is ignored.
+        assert!((divider_ratio(100.0, 400.0, 260.0, 120.0) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn neither_side_may_be_driven_below_the_floor() {
+        // 120 of 400 is 0.3, and 1 - 0.3 on the other end.
+        assert!((divider_ratio(0.0, 400.0, -500.0, 120.0) - 0.3).abs() < 1e-6);
+        assert!((divider_ratio(0.0, 400.0, 900.0, 120.0) - 0.7).abs() < 1e-6);
+    }
+
+    /// The reason the drag is absolute rather than accumulated: shoving the
+    /// pointer past the floor and bringing it back must put the boundary under
+    /// the pointer again, not leave it offset by however far it was shoved.
+    #[test]
+    fn a_boundary_pushed_past_the_floor_comes_straight_back() {
+        let floor = 120.0;
+        assert!((divider_ratio(0.0, 400.0, -500.0, floor) - 0.3).abs() < 1e-6);
+        // Back inside the legal range, the boundary is under the pointer again.
+        // An implementation that accumulated the overshoot would answer with
+        // the 500 px it was shoved by still subtracted.
+        assert!((divider_ratio(0.0, 400.0, 240.0, floor) - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_split_too_small_for_two_floors_stays_even() {
+        // 200 px cannot give both sides 120, so no position satisfies the rule
+        // and the boundary sits in the middle rather than at one extreme.
+        assert!((divider_ratio(0.0, 200.0, 10.0, 120.0) - 0.5).abs() < 1e-6);
+        assert!((divider_ratio(0.0, 0.0, 10.0, 120.0) - 0.5).abs() < 1e-6);
+    }
+
+    // This constant is the one number the whole suite trusts without passing
+    // it explicitly: 120 px is a documented product promise ("roughly fifteen
+    // columns or six rows"), not an arbitrary default, so a change to it
+    // should fail a test even though every other case supplies its own floor.
+    #[test]
+    fn the_floor_is_the_one_the_product_promises() {
+        assert!((DIVIDER_FLOOR_PX - 120.0).abs() < f32::EPSILON);
     }
 }
