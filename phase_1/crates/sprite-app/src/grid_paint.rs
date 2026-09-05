@@ -59,6 +59,7 @@ use gpui::{
 use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor};
 
 use crate::block_elements::{block_fill, fill_rects};
+use crate::box_drawing::{self, box_glyph, box_outlines, box_rects};
 use crate::grid::PositionedCell;
 
 /// How thick a bar or underline cursor is drawn, as a fraction of a cell.
@@ -299,6 +300,29 @@ fn snapped_span(start: f32, end: f32, scale: f32) -> (Pixels, Pixels) {
     (left, px(f32::from(left) + device_pixel))
 }
 
+/// How thick a light and a heavy box drawing stroke are, in logical pixels.
+///
+/// Taken from the narrower side of the cell, not the taller one. A cell is
+/// about twice as tall as it is wide, so keying the weight to its height draws
+/// a "light" rule at twice the weight the text around it reads at.
+///
+/// Both are whole device pixels: half a pixel of stroke is drawn as two grey
+/// ones, and a grid of rules at slightly different offsets is the beading this
+/// is all here to remove.
+fn stroke_widths(cell_width: Pixels, cell_height: Pixels, scale: f32) -> box_drawing::Strokes {
+    let device = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let narrow = f32::from(cell_width).min(f32::from(cell_height)) * device;
+    let light = (narrow / 8.0).round().max(1.0);
+    box_drawing::Strokes {
+        light: light / device,
+        heavy: (light * 2.0) / device,
+    }
+}
+
 /// One stretch of cells sharing a background colour.
 struct Run {
     start: u32,
@@ -492,6 +516,13 @@ impl GridPaint {
             return;
         }
 
+        // Box drawing is geometry for the same reason, and additionally has to
+        // be drawn on whole device pixels to stay one pixel thick. See
+        // `box_drawing`.
+        if self.paint_box(cell, drawn, bounds, scale, window) {
+            return;
+        }
+
         let text = SharedString::from(cell.text.clone());
         let run = TextRun {
             len: text.len(),
@@ -581,6 +612,61 @@ impl GridPaint {
                 color,
             ));
         }
+        true
+    }
+
+    /// Fills a Box Drawing character from its arms, returning whether it drew.
+    fn paint_box(
+        &self,
+        cell: &PositionedCell,
+        drawn: &Drawn,
+        bounds: CellBounds,
+        scale: f32,
+        window: &mut Window,
+    ) -> bool {
+        let mut chars = cell.text.chars();
+        let (Some(ch), None) = (chars.next(), chars.next()) else {
+            return false;
+        };
+        let Some(glyph) = box_glyph(ch) else {
+            return false;
+        };
+
+        let area = box_drawing::Cell {
+            left: f32::from(bounds.left),
+            top: f32::from(bounds.top),
+            right: f32::from(bounds.right),
+            bottom: f32::from(bounds.bottom),
+        };
+        let strokes = stroke_widths(self.cell_width, self.cell_height, scale);
+        let color = drawn.foreground;
+
+        box_rects(&glyph, area, strokes, |(left, top, right, bottom)| {
+            // Snapped on both axes: along the line so neighbours meet, and
+            // across it so a rule is a crisp pixel rather than a grey smear.
+            let (left, right) = snapped_span(left, right, scale);
+            let (top, bottom) = snapped_span(top, bottom, scale);
+            window.paint_quad(fill(
+                Bounds::from_corners(point(left, top), point(right, bottom)),
+                color,
+            ));
+        });
+
+        // The arcs and diagonals are curves, so they are filled as paths and
+        // left antialiased rather than snapped: snapping a curve to the pixel
+        // grid is what makes one look like a staircase.
+        box_outlines(&glyph, area, strokes, |outline| {
+            let mut path = gpui::Path::new(point(px(outline.start.0), px(outline.start.1)));
+            for step in &outline.steps {
+                match *step {
+                    box_drawing::Step::Line(to) => path.line_to(point(px(to.0), px(to.1))),
+                    box_drawing::Step::Curve { ctrl, to } => {
+                        path.curve_to(point(px(to.0), px(to.1)), point(px(ctrl.0), px(ctrl.1)))
+                    }
+                }
+            }
+            window.paint_path(path, color);
+        });
         true
     }
 
@@ -721,6 +807,43 @@ mod tests {
     fn an_empty_span_stays_empty() {
         let (left, right) = snapped_span(10.0, 10.0, 2.0);
         assert_eq!(left, right);
+    }
+
+    /// A light rule is weighed against the narrow side of the cell. Keying it
+    /// to the tall side instead draws every box on screen at twice the weight
+    /// of the text inside it.
+    #[test]
+    fn a_light_stroke_is_weighed_against_the_narrow_side_of_the_cell() {
+        // The 8.4 x 16.8 logical cell a 14pt JetBrains Mono gives, at 2x.
+        let strokes = stroke_widths(px(8.4), px(16.8), 2.0);
+        assert_eq!(
+            strokes.light * 2.0,
+            2.0,
+            "a light rule should be two device pixels here, not four"
+        );
+        assert_eq!(strokes.heavy, strokes.light * 2.0);
+    }
+
+    /// Every stroke lands on whole device pixels, and none of them vanishes at
+    /// a tiny cell or a degenerate scale.
+    #[test]
+    fn a_stroke_is_always_a_whole_number_of_device_pixels_and_never_zero() {
+        for (w, h, scale) in [
+            (8.4, 16.8, 2.0),
+            (6.0, 12.0, 1.0),
+            (3.0, 4.0, 1.0),
+            (0.5, 0.5, 1.0),
+            (8.4, 16.8, 0.0),
+        ] {
+            let strokes = stroke_widths(px(w), px(h), scale);
+            let device = if scale > 0.0 { scale } else { 1.0 };
+            let in_pixels = strokes.light * device;
+            assert!(in_pixels >= 1.0, "light vanished at {w}x{h}@{scale}");
+            assert!(
+                (in_pixels - in_pixels.round()).abs() < 1e-4,
+                "light was {in_pixels} device pixels at {w}x{h}@{scale}"
+            );
+        }
     }
 
     /// A style with no colour of its own and a cell style carrying every other
