@@ -247,6 +247,7 @@
             <p class="font-serif text-lg">Alt is relaxed for arrows only</p>
             <p class="text-sm text-slate-600 leading-relaxed"><code>workspace_action</code> rejects any keystroke carrying alt, so alt-modified keys reach the child. Only <kbd class="font-mono text-xs bg-stone-100 px-1 rounded">Ctrl+Shift+Alt</kbd> + arrow is carved out.</p>
             <p class="text-sm text-slate-600 leading-relaxed">A pane already against the tab's edge does nothing. Growing a pane by moving its <em>opposite</em> boundary was rejected: it makes one key mean two motions depending on where the pane sits.</p>
+            <p class="text-sm text-slate-600 leading-relaxed rounded bg-amber-50 border border-amber-200 p-3"><strong class="font-serif">Looks like a defect, is deliberate:</strong> a boundary cannot be nudged back without moving focus first. The right pane's arrows move the shared boundary left; the left pane's move it right. Measured in a running window, and reaffirmed with that behaviour in hand.</p>
           </div>
         </div>
       </section>

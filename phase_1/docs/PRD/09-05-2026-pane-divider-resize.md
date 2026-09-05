@@ -192,6 +192,14 @@ nothing. Growing a pane by moving its *opposite* boundary was considered and
 rejected: it makes one key mean two different motions depending on where the
 pane sits, and predictability is worth more here than reach.
 
+That rule has a consequence worth stating plainly, because it looks like a
+defect until you know it is deliberate: **a boundary cannot be nudged back
+without moving focus first.** With two panes side by side, the right pane's
+arrows move the shared boundary left and nothing else; the left pane's move it
+right. Measured in a running window: from the right pane, `Right` correctly does
+nothing, and the same boundary moves right once focus is on the left pane. The
+decision was reaffirmed on 2026-09-05 with that behaviour in hand.
+
 ### The floor protects a side, not every pane inside it
 
 The clamp is local to the split being dragged, because that is the only split
