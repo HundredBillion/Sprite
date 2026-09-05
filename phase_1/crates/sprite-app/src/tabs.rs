@@ -494,6 +494,30 @@ mod tests {
     }
 
     #[test]
+    fn evening_a_boundary_puts_it_back_where_a_split_starts_it() {
+        let mut tabs = Tabs::new(|_, pane| pane);
+        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane);
+        let fresh = tabs
+            .divider(split_pane, Direction::Left)
+            .expect("a split has a boundary")
+            .ratio;
+
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.85));
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.5));
+        let evened = tabs.divider(split_pane, Direction::Left).unwrap().ratio;
+        assert!(
+            (evened - fresh).abs() < 1e-6,
+            "even is the ratio a split opens with, so evening undoes every drag"
+        );
+
+        // Evening what is already even is a no-op, so asking twice cannot
+        // leave the boundary somewhere a third ask would move it back from.
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.5));
+        let again = tabs.divider(split_pane, Direction::Left).unwrap().ratio;
+        assert!((again - evened).abs() < 1e-6);
+    }
+
+    #[test]
     fn closing_an_unknown_tab_touches_nothing() {
         let log: Log = Rc::default();
         let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));

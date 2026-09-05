@@ -453,6 +453,13 @@ impl Workspace {
         }
     }
 
+    /// Returns a split to even, which is where it started.
+    fn reset_divider(&mut self, pane: PaneId, direction: Direction, cx: &mut Context<Self>) {
+        if self.tabs.set_divider_ratio(pane, direction, 0.5) {
+            cx.notify();
+        }
+    }
+
     fn switch_tab(&mut self, forwards: bool, cx: &mut Context<Self>) {
         if forwards {
             self.tabs.next_tab();
@@ -1097,6 +1104,16 @@ impl Render for Workspace {
                         gpui::MouseButton::Left,
                         cx.listener(
                             move |workspace, event: &gpui::MouseDownEvent, _window, cx| {
+                                // The second click of a double-click evens the
+                                // split rather than starting a drag, so undoing
+                                // an over-enthusiastic one takes a single
+                                // gesture. Two or more, so a third click does
+                                // not leave a stray drag behind.
+                                if event.click_count >= 2 {
+                                    workspace.end_divider_drag(cx);
+                                    workspace.reset_divider(placed.pane, placed.direction, cx);
+                                    return;
+                                }
                                 let pointer = if horizontal {
                                     f32::from(event.position.x)
                                 } else {
@@ -1189,6 +1206,10 @@ impl Render for Workspace {
                 let Some(action) = action else {
                     return;
                 };
+                // The key handler runs on capture whatever the mouse is doing,
+                // and every action below can rearrange the tree a live drag
+                // holds an address into. So the drag ends before any of them.
+                workspace.end_divider_drag(cx);
                 // Claimed: nothing below this element will see it.
                 cx.stop_propagation();
                 match action {
