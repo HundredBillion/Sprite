@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pane Divider Resize — Sprite</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      .band { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+      .rule { background-image: repeating-linear-gradient(90deg,#94a3b8 0 6px,transparent 6px 11px); height:1px; }
+      .grabme { cursor: ew-resize; }
+      code { font-size: .85em; background: #f1f0ee; padding: 0 3px; border-radius: 2px; }
+      h2 { scroll-margin-top: 2rem; }
+      .num { font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 antialiased">
+    <main class="max-w-5xl mx-auto px-6 py-14 space-y-16">
+
+      <!-- ═══════════ HEADER ═══════════ -->
+      <header class="space-y-6">
+        <div class="flex items-baseline justify-between flex-wrap gap-3">
+          <h1 class="font-serif text-4xl tracking-tight">Pane divider resize — <span class="italic">Sprite</span></h1>
+          <p class="font-mono text-xs text-slate-500">5 Sep 2026 · phase_1 @ 5698c19 · PRD</p>
+        </div>
+        <div class="rule"></div>
+        <div class="grid sm:grid-cols-4 gap-4 text-sm">
+          <div><p class="band text-slate-400">Closes</p><p class="font-mono">Phase 1 story 15</p></div>
+          <div><p class="band text-slate-400">Touches</p><p class="font-mono">pane_tree.rs · workspace.rs</p></div>
+          <div><p class="band text-slate-400">New concepts</p><p class="font-mono">1 <span class="text-slate-400">(divider address)</span></p></div>
+          <div><p class="band text-slate-400">Minimum pane</p><p class="font-mono num">120 px</p></div>
+        </div>
+      </header>
+
+      <!-- ═══════════ PROBLEM ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">The problem</h2>
+        <div class="grid md:grid-cols-2 gap-8 items-start">
+          <div class="space-y-4 text-[15px] leading-relaxed">
+            <p>Sprite splits panes evenly and leaves them that way. A split is born at a ratio of <code>0.5</code> and nothing in the product can ever change it.</p>
+            <p><code>PaneTree</code> stores a <code>ratio</code> per split node but exposes no operation that reads or writes one. And the divider is not an object at all — it is a one-pixel gap, produced by shrinking every pane by <code>DIVIDER_PX</code> and letting the container's background show through.</p>
+            <p>So someone who wants an editor twice the width of a log tail cannot have it. Every terminal Sprite is measured against — Ghostty, kitty, WezTerm, tmux — lets a divider be dragged.</p>
+          </div>
+          <figure class="rounded-lg border border-stone-300 bg-white p-5 space-y-3">
+            <figcaption class="band text-slate-400">What exists today</figcaption>
+            <svg viewBox="0 -34 420 184" class="w-full">
+              <rect x="4" y="4" width="204" height="142" rx="3" fill="#0f172a"/>
+              <rect x="212" y="4" width="204" height="142" rx="3" fill="#0f172a"/>
+              <line x1="210" y1="4" x2="210" y2="146" stroke="#2a2a34" stroke-width="2"/>
+              <text x="16" y="26" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="11">$ vim</text>
+              <text x="224" y="26" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="11">$ tail -f log</text>
+              <text x="106" y="140" fill="#475569" font-family="ui-monospace,monospace" font-size="10" text-anchor="middle">50%</text>
+              <text x="314" y="140" fill="#475569" font-family="ui-monospace,monospace" font-size="10" text-anchor="middle">50%</text>
+              <g>
+                <line x1="210" y1="-16" x2="210" y2="0" stroke="#dc2626" stroke-width="1"/>
+                <text x="210" y="-22" fill="#dc2626" font-size="11" font-family="ui-monospace,monospace" text-anchor="middle">1 px of background. Not an element.</text>
+              </g>
+            </svg>
+            <p class="text-xs text-slate-500 leading-relaxed">The gap is the container showing through, so there is nothing to hover, nothing to press, and nowhere to hang a cursor.</p>
+          </figure>
+        </div>
+        <blockquote class="border-l-2 border-amber-400 pl-4 text-[15px] italic text-slate-700">
+          “As a mouse user, I want to focus <strong class="not-italic">and resize</strong> panes by clicking and dragging, so that layout adjustments are direct.”
+          <span class="not-italic text-slate-500 text-sm block mt-1 font-mono">— Phase 1 PRD, story 15. Clicking to focus landed in Checkpoint 3. Dragging to resize did not.</span>
+        </blockquote>
+      </section>
+
+      <!-- ═══════════ THE GESTURE ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">The gesture</h2>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2">
+            <p class="band text-slate-400">Hover</p>
+            <p class="font-mono text-sm grabme inline-block border-b border-dotted border-slate-400">↔ resize cursor</p>
+            <p class="text-sm text-slate-600 leading-relaxed">A 7 px strip over the 1 px gap. One pixel cannot be hit with a mouse.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2">
+            <p class="band text-slate-400">Drag</p>
+            <p class="font-mono text-sm">continuous</p>
+            <p class="text-sm text-slate-600 leading-relaxed">Both panes follow the pointer. Neither may go below 120 px — the divider simply stops.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2">
+            <p class="band text-slate-400">Double-click</p>
+            <p class="font-mono text-sm">→ 50 / 50</p>
+            <p class="text-sm text-slate-600 leading-relaxed">Undoes an over-enthusiastic drag in one gesture.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2">
+            <p class="band text-slate-400">Keyboard</p>
+            <p class="font-mono text-sm">Ctrl+Shift+Alt + ←↑↓→</p>
+            <p class="text-sm text-slate-600 leading-relaxed">Moves the focused pane's boundary on that side by 20 px, through the same clamp.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ NAMING A DIVIDER ═══════════ -->
+      <section class="space-y-6">
+        <h2 class="font-serif text-2xl">Naming a divider</h2>
+        <p class="text-[15px] leading-relaxed max-w-3xl">A drag needs a name for the boundary it grabbed that stays valid for the length of the gesture. The tree has no name for a split node, so one has to be chosen. Three were considered.</p>
+
+        <div class="grid md:grid-cols-3 gap-4">
+          <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2 opacity-70">
+            <p class="band text-slate-400">Rejected</p>
+            <p class="font-serif text-lg">Mint a <span class="font-mono text-base">DividerId</span></p>
+            <p class="text-sm text-slate-600 leading-relaxed">Stable and never reused, matching the file's identity rules — but it changes three <code>split</code> signatures and puts a second identity type beside the one the observation schema already exposes. More vocabulary than the problem needs.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-4 space-y-2 opacity-70">
+            <p class="band text-slate-400">Rejected</p>
+            <p class="font-serif text-lg">A tree path</p>
+            <p class="text-sm text-slate-600 leading-relaxed">A bit-path from the root needs no new type, but it is valid only until the tree changes shape — and a stale path resolves silently to a <em>different</em> divider rather than to nothing.</p>
+          </div>
+          <div class="rounded-lg border-2 border-emerald-600 bg-emerald-50/60 p-4 space-y-2">
+            <p class="band text-emerald-700">Chosen</p>
+            <p class="font-serif text-lg">The pane on its low side</p>
+            <p class="text-sm text-slate-700 leading-relaxed">A divider is <strong>“the boundary on side D of pane P”</strong> — reusing <code>PaneId</code> and the <code>Direction</code> focus navigation already uses. No new identity type, and the same address serves the drag, the double-click, and the keyboard nudge.</p>
+          </div>
+        </div>
+
+        <div class="rounded-lg border border-stone-300 bg-white p-6 space-y-5">
+          <p class="band text-slate-400">The rule</p>
+          <p class="font-serif text-lg leading-relaxed max-w-3xl">The boundary on the <strong>right</strong> of pane P is the nearest ancestor split of horizontal orientation whose subtree containing P is that split's <code class="font-mono">first</code> child. Where P's subtree is the <code class="font-mono">second</code> child, that split is P's <strong>left</strong> boundary.</p>
+          <p class="text-[15px] leading-relaxed max-w-3xl text-slate-700">The rule matters most where a naive one fails. Take <code>[[A|B] | C]</code>. The <em>nearest</em> horizontal ancestor of B is the <code>A|B</code> split — but the boundary to B's right is the root's. Walking up from B, the <code>A|B</code> split is skipped because B is its <code>second</code> child, and the walk lands on the root.</p>
+
+          <div class="grid md:grid-cols-2 gap-8 pt-2">
+            <figure class="space-y-2">
+              <figcaption class="band text-slate-400">On screen</figcaption>
+              <svg viewBox="0 0 400 170" class="w-full">
+                <rect x="2" y="2" width="96" height="130" rx="3" fill="#0f172a"/>
+                <rect x="102" y="2" width="96" height="130" rx="3" fill="#0f172a"/>
+                <rect x="202" y="2" width="196" height="130" rx="3" fill="#0f172a"/>
+                <text x="50" y="72" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="14" text-anchor="middle">A</text>
+                <text x="150" y="72" fill="#fbbf24" font-family="ui-monospace,monospace" font-size="14" text-anchor="middle" font-weight="bold">B</text>
+                <text x="300" y="72" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="14" text-anchor="middle">C</text>
+                <line x1="100" y1="2" x2="100" y2="132" stroke="#64748b" stroke-width="2"/>
+                <line x1="200" y1="2" x2="200" y2="132" stroke="#10b981" stroke-width="3"/>
+                <text x="100" y="150" fill="#64748b" font-size="10" font-family="ui-monospace,monospace" text-anchor="middle">d1</text>
+                <text x="200" y="150" fill="#059669" font-size="10" font-family="ui-monospace,monospace" text-anchor="middle" font-weight="bold">d2</text>
+                <text x="200" y="165" fill="#059669" font-size="10" font-family="ui-monospace,monospace" text-anchor="middle">right of B</text>
+              </svg>
+            </figure>
+            <figure class="space-y-2">
+              <figcaption class="band text-slate-400">In the tree</figcaption>
+              <svg viewBox="0 0 420 200" class="w-full">
+                <!-- edges -->
+                <line x1="238" y1="40" x2="152" y2="86" stroke="#94a3b8" stroke-width="1.5"/>
+                <line x1="262" y1="40" x2="322" y2="140" stroke="#94a3b8" stroke-width="1.5"/>
+                <line x1="128" y1="112" x2="86" y2="140" stroke="#94a3b8" stroke-width="1.5"/>
+                <line x1="152" y1="112" x2="182" y2="140" stroke="#94a3b8" stroke-width="1.5"/>
+                <text x="182" y="58" fill="#64748b" font-size="9" font-family="ui-monospace,monospace">first</text>
+                <text x="288" y="80" fill="#64748b" font-size="9" font-family="ui-monospace,monospace">second</text>
+                <text x="86" y="130" fill="#64748b" font-size="9" font-family="ui-monospace,monospace">first</text>
+                <text x="166" y="130" fill="#64748b" font-size="9" font-family="ui-monospace,monospace">second</text>
+                <!-- split nodes -->
+                <circle cx="250" cy="28" r="16" fill="#fff" stroke="#059669" stroke-width="3"/>
+                <text x="250" y="32" font-size="11" text-anchor="middle" font-family="ui-monospace,monospace" fill="#059669">d2</text>
+                <circle cx="140" cy="99" r="16" fill="#fff" stroke="#64748b" stroke-width="2"/>
+                <text x="140" y="103" font-size="11" text-anchor="middle" font-family="ui-monospace,monospace" fill="#64748b">d1</text>
+                <!-- leaves -->
+                <rect x="68" y="140" width="36" height="26" rx="3" fill="#0f172a"/>
+                <text x="86" y="158" fill="#e2e8f0" font-size="12" text-anchor="middle" font-family="ui-monospace,monospace">A</text>
+                <rect x="164" y="140" width="36" height="26" rx="3" fill="#0f172a" stroke="#fbbf24" stroke-width="2"/>
+                <text x="182" y="158" fill="#fbbf24" font-size="12" text-anchor="middle" font-family="ui-monospace,monospace">B</text>
+                <rect x="304" y="140" width="36" height="26" rx="3" fill="#0f172a"/>
+                <text x="322" y="158" fill="#e2e8f0" font-size="12" text-anchor="middle" font-family="ui-monospace,monospace">C</text>
+                <!-- the walk up from B -->
+                <path d="M204 150 C 232 140, 196 112, 158 106" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4 3"/>
+                <circle cx="216" cy="126" r="9" fill="#fff" stroke="#dc2626" stroke-width="1.5"/>
+                <text x="216" y="130" font-size="10" text-anchor="middle" font-family="ui-monospace,monospace" fill="#dc2626">1</text>
+                <path d="M126 84 C 118 54, 176 32, 232 26" fill="none" stroke="#059669" stroke-width="1.5" stroke-dasharray="4 3"/>
+                <circle cx="150" cy="46" r="9" fill="#fff" stroke="#059669" stroke-width="1.5"/>
+                <text x="150" y="50" font-size="10" text-anchor="middle" font-family="ui-monospace,monospace" fill="#059669">2</text>
+                <!-- legend -->
+                <text x="4" y="188" font-size="10" font-family="ui-monospace,monospace" fill="#dc2626">1</text>
+                <text x="18" y="188" font-size="10" font-family="ui-monospace,monospace" fill="#475569">at d1, B is second — skip it</text>
+                <text x="212" y="188" font-size="10" font-family="ui-monospace,monospace" fill="#059669">2</text>
+                <text x="226" y="188" font-size="10" font-family="ui-monospace,monospace" fill="#475569">at d2, [A|B] is first — stop</text>
+              </svg>
+            </figure>
+          </div>
+
+          <div class="rounded bg-stone-100 border border-stone-300 p-4 text-[15px] leading-relaxed max-w-3xl">
+            <p><strong class="font-serif">And for enumeration</strong>, each split names itself by <strong>the last leaf of its <code class="font-mono">first</code> subtree</strong> — B, in that example. The walk up from a last leaf skips every intermediate split of matching orientation, because a last leaf is by construction in each of their <code class="font-mono">second</code> children.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ WHERE THINGS LIVE ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">Where the work lives</h2>
+        <p class="text-[15px] leading-relaxed max-w-3xl">The split between the three layers is the point. GPUI event handlers have no test seam — anything inside one is verified only by hand — so nothing that can be wrong is allowed to live there.</p>
+
+        <div class="space-y-3">
+          <div class="rounded-lg border border-stone-300 bg-white overflow-hidden">
+            <div class="flex flex-wrap items-center gap-3 px-5 py-3 border-b border-stone-200 bg-emerald-50/60">
+              <span class="font-mono text-sm font-bold">pane_tree.rs</span>
+              <span class="band text-emerald-700">pure · normalised · fully testable</span>
+            </div>
+            <div class="px-5 py-4 space-y-3 text-[15px]">
+              <p class="text-slate-700">Two operations, no pixels, no GPUI:</p>
+              <ul class="space-y-2 font-mono text-sm">
+                <li class="pl-4 border-l-2 border-emerald-400">dividers() → Vec&lt;Divider&gt;<span class="font-sans text-slate-600 text-[13px] block pt-1">one per split: naming pane, direction, orientation, current ratio, the split's own area. Ratio and area both, because the area converts pixels to a ratio and the ratio seeds a drag from where it was grabbed.</span></li>
+                <li class="pl-4 border-l-2 border-emerald-400">set_divider_ratio(pane, direction, ratio) → bool<span class="font-sans text-slate-600 text-[13px] block pt-1">resolves by the rule above; reports whether a divider was found.</span></li>
+              </ul>
+              <p class="text-slate-600 text-sm">Neither touches pane identity, focus, or session ownership — the property Phase 1 already states about resize, and one the tree's tests already know how to assert.</p>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-stone-300 bg-white overflow-hidden">
+            <div class="flex flex-wrap items-center gap-3 px-5 py-3 border-b border-stone-200 bg-sky-50">
+              <span class="font-mono text-sm font-bold">workspace.rs</span>
+              <span class="band text-sky-700">pixels · free functions · testable without a window</span>
+            </div>
+            <div class="px-5 py-4 space-y-3 text-[15px]">
+              <p class="font-mono text-sm bg-stone-100 rounded p-3">divider_ratio(area_origin_px, area_extent_px, pointer_px, floor_px) → f32</p>
+              <p class="text-slate-700">Maps a pointer position to a ratio and clamps it so neither side falls below the floor. A free function, not a method on the drag state, precisely so it can be tested. The drag and the keyboard nudge both go through it, so the two cannot disagree about where the floor is.</p>
+              <p class="text-slate-600 text-sm"><code>split_area</code>'s existing <code>0.05..=0.95</code> clamp stays as the tree's own safety net for its invariants — it is not the product's minimum size.</p>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-stone-300 bg-white overflow-hidden">
+            <div class="flex flex-wrap items-center gap-3 px-5 py-3 border-b border-stone-200 bg-amber-50">
+              <span class="font-mono text-sm font-bold">GPUI handlers</span>
+              <span class="band text-amber-700">no test seam · verified by hand · kept trivial</span>
+            </div>
+            <div class="px-5 py-4 text-[15px] text-slate-700">
+              Hit strips, the drag overlay, and the press/release bookkeeping. Every decision they make is a call into one of the two layers above.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ MECHANICS ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">Three mechanics worth stating</h2>
+        <div class="grid md:grid-cols-3 gap-4">
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-2">
+            <p class="font-serif text-lg">The drag needs an overlay</p>
+            <p class="text-sm text-slate-600 leading-relaxed">GPUI's <code>on_mouse_move</code> fires only while its own hitbox is hovered, so a 7 px strip loses the pointer the moment the pointer outruns it — the common case in a fast drag. While a drag is live, one occluding overlay across the whole pane area carries the move and release listeners.</p>
+            <p class="text-sm text-slate-600 leading-relaxed">It also guarantees a gesture begun on a divider cannot become a text selection in the pane underneath: one gesture, one meaning.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-2">
+            <p class="font-serif text-lg">The grab keeps its offset</p>
+            <p class="text-sm text-slate-600 leading-relaxed">A press records where <em>within</em> the strip it landed, so the divider does not jump to centre itself under the pointer on the first move.</p>
+            <p class="text-sm text-slate-600 leading-relaxed">A release anywhere ends the drag. A move that arrives with no button held ends it too — which is how a release lost outside the window is recovered.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-2">
+            <p class="font-serif text-lg">Alt is relaxed for arrows only</p>
+            <p class="text-sm text-slate-600 leading-relaxed"><code>workspace_action</code> rejects any keystroke carrying alt, so alt-modified keys reach the child. Only <kbd class="font-mono text-xs bg-stone-100 px-1 rounded">Ctrl+Shift+Alt</kbd> + arrow is carved out.</p>
+            <p class="text-sm text-slate-600 leading-relaxed">A pane already against the tab's edge does nothing. Growing a pane by moving its <em>opposite</em> boundary was rejected: it makes one key mean two motions depending on where the pane sits.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ ALREADY HANDLED ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">What needs no work</h2>
+        <div class="grid md:grid-cols-2 gap-4">
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-2">
+            <p class="band text-slate-400">Child resize</p>
+            <p class="text-[15px] text-slate-700 leading-relaxed">A pane's <code>TerminalView</code> is told its allocation every render, and <code>synchronise_size</code> sends a resize only when the cell count changes. A continuous drag therefore produces at most one resize per column or row crossed — not one per frame.</p>
+          </div>
+          <div class="rounded-lg border border-stone-300 bg-white p-5 space-y-2">
+            <p class="band text-slate-400">Observation</p>
+            <p class="text-[15px] text-slate-700 leading-relaxed">Pane rectangles are published from <code>render</code> on every frame, so a resized layout reaches observation clients with no new plumbing.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ STORIES ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">User stories</h2>
+        <ol class="space-y-3 counter-reset">
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">01</span><p class="text-[15px] leading-relaxed">As a <strong>mouse user</strong>, I want a resize cursor when I hover a divider, so that I can see the boundary is draggable before I press.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">02</span><p class="text-[15px] leading-relaxed">As a <strong>mouse user</strong>, I want to drag a divider and have both panes follow the pointer, so that adjusting a layout is direct rather than a matter of configuration.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">03</span><p class="text-[15px] leading-relaxed">As a <strong>mouse user</strong>, I want a divider I have grabbed to keep following the pointer when the pointer moves faster than it or leaves it, so that a quick drag does not silently stop halfway.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">04</span><p class="text-[15px] leading-relaxed">As a <strong>mouse user</strong>, I want a drag that starts on a divider never to select text in the pane underneath, so that one gesture has one meaning.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">05</span><p class="text-[15px] leading-relaxed">As a <strong>mouse user</strong>, I want to double-click a divider to return that split to even, so that undoing an over-enthusiastic drag takes one gesture.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">06</span><p class="text-[15px] leading-relaxed">As a <strong>keyboard user</strong>, I want <kbd class="font-mono text-xs bg-stone-100 px-1 rounded">Ctrl+Shift+Alt</kbd> and an arrow to move the focused pane's boundary on that side, so that resizing does not require a mouse.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">07</span><p class="text-[15px] leading-relaxed">As a <strong>shell user</strong>, I want a resized pane's child to learn its new dimensions, so that full-screen programs redraw at the size they are actually given.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">08</span><p class="text-[15px] leading-relaxed">As a <strong>shell user</strong>, I want resizing a pane never to disturb any pane's session, scrollback, or focus, so that layout work is safe during real work.</p></li>
+          <li class="flex gap-4 rounded-lg border border-stone-300 bg-white p-4"><span class="font-mono text-xs text-slate-400 pt-1 num">09</span><p class="text-[15px] leading-relaxed">As a <strong>terminal user</strong>, I want neither side of a split to shrink below a usable size, so that a pane cannot be dragged into something visible but unusable.</p></li>
+        </ol>
+      </section>
+
+      <!-- ═══════════ TESTING ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">How it is verified</h2>
+        <div class="overflow-x-auto rounded-lg border border-stone-300 bg-white">
+          <table class="w-full text-[15px]">
+            <thead class="bg-stone-100 border-b border-stone-300">
+              <tr><th class="text-left px-5 py-3 band text-slate-500">Claim</th><th class="text-left px-5 py-3 band text-slate-500">Seam</th></tr>
+            </thead>
+            <tbody class="divide-y divide-stone-200">
+              <tr><td class="px-5 py-3">Enumeration returns one divider per split, with the geometry the layout actually uses</td><td class="px-5 py-3 font-mono text-xs text-emerald-700">pane_tree unit</td></tr>
+              <tr><td class="px-5 py-3">Addressing is right in nested same-orientation splits — <code>[[A|B] | C]</code>, both directions, as a named test</td><td class="px-5 py-3 font-mono text-xs text-emerald-700">pane_tree unit</td></tr>
+              <tr><td class="px-5 py-3">A pane against the tab's edge reports no boundary on that side</td><td class="px-5 py-3 font-mono text-xs text-emerald-700">pane_tree unit</td></tr>
+              <tr><td class="px-5 py-3">Setting a ratio moves both panes and changes no identity, no focus, no session ownership</td><td class="px-5 py-3 font-mono text-xs text-emerald-700">pane_tree unit</td></tr>
+              <tr><td class="px-5 py-3">Closing a pane collapses its split and its divider disappears with it</td><td class="px-5 py-3 font-mono text-xs text-emerald-700">pane_tree unit</td></tr>
+              <tr><td class="px-5 py-3"><code>divider_ratio</code> maps a pointer position to the expected ratio</td><td class="px-5 py-3 font-mono text-xs text-sky-700">free function</td></tr>
+              <tr><td class="px-5 py-3">It clamps at both floors, and a pointer pushed past a floor and brought back returns the divider to the pointer rather than leaving it offset</td><td class="px-5 py-3 font-mono text-xs text-sky-700">free function</td></tr>
+              <tr><td class="px-5 py-3">A keyboard nudge moves by the expected amount and stops at the same floors</td><td class="px-5 py-3 font-mono text-xs text-sky-700">free function</td></tr>
+              <tr class="bg-amber-50/50"><td class="px-5 py-3">Hover shows the cursor; a fast drag keeps the divider; a drag begun on a divider selects no text; a double-click evens the split; a resized pane's <code>stty size</code> reports its new dimensions</td><td class="px-5 py-3 font-mono text-xs text-amber-700">by hand</td></tr>
+              <tr class="bg-amber-50/50"><td class="px-5 py-3">The divider's resulting pixel position</td><td class="px-5 py-3 font-mono text-xs text-amber-700"><code>grim</code> capture, measured — not judged by eye</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ═══════════ OUT OF SCOPE ═══════════ -->
+      <section class="space-y-5">
+        <h2 class="font-serif text-2xl">Out of scope</h2>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div class="rounded border border-stone-300 bg-stone-100/60 p-4"><p class="font-serif">Persisting ratios across restarts</p><p class="text-sm text-slate-600 pt-1 leading-relaxed">Sprite persists no layout today, and a resize is not the change that should introduce a session store.</p></div>
+          <div class="rounded border border-stone-300 bg-stone-100/60 p-4"><p class="font-serif">Dragging a pane to a new position</p><p class="text-sm text-slate-600 pt-1 leading-relaxed">Or any layout gesture beyond moving a boundary that already exists.</p></div>
+          <div class="rounded border border-stone-300 bg-stone-100/60 p-4"><p class="font-serif">Resizing across tabs or windows</p><p class="text-sm text-slate-600 pt-1 leading-relaxed">A divider belongs to one tab's tree.</p></div>
+          <div class="rounded border border-stone-300 bg-stone-100/60 p-4"><p class="font-serif">Configurable bindings, strip width, or minimum size</p><p class="text-sm text-slate-600 pt-1 leading-relaxed">Configuration is a Phase 1 subsystem in its own right; this change adds nothing to its schema.</p></div>
+          <div class="rounded border border-stone-300 bg-stone-100/60 p-4"><p class="font-serif">Snapping to whole cells</p><p class="text-sm text-slate-600 pt-1 leading-relaxed">The drag is continuous. A pane keeps the partial cell of padding it already keeps at every other edge.</p></div>
+        </div>
+      </section>
+
+      <footer class="pt-4 space-y-3">
+        <div class="rule"></div>
+        <p class="font-mono text-xs text-slate-500">Sprite Terminal · Phase 1 · docs/PRD/09-05-2026-pane-divider-resize.md is the source of record for this document.</p>
+      </footer>
+    </main>
+  </body>
+</html>
