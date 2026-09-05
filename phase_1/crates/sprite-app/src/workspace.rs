@@ -1149,43 +1149,14 @@ impl Render for Workspace {
             .bg(rgb(DIVIDER))
             .children(pane_children)
             // After the panes, so a strip is never buried by one.
-            .children(divider_children)
-            .when_some(self.divider_drag, |element, drag| {
-                // GPUI delivers a move only while the element under the pointer
-                // is hovered, and a pointer outruns a seven-pixel strip at
-                // once. The overlay is what keeps the moves coming — and it
-                // stops the drag becoming a text selection in the pane below.
-                element.child(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(0.0))
-                        .size_full()
-                        .occlude()
-                        .cursor(drag.cursor())
-                        .on_mouse_move(cx.listener(
-                            |workspace, event: &gpui::MouseMoveEvent, _window, cx| {
-                                // A move with no button held means the release
-                                // happened somewhere this window never saw.
-                                if event.dragging() {
-                                    workspace.drag_divider(event.position, cx);
-                                } else {
-                                    workspace.end_divider_drag(cx);
-                                }
-                            },
-                        ))
-                        .on_mouse_up(
-                            gpui::MouseButton::Left,
-                            cx.listener(|workspace, _event, _window, cx| {
-                                workspace.end_divider_drag(cx);
-                            }),
-                        ),
-                )
-            });
+            .children(divider_children);
 
         div()
             .flex()
             .flex_col()
+            // The drag overlay is placed against this, in the window
+            // coordinates every boundary's geometry is already in.
+            .relative()
             .size_full()
             .bg(rgb(BACKGROUND))
             .track_focus(&self.focus)
@@ -1267,6 +1238,42 @@ impl Render for Workspace {
                 )
             })
             .child(panes)
+            .when_some(self.divider_drag, |element, drag| {
+                // GPUI delivers a move only while the element under the pointer
+                // is hovered, and a pointer outruns a seven-pixel strip at
+                // once. The overlay is what keeps the moves coming — and it
+                // stops the drag becoming a text selection in the pane below.
+                // It covers the window rather than the panes, so a pointer that
+                // strays up into the tab strip mid-drag still feeds it. Nothing
+                // is swallowed by that: the overlay is only ever here while a
+                // button is already down.
+                element.child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .size_full()
+                        .occlude()
+                        .cursor(drag.cursor())
+                        .on_mouse_move(cx.listener(
+                            |workspace, event: &gpui::MouseMoveEvent, _window, cx| {
+                                // A move with no button held means the release
+                                // happened somewhere this window never saw.
+                                if event.dragging() {
+                                    workspace.drag_divider(event.position, cx);
+                                } else {
+                                    workspace.end_divider_drag(cx);
+                                }
+                            },
+                        ))
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(|workspace, _event, _window, cx| {
+                                workspace.end_divider_drag(cx);
+                            }),
+                        ),
+                )
+            })
     }
 }
 
