@@ -1,8 +1,8 @@
 # Checkpoint 3 security review request
 
-**Status: OUTSTANDING — not yet performed.** This document prepares the review;
-it is not a substitute for it. Nothing below has been reviewed by anyone other
-than the author of the code.
+**Status: PERFORMED, 2026-09-05.** The review this document prepared is
+[checkpoint-3-security-review.md](checkpoint-3-security-review.md), which
+answers every question below. This file is kept as the brief it was.
 
 The observation surface is the most security-sensitive code in Phase 1: it
 brokers read-only access to the contents of other panes. The TSP requires a

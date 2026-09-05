@@ -49,6 +49,25 @@ fn tcp_inodes() -> HashSet<u64> {
     inodes
 }
 
+/// Linux only, because the method is `/proc` and macOS has none.
+///
+/// This measures the property by reading `/proc/self/fd` and `/proc/net/tcp`.
+/// There is no macOS equivalent that does not mean shelling out to `lsof`, so
+/// the test is ignored there rather than rewritten around a second mechanism.
+///
+/// **macOS is not left uncovered.** The forbidden-state scan asserts the same
+/// property by inspection — no TCP type is named anywhere in the crate — and
+/// although that scan runs in the Linux job only, it greps source that both
+/// platforms compile, so it covers the macOS build too. What macOS loses is the
+/// measurement, not the guarantee.
+///
+/// This surfaced when the socket-path guard was corrected: before that, every
+/// endpoint test failed on macOS long before this one ran, so a `/proc` test on
+/// a platform without `/proc` was never reached.
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "reads /proc, which only Linux has; the forbidden-state scan covers this platform"
+)]
 #[test]
 fn an_open_endpoint_holds_no_tcp_socket() {
     // A directory of this test's own rather than `XDG_RUNTIME_DIR`, which a

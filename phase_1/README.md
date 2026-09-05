@@ -120,9 +120,17 @@ output is whatever a program chose to print.
 
 Linux is the supported platform and the one this is tested on.
 
-macOS builds, but pane observation does not work there: the socket path check
-is stricter than the platform requires and `$TMPDIR` is long enough to trip
-it. Everything else is untested on macOS.
+macOS builds. Its observation tests used to fail there, and the cause was
+Sprite's own: a socket-path guard set at a flat 100 bytes, stricter than either
+platform requires — `sun_path` holds 104 on macOS and 108 on Linux. What
+exceeded it was the *test* harness, which nests a scratch directory inside
+`$TMPDIR`, itself a ~48-byte path under `/var/folders` there. The guard now
+comes from the platform, the harness leaves room for a macOS `$TMPDIR`, and a
+test pins that budget so it cannot drift back.
+
+The whole suite passes on Linux with `$TMPDIR` set to a macOS-length path, which
+is the closest this can be checked without a Mac. It is still not a measurement:
+until the suite has run on real hardware, treat macOS as untested.
 
 ## Layout
 
