@@ -27,8 +27,16 @@ use crate::snapshot::Projector;
 use crate::{
     CellPosition, ChildExit, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton,
     MouseEvent, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle,
-    TerminalCommand, TerminalEvent, TerminalSize,
+    TerminalCommand, TerminalEvent, TerminalSize, WheelEvent,
 };
+
+/// The most rows one wheel turn is allowed to send to a child.
+///
+/// A mouse report and a cursor key each carry one notch, so a large delta
+/// becomes that many events. A trackpad fling can accumulate a very large one,
+/// and a child should not be handed thousands of keypresses because a finger
+/// slipped.
+const MAX_WHEEL_TURNS: u32 = 32;
 
 /// The one ordered PTY-write path. Worker-local: it never crosses a thread or
 /// the public interface, so no `Arc`, writer thread, or extra channel exists.
@@ -492,6 +500,47 @@ pub(crate) fn run(
                     });
                     generation += 1;
                     dirty = true;
+                }
+                TerminalCommand::Wheel(event) => {
+                    // Where a wheel turn goes depends on terminal state the
+                    // application cannot see, so the decision is made here for
+                    // the same reason a click's is.
+                    match wheel_destination(&terminal, &event) {
+                        Ok(WheelDestination::Child(kind)) => {
+                            match encode_wheel(
+                                kind,
+                                &mut mouse_encoder,
+                                &mut encoder,
+                                &terminal,
+                                &event,
+                                size,
+                            ) {
+                                Ok(bytes) => {
+                                    if let Err(error) = write_all(&writer, &bytes) {
+                                        fatal = Some(error);
+                                        break;
+                                    }
+                                }
+                                Err(error) => {
+                                    if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(WheelDestination::Viewport) => {
+                            terminal.scroll_viewport(
+                                libghostty_vt::terminal::ScrollViewport::Delta(event.rows as isize),
+                            );
+                            generation += 1;
+                            dirty = true;
+                        }
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
                 }
                 TerminalCommand::Select {
                     anchor,
@@ -1307,6 +1356,159 @@ fn encode_focus(
         .encode(&mut buffer)
         .map_err(|error| SessionError::new("focus_encode", error))?;
     Ok(Some(buffer[..written].to_vec()))
+}
+
+/// Who a wheel turn belongs to.
+enum WheelDestination {
+    /// The child, encoded the way it has asked to hear about the wheel.
+    Child(WheelKind),
+    /// Sprite, which moves the viewport over its scrollback.
+    Viewport,
+}
+
+/// How a child that should hear the wheel wants it spelled.
+#[derive(Clone, Copy)]
+enum WheelKind {
+    /// A mouse report, for a child that turned reporting on.
+    Report,
+    /// Cursor keys, for a full-screen child that did not. This is what makes a
+    /// pager scroll, and what `mouse_alternate_scroll` describes.
+    CursorKeys,
+}
+
+/// Decides where one wheel turn goes.
+///
+/// Three cases, in the order every terminal resolves them:
+///
+/// 1. A child reporting the mouse hears the wheel as a mouse report, exactly as
+///    it hears a click.
+/// 2. A full-screen child that is not reporting gets cursor keys instead, while
+///    `mouse_alternate_scroll` is on — it is on unless the child turns it off.
+///    Without this a pager cannot be scrolled at all: the alternate screen has
+///    no scrollback for Sprite to move over.
+/// 3. Anything else is Sprite's own: move the viewport over the scrollback.
+///
+/// Shift overrides the first two, the same way it takes a click back for
+/// Sprite's selection.
+fn wheel_destination(
+    terminal: &Terminal<'_, '_>,
+    event: &WheelEvent,
+) -> Result<WheelDestination, SessionError> {
+    if event.shift {
+        return Ok(WheelDestination::Viewport);
+    }
+
+    let tracking = terminal
+        .is_mouse_tracking()
+        .map_err(|error| SessionError::new("mouse_tracking", error))?;
+    if tracking {
+        return Ok(WheelDestination::Child(WheelKind::Report));
+    }
+
+    let alternate = matches!(
+        terminal
+            .active_screen()
+            .map_err(|error| SessionError::new("active_screen", error))?,
+        libghostty_vt::screen::Screen::Alternate
+    );
+    let alternate_scroll = terminal
+        .mode(libghostty_vt::terminal::Mode::ALT_SCROLL)
+        .map_err(|error| SessionError::new("alt_scroll_mode", error))?;
+    if alternate && alternate_scroll {
+        return Ok(WheelDestination::Child(WheelKind::CursorKeys));
+    }
+
+    Ok(WheelDestination::Viewport)
+}
+
+/// Encodes one wheel turn as the bytes its child is expecting.
+///
+/// A turn of several rows is several events rather than one with a count:
+/// neither a mouse report nor a cursor key can carry a magnitude, and a child
+/// that receives three of them scrolls three lines.
+fn encode_wheel(
+    kind: WheelKind,
+    mouse_encoder: &mut libghostty_vt::mouse::Encoder<'_>,
+    key_encoder: &mut key::Encoder<'_>,
+    terminal: &Terminal<'_, '_>,
+    event: &WheelEvent,
+    size: TerminalSize,
+) -> Result<Vec<u8>, SessionError> {
+    let up = event.rows < 0;
+    let turns = event.rows.unsigned_abs().min(MAX_WHEEL_TURNS);
+
+    let mut bytes = Vec::new();
+    for _ in 0..turns {
+        match kind {
+            WheelKind::Report => {
+                encode_wheel_report(mouse_encoder, terminal, event, size, up, &mut bytes)?;
+            }
+            WheelKind::CursorKeys => {
+                let key = KeyEvent {
+                    logical_key: if up { "up" } else { "down" }.to_owned(),
+                    text: None,
+                    modifiers: KeyModifiers {
+                        shift: false,
+                        alt: false,
+                        control: false,
+                        platform: false,
+                        function: false,
+                    },
+                    action: KeyAction::Press,
+                    composing: false,
+                };
+                // Through the same encoder a typed arrow uses, so a child in
+                // application cursor mode gets SS3 rather than CSI without this
+                // having to know the difference.
+                bytes.extend_from_slice(&encode_key(key_encoder, terminal, &key)?);
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// One wheel notch as a mouse report.
+fn encode_wheel_report(
+    encoder: &mut libghostty_vt::mouse::Encoder<'_>,
+    terminal: &Terminal<'_, '_>,
+    event: &WheelEvent,
+    size: TerminalSize,
+    up: bool,
+    out: &mut Vec<u8>,
+) -> Result<(), SessionError> {
+    use libghostty_vt::mouse::{Action, Button, EncoderSize, Event, Position};
+
+    let mut encoded = Event::new().map_err(|error| SessionError::new("mouse_event", error))?;
+    // The wheel reports as a press of X11 buttons four and five, which is what
+    // becomes report buttons 64 and 65 on the wire.
+    encoded.set_action(Action::Press);
+    encoded.set_button(Some(if up { Button::Four } else { Button::Five }));
+
+    let mut mods = key::Mods::empty();
+    mods.set(key::Mods::ALT, event.alt);
+    mods.set(key::Mods::CTRL, event.control);
+    encoded.set_mods(mods);
+
+    encoded.set_position(Position {
+        x: f32::from(event.position.column) * size.cell_width_px as f32,
+        y: f32::from(event.position.row) * size.cell_height_px as f32,
+    });
+
+    encoder.set_options_from_terminal(terminal);
+    encoder.set_size(EncoderSize {
+        screen_width: u32::from(size.cols) * size.cell_width_px,
+        screen_height: u32::from(size.rows) * size.cell_height_px,
+        cell_width: size.cell_width_px,
+        cell_height: size.cell_height_px,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    });
+
+    encoder
+        .encode_to_vec(&encoded, out)
+        .map_err(|error| SessionError::new("mouse_encode", error))
 }
 
 /// Encodes one mouse event, or withholds it.
