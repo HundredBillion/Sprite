@@ -5,6 +5,7 @@
 //! libghostty or the PTY.
 
 mod block_elements;
+mod box_drawing;
 mod cli;
 mod config;
 mod graphics_cache;
