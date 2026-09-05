@@ -4,6 +4,7 @@
 //! the public `sprite-term` interface. It never reaches past that seam to
 //! libghostty or the PTY.
 
+mod block_elements;
 mod cli;
 mod config;
 mod graphics_cache;
