@@ -146,8 +146,15 @@ because GPUI event handlers have no test seam: anything inside one is verified
 only by hand, so nothing that can be wrong belongs there. The keyboard nudge
 and the drag both go through it.
 
-`split_area`'s existing `0.05..=0.95` clamp stays as the tree's own floor. It
-is a safety net for the tree's invariants, not the product's minimum size.
+`split_area`'s existing `0.05..=0.95` clamp stays as the tree's own floor, and
+on a wide enough split it is the stricter one: once a split's extent passes
+2400 logical pixels, `120px` is under 5% of it, so 5% wins and the divider
+stops further out than 120px would. The effective floor is the larger of the
+two — `max(120px, 0.05 * extent)` — and that is safe rather than merely
+tolerated: a bigger minimum never produces an unusable pane, only a more
+generous one, and the keyboard nudge and the mouse still cannot disagree,
+because both call `divider_ratio` and neither one sees the tree's clamp until
+after it has already answered.
 
 ### Dividers render as hit strips over the gap the layout already leaves
 

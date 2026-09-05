@@ -213,7 +213,7 @@
             <div class="px-5 py-4 space-y-3 text-[15px]">
               <p class="font-mono text-sm bg-stone-100 rounded p-3">divider_ratio(area_origin_px, area_extent_px, pointer_px, floor_px) → f32</p>
               <p class="text-slate-700">Maps a pointer position to a ratio and clamps it so neither side falls below the floor. A free function, not a method on the drag state, precisely so it can be tested. The drag and the keyboard nudge both go through it, so the two cannot disagree about where the floor is.</p>
-              <p class="text-slate-600 text-sm"><code>split_area</code>'s existing <code>0.05..=0.95</code> clamp stays as the tree's own safety net for its invariants — it is not the product's minimum size.</p>
+              <p class="text-slate-600 text-sm"><code>split_area</code>'s existing <code>0.05..=0.95</code> clamp stays as the tree's own floor, and on a wide enough split it is the stricter one: past 2400 logical pixels of extent, 120px is under 5% of it, so 5% wins. The effective floor is <code>max(120px, 0.05 × extent)</code> — safe because a bigger minimum never produces an unusable pane, and the keyboard and the mouse still agree, since both go through the same clamp.</p>
             </div>
           </div>
 

@@ -158,6 +158,10 @@ impl Node {
             orientation: *orientation,
             // Reported as the layout uses it, so a caller that draws the
             // boundary and a caller that moves it agree about where it is.
+            // `a` has already been through `split_area`'s own `0.05..=0.95`
+            // clamp; reading the ratio back out of it, instead of handing
+            // back `*ratio` on trust, is what keeps a boundary parked at
+            // either floor honest about where it actually sits.
             ratio: match orientation {
                 Orientation::Horizontal => a.width / area.width,
                 Orientation::Vertical => a.height / area.height,
