@@ -330,47 +330,48 @@ macOS. Croft is an acceptance-test application, not a dependency.
   accessibility services. Five cohesive checkpoints culminate in performance,
   soak, packaged Arch daily-drive, and real-macOS acceptance gates.
 
-### Phase 2 — Croft qualification and minimal fork
+### Phase 2 — Croft qualification, fork, and Studio foundation
 
 - **2.1 Freeze a baseline:** record the audited upstream commit, license,
   dependency graph, supported platforms, feature inventory, startup/resource
-  measurements, and known failures in Sprite. Do not fork from a moving branch
-  without a reproducible baseline.
-- **2.2 Create a separate fork repository:** preserve `upstream`, keep Sprite-
-  specific commits narrow, and establish a repeatable upstream-sync and release
-  process. The fork is never added to the Sprite Cargo workspace.
-- **2.3 Characterize before changing:** add end-to-end tests for startup, editor,
-  LSP, DAP, Git, testing, tasks, remote sessions, collaboration, embedded
-  terminal, Kitty graphics, and session persistence on Linux and macOS.
-- **2.4 Sprite compatibility:** recognize Sprite capability identifiers; remove
-  the need for `croft setup-ghostty` when running under Sprite; preserve normal
-  behavior under Ghostty, Kitty, WezTerm, iTerm2, and other supported terminals.
-- **2.5 Establish deep seams before feature growth:** split the central App into
-  bounded application services and separate editor state from cell rendering.
-  Introduce interfaces only where the fork's visual-parity or extension-host
-  work requires them; avoid a speculative full rewrite.
-- **2.6 Branding and configuration:** choose a distinct product name and assets,
-  centralize design tokens, and retain Croft attribution and MIT notices.
+  measurements, and known failures in Sprite Terminal. Do not fork from a
+  moving branch without a reproducible baseline.
+- **2.2 Create a separate fork repository:** preserve `upstream`, keep
+  Sprite-specific commits narrow, and establish a repeatable upstream-sync
+  and release process. The fork is consumed by Studio as a Cargo dependency
+  and is never added to Sprite Terminal's workspace.
+- **2.3 Characterize before changing:** add end-to-end tests for startup,
+  editor, LSP, DAP, Git, testing, tasks, and session behavior against the
+  frozen baseline, so model behavior is pinned before the view surgery
+  begins.
+- **2.4 Model/view separation:** carve Croft's model (editor state, LSP,
+  DAP, Git, testing, tasks) out of its ratatui view layer incrementally; the
+  GPUI view replaces the TUI as it goes. No dual-renderer seam is built or
+  maintained; the ratatui path is deleted, not preserved. The fork's
+  duplicated terminal engine (`alacritty_terminal`) is removed — Studio's
+  terminal panes serve that need.
+- **2.5 Studio foundation (parallel track, Sprite repository):** extract the
+  shared UI crate (pane tree, tabs, dividers, grid rendering) from
+  `sprite-app`; rename `sprite-term` to `sprite-engine`; generalize the pane
+  tree to pane types; stand up the `sprite-studio` crate hosting Terminal
+  panes and, when 2.4 delivers, the Editor pane.
+- **2.6 Branding and configuration:** choose a distinct product name and
+  assets for the fork, centralize design tokens, and retain Croft
+  attribution and MIT notices.
 
 ### Phase 3 — VS Code visual parity
 
 - **3.1 Reference corpus:** define supported VS Code layouts, resolutions,
-  themes, zoom levels, states, menus, popups, editor tabs, sidebars, panel tabs,
-  status bar, terminal, source-control, settings, and debug views. Capture
-  repeatable reference screenshots with licensed/legal fixtures.
+  themes, zoom levels, states, menus, popups, editor tabs, sidebars, panel
+  tabs, status bar, terminal, source-control, settings, and debug views.
+  Capture repeatable reference screenshots with licensed/legal fixtures.
 - **3.2 Tokenize the UI:** one semantic token system for colors, spacing,
-  typography, borders, icons, focus/hover/selection states, and motion. Map the
-  tokens onto Croft's ratatui path first.
-- **3.3 Close the TUI gap:** use Kitty graphics for crisp legal/open icons,
-  minimap and image surfaces; refine cell metrics, Unicode width behavior,
-  pointer hit targets, and transitions. Preserve the plain-cell fallback.
-- **3.4 Visual regression harness:** render deterministic workspaces and compare
-  them against the reference corpus. Record intentional platform/font variance
-  explicitly instead of accepting subjective "looks close" review.
-- **3.5 Grid-ceiling gate:** if defined parity states cannot pass because cells
-  cannot express the required geometry, design the smallest versioned Sprite
-  enhancement protocol or renderer extraction that closes those specific gaps.
-  A native GPUI Croft renderer is a last resort, not the default Phase 3 plan.
+  typography, borders, icons, focus/hover/selection states, and motion,
+  mapped onto the fork's GPUI components.
+- **3.3 Visual regression harness:** render deterministic workspaces in
+  Studio and compare them against the reference corpus. Record intentional
+  platform/font variance explicitly instead of accepting subjective "looks
+  close" review.
 
 ### Phase 4 — VS Code functional and extension compatibility
 
@@ -420,6 +421,9 @@ macOS. Croft is an acceptance-test application, not a dependency.
 ### Ongoing / cross-cutting
 - Daily-drive Sprite from Phase 1 and the Croft fork from Phase 2; every defect
   becomes a minimal reproduction and regression test in the owning repo.
+- Sprite Terminal quality-of-life: configurable line height, configurable
+  pane padding, and smooth scrolling remain Phase 1 maintenance items,
+  scheduled independently of Phases 2–5.
 - Maintain three distinct harnesses: terminal-protocol conformance, visual
   parity, and VS Code workflow/extension compatibility.
 - CI on macOS and Linux from Phase 1. Arch/Omarchy is a supported development
