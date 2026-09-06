@@ -8,7 +8,82 @@ read-only interface that lets a tool ask what another pane is currently
 showing. That interface is the reason the project exists; everything else is
 what a terminal has to get right before the interesting part is worth having.
 
+Where that leads is an inversion. VS Code and Zed are editors that contain a
+terminal, which is why their terminal is always the weakest panel in the
+window. Sprite is meant to be a terminal that can host a complete development
+environment without ceasing to be a terminal — real programs first, the editor
+an ordinary child process you can close without losing your shell. None of that
+is in this directory, and it is a plan rather than a claim.
+
 This directory is Phase 1. It is a working terminal, not a finished product.
+
+## Why this and not another terminal
+
+Sprite does not claim to emulate a terminal better than the terminals it
+learned from, and it is not a fork of one. It embeds libghostty, so its VT
+behaviour *is* Ghostty's, deliberately: terminal semantics are the
+correctness-hard part, decades of them, and reimplementing that would buy
+nothing a user could see. What is worth building is the layer above.
+
+It makes no speed claim either. Checkpoint 5 measured this phase and froze no
+budget — six metrics still exceed the ones carried forward, with the numbers
+and the reading in
+[`docs/performance/checkpoint-5.md`](docs/performance/checkpoint-5.md). A
+terminal's speed is a measurement rather than an adjective, and there is no
+honest version of that sentence yet.
+
+Against the terminals worth comparing it to:
+
+**Alacritty** has no splits, and its tabs are macOS's rather than its own; the
+documented answer is to run a multiplexer. That is a coherent position and it is
+why Alacritty is small. It also means the panes on your screen belong to a
+program that does not know what a pane is, so nothing in that arrangement can be
+asked what one of them is showing.
+
+**Ghostty** is where Sprite's terminal behaviour comes from, and on emulation
+there is nothing to choose between them, because it is the same code. Ghostty
+has tabs, splits and a graphics protocol, and it is finished in a way this is
+not. The difference is one interface it does not offer and has no reason to:
+Ghostty is a terminal, and Sprite is a terminal with a read surface and an
+IDE-shaped plan behind it.
+
+**kitty** can already do this, through the same channel it uses to drive the
+terminal: `kitty @ get-text` reads a window and `kitty @ send-text` types into
+one. What keeps those apart is configured rather than structural — passwords
+scoped to named commands, or a Python hook that vets each one — so a read-only
+kitty is something you assemble correctly and then keep that way. Sprite's is
+read-only because the grammar has no write in it to switch off.
+
+**WezTerm** is the closest prior art and deserves the credit: `wezterm cli
+get-text` genuinely hands a program the contents of a pane. The difference is
+shape rather than existence. That arrives as text, from a CLI that can equally
+spawn, kill and write to panes. Sprite's arrives as versioned JSON, from a
+grammar with no write in it, over a socket keyed per window, with the content
+declared untrusted in the payload.
+
+**Warp** shares the premise and is more open than it is usually given credit
+for: the client is on GitHub under AGPL v3, and the account is optional. The
+difference is what the product is. Warp is an agentic development environment —
+it supplies the intelligence, rebuilds the shell interaction model around it,
+and reaches its own servers for the parts that matter. Sprite supplies none of
+that and changes nothing about how your shell works. It exposes a surface, keys
+it per window, and lets whichever agent you already run be the one that reads.
+
+What holds that together is that the read surface is read-only by construction
+rather than by policy. The request grammar has no variant that means write, so a
+mutating request cannot be built, let alone refused; scope resolves against the
+issuing window, so a pane in another window is not addressable rather than
+forbidden; no TCP socket is ever opened, and a test asserts the process holds
+none. The reply is serialised field by field in hand-written code, so adding a
+field to an internal snapshot for the renderer's benefit cannot put it on the
+wire — colours, fonts, image bytes, control sequences, environment values and
+filenames are absent because no line of the serialiser writes them. And every
+pane carries `content_trust: "untrusted_terminal_output"`, because a tool
+feeding this to a language model is feeding it text an arbitrary program chose.
+
+Agents living in the terminal are what make that worth having now. The usual
+options are to scrape the screen or to paste it. Sprite offers a third: ask,
+over a local socket, with a key, and get back something with a schema.
 
 ## Install
 
