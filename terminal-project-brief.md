@@ -2,7 +2,7 @@
 ## "Terminal with an editor" — not an editor with a terminal
 
 The build-ready plan for **Sprite**, reflecting the most recent decisions
-(2026-08-09). Historical decisions that were evaluated and discarded live in
+(2026-09-05). Historical decisions that were evaluated and discarded live in
 **Addendum A** at the bottom — the main document describes only what is being
 built and why.
 
@@ -170,7 +170,7 @@ it is a crate dependency, chosen so the editor pane is native.
 
 ---
 
-## 4. Stack Decisions (current, 2026-08-09)
+## 4. Stack Decisions (current, 2026-09-05)
 
 - **Language: Rust.** Sprite Terminal, Studio, and the fork are Rust
   projects in separate repositories; the fork compiles into Studio rather
@@ -441,16 +441,18 @@ macOS. Croft is an acceptance-test application, not a dependency.
 
 Sprite Terminal reaching daily-driver quality is the bounded, high-confidence
 part: Ghostty provides the terminal semantics and multiple GPUI terminals prove
-the windowing/rendering path. Croft visual parity is plausible but may require a
-native enhancement once the cell ceiling is measured. Functional VS Code parity,
-especially extension compatibility, is the dominant risk and a multi-phase
-product program. Beating VS Code performance while adding compatibility is a
-separate empirical challenge.
+the windowing/rendering path. The fork's visual parity is pursued on the GPUI
+renderer, so the terminal cell ceiling no longer bounds it; the dominant parity
+risks are the model/view surgery itself and the fidelity work after it.
+Functional VS Code parity, especially extension compatibility, is the dominant
+risk and a multi-phase product program. Beating VS Code performance while
+adding compatibility is a separate empirical challenge.
 
-The plan therefore preserves stop points: Phase 1 is useful alone; Phase 2 is a
-usable Croft fork; Phase 3 can succeed without extension parity; and every Phase
-4 API slice can ship independently. Attrition and uncontrolled fork divergence
-remain larger risks than any single known protocol problem.
+The plan therefore preserves stop points: Phase 1 is useful alone; Phase 2
+leaves a qualified fork and a Studio that is useful with terminal panes alone;
+Phase 3 can succeed without extension parity; and every Phase 4 API slice can
+ship independently. Attrition and uncontrolled fork divergence remain larger
+risks than any single known protocol problem.
 
 ---
 
@@ -526,8 +528,8 @@ than scraping terminal contents or embedding prompt input inside the editor.
   permissioned context service from that model, with user-visible scope and no
   implicit writes. Keep the Claude process out of the render/input hot path.
 - **Sprite version:** a terminal pane may publish only coarse process/pane
-  metadata through the optional Sprite protocol. Sprite must not inspect or
-  reinterpret arbitrary terminal contents as trusted editor context.
+  metadata through the OSC 1338 namespace reserved in Phase 1. Sprite must not
+  inspect or reinterpret arbitrary terminal contents as trusted editor context.
 - **Open design work:** choose the receiving contract (MCP, hooks, or another
   explicit local protocol), permission model, context freshness, and audit UI.
 - Note: an existing personal script opens the Neovim buffer for files Claude is
@@ -937,8 +939,10 @@ The plan pursued VS Code visual parity on Croft's ratatui/terminal-cell
 path, holding a native GPUI renderer as "a last resort" behind a Phase 3
 grid-ceiling gate: only if screenshot tests proved cells could not express
 the required geometry would renderer work be permitted. The
-progressive-enhancement escape path (§2) and the deferred native-panel
-research (§5) encoded the same posture.
+progressive-enhancement escape path (§2), the deferred native-panel
+research (§5), and Phase 2.4's Sprite-compatibility work (capability
+identifiers, retiring `croft setup-ghostty` under Sprite) encoded the same
+posture.
 
 A 2026-09-05 code-level analysis of the Phase 1 renderer (`grid_paint.rs`,
 `grid.rs`, `terminal_view.rs`) concluded the gate was testing settled
