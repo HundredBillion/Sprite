@@ -39,6 +39,7 @@ jobs:
           set -euo pipefail
           pacman -Syu --noconfirm --needed \
             base-devel git curl ncurses \
+            less \
             "zig=${ZIG_VERSION}" \
             wayland libxkbcommon libx11 libxcb libxkbcommon-x11 \
             mesa vulkan-icd-loader vulkan-headers \
