@@ -17,6 +17,22 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+/// Whether this machine has the full-screen program the alternate-screen test
+/// drives.
+///
+/// Without this check a missing `less` is not reported as a missing `less`: the
+/// shell writes "not found", the pane stays on the normal screen, the snapshot
+/// stream goes quiet, and the wait fails five seconds later as
+/// `watchdog: no snapshot within 5s` — a message about the harness that names
+/// nothing about the cause.
+fn has_less() -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", "command -v less"])
+        .output()
+        .map(|out| !out.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// Waits for the answer to one history request, ignoring unrelated events.
 ///
 /// A live shell also reports its title and working directory, so the answer is
@@ -145,8 +161,24 @@ fn a_request_beyond_the_maximum_is_clamped_rather_than_refused() {
 fn an_alternate_screen_application_hides_the_normal_screen() {
     // `less` is a real full-screen program: it switches to the alternate
     // screen and draws its own view, leaving the shell's output behind it.
+    assert!(
+        has_less(),
+        "this test drives `less` as its full-screen program, and this machine \
+         has none; install it rather than reading the watchdog timeout that \
+         would otherwise follow as a terminal defect"
+    );
     let script = "echo secret-normal-screen-text; seq 1 500 | less; sleep 300";
-    let config = SessionConfig::command("/bin/sh", args(&["-c", script]));
+    let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
+    // `SessionConfig::command` carries no environment, so without this the
+    // child inherits whatever TERM the suite was run under. A developer's
+    // terminal supplies a real one and the test passes; CI runs with
+    // `TERM=dumb`, where `less` refuses to start, the pane never reaches the
+    // alternate screen, and the wait dies as a watchdog timeout that says
+    // nothing about terminals. `xterm` rather than Sprite's own entry, so the
+    // test does not also depend on the terminfo bootstrap having run.
+    config
+        .environment
+        .push((OsString::from("TERM"), OsString::from("xterm")));
     let mut session = TerminalSession::spawn(config).expect("spawn session");
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
