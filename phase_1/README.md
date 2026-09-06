@@ -15,7 +15,8 @@ environment without ceasing to be a terminal — real programs first, the editor
 an ordinary child process you can close without losing your shell. None of that
 is in this directory, and it is a plan rather than a claim.
 
-This directory is Phase 1. It is a working terminal, not a finished product.
+This directory is Phase 1. It is a working terminal, not a finished product,
+and **Not yet** below says what that costs you in ordinary use.
 
 ## Why this and not another terminal
 
@@ -178,6 +179,23 @@ sprite config reload    # re-read, and report what changed
 Colours, cursor and font apply immediately. Shell and scrollback apply to the
 next session, because changing them under a running program would not be
 honest about what that program is attached to.
+
+## Not yet
+
+The settings above are the whole list, which makes two absences worth stating
+plainly rather than leaving you to find them.
+
+**Keybindings are not configurable.** The table under Keys is compiled in.
+Every terminal Sprite is compared against lets you remap keys, and for many
+people that alone settles it.
+
+**There is no scrollback search.** Nothing finds text in history — no search
+box, no vi mode, no regex.
+
+Both are ordinary expectations rather than exotic ones, and the opening
+sentence of this file calls Sprite an ordinary terminal emulator. It is one in
+most respects. These are the respects in which it is not, and they are the two
+you would meet on the first day.
 
 ## Reading a pane from a program
 
