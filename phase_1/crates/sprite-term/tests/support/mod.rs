@@ -184,6 +184,22 @@ impl EventPump {
 // Kitty graphics
 // ---------------------------------------------------------------------------
 
+/// A command that prints `MARK<n>`, and the text that proves it ran.
+///
+/// The number is passed as an argument rather than written into the command,
+/// because the tty echoes input as it is written — before the shell has read
+/// the line, let alone run the one before it. A marker spelled out in the
+/// command is therefore already on screen while the payload it exists to prove
+/// is still unexecuted, so waiting for it proves nothing about the payload.
+/// `printf 'MARK%s\n' 7` echoes as `MARK%s`, which cannot be mistaken for the
+/// `MARK7` the child writes when it actually runs.
+pub fn marker_command(n: u32) -> (Vec<u8>, String) {
+    (
+        format!("printf 'MARK%s\\n' {n}\n").into_bytes(),
+        format!("MARK{n}"),
+    )
+}
+
 /// Base64 as the Kitty protocol wants it, without a dependency for it.
 pub fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -286,11 +302,9 @@ impl GraphicsSession {
             .expect("ask the child to print the payload");
 
         self.marks += 1;
-        let marker = format!("MARK{}", self.marks);
+        let (command, marker) = marker_command(self.marks);
         self.session
-            .send(TerminalCommand::Input(
-                format!("printf '{marker}\\n'\n").into_bytes(),
-            ))
+            .send(TerminalCommand::Input(command))
             .expect("ask the child to print the marker");
         self.snapshots
             .wait_for("the payload to be processed", |bundle| {
