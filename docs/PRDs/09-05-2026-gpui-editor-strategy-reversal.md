@@ -49,6 +49,15 @@ Supporting decisions:
   exchange, the fork avoids both the hardest surgery (extracting a stable
   dual-renderer seam from a ~34k-line App module with no existing renderer
   abstraction) and a permanent second-renderer maintenance obligation.
+- **Crate rename:** `sprite-term` is renamed `sprite-engine` (decision
+  2026-09-05; the `-term` name misleads — it is the engine library, not the
+  terminal product). The rename is executed in the studio-foundation work,
+  not in this documentation pass; amended brief text uses the new name with
+  a note that the crate is named `sprite-term` until the rename lands.
+- **Studio is the designated home of future workspace features.** The
+  deferred agent-first product vision (agent chat, source-control review,
+  diff viewing, inline-output annotations), when it gets its own PRD, lands
+  in `sprite-studio` as pane types and layouts — no fourth product.
 
 ## Scope: the seven edits
 
@@ -60,7 +69,16 @@ decisions move to Addendum A.
    (Croft model + GPUI view), hosted as a pane type in `sprite-studio`. The
    product list becomes three: Sprite Terminal (unchanged), the fork, studio.
    Replace the "standards-based TUI fallback" line with the Neovim/upstream-
-   Croft answer for remote editing.
+   Croft answer for remote editing. The thesis subtitle ("terminal with an
+   editor — not an editor with a terminal") survives, restated around panes:
+   studio is pane-first — the pane is the primitive, terminal panes are the
+   default and majority case, and the editor is one optional pane type among
+   them. This clarification must be written in high-level language with an
+   analogy (approved example: Zed/VS Code are office buildings with a
+   kitchenette — the editor is the building, the terminal a room inside it;
+   studio is a workshop full of benches — most benches are terminals, one
+   holds a first-class editor; the identity comes from the benches, not any
+   single tool on them).
 2. **§2 Core problems.** Rescope "the terminal grid ceiling" to TUI programs
    running in terminal panes (accepted, not fought). Replace the four-step
    progressive-enhancement escape path: the GPUI view fork is the plan. Record
