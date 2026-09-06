@@ -1096,18 +1096,21 @@ fn apply_graphics_policy(
     // One worker thread per pane therefore means one decoder per pane, each
     // bounded by that pane's own storage limit.
     //
-    // Clearing it for a disabled pane is not a no-op: the setting belongs to
-    // the thread, so a pane must actively ensure no decoder is installed rather
-    // than assume none is. A pane that stores no images should not run a parser
-    // over bytes an arbitrary child printed.
-    let decoder: Option<Box<dyn graphics::DecodePng>> = if policy.enabled {
-        Some(Box::new(crate::png_decoder::PngDecoder::new(
-            policy.storage_bytes,
-        )))
+    // A disabled pane installs a decoder that refuses rather than passing
+    // `None`, because `None` is not the thread-local act it looks like: the
+    // binding also writes a null into `ghostty_sys_set`, a *library-wide*
+    // option, so one disabled pane turned PNG decoding off for every other pane
+    // in the process. That is what `tests/png_decoder_leak.rs` pins.
+    //
+    // A pane that stores no images still runs no parser over bytes an arbitrary
+    // child printed: the refusing decoder returns before reading one, and the
+    // storage limit above is zero.
+    let decoder: Box<dyn graphics::DecodePng> = if policy.enabled {
+        Box::new(crate::png_decoder::PngDecoder::new(policy.storage_bytes))
     } else {
-        None
+        Box::new(crate::png_decoder::RefusingDecoder)
     };
-    graphics::set_png_decoder(decoder).map_err(vt("kitty_png_decoder"))?;
+    graphics::set_png_decoder(Some(decoder)).map_err(vt("kitty_png_decoder"))?;
 
     Ok(())
 }
