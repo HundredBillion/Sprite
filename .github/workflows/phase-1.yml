@@ -126,7 +126,12 @@ jobs:
           set -euo pipefail
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-          cargo test --workspace --locked --offline
+          # `--no-fail-fast`: without it cargo stops at the first failing test
+          # binary, so a run reports one failure and silently skips the rest of
+          # the suite. That is how phase_1 stayed red across eight merges — the
+          # 2026-09-05 run reached only 6 of 33 binaries, and each fix revealed
+          # the next latent failure instead of the whole set at once.
+          cargo test --workspace --locked --offline --no-fail-fast
           cargo build --workspace --locked --offline
           cargo tree --locked --offline --duplicates
           cargo tree --locked --offline --edges features
@@ -208,7 +213,12 @@ jobs:
           set -euo pipefail
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-          cargo test --workspace --locked --offline
+          # `--no-fail-fast`: without it cargo stops at the first failing test
+          # binary, so a run reports one failure and silently skips the rest of
+          # the suite. That is how phase_1 stayed red across eight merges — the
+          # 2026-09-05 run reached only 6 of 33 binaries, and each fix revealed
+          # the next latent failure instead of the whole set at once.
+          cargo test --workspace --locked --offline --no-fail-fast
           cargo build --workspace --locked --offline
 
   croft:
