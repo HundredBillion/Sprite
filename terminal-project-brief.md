@@ -413,10 +413,10 @@ macOS. Croft is an acceptance-test application, not a dependency.
 - **5.4 Reliability and security:** crash recovery, extension isolation,
   workspace trust, remote boundary hardening, fuzz/property tests for protocol
   parsers, dependency auditing, signed releases, and rollback-capable upgrades.
-- **5.5 Distribution:** versioned Sprite and Croft-fork releases for macOS and
-  Linux, with Arch packaging first-class. The two products can be installed and
-  updated independently, plus an optional bundle that installs compatible
-  versions together.
+- **5.5 Distribution:** versioned Sprite Terminal and Studio releases for
+  macOS and Linux, with Arch packaging first-class (the fork ships inside
+  Studio). The products install and update independently, plus an optional
+  bundle that installs compatible versions together.
 
 ### Ongoing / cross-cutting
 - Daily-drive Sprite from Phase 1 and the Croft fork from Phase 2; every defect
@@ -467,8 +467,9 @@ dirty/change counts, failing checks, and quick actions for each repository.
 Keep `git` as the behavioral authority; use a library only where it demonstrably
 reduces work without narrowing Git compatibility.
 
-Deep interactive operations that lazygit already solves well may open lazygit in
-Croft's embedded terminal, with the selected repository as its working directory.
+Deep interactive operations that lazygit already solves well may open
+lazygit in a Studio terminal pane, with the selected repository as its
+working directory.
 Do not reimplement interactive rebase merely to claim feature ownership.
 
 The Phase-0 Neovim plugin remains a useful standalone tool and prototype for
@@ -489,17 +490,17 @@ Use one semantic design-token model for the Croft fork:
    disabled and contrast states.
 2. **Geometry tokens:** spacing, row heights, panel and activity-bar widths,
    borders, radii, typography metrics, scrollbar geometry, popup placement, and
-   motion. The ratatui renderer may approximate tokens that cannot map to cells;
-   the visual harness records those gaps.
+   motion. GPUI maps geometry tokens directly; the visual harness records any
+   remaining platform and font variance.
 3. **Icon tokens:** semantic icon identifiers mapped to open/licensed assets.
    Never couple behavior to a particular glyph or Microsoft-branded asset.
 4. **Platform/font profiles:** pin the reference font and raster conditions for
    visual tests, while keeping production fallback and accessibility settings.
 
-Sprite Terminal has its own terminal theme and font configuration. The Croft
-fork may request or recommend a compatible palette, but must not mutate Sprite's
-configuration silently. Deterministic screenshot fixtures and interaction-state
-tests are the authority for visual parity.
+Sprite Terminal has its own terminal theme and font configuration.
+Studio and the fork may recommend a compatible palette, but must not mutate
+Sprite Terminal's configuration silently. Deterministic screenshot fixtures and
+interaction-state tests are the authority for visual parity.
 
 ---
 
@@ -573,8 +574,9 @@ than scraping terminal contents or embedding prompt input inside the editor.
    existing IDE behavior, Git, language servers, debug adapters); build only
    the missing compatibility, integration, rendering, and product layers.
 2. **Each phase must leave a usable artifact** — attrition is the real risk.
-3. **The process boundary is a feature** — Sprite and the Croft fork install,
-   run, fail, update, and remain useful independently.
+3. **The product boundary is a feature** — Sprite Terminal and Studio
+   install, run, fail, update, and remain useful independently; the fork
+   ships inside Studio, and the extension host stays out of process.
 4. **Data/logic separated from rendering** — Croft's current coupling is debt to
    reduce where parity work touches it; new domain behavior cannot depend on
    terminal cells or GPUI.
@@ -586,8 +588,9 @@ than scraping terminal contents or embedding prompt input inside the editor.
 7. **Dependencies must earn their place** — prefer the standard library and
    native platform features; accept a dependency when it replaces a hard,
    maintained subsystem and keep it behind a narrow seam.
-8. **Fallbacks are product features** — Sprite remains a normal terminal and
-   the Croft fork remains a normal TUI when their optional integration is absent.
+8. **Fallbacks are product features** — Sprite Terminal remains a normal
+   terminal, and when Studio or the fork is absent, Neovim and unmodified
+   upstream Croft in a terminal pane remain the complete editing answer.
 9. **Upstream relationships are maintained assets** — pin reproducibly, record
    provenance, keep changes reviewable, and make upgrades deliberate.
 10. **Stop if satisfied** — if a bounded phase delivers the actual daily need,
