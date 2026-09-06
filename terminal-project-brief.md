@@ -222,8 +222,9 @@ it is a crate dependency, chosen so the editor pane is native.
 
 ## 5. Ecosystem — current roles
 
-- **Croft (`vitali87/croft`)** — the chosen IDE foundation after Phase 1, under
-  MIT. Current source audit (2026-08-09, main at v0.1.701): about 181k Rust
+- **Croft (`vitali87/croft`)** — two roles, under MIT: the model foundation
+  for the fork, and the acceptance application for Sprite Terminal (the
+  moving-`main` CI gate stays). Current source audit (2026-08-09, main at v0.1.701): about 181k Rust
   lines, 137 Rust modules, ~3,100 tests, 64 direct Cargo dependencies, and 459
   locked packages. It already contains editor, LSP, DAP, Git, testing, tasks,
   remote sessions, collaboration, and an embedded terminal.
@@ -234,7 +235,10 @@ it is a crate dependency, chosen so the editor pane is native.
   Code extension-host compatibility; terminal-cell rendering; duplicated inner
   terminal engine; and tight UI/state coupling. About 50 modules reference
   `ratatui`; the central `App` module is ~34k lines and the editor module ~18k
-  lines, with no existing renderer abstraction suitable for a native GPUI port.
+  lines, with no existing renderer abstraction suitable for a native GPUI port;
+  and, for the fork specifically, a GPUI-only view rewrite diverges heavily
+  from upstream, so upstream syncs get harder over time — an accepted cost
+  (Addendum A.15).
 - **`libghostty-rs` (`Uzaaft/libghostty-rs`)** — chosen Rust interface to
   Ghostty's VT library. It exposes terminal/render state, input encoders, and
   Kitty graphics storage, decoded pixels, placements, geometry, generations,
@@ -253,19 +257,13 @@ it is a crate dependency, chosen so the editor pane is native.
   project-scale navigation, command UI, and architecture. Evaluate each idea by
   user value and measured cost rather than cloning Zed wholesale.
 
-### Deferred research: native Neovim and Helix panels
+### Native editor panes: scheduled via the fork
 
-The former roadmap centered on a native GPUI `NeovimPanel`, with a possible
-`HelixPanel` behind the same abstraction. Croft's discovery superseded that
-scheduled work: Neovim remains a first-class terminal program, while the Croft
-fork becomes the IDE product. A native editor panel returns to the roadmap only
-after the Croft fork reaches daily-driver quality and a measured grid limitation
-cannot be solved by standards-based graphics or progressive enhancement.
-
-No `NeovimPanel` or `HelixPanel` implementation is scheduled. Revisit only if a
-pixel-native editor protocol creates a clear structural advantage, or the Croft
-path fails a defined daily-driver requirement. The detailed 2026-07-22 Helix
-overtake analysis is historical context and no longer drives the build plan.
+The former roadmap deferred any native editor panel until the Croft TUI path
+failed a measured gate. The 2026-09-05 reversal (Addendum A.15) supersedes
+that: the fork itself becomes the native editor pane, hosted by Studio. No
+separate `NeovimPanel` or `HelixPanel` is scheduled; Neovim and Helix remain
+first-class terminal programs in terminal panes.
 
 ---
 
