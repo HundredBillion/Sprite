@@ -136,8 +136,9 @@ fn the_login_shell_carries_sprite_identity() {
     });
     let text = support::pane_text(&bundle);
 
+    let identity = format!("IDENT:xterm-ghostty:Sprite:{}", env!("CARGO_PKG_VERSION"));
     assert!(
-        text.contains("IDENT:xterm-ghostty:Sprite:0.1.0"),
+        text.contains(&identity),
         "the child sees Sprite's terminal identity, got:\n{text}"
     );
     assert!(
