@@ -127,47 +127,54 @@ qualification (Phase 2.3) produces regression coverage before any surgery.
 
 ## 3. Architecture (independent products, explicit boundary)
 
-1. **`sprite-term` — terminal engine adapter.** Owns one PTY/libghostty terminal
-   per terminal thread and exposes owned render snapshots, input commands,
-   selection, scrolling, Kitty graphics placements, and terminal events. It
-   contains no GPUI, Croft, Neovim, or product-level pane logic. Current
-   `libghostty-rs` handles are `!Send + !Sync`; only owned snapshots cross to the
-   UI thread.
+1. **`sprite-engine` — terminal engine library** (named `sprite-term` until
+   the rename lands). Owns one PTY/libghostty terminal per terminal thread
+   and exposes owned render snapshots, input commands, selection, scrolling,
+   Kitty graphics placements, and terminal events. It contains no GPUI,
+   Croft, Neovim, or product-level pane logic. Current `libghostty-rs`
+   handles are `!Send + !Sync`; only owned snapshots cross to the UI thread.
 
-2. **`sprite-app` — GPUI application and compositor.** Owns native windows,
-   tabs, split trees, focus, font shaping, GPU rendering, IME, configuration,
-   menus, packaging, and platform integration. It consumes `sprite-term` rather
-   than reaching through it to libghostty internals. The terminal renderer must
-   support Kitty image textures and z-layers, not only text cells.
+2. **`sprite-app` — Sprite Terminal.** GPUI application and compositor:
+   native windows, tabs, split trees, focus, font shaping, GPU rendering,
+   IME, configuration, menus, packaging, and platform integration. It
+   consumes `sprite-engine` rather than reaching through it to libghostty
+   internals. Pane, tab, and grid-rendering components are extracted into a
+   shared UI crate during the Studio foundation work (Phase 2.5) so Studio
+   reuses them without depending on the terminal product.
 
-3. **Croft fork — separate repository and process.** Starts from upstream Croft
-   under its MIT license, keeps an upstream remote, and initially changes as
-   little architecture as possible. It continues to run in other terminals.
-   Sprite sets honest capability identifiers; the fork recognizes Sprite
-   directly instead of pretending it is Ghostty or mutating Ghostty config.
+3. **Croft fork — separate repository, consumed as a crate.** Starts from
+   upstream Croft under its MIT license and keeps an upstream remote. Its
+   ratatui view layer is replaced with GPUI; the model (editor, LSP, DAP,
+   Git, testing, tasks) is retained. It is a Cargo dependency of Studio and
+   of nothing else — never of Sprite Terminal.
 
-4. **Optional Sprite enhancement protocol.** Added only after the standard TUI
-   path is characterized. The protocol is versioned, capability-negotiated, and
-   has a clean cell-rendered fallback. Candidate messages include semantic pane
-   metadata, context, hit regions, native sub-terminal requests, and eventually
-   higher-level drawing primitives. It must never become an undocumented path
-   that makes the fork unusable elsewhere.
+4. **`sprite-studio` — pane-first workspace product.** Depends on
+   `sprite-engine`, the shared UI crate, and the fork. Hosts two pane types:
+   Terminal (Studio's own panes — one terminal implementation for the whole
+   product) and Editor (the fork). Ships, versions, and fails independently
+   of Sprite Terminal. The OSC 1338 control namespace reserved in Phase 1
+   remains available for terminal-pane metadata (§9); the broader TUI
+   enhancement protocol is superseded (Addendum A.15).
 
-5. **VS Code compatibility subsystem inside the Croft fork.** Owns the
-   compatibility matrix for user settings, keybindings, commands, workspaces,
-   extension manifests, contribution points, extension-host lifecycle, and API
-   versions. It is isolated from Croft's editor model and renderer so extensions
-   cannot run on the input/render hot path or destabilize the terminal host.
+5. **VS Code compatibility subsystem inside the fork.** Owns the
+   compatibility matrix for user settings, keybindings, commands,
+   workspaces, extension manifests, contribution points, extension-host
+   lifecycle, and API versions. Extensions run out of process so extension
+   work can never sit on Studio's input/render hot path.
 
-The outer terminal and the IDE communicate as processes, not Rust crate
-dependencies. This is the primary dependency-control and failure-isolation seam.
+Two boundaries do the dependency control. Sprite Terminal ↔ everything else
+is a **product boundary**: no editor code links into the terminal. Studio ↔
+the extension host is a **process boundary**: extension work never blocks
+rendering. The fork inside Studio is deliberately *not* a process boundary —
+it is a crate dependency, chosen so the editor pane is native.
 
 ---
 
 ## 4. Stack Decisions (current, 2026-08-09)
 
-- **Language: Rust.** Both Sprite and Croft are Rust projects, but they remain
-  separate binaries and repositories.
+- **Language: Rust.** Sprite Terminal, Studio, and the fork are Rust
+  projects in separate repositories; the fork compiles into Studio rather
+  than shipping its own binary.
 - **Sprite UI/renderer: GPUI.** Use GPUI for the native window, compositor,
   text/image rendering, and platform integration. Zed remains an architectural
   and performance reference, not a linked dependency.
@@ -186,12 +193,15 @@ dependencies. This is the primary dependency-control and failure-isolation seam.
 - **`tty7`: reference only.** Its GPUI tabs, split-tree, configuration, and
   packaging patterns are useful; its Alacritty terminal engine and dependency
   surface are not Sprite's foundation.
-- **PTY dependency:** `portable-pty` is acceptable for the first cross-platform
-  implementation. Hide it behind `sprite-term` so it can be replaced without
-  changing `sprite-app`.
-- **Croft: fork after Phase 1 validation.** Croft remains an external process
-  and never becomes a Sprite crate dependency. Preserve its standalone TUI
-  fallback and upstream relationship.
+- **PTY dependency:** `portable-pty` is acceptable for the first
+  cross-platform implementation. Hide it behind `sprite-engine` (named
+  `sprite-term` until the rename lands) so it can be replaced without
+  changing the products above it.
+- **Croft: fork after Phase 1 validation.** The fork's ratatui view layer is
+  replaced with GPUI and the result is consumed by Studio as a Cargo
+  dependency. It never becomes a dependency of Sprite Terminal. No TUI
+  fallback is maintained in the fork; unmodified upstream Croft remains the
+  TUI answer and Sprite Terminal's acceptance application.
 - **VS Code behavior reference: Code - OSS plus the supported VS Code product.**
   Use open code and documented behavior where licenses allow. Do not ship the
   Microsoft product name, logo, proprietary services, or Marketplace access
