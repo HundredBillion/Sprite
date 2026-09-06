@@ -82,12 +82,16 @@ improve measured user outcomes. Zed does not become a dependency.
 
 There are now two independent ceilings.
 
-**The terminal grid ceiling.** Croft's normal UI is rendered through `ratatui`
-and `crossterm` into terminal cells. It augments those cells with Kitty/iTerm2/
-sixel graphics for icons, previews, and the minimap. Sprite can host that path
-exceptionally well, but cells still constrain typography, spacing, rounded
-geometry, popovers, animation, and arbitrary pixel placement. A custom ratatui
-backend would still receive cells; it would not create a native widget tree.
+**The terminal grid ceiling — accepted, not fought.** Terminal panes render
+programs through cells, and cells constrain typography, spacing, rounded
+geometry, popovers, animation, and arbitrary pixel placement. The constraint
+is structural: it is the VT protocol itself — the pipe between a terminal
+and a program carries characters, not pixels — so no terminal
+implementation, however good, can lift it. The 2026-09-05 reversal (Addendum
+A.15) therefore moves the editor out of the grid entirely: the fork renders
+through GPUI in a Studio pane, and the grid ceiling remains only where it
+belongs — on actual terminal programs in terminal panes, which is what they
+expect.
 
 **The VS Code compatibility ceiling.** Croft is an independent IDE, not a VS
 Code frontend. It already implements a large editor/LSP/DAP/Git/terminal stack,
@@ -98,27 +102,26 @@ contribution points, extension-host isolation, API/version compatibility, and a
 legally usable extension registry such as Open VSX. This is the largest product
 risk and must not be hidden behind a generic "extensions" checkbox.
 
-**The nested-terminal boundary.** When Croft runs inside Sprite, Sprite owns the
-outer PTY and libghostty terminal state, while Croft's TERMINAL panel allocates
-another PTY and emulates it with `alacritty_terminal`. That is valid and useful,
-but it means Croft's internal terminal does not automatically inherit
-libghostty's behavior. Unifying those surfaces later requires a deliberate
-Sprite/Croft protocol; it is not a side effect of running Croft in Sprite.
+**The nested-terminal boundary dissolves.** Upstream Croft duplicates a
+terminal engine (`alacritty_terminal`) to implement its TERMINAL panel. The
+fork does not: terminal panes are Studio's own, powered by `sprite-engine`,
+so one terminal implementation serves the whole product and the fork's
+duplicated engine is removed rather than unified.
 
-**The escape path is progressive enhancement:**
+**The build path is now direct rather than progressive:**
 
-1. Croft must remain a correct standalone TUI in ordinary terminals.
-2. Sprite Phase 1 must fully support the standard Kitty keyboard and graphics
-   protocols Croft already uses.
-3. The fork may later advertise optional Sprite capabilities through a
-   versioned, capability-negotiated side channel.
-4. If screenshot tests prove the grid makes visual parity impossible, only then
-   extract a renderer seam or add a Sprite-native pixel surface. Croft's domain
-   model must remain independent of that renderer so terminal fallback survives.
+1. Croft's model is qualified and carved out of its ratatui view layer
+   (Phase 2); the GPUI view replaces the TUI. No dual-renderer seam is built
+   or maintained.
+2. Studio hosts the fork as a native editor pane beside terminal panes.
+3. Visual parity (Phase 3) is measured against the GPUI renderer with the
+   same screenshot standard as before.
+4. Remote and SSH editing needs no fork support: Neovim or unmodified
+   upstream Croft runs in a terminal pane.
 
-This preserves a usable product at every step and avoids turning a native
-renderer rewrite into a prerequisite for learning whether the Croft foundation
-actually satisfies the day-to-day IDE goal.
+Each step leaves a usable artifact: Sprite Terminal is already daily-driven,
+Studio is useful with terminal panes alone, and the fork's model
+qualification (Phase 2.3) produces regression coverage before any surgery.
 
 ---
 
