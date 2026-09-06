@@ -10,22 +10,43 @@ built and why.
 
 ## 1. The Thesis
 
-Build a **terminal-first development environment** as two independent products:
+Build a **terminal-first development environment** as three independently
+useful products:
 
-1. **Sprite Terminal** — a fast, correct, general-purpose terminal for macOS and
-   Linux. Real terminal programs (ssh, tmux, htop, lazygit, Neovim, Croft) remain
-   first-class citizens. Sprite is useful without the IDE and the IDE never
-   becomes a dependency of the terminal.
-2. **The Croft fork** — a separately maintained Rust IDE that runs inside any
-   capable terminal but treats Sprite as its best host. Its north star is to be
-   **visually and functionally indistinguishable from VS Code in normal use**,
-   while starting faster, responding faster, using fewer resources, and adopting
+1. **Sprite Terminal** — a fast, correct, general-purpose terminal for macOS
+   and Linux. Real terminal programs (ssh, tmux, htop, lazygit, Neovim,
+   upstream Croft) remain first-class citizens. Sprite Terminal is useful
+   without any editor, and no editor ever becomes a dependency of it.
+2. **The Croft fork** — a separately maintained, GPUI-native editor: Croft's
+   model (editor state, LSP, DAP, Git, testing, tasks) with its ratatui view
+   layer replaced by GPUI. It maintains no TUI mode. Its north star is to be
+   **visually and functionally indistinguishable from VS Code in normal
+   use**, measured by the screenshot and workflow standards below, while
+   starting faster, responding faster, using fewer resources, and adopting
    the best product and architecture ideas proven by Zed.
+3. **Studio** (crate working name `sprite-studio`) — a pane-first workspace
+   that ships separately from Sprite Terminal: the same tabs, splits, and
+   terminal panes, plus the fork as a native editor pane type. Studio is the
+   designated home of future workspace features.
 
-The inversion still matters: VS Code and Zed are editors that contain terminals.
-Sprite is a terminal that can host a complete IDE without ceasing to be a
-terminal. Croft does not get linked into Sprite; it remains an ordinary child
-process with a standards-based TUI fallback.
+The inversion still matters, restated around panes. VS Code and Zed are
+office buildings with a kitchenette: the editor is the building, and the
+terminal is a small room inside it. Studio is a workshop full of benches:
+most benches are terminals, and one of them holds a first-class editor. The
+workshop's identity comes from the benches — any of them can hold an agent,
+a build, a server, or an editor — not from any single tool on them. The pane
+is the primitive; terminal panes are the default and majority case; the
+editor earns no special architectural status by being present. The fork is
+never linked into Sprite Terminal; remote and SSH editing is served by
+Neovim or unmodified upstream Croft running in an ordinary terminal pane.
+
+Terminology: **Sprite** unqualified names the project. The products are
+**Sprite Terminal** (`sprite-app`, installed as `/usr/bin/sprite`),
+**Studio** (`sprite-studio`, working name), and **the fork** (product name
+chosen at Phase 2.6). The engine library is **`sprite-engine`** (named
+`sprite-term` until the rename lands). Phase 1 documents predate this
+vocabulary and use "Sprite" for Sprite Terminal; they are grandfathered.
+See `CONTEXT.md`.
 
 "Indistinguishable" is a product goal with two measurable meanings:
 
