@@ -930,3 +930,52 @@ wrapper that resolves moving `main`, records its SHA, and runs an ignored
 public-session smoke for the capabilities Checkpoint 1 actually claims. Normal
 Rust tests never fetch Croft; the complete visual/graphics interaction matrix
 becomes merge-blocking when Checkpoint 4 introduces those capabilities.
+
+## A.15 TUI-first Croft strategy and grid-ceiling gate: SUPERSEDED (2026-09-05)
+
+The plan pursued VS Code visual parity on Croft's ratatui/terminal-cell
+path, holding a native GPUI renderer as "a last resort" behind a Phase 3
+grid-ceiling gate: only if screenshot tests proved cells could not express
+the required geometry would renderer work be permitted. The
+progressive-enhancement escape path (§2) and the deferred native-panel
+research (§5) encoded the same posture.
+
+A 2026-09-05 code-level analysis of the Phase 1 renderer (`grid_paint.rs`,
+`grid.rs`, `terminal_view.rs`) concluded the gate was testing settled
+physics. Text position in a terminal is `origin + cell_index × cell_size`;
+one cell height rules every row of a pane; scrolling resolves to whole rows;
+Kitty graphics anchor to cells. These are properties of the VT protocol —
+the pipe between a terminal and a program carries characters, not pixels —
+so no terminal implementation, however good, can render an editor to
+pixel-level VS Code parity. Waiting for Phase 3 screenshot fixtures to fail
+would have spent the most expensive phase discovering an available
+conclusion.
+
+Decisions taken, and their trades:
+
+- **The fork goes GPUI-only.** Croft's model is retained; the ratatui view
+  is replaced, not abstracted. A dual-renderer seam was rejected: extracting
+  a stable seam from a ~34k-line App module with no renderer abstraction is
+  the hardest form of the surgery, and it would obligate every future
+  upstream sync to keep two renderers working. Accepted cost: the fork
+  diverges heavily from upstream and syncs get harder over time.
+- **No TUI fallback is owed.** Remote and SSH editing is served by Neovim or
+  unmodified upstream Croft in an ordinary terminal pane. The project owner
+  confirmed SSH editing is rare in his workflow and Neovim is his tool for
+  it.
+- **Studio (`sprite-studio`, working name) hosts the fork** as a native
+  editor pane beside terminal panes. Sprite Terminal stays pure — the
+  Phase 1 boundary survives; the fork links into Studio only. Studio is the
+  designated home of future workspace features.
+- **The optional Sprite enhancement protocol** (§3 item 4, pre-amendment) is
+  superseded along with the TUI path; the OSC 1338 namespace reserved in
+  Phase 1 remains available for terminal-pane metadata.
+- **Upstream Croft keeps both remaining roles:** acceptance application for
+  Sprite Terminal (the moving-`main` CI gate stays) and model source for the
+  fork.
+- **`sprite-term` is renamed `sprite-engine`** during the Studio foundation
+  work; the old name repeatedly misled by sounding like the terminal
+  product.
+
+Full decision record: `docs/PRDs/09-05-2026-gpui-editor-strategy-reversal.md`;
+vocabulary: `CONTEXT.md` (project root).
