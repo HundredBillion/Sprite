@@ -9,6 +9,8 @@ use sprite_term::{HistorySnapshot, SessionError, TerminalEvent};
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
     Status(SharedString),
+    /// The child set, or cleared, its title.
+    Title(Option<String>),
     HoldPaste(String),
     OpenUrl(String),
     Clipboard(String),
@@ -48,16 +50,17 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
 
     match event {
         // Nothing to present. Working directory and bell are carried for
-        // observation and for a future bell policy; a title change has no
-        // presentation because nothing sets a window title. A graphics probe
-        // belongs to whoever asked for it, and a pane draws only text.
+        // observation and for a future bell policy. A graphics probe belongs
+        // to whoever asked for it, and a pane draws only text.
         Ok(TerminalEvent::Ready)
         | Ok(TerminalEvent::Bell)
         | Ok(TerminalEvent::WorkingDirectoryChanged(_))
-        | Ok(TerminalEvent::TitleChanged(_))
         | Ok(TerminalEvent::Graphics(_))
         // No link, or a refused scheme. Indistinguishable on purpose.
         | Ok(TerminalEvent::Hyperlink { uri: None, .. }) => {}
+
+        // A Pane Title, shown on the tab and in the window's title bar.
+        Ok(TerminalEvent::TitleChanged(title)) => effects.push(Effect::Title(title)),
 
         Ok(TerminalEvent::UnsafePaste(text)) => {
             // Held, not performed. The person sees why and repeats the paste.
@@ -236,11 +239,19 @@ mod tests {
         assert!(!decide(Ok(TerminalEvent::Ready)).stop);
     }
 
-    /// Nothing sets a window title, so the event has no presentation. The old
-    /// arm called `cx.notify()` for it, repainting once per shell prompt.
+    /// A title is a Pane Title now: the tab label and window title show it,
+    /// so a change asks for a repaint carrying the new value — including
+    /// `None`, which is a child clearing its title.
     #[test]
-    fn a_title_change_asks_for_nothing() {
-        assert!(effects(TerminalEvent::TitleChanged(Some("x".to_owned()))).is_empty());
+    fn a_title_change_is_presented() {
+        assert_eq!(
+            effects(TerminalEvent::TitleChanged(Some("vim".to_owned()))),
+            vec![Effect::Title(Some("vim".to_owned()))]
+        );
+        assert_eq!(
+            effects(TerminalEvent::TitleChanged(None)),
+            vec![Effect::Title(None)]
+        );
     }
 
     /// A graphics probe belongs to whoever asked for it; the view draws only

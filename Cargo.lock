@@ -5037,6 +5037,7 @@ dependencies = [
  "gpui",
  "image",
  "serde_json",
+ "sprite-pane",
  "sprite-term",
  "toml 0.8.23",
 ]

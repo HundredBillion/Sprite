@@ -96,6 +96,10 @@ pub struct TerminalView {
     /// tell every child the wrong size.
     allocated: Option<Size<Pixels>>,
     status: Option<SharedString>,
+    /// The title the child set through OSC, if it set one.
+    ///
+    /// `None` means unknown, never a guess: the engine's own rule, kept here.
+    title: Option<SharedString>,
     /// Sub-row scroll remainder, so trackpad gestures are not rounded away.
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
@@ -142,10 +146,6 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // TitlebarOptions only reaches macOS and Windows titlebars, so the
-        // Wayland/X11 title is set explicitly here.
-        window.set_window_title("Sprite");
-
         let crate::config::Settings {
             font,
             graphics,
@@ -317,6 +317,7 @@ impl TerminalView {
             fallback_colors,
             size: Some(initial_size),
             allocated: None,
+            title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
             origin: point(px(PANE_PADDING), px(PANE_PADDING)),
@@ -353,6 +354,7 @@ impl TerminalView {
             fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
             allocated: None,
+            title: None,
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag: None,
@@ -373,6 +375,7 @@ impl TerminalView {
         use crate::terminal_events::Effect;
         match effect {
             Effect::Status(line) => self.status = Some(line),
+            Effect::Title(title) => self.title = title.map(SharedString::from),
             Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
             Effect::OpenUrl(uri) => cx.open_url(&uri),
             Effect::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
@@ -538,6 +541,21 @@ impl TerminalView {
             return sprite_term::ForegroundState::Idle;
         };
         session.foreground()
+    }
+
+    /// What this pane is called, as the tab and the window title will show it.
+    ///
+    /// The child's own title first, because a program that set one meant it.
+    /// Then the program in the foreground, which is a name the kernel vouches
+    /// for. Then nothing — the workspace falls back to the tab's index, and
+    /// this view does not invent a word to save it the trouble.
+    pub fn title(&self) -> Option<SharedString> {
+        if let Some(title) = &self.title {
+            return Some(title.clone());
+        }
+        self.foreground()
+            .program()
+            .map(|program| SharedString::from(program.to_owned()))
     }
 
     fn default_colors(&self) -> (Rgb, Rgb) {
@@ -942,6 +960,34 @@ impl TerminalView {
 impl Focusable for TerminalView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+impl sprite_pane::Pane for TerminalView {
+    fn title(&self) -> Option<SharedString> {
+        TerminalView::title(self)
+    }
+
+    fn set_allocated(&mut self, size: Size<Pixels>) {
+        TerminalView::set_allocated(self, size);
+    }
+
+    fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
+        let handle = TerminalView::begin_shutdown(self)?;
+        // The interface promises blocking work and nothing about children;
+        // what this pane's blocking work happens to be stays in here.
+        Some(Box::new(move || {
+            let _ = handle.wait();
+        }))
+    }
+
+    fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
+        let state = self.foreground();
+        state.should_confirm().then(|| sprite_pane::CloseWarning {
+            program: state
+                .program()
+                .map(|program| SharedString::from(program.to_owned())),
+        })
     }
 }
 
