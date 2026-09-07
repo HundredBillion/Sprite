@@ -107,7 +107,7 @@ The script is three commands, and running them yourself is fine:
 ```sh
 cargo build --release -p sprite-app --locked --offline
 cd packaging && makepkg -p PKGBUILD.local -fC
-sudo pacman -U sprite-0.1.1-1-x86_64.pkg.tar.zst
+sudo pacman -U sprite-0.1.2-1-x86_64.pkg.tar.zst
 ```
 
 `-C` matters. Without it `makepkg` can reuse a stale staging directory and

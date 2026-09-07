@@ -8,7 +8,7 @@
 #
 #   cargo build --release -p sprite-app --locked --offline
 #   cd packaging && makepkg -p PKGBUILD.local -fC
-#   sudo pacman -U sprite-0.1.1-1-x86_64.pkg.tar.zst
+#   sudo pacman -U sprite-0.1.2-1-x86_64.pkg.tar.zst
 #
 # From `packaging`, not from the workspace root: makepkg refuses a recipe that
 # is not in the current directory, and `package()` finds the tree by walking up
@@ -21,7 +21,7 @@
 # It builds nothing itself, on purpose: what gets installed is what you tested,
 # not a second compilation that might differ.
 pkgname=sprite
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="A terminal built to be read by programs as well as by people (local build)"
 arch=('x86_64' 'aarch64')
