@@ -5,6 +5,8 @@ name: ci
 # compositor or an emulated display is not equivalent to the real thing.
 
 on:
+  push:
+    branches: [master]
   pull_request:
   schedule:
     # Nightly, so a moving upstream is caught without waiting for a change here.
