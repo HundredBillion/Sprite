@@ -3,7 +3,9 @@
 **Date:** 2026-09-05
 **Type:** Documentation amendment (decision reversal)
 **Target:** `terminal-project-brief.md`
-**Status:** Draft
+**Status:** Implemented (commit `0c088436`); partially superseded by
+`09-07-2026-pane-trait-and-editor-plurality.md` (Studio, the single-editor
+architecture, and the `sprite-engine` rename)
 
 ## Problem Statement
 
