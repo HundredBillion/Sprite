@@ -315,9 +315,31 @@ pub struct MouseEvent {
     pub control: bool,
 }
 
+/// One turn of the wheel, in whole terminal rows.
+///
+/// Position and modifiers ride along because the wheel may be delivered to the
+/// child as a mouse report, which carries both. Where it goes is Terminal
+/// Core's decision, not the application's: only the terminal knows whether the
+/// child is reporting the mouse, which screen is active, and whether alternate
+/// scroll is on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WheelEvent {
+    /// Rows the wheel moved. Negative is up, toward history.
+    pub rows: i32,
+    pub position: CellPosition,
+    /// Held shift takes the wheel back for Sprite, the same override a click
+    /// obeys.
+    pub shift: bool,
+    pub alt: bool,
+    pub control: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerminalCommand {
     Key(KeyEvent),
+    /// The wheel turned. Distinct from `Scroll`, which always means "move the
+    /// viewport": a wheel event may instead belong to the child.
+    Wheel(WheelEvent),
     Input(Vec<u8>),
     Resize(TerminalSize),
     Scroll(Scroll),

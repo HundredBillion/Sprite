@@ -48,11 +48,9 @@ fn feed(
         .expect("ask the child to print the payload");
 
     let mark = NEXT_MARK.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let marker = format!("MARK{mark}");
+    let (command, marker) = support::marker_command(mark);
     session
-        .send(TerminalCommand::Input(
-            format!("printf '{marker}\\n'\n").into_bytes(),
-        ))
+        .send(TerminalCommand::Input(command))
         .expect("ask the child to print the marker");
     snapshots.wait_for("the payload to be processed", |bundle| {
         pane_text(bundle).contains(&marker)

@@ -1,8 +1,8 @@
 # Checkpoint 4 security review request
 
-**Status: OUTSTANDING — not yet performed.** This document prepares the review;
-it is not a substitute for it. Nothing below has been reviewed by anyone other
-than the author of the code.
+**Status: PERFORMED, 2026-09-05.** The review this document prepared is
+[checkpoint-4-security-review.md](checkpoint-4-security-review.md), which
+answers every question below. This file is kept as the brief it was.
 
 Graphics turn "a program printed something" into "the terminal decoded an
 untrusted binary format and put it on a GPU". The TSP requires a security review

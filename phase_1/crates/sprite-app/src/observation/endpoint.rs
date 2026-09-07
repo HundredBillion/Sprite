@@ -52,6 +52,27 @@ const MAX_CONNECTIONS: usize = 16;
 
 const KEY_BYTES: usize = 32;
 
+/// The longest socket path this platform can actually carry.
+///
+/// A Unix socket address keeps its path in `sockaddr_un.sun_path`, which is 108
+/// bytes on Linux and 104 on macOS, NUL terminator included — so the usable
+/// length is one less than the array.
+///
+/// This was a flat 100 on every platform, which is shorter than either, and the
+/// difference was not academic. macOS `$TMPDIR` is itself a ~49-byte path under
+/// `/var/folders`, so a socket nested one directory deeper than the product
+/// nests it exceeded 100 — which is exactly what the endpoint tests do, and why
+/// every one of them failed on macOS while passing on Linux. A limit that
+/// refuses paths the platform would accept is not a safety margin; it is a bug
+/// that only shows up where the base path is long.
+///
+/// Deliberately not read from `libc`: that would be a new direct dependency,
+/// and a third-party notice, for two integers each platform's headers fix.
+#[cfg(target_os = "macos")]
+const MAX_SOCKET_PATH: usize = 103;
+#[cfg(not(target_os = "macos"))]
+const MAX_SOCKET_PATH: usize = 107;
+
 /// A per-window secret, compared in constant time and wiped when dropped.
 pub struct ObservationKey {
     bytes: [u8; KEY_BYTES],
@@ -222,9 +243,14 @@ impl Endpoint {
         let mut name = ObservationKey::generate()?.to_hex();
         name.truncate(24);
         let socket = directory.join(format!("{name}.sock"));
-        if socket.as_os_str().len() >= 100 {
+        // Checked against what this platform's `sockaddr_un` actually holds, so
+        // the refusal is the kernel's rule rather than a number. `bind` would
+        // fail anyway; failing here says why, and names the limit.
+        let length = socket.as_os_str().len();
+        if length > MAX_SOCKET_PATH {
             return Err(std::io::Error::other(format!(
-                "the observation socket path is too long for a Unix socket: {}",
+                "the observation socket path is {length} bytes and this platform's \
+                 sockaddr_un holds {MAX_SOCKET_PATH}: {}",
                 socket.display()
             )));
         }
@@ -489,12 +515,22 @@ mod tests {
     /// passes in a container, over ssh, and on macOS — none of which have one.
     struct Scratch(PathBuf);
 
+    /// The name of one test's scratch directory.
+    ///
+    /// A free function so its *width* can be asserted at the widest inputs it
+    /// could ever be given, rather than at whatever this run's pid happens to
+    /// be. Kept short on purpose: this sits inside `$TMPDIR`, which on macOS is
+    /// already a ~48-byte path under `/var/folders`, and what is left has to
+    /// hold a socket name.
+    fn scratch_name(pid: u32, ordinal: u64) -> String {
+        format!("sp-{pid:x}-{ordinal:x}")
+    }
+
     impl Scratch {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let ordinal = NEXT.fetch_add(1, Ordering::SeqCst);
-            let path = std::env::temp_dir()
-                .join(format!("sprite-endpoint-{}-{ordinal}", std::process::id()));
+            let path = std::env::temp_dir().join(scratch_name(std::process::id(), ordinal));
             let _ = fs::remove_dir_all(&path);
             Self(path)
         }
@@ -590,6 +626,115 @@ mod tests {
             assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(seen.insert(hex), "a key repeated, so it is not random");
         }
+    }
+
+    /// What `open_in` appends to the directory it is given: a separator, 24 hex
+    /// characters, and `.sock`.
+    const SOCKET_NAME_BYTES: usize = 1 + 24 + ".sock".len();
+
+    /// A directory long enough that the socket inside it is exactly `target`.
+    fn directory_of_socket_length(scratch: &Scratch, target: usize) -> PathBuf {
+        let base = scratch.path();
+        let wanted = target - SOCKET_NAME_BYTES;
+        let base_len = base.as_os_str().len();
+        assert!(
+            base_len + 1 < wanted,
+            "the scratch base is already {base_len} bytes, too long to pad up to {wanted}"
+        );
+        // One padded component, so no component approaches the 255-byte limit.
+        let directory = base.join("p".repeat(wanted - base_len - 1));
+        assert_eq!(
+            directory.as_os_str().len() + SOCKET_NAME_BYTES,
+            target,
+            "the padding arithmetic is what this test rests on"
+        );
+        directory
+    }
+
+    /// This suite's own paths must fit the *tightest* platform, not whichever
+    /// one it happens to be running on.
+    ///
+    /// This is the test that would have caught the original failure from Linux.
+    /// The scratch directory used to be `sprite-endpoint-<pid>-<ordinal>`, and
+    /// nested inside a macOS `$TMPDIR` its sockets came to ~102 bytes — fine
+    /// against Linux's 107, refused by the flat 100 the guard then applied, and
+    /// over macOS's 103 even once the guard was corrected. A suite that only
+    /// fits on the platform it was written on is not a gate, so the budget is
+    /// asserted here rather than discovered on a Mac.
+    #[test]
+    fn the_scratch_directory_leaves_room_for_a_macos_tmpdir() {
+        /// `sun_path` on macOS, less its NUL terminator.
+        const MACOS_SUN_PATH: usize = 103;
+        /// `/var/folders/<2>/<~30>/T`, as `temp_dir` reports it — no trailing
+        /// separator, because that is the form the length is measured in.
+        const MACOS_TMPDIR: usize = 48;
+
+        // The widest name this can realistically produce, not the one today's
+        // pid gives: a test whose margin depends on how many digits the pid
+        // happened to have passes or fails by luck. The pid is taken at its
+        // true maximum; the ordinal is a counter of scratch directories within
+        // one test process, and 65,535 is generous for a suite of ~300 tests.
+        let widest = scratch_name(u32::MAX, 0xFFFF);
+        let on_macos = MACOS_TMPDIR + 1 + widest.len() + SOCKET_NAME_BYTES;
+        assert!(
+            on_macos <= MACOS_SUN_PATH,
+            "the widest scratch name ({widest}) gives a {on_macos}-byte socket path \
+             inside a macOS $TMPDIR, over its {MACOS_SUN_PATH}-byte limit"
+        );
+    }
+
+    /// A socket path the platform can carry is accepted, even past 100 bytes.
+    ///
+    /// The guard used to be a flat 100 on every platform. `sun_path` holds 108
+    /// bytes on Linux and 104 on macOS, so 100 refused paths both platforms
+    /// accept — and on macOS, where `$TMPDIR` alone is ~49 bytes, it refused
+    /// this suite's own scratch directories and made every endpoint test fail
+    /// there. This pins the limit to the platform rather than to a number.
+    #[test]
+    fn a_socket_path_the_platform_can_carry_is_accepted() {
+        let scratch = Scratch::new();
+        // Both platforms' limits are past the old flat 100, so on either one
+        // this path is one the guard used to refuse.
+        let directory = directory_of_socket_length(&scratch, MAX_SOCKET_PATH);
+
+        let endpoint = Endpoint::open_in(directory, |_request| "ok".to_owned())
+            .expect("a path the platform can carry is accepted");
+        assert_eq!(
+            endpoint.socket_path().as_os_str().len(),
+            MAX_SOCKET_PATH,
+            "the longest path this platform allows"
+        );
+        assert_eq!(
+            ask(
+                endpoint.socket_path(),
+                &format!("{} hello", endpoint.key_hex())
+            ),
+            "ok",
+            "and it is a working endpoint, not merely a path that was allowed"
+        );
+    }
+
+    /// One byte past what the platform can carry is refused, and says so.
+    ///
+    /// The guard is not being removed, only corrected: a path `bind` could not
+    /// hold must still fail with an explanation rather than an `EINVAL` from
+    /// the kernel.
+    #[test]
+    fn a_socket_path_the_platform_cannot_carry_is_refused() {
+        let scratch = Scratch::new();
+        let directory = directory_of_socket_length(&scratch, MAX_SOCKET_PATH + 1);
+
+        // Matched rather than `expect_err`, which would need `Debug` on
+        // `Endpoint` — and a `Debug` on a type that owns a key is a way for the
+        // key to reach a log.
+        let message = match Endpoint::open_in(directory, |_request| "ok".to_owned()) {
+            Ok(_) => panic!("one byte past the platform's limit was accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains(&MAX_SOCKET_PATH.to_string()),
+            "the refusal names the limit it applied: {message}"
+        );
     }
 
     #[test]

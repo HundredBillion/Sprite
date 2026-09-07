@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sprite Architecture Remediation</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { curve: "basis" } });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 5 4; }
+      .rule { background-image: repeating-linear-gradient(90deg,#94a3b8 0 6px,transparent 6px 11px); height:1px; }
+      .band { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+      .hatch { background-image: repeating-linear-gradient(45deg,#fecaca 0 4px,transparent 4px 9px); }
+      .deepfill { background-image: linear-gradient(150deg,#0f172a,#1e293b 60%,#334155); }
+      mark { background: #fef08a; padding: 0 2px; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 antialiased">
+    <main class="max-w-5xl mx-auto px-6 py-14 space-y-14">
+
+      <!-- ═══════════════ HEADER ═══════════════ -->
+      <header class="space-y-6">
+        <div class="flex items-baseline justify-between flex-wrap gap-3">
+          <h1 class="font-serif text-4xl tracking-tight">Architecture review — <span class="italic">Sprite</span></h1>
+          <p class="font-mono text-xs text-slate-500">26 Aug 2026 · revised 27 Aug 2026 · phase_1 @ ad3e06e</p>
+          <div class="mt-3 rounded bg-amber-50 border border-amber-200 p-3 text-sm">
+            <strong>Revision — this document is now the PRD.</strong> Every count below was re-derived from source on 27 Aug 2026. Corrected: <code class="text-xs bg-stone-100 px-1">TerminalView</code> fields 28→23; event-pump arms 10→13; <code class="text-xs bg-stone-100 px-1">PaneRegistry</code> methods 11→14; <code class="text-xs bg-stone-100 px-1">config.rs</code> complaint sites 14→10 and boilerplate 92→61 lines; GPUI shell "nine files, ~4,400" → seven files, 4,615; unused <code class="text-xs bg-stone-100 px-1">lib.rs</code> re-exports 3→22; dead-arm span 14→15 lines. Two findings were <em>withdrawn</em> as incorrect: the focus "permanent disagreement" (C2) and <code class="text-xs bg-stone-100 px-1">PaneTree::is_empty</code> as dead-and-lying (C7). All four defects stand as written. The <code class="text-xs bg-stone-100 px-1">config.rs</code> ≈39-line saving stands despite its inputs being wrong.
+          </div>
+        </div>
+        <div class="rule"></div>
+        <div class="grid sm:grid-cols-4 gap-4 text-sm">
+          <div><p class="band text-slate-400">Scope</p><p class="font-mono">17,584 LOC · 2 crates</p></div>
+          <div><p class="band text-slate-400">Traits in workspace</p><p class="font-mono">1 <span class="text-slate-400">(PaneSource, 3 adapters)</span></p></div>
+          <div><p class="band text-slate-400">Tests</p><p class="font-mono">136 int · 221 inline</p></div>
+          <div><p class="band text-slate-400">Candidates</p><p class="font-mono">8 scheduled · 2 dropped</p></div>
+        </div>
+        <div class="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-500 pt-1">
+          <span>▭ module</span>
+          <span><span class="text-slate-400">┄┄</span> seam</span>
+          <span class="text-red-600">→ leakage</span>
+          <span><span class="inline-block w-3 h-3 align-middle deepfill rounded-sm"></span> deep module</span>
+          <span class="text-emerald-700">◆ verified against source</span>
+        </div>
+      </header>
+
+      <!-- ═══════════════ DEFECTS ═══════════════ -->
+      <section class="space-y-5">
+        <div>
+          <h2 class="font-serif text-2xl">Defects found while reading</h2>
+          <p class="text-sm text-slate-600 mt-1 max-w-3xl">All five verified against source. <strong>Revised framing:</strong> the original review said each defect lives in a module no test can reach. That holds for two of them, not four. Defects 1 and 4 are plain coverage gaps in code that already has tests beside it — <code class="text-xs bg-stone-100 px-1">sprite-term/tests/colors.rs</code> and the <code class="text-xs bg-stone-100 px-1">config_request</code> tests respectively. Only defects 2 and 3 are genuinely GPUI-locked. Defect 5 was found by running C7, not by reading. The case for the candidates rests on two defects, not three.</p>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4">
+          <article class="rounded-lg border border-red-200 bg-white p-5 space-y-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-red-100 text-red-800">colours never repaint</span>
+              <span class="text-emerald-700 text-xs">◆</span>
+            </div>
+            <p class="font-mono text-xs text-slate-500">sprite-term/src/worker.rs:658, 670</p>
+            <p class="text-sm"><code class="text-xs bg-stone-100 px-1">SetColors</code> and <code class="text-xs bg-stone-100 px-1">SetCursor</code> are the only mutating arms that never set <code class="text-xs bg-stone-100 px-1">dirty</code>. They send <code class="text-xs bg-stone-100 px-1">CaptureRequested</code>, which wakes the loop to re-evaluate a gate that is <em>still false</em> — <code class="text-xs bg-stone-100 px-1">if dirty &amp;&amp; snapshots.is_empty()</code> at :755. No Render Snapshot is produced.</p>
+            <p class="text-sm text-slate-600">Line 657, immediately above, shows the correct idiom: <code class="text-xs bg-stone-100 px-1">Capture =&gt; dirty = true</code>. Masked in-app because GPUI redraws the last snapshot, so a live colour reload appears only after the next keystroke.</p>
+          </article>
+
+          <article class="rounded-lg border border-red-200 bg-white p-5 space-y-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-red-100 text-red-800">close guard has a hole</span>
+              <span class="text-emerald-700 text-xs">◆</span>
+            </div>
+            <p class="font-mono text-xs text-slate-500">sprite-app/src/main.rs:100 vs workspace.rs:298</p>
+            <p class="text-sm"><code class="text-xs bg-stone-100 px-1">may_close</code> has exactly two callers — <code class="text-xs bg-stone-100 px-1">close_focused_pane</code> and <code class="text-xs bg-stone-100 px-1">close_active_tab</code>. The window-manager close button calls <code class="text-xs bg-stone-100 px-1">begin_shutdown</code> and returns <code class="text-xs bg-stone-100 px-1">true</code> unconditionally.</p>
+            <p class="text-sm text-slate-600">PRD story 11 wants "a deliberate close confirmation … so that I do not accidentally terminate work". Its acceptance criteria (PRD:417–426) enumerate only pane close and tab close, so the title-bar X is a gap against the story's <em>intent</em>, not a stated criterion. <span class="font-mono text-xs">Ctrl+Shift+W</span> (ClosePane) and <span class="font-mono text-xs">Ctrl+Shift+Q</span> (CloseTab) are both guarded.</p>
+          </article>
+
+                      <article class="rounded-lg border border-red-200 bg-white p-5 space-y-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-red-100 text-red-800">a failed pane is reported as a timeout</span>
+              <span class="text-emerald-700 text-xs">◆</span>
+            </div>
+            <p class="font-mono text-xs text-slate-500">observation/panes.rs:150 · terminal_view.rs:340 · broker.rs:353</p>
+            <p class="text-sm"><code class="text-xs bg-stone-100 px-1">deliver_failure</code> is never called. It is the error counterpart to <code class="text-xs bg-stone-100 px-1">deliver</code>, so nothing ever hands an observation waiter an <code class="text-xs bg-stone-100 px-1">Err</code>. A pane that genuinely fails is not reported — the requester waits out the full 500&nbsp;ms <code class="text-xs bg-stone-100 px-1">DEADLINE</code> and is then told <code class="text-xs bg-stone-100 px-1">FailureKind::Timeout</code>, which is the wrong reason.</p>
+            <p class="text-sm text-slate-600"><code class="text-xs bg-stone-100 px-1">FailureKind::Errored</code> is therefore unreachable in production. It exists, and <code class="text-xs bg-stone-100 px-1">broker.rs:779</code> asserts it against a fake. <code class="text-xs bg-stone-100 px-1">terminal_view.rs:340</code> handles <code class="text-xs bg-stone-100 px-1">TerminalEvent::Error</code> by setting <code class="text-xs bg-stone-100 px-1">view.status</code> and never touches <code class="text-xs bg-stone-100 px-1">link.panes</code>. Found by narrowing <code class="text-xs bg-stone-100 px-1">lib.rs</code> and letting <code class="text-xs bg-stone-100 px-1">dead_code</code> report it — i.e. by C7.</p>
+          </article>
+
+            <article class="rounded-lg border border-red-200 bg-white p-5 space-y-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-red-100 text-red-800">protocol version divergence</span>
+              <span class="text-emerald-700 text-xs">◆</span>
+            </div>
+            <p class="font-mono text-xs text-slate-500">observation/broker.rs:194 vs workspace.rs:574</p>
+            <p class="text-sm"><code class="text-xs bg-stone-100 px-1">broker::parse</code> refuses a newer protocol token (<code class="text-xs bg-stone-100 px-1">spoken != PROTOCOL</code>). <code class="text-xs bg-stone-100 px-1">config_request</code> consumes any <code class="text-xs bg-stone-100 px-1">sprite-observation/*</code> token without checking.</p>
+            <p class="text-sm text-slate-600"><span class="font-mono text-xs">sprite-observation/99 config reload</span> reloads. <span class="font-mono text-xs">sprite-observation/99 panes snapshot</span> is refused.</p>
+          </article>
+        </div>
+      </section>
+
+      <div class="rule"></div>
+
+      <!-- ═══════════════ CANDIDATES ═══════════════ -->
+      <section id="candidates" class="space-y-12">
+      <!-- ═══════════════ IMPLEMENTATION PLAN ═══════════════ -->
+      <section class="space-y-5">
+        <div>
+          <h2 class="font-serif text-2xl">Implementation plan</h2>
+          <p class="text-sm text-slate-600 mt-1 max-w-3xl">Settled in a grilling session, 31 Aug 2026. Ten decisions, each recorded with the reasoning that produced it. Where a decision contradicts the card below, this section wins.</p>
+        </div>
+
+        <article class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+          <h3 class="font-serif text-xl">Branch one — defects, shipped ahead of all structural work</h3>
+          <p class="text-sm text-slate-600">Roughly 40 lines of change. Three of five defects are user-visible. Kept separate so that every diff in branch two carries <em>no</em> behaviour change, which is what makes a refactor reviewable.</p>
+          <div class="space-y-3 text-sm">
+            <div class="border-l-2 border-slate-300 pl-3">
+              <p class="font-semibold">Defect 1 — colours never repaint</p>
+              <p><code class="text-xs bg-stone-100 px-1">dirty = true;</code> in both arms, <em>keep</em> the <code class="text-xs bg-stone-100 px-1">CaptureRequested</code> self-send, and comment <code class="text-xs bg-stone-100 px-1">:438</code> to say what it is for. The one-slot snapshot channel (<code class="text-xs bg-stone-100 px-1">SNAPSHOT_CAPACITY = 1</code>) means the flag alone is not sufficient: if the slot is occupied the gate skips and the loop blocks on <code class="text-xs bg-stone-100 px-1">recv()</code>. The self-send buys a second pass at the gate. An empty match arm doing load-bearing work is what let this survive review, so it gets a comment rather than a deletion.</p>
+              <p class="text-slate-600 mt-1"><strong>Verified by:</strong> integration test in <code class="text-xs bg-stone-100 px-1">sprite-term/tests/colors.rs</code> — send <code class="text-xs bg-stone-100 px-1">SetColors</code> to a <em>running</em> session, assert the new colours are present in the next snapshot. The harness watchdog (<code class="text-xs bg-stone-100 px-1">support/mod.rs:95</code>) fails loudly rather than hanging.</p>
+            </div>
+            <div class="border-l-2 border-slate-300 pl-3">
+              <p class="font-semibold">Defect 2 — close guard has a hole</p>
+              <p>Add <code class="text-xs bg-stone-100 px-1">CloseScope::Window</code>, sourcing its running set from <code class="text-xs bg-stone-100 px-1">Tabs::all_panes()</code> so it spans every tab. <code class="text-xs bg-stone-100 px-1">on_window_should_close</code> calls <code class="text-xs bg-stone-100 px-1">may_close</code> and returns <code class="text-xs bg-stone-100 px-1">false</code> to refuse — GPUI 0.2.2 honours this (<code class="text-xs bg-stone-100 px-1">wayland/window.rs:542</code>). Reuse the existing banner rather than introducing a modal; add <code class="text-xs bg-stone-100 px-1">CloseScope::again()</code> so it reads "click close again" for the X and keeps "press the same keys again" for the bindings.</p>
+              <p class="text-slate-600 mt-1"><strong>Deliberate:</strong> any keystroke cancels a pending window close, because a <code class="text-xs bg-stone-100 px-1">Window</code> scope can never match <code class="text-xs bg-stone-100 px-1">ClosePane|CloseTab</code> at <code class="text-xs bg-stone-100 px-1">:962</code>. That is correct — typing means the person moved on — and is recorded here so it is inherited on purpose. <code class="text-xs bg-stone-100 px-1">Ctrl+Shift+Q</code> stays <code class="text-xs bg-stone-100 px-1">Tab</code> scope: with one tab the two scopes see identical panes, and making a binding's meaning depend on tab count is worse than the cosmetic inconsistency.</p>
+              <p class="text-slate-600 mt-1"><strong>Verified by:</strong> manual check, written into the PR. Run Sprite; start <code class="text-xs bg-stone-100 px-1">sleep 30</code> in a pane; click the title-bar X; confirm the banner appears and the window survives; click X again; confirm it closes. Repeat with an idle shell and confirm one click closes it. <code class="text-xs bg-stone-100 px-1">may_close</code> needs a live <code class="text-xs bg-stone-100 px-1">Context&lt;Workspace&gt;</code>, so no automated test is possible before C1.</p>
+            </div>
+            <div class="border-l-2 border-slate-300 pl-3">
+              <p class="font-semibold">Defect 4 — protocol version divergence</p>
+              <p>Hoist the check into <code class="text-xs bg-stone-100 px-1">respond</code>: one <code class="text-xs bg-stone-100 px-1">protocol_check(body) -&gt; Result&lt;&amp;str, Refusal&gt;</code> validating and stripping the token ahead of the dispatch, so both verbs pass through it. This fixes the divergence <em>by construction</em> rather than by keeping two checks in step, and is a down-payment on C4. <code class="text-xs bg-stone-100 px-1">broker::parse</code> keeps its own token handling untouched — it is public API used by the bench, and after the hoist it simply never sees a token from the endpoint path.</p>
+              <p class="text-slate-600 mt-1"><strong>In scope:</strong> <code class="text-xs bg-stone-100 px-1">respond(panes: &amp;WindowPanes, …)</code> becomes <code class="text-xs bg-stone-100 px-1">respond(panes: &amp;dyn PaneSource, …)</code>. One word. <code class="text-xs bg-stone-100 px-1">broker::collect</code> is already written against the trait; <code class="text-xs bg-stone-100 px-1">respond</code> is the only part of the subsystem tied to the concrete type, which is why no test can call it. The call site at <code class="text-xs bg-stone-100 px-1">:502</code> coerces unchanged.</p>
+              <p class="text-slate-600 mt-1"><strong>Verified by:</strong> unit test calling <code class="text-xs bg-stone-100 px-1">respond</code> through a six-line <code class="text-xs bg-stone-100 px-1">PaneSource</code> fake, asserting <code class="text-xs bg-stone-100 px-1">sprite-observation/99 config reload</code> <em>and</em> <code class="text-xs bg-stone-100 px-1">… panes snapshot</code> are both refused. Testing <code class="text-xs bg-stone-100 px-1">config_request</code> alone cannot pin this — the defect <em>is</em> that the two paths disagree. The refusal happens before <code class="text-xs bg-stone-100 px-1">ask_window</code>, so the 2-second <code class="text-xs bg-stone-100 px-1">RELOAD_TIMEOUT</code> is never reached.</p>
+            </div>
+            <div class="border-l-2 border-amber-300 pl-3">
+              <p class="font-semibold">Not in branch one</p>
+              <p><strong>Defect 3</strong> (<code class="text-xs bg-stone-100 px-1">Self::failed</code> forks a shell) rides with C1 — its clean fix, <code class="text-xs bg-stone-100 px-1">session: Option&lt;TerminalSession&gt;</code>, touches every <code class="text-xs bg-stone-100 px-1">self.session</code> use in the file C1 is already rewriting. <strong>Note:</strong> C1's win list claims the extraction earns this fix. It does not — the pump never touches the <code class="text-xs bg-stone-100 px-1">session</code> field. Batching them is a review convenience, not a causal relationship.</p>
+              <p class="mt-1"><strong>Defect 5</strong> (<code class="text-xs bg-stone-100 px-1">deliver_failure</code>) rides with C1 — the fix lives in the <code class="text-xs bg-stone-100 px-1">TerminalEvent::Error</code> arm, which is one of the thirteen arms C1 rewrites, and C1 is what makes it testable. There is a judgment call inside it: that arm fires for <em>any</em> session error, so calling <code class="text-xs bg-stone-100 px-1">deliver_failure</code> there fails any in-flight request whenever the pane reports anything wrong. That is the intended behaviour — a pane in a bad state should not leave a requester waiting out the deadline.</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+          <h3 class="font-serif text-xl">Branch two — candidates, in order</h3>
+          <ol class="space-y-3 text-sm list-decimal ml-5">
+            <li><strong>C7 — dead public surface, reframed as instrumentation.</strong> Not a warm-up. It is the only card that makes the compiler enumerate the problem, and it found defect 5, which two careful read-throughs missed. Narrowing <code class="text-xs bg-stone-100 px-1">lib.rs</code> to the 24 names with external users compiles clean and makes <code class="text-xs bg-stone-100 px-1">dead_code</code> report three items this document's own list does not contain: <code class="text-xs bg-stone-100 px-1">deliver_failure</code>, <code class="text-xs bg-stone-100 px-1">GraphicsCache::used_bytes</code>, <code class="text-xs bg-stone-100 px-1">PaneRegistry::len</code>. Running it first means C1's interface is designed against the real inventory. <em>Limitation:</em> <code class="text-xs bg-stone-100 px-1">Workspace::observation_enabled</code> does not appear, because <code class="text-xs bg-stone-100 px-1">Workspace</code> stays public and its methods remain formally reachable; the five hand-verified items still need hand-deletion. <strong>Also folds in the ADR-0012 amendment</strong> — this is the card that establishes the true inventory, and it is a documentation change with no code risk.</li>
+            <li><strong>C1 — cut the event pump out.</strong> Carries defect 3, defect 5, and C10's first half. Design settled below.</li>
+            <li><strong>C8, C9, C11</strong> — mechanical, no design decisions, independently reviewable, any order.</li>
+            <li><strong>C4 → C5</strong>, in that order and as one arc. C4 moves <code class="text-xs bg-stone-100 px-1">respond</code> into its own module and narrows <code class="text-xs bg-stone-100 px-1">collect</code>'s error type, absorbing C10's second half. C5 then defines the grammar once in the module C4 just created; doing C5 first would put it somewhere C4 immediately moves it.</li>
+            <li><strong>C6</strong> — the view/painter cycle. After C1, since both edit <code class="text-xs bg-stone-100 px-1">terminal_view.rs</code> and C1 is the larger diff.</li>
+            <li><strong>C3a</strong> — parameter bundling only. See the split below.</li>
+          </ol>
+        </article>
+
+        <article class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+          <h3 class="font-serif text-xl">C1 — the pump's interface</h3>
+          <p class="text-sm">Reading all thirteen arms changes the design. <strong>Every arm only writes view state; none reads it.</strong> So the decision half is a pure, stateless function — the fields stay on the view and the pump owns nothing. That is a better outcome than this document's "pump absorbs 3 of 23 fields": there is no new state at all, and the view's field count is unchanged.</p>
+          <pre class="bg-slate-900 text-slate-100 rounded p-3 text-xs overflow-x-auto"><code>// terminal_events.rs — beside terminal_view.rs, not inside it
+enum Effect {
+    Status(SharedString),
+    HoldPaste(String),
+    OpenUrl(String),
+    Clipboard(String),
+    DeliverHistory(HistorySnapshot),
+    FailRequest(String),      // defect 5
+}
+struct Decision { effects: Vec&lt;Effect&gt;, stop: bool }
+fn decide(event: Result&lt;TerminalEvent, StreamError&gt;) -&gt; Decision</code></pre>
+          <p class="text-sm"><code class="text-xs bg-stone-100 px-1">notify</code> is <em>implicit</em>: <code class="text-xs bg-stone-100 px-1">apply</code> calls <code class="text-xs bg-stone-100 px-1">cx.notify()</code> once if any effect was applied. Fewer variants, and it removes the current bug-shape where an arm notifies for nothing. Max effects for one event is two (<code class="text-xs bg-stone-100 px-1">UnsafePaste</code>, <code class="text-xs bg-stone-100 px-1">Error</code>). The async loop becomes three lines and holds no logic. <code class="text-xs bg-stone-100 px-1">decide</code> lives in a new <code class="text-xs bg-stone-100 px-1">terminal_events.rs</code> — <code class="text-xs bg-stone-100 px-1">terminal_view.rs</code> is the 1,581-line file this card exists to shrink, so its tests should not land there either.</p>
+          <p class="text-sm text-slate-600">Rejected: a <code class="text-xs bg-stone-100 px-1">Pump</code> struct owning the three fields (invents state the code does not need, and still has to reach the view to apply anything); a <code class="text-xs bg-stone-100 px-1">PumpHost</code> trait (one real implementor — the shallow-seam pattern this review argues against elsewhere).</p>
+        </article>
+
+        <article class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+          <h3 class="font-serif text-xl">C3 splits</h3>
+          <p class="text-sm"><strong>C3a — bundle the parameters.</strong> One value holding the five scratch objects, passed as one argument. Both <code class="text-xs bg-stone-100 px-1">too_many_arguments</code> suppressions go, <code class="text-xs bg-stone-100 px-1">publish</code>'s 31 lines collapse, <code class="text-xs bg-stone-100 px-1">capture</code> drops from nine parameters to three, and the threading through four sites disappears. <strong>Changes no drop behaviour</strong> — keep the explicit <code class="text-xs bg-stone-100 px-1">drop()</code> list exactly as it is, now against the struct's fields. Covered by the existing integration suite.</p>
+          <p class="text-sm"><strong>C3b — encode the ordering in <code class="text-xs bg-stone-100 px-1">Drop</code>. Gated, not scheduled.</strong> This card's central promise is that drop order becomes a <code class="text-xs bg-stone-100 px-1">Drop</code> impl rather than the worker's discipline. You cannot encode an invariant the codebase states two different ways and the compiler cannot check either. <code class="text-xs bg-stone-100 px-1">worker.rs:792</code> says <em>"Every libghostty value goes first"</em>, but the list at <code class="text-xs bg-stone-100 px-1">:795–799</code> omits <code class="text-xs bg-stone-100 px-1">placements</code>, one of the four objects <code class="text-xs bg-stone-100 px-1">render_objects()</code> returns. All four are declared <code class="text-xs bg-stone-100 px-1">'static</code>, so these are not Rust borrows — the ordering concerns libghostty's internal state, which the compiler will never check. A <code class="text-xs bg-stone-100 px-1">Drop</code> impl written now would freeze a guess, and because <code class="text-xs bg-stone-100 px-1">Drop</code> fires implicitly, a future reader would have <em>less</em> signal than the explicit list gives.</p>
+        </article>
+
+        <article class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+          <h3 class="font-serif text-xl">Acceptance criteria</h3>
+          <p class="text-sm">Four cards are justified entirely by a testability claim. For those, <strong>landing the promised test is the acceptance criterion</strong> — a refactor that ships without it has spent the effort and preserved the original condition, which is that nobody can verify this code.</p>
+          <ul class="list-disc ml-5 space-y-1 text-sm">
+            <li><strong>C1</strong> — <code class="text-xs bg-stone-100 px-1">decide</code> unit-tested across all thirteen arms with no GPUI in the test binary, including the two that emit two effects, plus the defect-5 regression: an <code class="text-xs bg-stone-100 px-1">Error</code> event produces <code class="text-xs bg-stone-100 px-1">FailRequest</code>.</li>
+            <li><strong>C4</strong> — <code class="text-xs bg-stone-100 px-1">respond</code> tested directly through <code class="text-xs bg-stone-100 px-1">&amp;dyn PaneSource</code>: read path, config path, protocol refusal on both. Branch one's defect-4 test becomes the first of these, which doubles as a check that C4 changed no behaviour.</li>
+            <li><strong>C5</strong> — round-trip test, <code class="text-xs bg-stone-100 px-1">Query</code> → wire text → <code class="text-xs bg-stone-100 px-1">Query</code> across every scope and flag combination. This is what actually retires the two-<code class="text-xs bg-stone-100 px-1">Scope</code>-enums problem: it fails if the two directions ever disagree.</li>
+            <li><strong>C6 — promise restated.</strong> The original claim, "<code class="text-xs bg-stone-100 px-1">GridPaint::draw</code> becomes testable", overpromises: <code class="text-xs bg-stone-100 px-1">draw</code> paints into a GPUI <code class="text-xs bg-stone-100 px-1">Window</code>, and moving colour vocabulary into the painter does not by itself make painting testable. What C6 genuinely earns is <code class="text-xs bg-stone-100 px-1">cell_colors</code> — the 50-line colour resolution block — testable as a pure function. That is the criterion.</li>
+          </ul>
+          <p class="text-sm text-slate-600">For C7, C8, C9 and C11 the criterion is the existing suite green — and for C7 specifically, <code class="text-xs bg-stone-100 px-1">cargo check</code> clean with narrowed exports and <strong>no new <code class="text-xs bg-stone-100 px-1">#[allow(dead_code)]</code></strong> added to silence anything.</p>
+        </article>
+
+        <article class="rounded-xl border border-amber-200 bg-amber-50 p-6 space-y-3">
+          <h3 class="font-serif text-xl">Dropped, dissolved, and open</h3>
+          <p class="text-sm"><strong>C2 — dropped.</strong> Observed, not actioned. Its headline defect was withdrawn: there is no permanent focus disagreement, and no caller sequence reaching the drop at <code class="text-xs bg-stone-100 px-1">workspace.rs:480</code> could be constructed. What remains is a real complexity argument — focus in six places across five modules, five hops to answer one question, six of <code class="text-xs bg-stone-100 px-1">PaneRegistry</code>'s fourteen methods pure delegation — but it would be the only card justified purely by navigability, it has the widest blast radius here, and no test can fail if it is done wrong. Revisit if a focus bug ever appears; that bug would then tell you where the ownership boundary belongs.</p>
+          <p class="text-sm"><strong>C10 — dissolved.</strong> Not a card. <code class="text-xs bg-stone-100 px-1">terminal_view.rs:288</code> is one of the thirteen arms C1 rewrites — under <code class="text-xs bg-stone-100 px-1">decide</code> it is never written rather than deleted. <code class="text-xs bg-stone-100 px-1">workspace.rs:558</code> waits for C4, because removing those arms properly means narrowing <code class="text-xs bg-stone-100 px-1">collect</code>'s error type, not adding a catch-all that would answer "denied" to a malformed request. Eight candidates remain, not eleven.</p>
+          <p class="text-sm"><strong>Open question, for whoever picks up C3b:</strong> must <code class="text-xs bg-stone-100 px-1">placements</code> drop before <code class="text-xs bg-stone-100 px-1">terminal</code>? If yes, the current code has a latent bug and that is a defect, not a refactor. If no, the comment at <code class="text-xs bg-stone-100 px-1">:792</code> is wrong and should be narrowed to name the three values that do matter. This is a libghostty question rather than a Sprite one, and it does not block the eight cards ahead of it.</p>
+          <p class="text-sm"><strong>Unverified claim, inherited:</strong> C10's "five doc comments attached to the function below the one they describe" was never re-read against source. Confirm before acting on it.</p>
+        </article>
+      </section>
+
+        <h2 class="font-serif text-2xl">Candidates</h2>
+
+        <!-- ── C1 ── -->
+        <article id="c1" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Cut the event pump out of the Pane view</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-indigo-100 text-indigo-800">Deepen</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-500">sprite-app/src/terminal_view.rs — 1,581 lines, 23 fields, 7 tests</p>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">Before — one struct, 17 responsibilities</p>
+              <div class="space-y-[3px]">
+                <div class="h-5 bg-slate-800 text-white text-[10px] flex items-center px-2 rounded-sm">interface: <span class="font-mono ml-1">23 fields</span></div>
+                <div class="h-3 bg-red-200"></div><div class="h-3 bg-red-200"></div><div class="h-3 bg-red-200"></div>
+                <div class="h-3 bg-red-300"></div><div class="h-3 bg-red-200"></div><div class="h-3 bg-red-200"></div>
+                <div class="h-3 bg-red-200"></div><div class="h-3 bg-red-300"></div><div class="h-3 bg-red-200"></div>
+                <div class="h-3 bg-red-200"></div><div class="h-3 bg-red-200"></div><div class="h-3 bg-red-200"></div>
+                <div class="h-3 bg-red-300"></div><div class="h-3 bg-red-200"></div><div class="h-3 bg-red-200"></div>
+                <div class="h-3 bg-red-200"></div><div class="h-3 bg-red-200"></div>
+              </div>
+              <p class="text-[11px] text-slate-500 mt-3">Every band a separate concern. Test reach: <mark>one 50-line free function</mark>.</p>
+            </div>
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">After — the pump behind its own seam</p>
+              <div class="space-y-[3px]">
+                <div class="h-5 bg-slate-800 text-white text-[10px] flex items-center px-2 rounded-sm">interface: <span class="font-mono ml-1">3 fields</span></div>
+                <div class="deepfill h-[52px] rounded-sm flex items-center justify-center text-white text-[10px] tracking-wider">EVENT PUMP · 120 lines</div>
+                <div class="h-2"></div>
+                <div class="h-5 bg-slate-800 text-white text-[10px] flex items-center px-2 rounded-sm">interface: <span class="font-mono ml-1">20 fields</span></div>
+                <div class="h-3 bg-slate-200"></div><div class="h-3 bg-slate-200"></div><div class="h-3 bg-slate-200"></div>
+                <div class="h-3 bg-slate-200"></div><div class="h-3 bg-slate-200"></div><div class="h-3 bg-slate-200"></div>
+              </div>
+              <p class="text-[11px] text-slate-500 mt-3">Pump takes events in, returns decisions out. Testable without a <span class="font-mono">Window</span>.</p>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Seventeen concerns share one struct because <code class="text-xs bg-stone-100 px-1">cx.spawn</code> needs an <code class="text-xs bg-stone-100 px-1">Entity&lt;Self&gt;</code>, so nothing in the file is reachable without a live GPUI <code class="text-xs bg-stone-100 px-1">Window</code>.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>Move the 13-arm event pump (lines 244–364, arms at 249–361) behind its own interface. It touches only <code class="text-xs bg-stone-100 px-1">status</code>, <code class="text-xs bg-stone-100 px-1">pending_unsafe_paste</code> and <code class="text-xs bg-stone-100 px-1">observation</code> — none of the other sixteen concerns.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Interface shrinks; pump absorbs 3 of 23 fields</li>
+                <li>Locality: paste safety in one module</li>
+                <li>Tests reach 13 event arms, currently 0</li>
+                <li><code class="text-xs">Self::failed</code> stops forking a shell</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3">All 7 inline tests exercise <code class="text-xs bg-stone-100 px-1">grid_size</code>, a free function. Zero touch the pump, <code class="text-xs bg-stone-100 px-1">route_mouse</code>, the drag state machine, or any of the 8 <code class="text-xs bg-stone-100 px-1">EntityInputHandler</code> methods.</p>
+          <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">ADR-0012 budgeted the GPUI shell at <em>"about 600 lines across three files"</em>. It is now 4,615 lines across seven (every file in <code class="text-xs bg-stone-100 px-1">sprite-app</code> that names <code class="text-xs bg-stone-100 px-1">gpui</code>; no <code class="text-xs bg-stone-100 px-1">observation/</code> module does). Roughly 7.7× the budgeted figure. Worth reopening the ADR to record what the shell actually costs.</div>
+        </article>
+
+        <!-- ── C2 ── -->
+        <article id="c2" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl"><s class="text-slate-400">Give the focused Pane one owner</s></h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-indigo-100 text-indigo-800">Deepen</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-stone-200 text-stone-700">Dropped</span>
+            </div>
+          </div>
+          <p class="rounded bg-stone-100 border border-stone-300 p-3 text-sm"><strong>Dropped — observed, not actioned.</strong> See "Dropped, dissolved, and open" above. Retained here for the finding, not as scheduled work.</p>
+          <p class="font-mono text-sm text-slate-500">pane_tree.rs · pane_registry.rs · tabs.rs · workspace.rs · observation/panes.rs</p>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <pre class="mermaid">
+flowchart LR
+  subgraph ASK["a reader asks: which Pane has the keyboard?"]
+    direction LR
+    W["Workspace<br/>pending_focus"] --> T["Tabs<br/>active: usize"]
+    T --> R["PaneRegistry<br/>focus()"]
+    R --> P["PaneTree<br/>focus: PaneId"]
+  end
+  G["GPUI FocusHandle<br/>the only true answer"]
+  O["WindowPanes<br/>Placement.focused"]
+  W -.->|apply_pending_focus<br/>drops if not in active tab| G
+  W -->|republished each frame| O
+  P -.->|no write-back path| G
+  classDef leak stroke:#dc2626,stroke-width:2px,fill:#fef2f2;
+  classDef truth stroke:#0f172a,stroke-width:3px,fill:#e2e8f0;
+  class W leak
+  class G truth
+            </pre>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Focus is stored in six places across five modules, and answering "which Pane has the keyboard?" takes five hops. <code class="text-xs bg-stone-100 px-1">apply_pending_focus</code> <em>takes</em> <code class="text-xs bg-stone-100 px-1">pending_focus</code> and drops it if the Pane is not in the active tab (<code class="text-xs bg-stone-100 px-1">workspace.rs:480</code>). <strong>Correction:</strong> the original review called that a live bug created by <code class="text-xs bg-stone-100 px-1">after_close</code> and <code class="text-xs bg-stone-100 px-1">switch_tab</code>. It is not — both request a pane from the <em>newly</em>-active tab (<code class="text-xs bg-stone-100 px-1">:406</code>, <code class="text-xs bg-stone-100 px-1">:423</code>), and click-to-focus routes through <code class="text-xs bg-stone-100 px-1">focus_pane</code> (<code class="text-xs bg-stone-100 px-1">:894</code>), which updates the tree. No caller sequence reaching that early return was found. The cost is navigability, not a defect.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>One module owns focus and answers every question about it. <code class="text-xs bg-stone-100 px-1">PaneRegistry</code> collapses into it — six of its fourteen methods are one-line delegations, and <code class="text-xs bg-stone-100 px-1">Tabs</code> adds a third forwarding hop over that.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Five hops become one</li>
+                <li>Locality: one place can drop focus</li>
+                <li>Membership asked once, not twice</li>
+                <li>Deletes two shallow modules' worth of forwarding</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3">Keep <code class="text-xs bg-stone-100 px-1">PaneRegistry::close</code> and <code class="text-xs bg-stone-100 px-1">into_contents</code> — 19 of its 82 non-blank, non-comment lines (impl spans <code class="text-xs bg-stone-100 px-1">:20–127</code>) that encode real rules ("the tree keeps its final leaf, but the tab is over", deterministic shutdown order). Those pass the deletion test; the delegations do not.</p>
+        </article>
+
+        <!-- ── C3 ── -->
+        <article id="c3" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Let the projection own its own scratch state</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-indigo-100 text-indigo-800">Deepen</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-500">sprite-term/src/snapshot.rs:170 · worker.rs:1132, 1171, 795</p>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">Before — nine parameters, four call sites</p>
+              <svg viewBox="0 0 300 190" class="w-full h-[190px]">
+                <rect x="8" y="8" width="284" height="52" fill="#fff" stroke="#0f172a"/>
+                <text x="16" y="26" font-size="9" font-family="monospace" fill="#0f172a">worker::run</text>
+                <text x="16" y="40" font-size="7.5" font-family="monospace" fill="#64748b">constructs 5 scratch buffers</text>
+                <text x="16" y="52" font-size="7.5" font-family="monospace" fill="#dc2626">drops them in a fixed order</text>
+                <g stroke="#dc2626" stroke-width="1.2" fill="none">
+                  <path d="M40 60 L40 96"/><path d="M75 60 L75 96"/><path d="M110 60 L110 96"/>
+                  <path d="M145 60 L145 96"/><path d="M180 60 L180 96"/><path d="M215 60 L215 96"/>
+                  <path d="M250 60 L250 96"/><path d="M275 60 L275 96"/><path d="M15 60 L15 96"/>
+                </g>
+                <rect x="8" y="96" width="284" height="30" fill="#fef2f2" stroke="#dc2626"/>
+                <text x="16" y="115" font-size="8.5" font-family="monospace" fill="#dc2626">publish(…11 args) #[allow(too_many_arguments)]</text>
+                <rect x="8" y="140" width="284" height="42" fill="#fff" stroke="#0f172a"/>
+                <text x="16" y="158" font-size="8.5" font-family="monospace" fill="#0f172a">snapshot::capture(…9 args)</text>
+                <text x="16" y="172" font-size="7.5" font-family="monospace" fill="#dc2626">#[allow(too_many_arguments)]</text>
+              </svg>
+            </div>
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">After — one owner, one call</p>
+              <svg viewBox="0 0 300 190" class="w-full h-[190px]">
+                <rect x="8" y="8" width="284" height="40" fill="#fff" stroke="#0f172a"/>
+                <text x="16" y="26" font-size="9" font-family="monospace" fill="#0f172a">worker::run</text>
+                <text x="16" y="39" font-size="7.5" font-family="monospace" fill="#64748b">owns the Terminal. Nothing else.</text>
+                <line x1="150" y1="48" x2="150" y2="74" stroke="#0f172a" stroke-width="1.2"/>
+                <text x="158" y="65" font-size="7.5" font-family="monospace" fill="#64748b">.capture()</text>
+                <rect x="8" y="74" width="284" height="108" fill="#1e293b" stroke="#0f172a"/>
+                <text x="16" y="92" font-size="9" font-family="monospace" fill="#fff">Projector</text>
+                <text x="16" y="106" font-size="7.5" font-family="monospace" fill="#94a3b8">owns: render_state, rows, cells,</text>
+                <text x="16" y="117" font-size="7.5" font-family="monospace" fill="#94a3b8">placements, PixelCache</text>
+                <text x="16" y="134" font-size="7.5" font-family="monospace" fill="#94a3b8">drop order is its Drop impl</text>
+                <text x="16" y="152" font-size="7.5" font-family="monospace" fill="#6ee7b7">'vt lifetime stated once</text>
+                <text x="16" y="170" font-size="7.5" font-family="monospace" fill="#6ee7b7">publish() disappears entirely</text>
+              </svg>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Five of nine parameters are mutable scratch buffers only <code class="text-xs bg-stone-100 px-1">snapshot.rs</code> and <code class="text-xs bg-stone-100 px-1">graphics.rs</code> know how to use, but that <code class="text-xs bg-stone-100 px-1">worker::run</code> must construct, thread through four sites, and destroy in a specific order that no type expresses.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>One value owns the four libghostty objects sharing the <code class="text-xs bg-stone-100 px-1">'vt</code> allocator lifetime plus the <code class="text-xs bg-stone-100 px-1">PixelCache</code>. Drop order becomes its <code class="text-xs bg-stone-100 px-1">Drop</code>, not the worker's discipline.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Two <code class="text-xs">too_many_arguments</code> suppressions go</li>
+                <li><code class="text-xs">publish</code> (31 lines) deletes</li>
+                <li>Sequencing obligation leaves the worker</li>
+                <li>Leverage: worker.rs drops ~1,757 → ~1,100</li>
+                <li>Half-built already: <code class="text-xs">RenderObjects</code> + <code class="text-xs">render_objects()</code> exist at <code class="text-xs">worker.rs:1160</code></li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <!-- ── C4 ── -->
+        <article id="c4" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Move <code class="font-mono text-xl">respond</code> out of the window view</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-indigo-100 text-indigo-800">Deepen</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-500">sprite-app/src/workspace.rs:531–585 <span class="text-emerald-700">◆ verified</span></p>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <pre class="mermaid">
+flowchart TB
+  REQ["request body<br/>(authenticated by observation key)"] --> CFG{"config_request?<br/>workspace.rs:540"}
+  CFG -->|yes| ASK["ask_window → Workspace::reload<br/>MUTATES settings, endpoint, every Pane"]
+  CFG -->|no| PARSE["broker::parse → Query"]
+  PARSE --> SCOPE["broker::Scope<br/>every variant reads"]
+  SCOPE --> COLLECT["broker::collect"]
+  ASK -.->|bypasses the read-only type| SCOPE
+  classDef leak stroke:#dc2626,stroke-width:2px,fill:#fef2f2;
+  classDef deep stroke:#0f172a,stroke-width:3px,fill:#e2e8f0;
+  class ASK,CFG leak
+  class SCOPE,COLLECT deep
+            </pre>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p><code class="text-xs bg-stone-100 px-1">broker.rs:79</code> promises <em>"a request that could mutate cannot be constructed"</em>. That is true of <code class="text-xs bg-stone-100 px-1">broker::Scope</code> and false of the endpoint: <code class="text-xs bg-stone-100 px-1">config reload</code> is checked <em>first</em> and never reaches the type. An auditor reads broker.rs, finds the guarantee, and stops.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>The subsystem's real entry point should not be a private <code class="text-xs bg-stone-100 px-1">fn</code> inside a 1,248-line GPUI view. Give it a module where the full request grammar — reads <em>and</em> the one write — is expressed in one type.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>The read-only claim becomes true again</li>
+                <li>Deletes 7 unreachable lines</li>
+                <li>Fixes the protocol divergence</li>
+                <li>Testable: <code class="text-xs">respond</code> has zero tests today</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3"><span class="text-emerald-700">◆</span> <strong>7 unreachable lines confirmed:</strong> <code class="text-xs bg-stone-100 px-1">collect</code> has exactly one <code class="text-xs bg-stone-100 px-1">?</code> (line 311, <code class="text-xs bg-stone-100 px-1">resolve(…)?</code>); every other error is pushed into <code class="text-xs bg-stone-100 px-1">failures</code>. <code class="text-xs bg-stone-100 px-1">resolve</code> returns only <code class="text-xs bg-stone-100 px-1">Refusal::Denied</code>. So the <code class="text-xs bg-stone-100 px-1">Malformed</code> and <code class="text-xs bg-stone-100 px-1">UnsupportedProtocol</code> arms at :558–564 cannot execute.</p>
+          <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">Touches ADR-0013's window-scoping decision — but does not contradict it. The scope rule is unchanged; only where the grammar is expressed moves.</div>
+        </article>
+
+        <!-- ── C5 ── -->
+        <article id="c5" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Define the snapshot request grammar once</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-indigo-100 text-indigo-800">Deepen</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-500">cli.rs:57,80,224 · observation/client.rs:229 · observation/broker.rs:84,189 — 203 lines for five flags</p>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">Before — six edits to add one flag</p>
+              <div class="space-y-2 text-[11px] font-mono">
+                <div class="border border-red-300 bg-red-50 px-2 py-1.5">cli::Scope <span class="text-slate-500">Tab | TabWithSelf | Pane | Window</span></div>
+                <div class="border border-red-300 bg-red-50 px-2 py-1.5">cli::snapshot <span class="text-slate-500">argv → SnapshotArgs</span></div>
+                <div class="border border-red-300 bg-red-50 px-2 py-1.5">cli::USAGE <span class="text-slate-500">the flags, as prose</span></div>
+                <div class="border border-red-300 bg-red-50 px-2 py-1.5">client::request_line <span class="text-slate-500">args → flag text</span></div>
+                <div class="border border-red-300 bg-red-50 px-2 py-1.5">broker::Scope <span class="text-slate-500">Tab{include_self} | …</span></div>
+                <div class="border border-red-300 bg-red-50 px-2 py-1.5">broker::parse <span class="text-slate-500">text → Query</span></div>
+              </div>
+              <p class="text-[11px] text-slate-500 mt-3">Two <code>Scope</code> enums of different shape; one validation rule written twice.</p>
+            </div>
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">After — one grammar, two directions</p>
+              <div class="space-y-2 text-[11px] font-mono">
+                <div class="deepfill text-white px-2 py-3 rounded-sm">observation::request<br/><span class="text-slate-400">Scope · Query · render · parse</span></div>
+                <div class="flex gap-2">
+                  <div class="border border-slate-300 px-2 py-1.5 flex-1">cli <span class="text-slate-500">→ Query</span></div>
+                  <div class="border border-slate-300 px-2 py-1.5 flex-1">broker <span class="text-slate-500">Query →</span></div>
+                </div>
+                <div class="text-slate-400 text-center pt-1">┄┄┄ the wire text is the seam ┄┄┄</div>
+                <div class="border border-slate-300 px-2 py-1.5 text-center">round-trip test becomes possible</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>The five-flag grammar has no single definition. Adding <code class="text-xs bg-stone-100 px-1">--since</code> means six sites in three modules, plus tests in each.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>One module owns the grammar and both directions across it. The seam stays exactly where ADR-0001 put it — the wire text between two processes.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>One <code class="text-xs">Scope</code>, not two shapes</li>
+                <li><code class="text-xs">--include-self</code> rule stated once</li>
+                <li>Leverage: one grammar, three callers</li>
+                <li>A real round-trip test, absent today</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3">The client-side duplication is deliberate and documented (cli.rs:438) — refusing a bad combination locally gives a better message than relaying the window's refusal. Keep that behaviour; it does not require a second definition of the grammar.</p>
+        </article>
+
+        <!-- ── C6 ── -->
+        <article id="c6" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Break the view ↔ painter cycle</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-indigo-100 text-indigo-800">Deepen</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-500">grid_paint.rs:62 ↔ terminal_view.rs:1151</p>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <pre class="mermaid">
+flowchart LR
+  TV["terminal_view<br/>declares CURSOR_STROKE, RowPass,<br/>cell_colors, pack, terminal_font"]
+  GP["grid_paint<br/>GridPaint::new(11 args)"]
+  TV -->|constructs| GP
+  GP -->|use crate::terminal_view::…| TV
+  classDef leak stroke:#dc2626,stroke-width:2px,fill:#fef2f2;
+  class TV,GP leak
+            </pre>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>A mutual <code class="text-xs bg-stone-100 px-1">use</code> is a seam that is not one. <code class="text-xs bg-stone-100 px-1">cell_colors</code> and <code class="text-xs bg-stone-100 px-1">CURSOR_STROKE</code> have <em>one</em> caller each — both in <code class="text-xs bg-stone-100 px-1">grid_paint</code>, zero in the module that declares them. Commit ad3e06e promoted four symbols to <code class="text-xs bg-stone-100 px-1">pub(crate)</code> and moved nothing.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>Move the painting vocabulary (the 50-line colour block 658–707, <code class="text-xs bg-stone-100 px-1">RowPass</code>, <code class="text-xs bg-stone-100 px-1">CURSOR_STROKE</code>) into the painter, and give <code class="text-xs bg-stone-100 px-1">GridPaint::new</code> one struct instead of eleven positional arguments.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Cycle becomes one direction</li>
+                <li>Three <code class="text-xs">too_many_arguments</code> suppressions go</li>
+                <li>The <code class="text-xs">build</code> closure workaround deletes</li>
+                <li><code class="text-xs">GridPaint::draw</code> becomes testable — 0 tests today</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3">ad3e06e did delete the old per-cell path cleanly — <code class="text-xs bg-stone-100 px-1">row_element</code>, <code class="text-xs bg-stone-100 px-1">cursor_mark</code>, <code class="text-xs bg-stone-100 px-1">PositionedCell::left/width</code> are gone. No superseded path survives. The extraction simply stopped at visibility.</p>
+        </article>
+
+        <div class="rule"></div>
+
+        <!-- ── C7 ── -->
+        <article id="c7" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Delete the aspirational public surface</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-stone-200 text-stone-800">Simplify / delete</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm"><span class="px-1.5 py-0.5 rounded bg-stone-800 text-white text-xs">yagni:</span> <span class="text-slate-500">16 dead lines + 22 unused re-exports · workspace.rs, tabs.rs, pane_registry.rs, lib.rs</span> <span class="text-emerald-700">◆ verified</span></p>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">Before</p>
+              <div class="space-y-1 text-[11px] font-mono">
+                <div class="flex justify-between border-b border-slate-100 py-1"><span>Workspace::observation_enabled</span><span class="text-red-600">0 callers</span></div>
+                <div class="flex justify-between border-b border-slate-100 py-1"><span>PaneTree::is_empty <span class="text-slate-400">→ false</span></span><span class="text-emerald-700">keep — correct</span></div>
+                <div class="flex justify-between border-b border-slate-100 py-1"><span>Tabs::active_mut</span><span class="text-red-600">0 callers</span></div>
+                <div class="flex justify-between border-b border-slate-100 py-1"><span>Tabs::get</span><span class="text-red-600">0 callers</span></div>
+                <div class="flex justify-between border-b border-slate-100 py-1"><span>PaneRegistry::focused_mut</span><span class="text-red-600">0 callers</span></div>
+                <div class="flex justify-between border-b border-slate-100 py-1"><span>PaneRegistry::get_mut</span><span class="text-red-600">1, itself dead</span></div>
+                <div class="flex justify-between border-b border-slate-100 py-1"><span>GraphicsCache::len / is_empty</span><span class="text-emerald-700">keep — own tests</span></div>
+                <div class="flex justify-between py-1"><span>22 × pub use in lib.rs</span><span class="text-red-600">no external user</span></div>
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-200 p-4 flex flex-col justify-center items-center">
+              <p class="band text-slate-400 mb-4 self-start">After</p>
+              <div class="w-full space-y-3">
+                <div class="h-16 hatch border border-red-200 rounded flex items-center justify-center text-xs text-red-700">16 lines + 22 exports removed</div>
+                <div class="text-center text-3xl text-slate-300">↓</div>
+                <div class="h-8 bg-slate-100 border border-slate-300 rounded flex items-center justify-center text-xs text-slate-600">nothing else changes</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Every method on <code class="text-xs bg-stone-100 px-1">PaneRegistry</code>, <code class="text-xs bg-stone-100 px-1">PaneTree</code> and <code class="text-xs bg-stone-100 px-1">Tabs</code> is <code class="text-xs bg-stone-100 px-1">pub</code> while nothing outside <code class="text-xs bg-stone-100 px-1">sprite-app</code> can reach any of them. That <code class="text-xs bg-stone-100 px-1">pub</code> is why <code class="text-xs bg-stone-100 px-1">dead_code</code> never fired.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>Delete the eight unused items; narrow the rest to <code class="text-xs bg-stone-100 px-1">pub(crate)</code> so the compiler starts reporting the next one.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Interface shrinks, implementation untouched</li>
+                <li>The compiler polices it from now on</li>
+                <li>Cheapest card here — no design decision</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3"><span class="text-emerald-700">◆</span> All rows re-read against source. Deletable: <code class="text-xs bg-stone-100 px-1">observation_enabled</code> (3 lines), <code class="text-xs bg-stone-100 px-1">Tabs::active_mut</code> (3), <code class="text-xs bg-stone-100 px-1">Tabs::get</code> (3), <code class="text-xs bg-stone-100 px-1">focused_mut</code> (4), <code class="text-xs bg-stone-100 px-1">get_mut</code> (3, whose only caller is <code class="text-xs bg-stone-100 px-1">focused_mut</code>) — 16 lines. <strong>Two corrections to the original review.</strong> (1) <code class="text-xs bg-stone-100 px-1">PaneTree::is_empty</code> returning <code class="text-xs bg-stone-100 px-1">false</code> is <em>correct</em>, not aspirational: <code class="text-xs bg-stone-100 px-1">new</code> seeds one leaf and <code class="text-xs bg-stone-100 px-1">close</code> refuses to remove the last (<code class="text-xs bg-stone-100 px-1">pane_tree.rs:270</code>), so the tree is never empty by invariant; <code class="text-xs bg-stone-100 px-1">len</code> is live at <code class="text-xs bg-stone-100 px-1">:270</code>, so deleting <code class="text-xs bg-stone-100 px-1">is_empty</code> trips clippy's <code class="text-xs bg-stone-100 px-1">len_without_is_empty</code>. Document the invariant instead. (2) <code class="text-xs bg-stone-100 px-1">GraphicsCache::len</code>/<code class="text-xs bg-stone-100 px-1">is_empty</code> are used by that module's own tests (<code class="text-xs bg-stone-100 px-1">graphics_cache.rs:334–420</code>); deleting them breaks the build. Gate with <code class="text-xs bg-stone-100 px-1">#[cfg(test)]</code> or keep. The re-export count was badly understated: 22 of 46 exported names have no external user, not 3.</p>
+        </article>
+
+        <!-- ── C8 ── -->
+        <article id="c8" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Build a Pane in one place</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-stone-200 text-stone-800">Simplify / delete</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm"><span class="px-1.5 py-0.5 rounded bg-stone-800 text-white text-xs">shrink:</span> <span class="text-slate-500">≈32 lines · all three collapse now · workspace.rs:108, 211, 234</span> <span class="text-emerald-700">◆ verified by diff</span></p>
+
+          <div class="rounded-lg border border-slate-200 p-4">
+            <p class="band text-slate-400 mb-3">Cross-section — three constructions of one Pane</p>
+            <div class="space-y-1">
+              <div class="flex items-center gap-3"><span class="font-mono text-[11px] w-40 text-slate-500">Workspace::new:108</span><div class="h-7 flex-1 bg-amber-100 border-l-4 border-amber-400 flex items-center px-3 text-[11px]">16 lines — <code>self</code> does not exist yet</div></div>
+              <div class="flex items-center gap-3"><span class="font-mono text-[11px] w-40 text-slate-500">Workspace::split:211</span><div class="h-7 flex-1 bg-red-100 border-l-4 border-red-400 flex items-center px-3 text-[11px]">18 lines</div></div>
+              <div class="flex items-center gap-3"><span class="font-mono text-[11px] w-40 text-slate-500">Workspace::open_tab:234</span><div class="h-7 flex-1 bg-red-100 border-l-4 border-red-400 flex items-center px-3 text-[11px]">17 lines — <mark>differs from :211 by 2 lines</mark></div></div>
+              <div class="pt-4 flex items-center gap-3"><span class="font-mono text-[11px] w-40 text-slate-500">after</span><div class="h-12 flex-1 deepfill rounded-sm flex items-center px-3 text-[11px] text-white">one <code class="text-emerald-300">make_pane</code> — the split/open difference is one argument</div></div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Adding anything to a Pane's construction — one environment variable, a per-Pane title — means finding and editing three sites. No test constructs a <code class="text-xs bg-stone-100 px-1">Workspace</code>, so nothing catches a missed one.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>One constructor. <code class="text-xs bg-stone-100 px-1">split</code> and <code class="text-xs bg-stone-100 px-1">open_tab</code> differ only in which <code class="text-xs bg-stone-100 px-1">Tabs</code> method receives the closure.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Locality: Pane construction in one place</li>
+                <li>≈32 lines; the two closures are character-identical</li>
+                <li>A <em>free</em> fn folds the third copy too — no <code class="text-xs">self</code> needed</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3"><span class="text-emerald-700">◆</span> <code class="text-xs bg-stone-100 px-1">diff</code> of :211–228 against :234–250 returns exactly two differing lines — the <code class="text-xs bg-stone-100 px-1">tabs.split(orientation, …)</code> / <code class="text-xs bg-stone-100 px-1">tabs.open(…)</code> call and one brace.</p>
+        </article>
+
+        <!-- ── C9 ── -->
+        <article id="c9" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Fold the graphics traversal written twice</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-stone-200 text-stone-800">Simplify / delete</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm"><span class="px-1.5 py-0.5 rounded bg-stone-800 text-white text-xs">shrink:</span> <span class="text-slate-500">~30 lines net · sprite-term/src/graphics.rs:291 and :443</span> <span class="text-emerald-700">◆ verified verbatim</span></p>
+
+          <div class="grid md:grid-cols-2 gap-5">
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">Before</p>
+              <div class="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                <div class="space-y-1">
+                  <p class="text-slate-500">capture_frame</p>
+                  <div class="h-6 bg-red-200 flex items-center justify-center">layer array · 14</div>
+                  <div class="h-4 bg-red-200 flex items-center justify-center">iter · 7</div>
+                  <div class="h-6 bg-red-200 flex items-center justify-center">format · 14</div>
+                  <div class="h-10 bg-slate-800 text-white flex items-center justify-center text-center">pixels<br/>image.data()</div>
+                  <div class="h-3 bg-red-200"></div>
+                </div>
+                <div class="space-y-1">
+                  <p class="text-slate-500">capture_placements</p>
+                  <div class="h-6 bg-red-200 flex items-center justify-center">layer array · 14</div>
+                  <div class="h-4 bg-red-200 flex items-center justify-center">iter · 7</div>
+                  <div class="h-6 bg-red-200 flex items-center justify-center">format · 13</div>
+                  <div class="h-10 bg-emerald-100 border border-emerald-300 flex items-center justify-center text-center text-emerald-800">no pixels<br/>ADR-0006</div>
+                  <div class="h-3 bg-red-200"></div>
+                </div>
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-200 p-4">
+              <p class="band text-slate-400 mb-3">After</p>
+              <div class="space-y-1 text-[10px] font-mono">
+                <div class="h-8 deepfill text-white flex items-center justify-center">shared traversal + transmitted_format()</div>
+                <div class="text-center text-slate-300 text-lg">↙ ↘</div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="h-10 bg-slate-800 text-white flex items-center justify-center text-center">with pixels</div>
+                  <div class="h-10 bg-emerald-100 border border-emerald-300 flex items-center justify-center text-center text-emerald-800">no pixels<br/>still one line</div>
+                </div>
+              </div>
+              <p class="text-[11px] text-slate-500 mt-3">The no-pixels guarantee stays where it is: the presence or absence of <code>image.data()</code>.</p>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Two functions exist for a sound reason — ADR-0006 forbids the observation path from touching pixels. But that guarantee lives in <em>one line</em>, not in 68 duplicated ones. A change to layer handling must be made twice, and only one copy is covered by the pixel-free assertion.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>Share the traversal preamble and the <code class="text-xs bg-stone-100 px-1">ImageFormat</code> mapping. Keep two entry points.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Layer handling changes once</li>
+                <li>ADR-0006 guarantee stays explicit</li>
+                <li>~17 of the 30 are the format table alone</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3"><span class="text-emerald-700">◆</span> I read both ranges: the 14-line layer array and the 7-line iterator block are <em>character-identical</em>; the 6-arm <code class="text-xs bg-stone-100 px-1">ImageFormat</code> match appears twice at 14 and 13 lines, differing only in rustfmt wrapping. Gross duplication ~48 lines; net saving after the shared helper ≈ 30.</p>
+        </article>
+
+        <!-- ── C10 ── -->
+        <article id="c10" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl"><s class="text-slate-400">Cut the arms that do nothing</s></h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-stone-200 text-stone-800">Simplify / delete</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm"><span class="px-1.5 py-0.5 rounded bg-stone-800 text-white text-xs">delete:</span> <span class="text-slate-500">15 lines · terminal_view.rs:288 (8) + workspace.rs:558 (7)</span></p>
+          <p class="rounded bg-stone-100 border border-stone-300 p-3 text-sm"><strong>Dissolved — not a card.</strong> The <code class="text-xs bg-stone-100 px-1">terminal_view.rs</code> half is one of the thirteen arms C1 rewrites; the <code class="text-xs bg-stone-100 px-1">workspace.rs</code> half waits for C4. See the implementation plan. <span class="text-emerald-700">◆ verified</span></p>
+
+          <div class="rounded-lg border border-slate-200 p-4 space-y-3">
+            <p class="band text-slate-400">The tell</p>
+            <pre class="text-[11px] font-mono bg-stone-900 text-stone-100 p-4 rounded overflow-x-auto">Ok(TerminalEvent::TitleChanged(title)) =&gt; {
+    // The window title follows the child, which is how a
+    // long-running command announces itself.
+    let _ = view.update(cx, |_view, cx| {
+        cx.notify();
+        <span class="text-red-400">let _ = &amp;title;</span>   <span class="text-stone-500">// ← suppresses the unused warning</span>
+    });
+}</pre>
+            <p class="text-sm text-slate-600">Nothing sets a title. The only <code class="text-xs bg-stone-100 px-1">set_window_title</code> in the crate runs once at construction with the constant <code class="text-xs bg-stone-100 px-1">"Sprite"</code>. That <code class="text-xs bg-stone-100 px-1">let _ = &amp;title;</code> is the fingerprint of a body emptied and an arm left behind — it folds into the existing ignore on the next line. Not quite a no-op, though: the arm still calls <code class="text-xs bg-stone-100 px-1">cx.notify()</code>, so a shell that sets its title at every prompt forces a repaint at every prompt.</p>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Two dead arms plus five doc comments attached to the function <em>below</em> the one they describe, and two comments that the code five lines away contradicts. This is what misdirects a reader — human or AI — navigating a 1,581-line file. <em>The arms are verified; the doc-comment claim is the exploration pass's and was <strong>not</strong> re-read — confirm it before acting.</em></p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>Delete both arms. Either build the title feature or stop describing it. Re-anchor the five misattached docs.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>15 lines; drops a spurious repaint per prompt</li>
+                <li>~24 lines of comment stop lying</li>
+                <li>AI-navigability: docs match code</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <!-- ── C11 ── -->
+        <article id="c11" class="rounded-xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <h3 class="font-serif text-2xl">Extend the complaint helper the file already has</h3>
+            <div class="flex gap-2 shrink-0">
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-stone-200 text-stone-800">Simplify / delete</span>
+              <span class="text-xs font-semibold px-2 py-1 rounded bg-amber-100 text-amber-800">Worth exploring</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm"><span class="px-1.5 py-0.5 rounded bg-stone-800 text-white text-xs">shrink:</span> <span class="text-slate-500">≈41 lines net · config.rs:396–652</span></p>
+
+          <div class="rounded-lg border border-slate-200 p-4">
+            <p class="band text-slate-400 mb-3">Mass diagram — <code>parse_candidate</code>, 257 lines for 15 settings</p>
+            <div class="flex items-end gap-3 h-40">
+              <div class="flex-1 flex flex-col justify-end"><div class="bg-red-200 h-[24%] rounded-t flex items-start justify-center pt-2 text-[10px]">61 lines<br/>boilerplate</div><p class="text-[10px] text-center mt-1 text-slate-500">before</p></div>
+              <div class="flex-1 flex flex-col justify-end"><div class="bg-slate-300 h-[100%] rounded-t flex items-start justify-center pt-2 text-[10px]">196 lines<br/>genuinely per-case</div><p class="text-[10px] text-center mt-1 text-slate-500">keep</p></div>
+              <div class="text-2xl text-slate-300 pb-8">→</div>
+              <div class="flex-1 flex flex-col justify-end"><div class="deepfill h-[22%] rounded-t flex items-start justify-center pt-1 text-[10px] text-white">~24</div><p class="text-[10px] text-center mt-1 text-slate-500">after</p></div>
+              <div class="flex-1 flex flex-col justify-end"><div class="bg-slate-300 h-[100%] rounded-t flex items-start justify-center pt-2 text-[10px]">196 lines<br/>unchanged</div><p class="text-[10px] text-center mt-1 text-slate-500">keep</p></div>
+            </div>
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-5 text-sm">
+            <div><p class="band text-slate-400 mb-1">Problem</p><p>Ten sites repeat the same <code class="text-xs bg-stone-100 px-1">Some(other) =&gt; complaints.0.push(…type_str()…)</code> / <code class="text-xs bg-stone-100 px-1">None =&gt; {}</code> shape — 61 lines measured span-by-span (five to six lines each, except <code class="text-xs bg-stone-100 px-1">:637</code> at eleven). The original review said fourteen sites and 92 lines; both were wrong, but its ≈39-line saving was right — collapsing ten sites to one call each plus a ~10-line helper saves ≈41.</p></div>
+            <div><p class="band text-slate-400 mb-1">Solution</p><p>The author already factored this once: the <code class="text-xs bg-stone-100 px-1">named</code> closure at :476 handles three colour settings in 19 lines where open-coding would take ~42. Extend that treatment to the other nine sites.</p></div>
+            <div><p class="band text-slate-400 mb-1">Wins</p>
+              <ul class="list-disc ml-4 space-y-0.5 text-slate-700">
+                <li>Precedent exists in the same file</li>
+                <li>No new dependency, no behaviour change</li>
+                <li>Per-field fallback fully preserved</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 border-l-2 border-slate-300 pl-3">The 165 kept lines are real: clamp-and-report for <code class="text-xs bg-stone-100 px-1">font.size</code> and <code class="text-xs bg-stone-100 px-1">scrollback.bytes</code>, per-entry survival in <code class="text-xs bg-stone-100 px-1">colors.palette</code> against whole-list rejection for <code class="text-xs bg-stone-100 px-1">shell.args</code>, empty-string handling, and fourteen distinct complaint strings each asserted on by name.</p>
+        </article>
+      </section>
+
+      <div class="rule"></div>
+
+      <!-- ═══════════════ REJECTED ═══════════════ -->
+      <section class="space-y-5">
+        <div>
+          <h2 class="font-serif text-2xl">Checked and rejected</h2>
+          <p class="text-sm text-slate-600 mt-1 max-w-3xl">Candidates that looked obvious and failed the deletion test. Recorded so the next review does not re-propose them.</p>
+        </div>
+        <div class="grid md:grid-cols-2 gap-4 text-sm">
+          <div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-5 space-y-1">
+            <p class="font-semibold">serde derive for <code class="text-xs">schema.rs</code> — no</p>
+            <p class="text-slate-700">The 1,134 lines are 464 production, 669 tests, and it <em>encodes only</em> — no decoding, no validation. Every wire key is renamed relative to its source; the source is a foreign type, so a wire struct would cost <em>two</em> lines per field where hand-writing costs one. ADR-0006 exists precisely so a field added for the renderer cannot silently appear on the wire, and a test asserts the exact key set. <strong>Deep — keep.</strong></p>
+          </div>
+          <div class="rounded-lg border border-emerald-200 bg-emerald-50/40 p-5 space-y-1">
+            <p class="font-semibold">serde derive for <code class="text-xs">config.rs</code> — no</p>
+            <p class="text-slate-700">It would delete all 92 boilerplate lines and break the rule the file exists for: <em>"absent or invalid configuration produces defaults rather than an error"</em>. serde aborts the document on the first type error, so one mistyped <code class="text-xs">graphics.enabled</code> would lose the other fourteen settings. Per-field fallback needs a <code class="text-xs">deserialize_with</code> shim per field — more code than the arm it replaces. <strong>Deep — keep.</strong></p>
+          </div>
+          <div class="rounded-lg border border-slate-200 bg-white p-5 space-y-1">
+            <p class="font-semibold"><code class="text-xs">PaneSource</code> — a real seam</p>
+            <p class="text-slate-700">The workspace's only trait, and it has <em>three</em> adapters: <code class="text-xs">WindowPanes</code>, the bench's <code class="text-xs">Panes</code>, the test's <code class="text-xs">FakeWindow</code>. Two adapters make a seam real. Its interface is also deliberately narrow — no method writes — which is the structural half of ADR-0013.</p>
+          </div>
+          <div class="rounded-lg border border-slate-200 bg-white p-5 space-y-1">
+            <p class="font-semibold"><code class="text-xs">png_decoder.rs</code> — not a reinvention</p>
+            <p class="text-slate-700">It is an adapter over the real <code class="text-xs">png</code> crate, installed through <code class="text-xs">set_png_decoder</code> because GPUI's bundled <code class="text-xs">RustPngDecoder</code> has a private field, no constructor, and hands <code class="text-xs">next_frame</code> a zero-length buffer. The workspace manifest documents this at length.</p>
+          </div>
+          <div class="rounded-lg border border-slate-200 bg-white p-5 space-y-1">
+            <p class="font-semibold"><code class="text-xs">config.rs::to_toml</code> — keep</p>
+            <p class="text-slate-700">Not a serializer in disguise: the <code class="text-xs">toml</code> dependency is <code class="text-xs">parse</code>-only so there is no <code class="text-xs">to_string</code>, every unset value is printed as a comment <em>naming its consequence</em>, and round-tripping is a tested contract.</p>
+          </div>
+          <div class="rounded-lg border border-slate-200 bg-white p-5 space-y-1">
+            <p class="font-semibold">No dead config fields</p>
+            <p class="text-slate-700">All 15 settings are read, each traced to a consumer. <code class="text-xs">classify</code>'s 35 lines for 7 comparisons are not collapsible either — the live-vs-next-session grouping is the product decision ADR-0002 requires.</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="rule"></div>
+
+      <!-- ═══════════════ TOP REC ═══════════════ -->
+      <section id="top-recommendation">
+        <div class="rounded-xl deepfill text-white p-9 space-y-4">
+          <p class="band text-slate-400">Top recommendation</p>
+          <h2 class="font-serif text-3xl"><a href="#c1" class="underline decoration-slate-500 underline-offset-4 hover:decoration-white">Cut the event pump out of the Pane view</a></h2>
+          <p class="text-slate-200 max-w-3xl">It is the smallest cut with the largest testability gain: 120 lines that depend on none of the other sixteen responsibilities, currently unreachable because <code class="text-xs bg-slate-700 px-1 rounded">cx.spawn</code> needs an <code class="text-xs bg-slate-700 px-1 rounded">Entity&lt;Self&gt;</code>. Three of the four defects above live in modules with exactly this shape — behaviour that only a running GPUI <code class="text-xs bg-slate-700 px-1 rounded">Window</code> can reach, so no test does.</p>
+          <p class="text-slate-200 max-w-3xl">Start here rather than with the deeper <a href="#c2" class="underline decoration-slate-500 underline-offset-4 hover:decoration-white">focus ownership</a> work: this one needs no decision about who owns what, and it makes the next four candidates testable as you do them. If you want a warm-up first, <a href="#c7" class="underline decoration-slate-500 underline-offset-4 hover:decoration-white">the 37 dead lines</a> cost nothing and switch the compiler back on as a guard.</p>
+        </div>
+      </section>
+
+      <footer class="text-xs text-slate-400 pt-4">
+        Vocabulary from <span class="font-mono">phase_1/CONTEXT.md</span> and the codebase-design glossary. ADRs 0001, 0002, 0006, 0008, 0010, 0011, 0012, 0013 consulted. Claims marked <span class="text-emerald-700">◆</span> were re-read against source; the rest come from the exploration pass.
+      </footer>
+    </main>
+  </body>
+</html>

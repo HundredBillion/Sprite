@@ -17,8 +17,21 @@ use sprite_term::{
     SnapshotStream, TerminalCommand, TerminalEvent, TerminalSession,
 };
 
-/// Every blocking wait in the suite fails after this long.
+/// Every blocking wait in the suite fails after this long without progress.
+///
+/// This is a hang detector: it measures *silence*, not total elapsed time. A
+/// stream that has produced nothing for this long is stuck, and the test that
+/// is waiting on it should fail rather than hold the suite open.
 pub const WATCHDOG: Duration = Duration::from_secs(5);
+
+/// A wait that is still making progress may run this long in total.
+///
+/// The other shape of a stuck test: a child that streams forever without ever
+/// producing what the test asked for. `WATCHDOG` never fires there, because
+/// bundles keep arriving, so this bounds the wait so the suite still
+/// terminates. It is deliberately far above any real wait — it exists to stop
+/// a wedge, not to hold a child to a schedule.
+pub const PROGRESS_CEILING: Duration = Duration::from_secs(120);
 
 /// Drives an `EventStream` from a helper thread.
 pub struct EventPump {
@@ -103,22 +116,35 @@ impl SnapshotPump {
         }
     }
 
-    /// The first bundle satisfying `predicate`, within the watchdog.
+    /// The first bundle satisfying `predicate`, for as long as bundles keep
+    /// coming.
+    ///
+    /// The watchdog belongs to `next`, which fails after `WATCHDOG` of silence.
+    /// Bounding the whole wait by the same duration would instead hold the
+    /// child to a schedule: one still streaming output is not stuck, and on a
+    /// loaded machine a child that arrives in two seconds here can need three
+    /// times that. `PROGRESS_CEILING` is the backstop for the case `next`
+    /// cannot see — endless output that never satisfies the predicate.
     pub fn wait_for(
         &self,
         what: &str,
         predicate: impl Fn(&SnapshotBundle) -> bool,
     ) -> Arc<SnapshotBundle> {
-        let deadline = Instant::now() + WATCHDOG;
+        let started = Instant::now();
         let mut seen = 0_u32;
-        while Instant::now() < deadline {
+        loop {
             let bundle = self.next();
             seen += 1;
             if predicate(&bundle) {
                 return bundle;
             }
+            if started.elapsed() >= PROGRESS_CEILING {
+                panic!(
+                    "watchdog: no snapshot matched {what} after {seen} bundles \
+                     over {PROGRESS_CEILING:?}"
+                );
+            }
         }
-        panic!("watchdog: no snapshot matched {what} after {seen} bundles");
     }
 }
 
@@ -157,6 +183,22 @@ impl EventPump {
 // ---------------------------------------------------------------------------
 // Kitty graphics
 // ---------------------------------------------------------------------------
+
+/// A command that prints `MARK<n>`, and the text that proves it ran.
+///
+/// The number is passed as an argument rather than written into the command,
+/// because the tty echoes input as it is written — before the shell has read
+/// the line, let alone run the one before it. A marker spelled out in the
+/// command is therefore already on screen while the payload it exists to prove
+/// is still unexecuted, so waiting for it proves nothing about the payload.
+/// `printf 'MARK%s\n' 7` echoes as `MARK%s`, which cannot be mistaken for the
+/// `MARK7` the child writes when it actually runs.
+pub fn marker_command(n: u32) -> (Vec<u8>, String) {
+    (
+        format!("printf 'MARK%s\\n' {n}\n").into_bytes(),
+        format!("MARK{n}"),
+    )
+}
 
 /// Base64 as the Kitty protocol wants it, without a dependency for it.
 pub fn base64(bytes: &[u8]) -> String {
@@ -260,11 +302,9 @@ impl GraphicsSession {
             .expect("ask the child to print the payload");
 
         self.marks += 1;
-        let marker = format!("MARK{}", self.marks);
+        let (command, marker) = marker_command(self.marks);
         self.session
-            .send(TerminalCommand::Input(
-                format!("printf '{marker}\\n'\n").into_bytes(),
-            ))
+            .send(TerminalCommand::Input(command))
             .expect("ask the child to print the marker");
         self.snapshots
             .wait_for("the payload to be processed", |bundle| {

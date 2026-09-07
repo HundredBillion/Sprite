@@ -12,7 +12,7 @@
 #     Zig cache that is already populated.
 #
 pkgname=sprite
-pkgver=0.1.0
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="A terminal built to be read by programs as well as by people"
 arch=('x86_64' 'aarch64')

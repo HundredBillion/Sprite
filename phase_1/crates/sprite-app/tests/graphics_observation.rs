@@ -5,7 +5,9 @@
 //! so this drives a real terminal, transmits a recognisable picture, and
 //! searches the finished JSON for it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use sprite_app::{Failure, PaneAddress, PaneReport, Report, render_schema};
@@ -16,6 +18,23 @@ use sprite_term::{
 
 /// A byte that is easy to spot and unlikely to occur by chance.
 const MARKER_BYTE: u8 = 0xab;
+
+/// A directory of this test's own, which no other test will delete.
+///
+/// The process id alone does not distinguish them: the tests in a binary run as
+/// threads of one process, so every caller here built the same path — and each
+/// removed it on the way out. Whichever test was still waiting for its child to
+/// `cat` the fixture then found it gone, showed no image, and spent the whole
+/// twenty-second deadline discovering that. It failed on CI as a flake that
+/// moved between the two tests, because either one can lose the race.
+fn fixture_directory() -> PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    std::env::temp_dir().join(format!(
+        "sprite-observe-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
 
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -53,7 +72,7 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
     let payload = base64(&pixels);
     let sequence = format!("\x1b_Ga=T,f=32,s=32,v=32,i=1,q=2;{payload}\x1b\\");
 
-    let directory = std::env::temp_dir().join(format!("sprite-observe-{}", std::process::id()));
+    let directory = fixture_directory();
     std::fs::create_dir_all(&directory).expect("a directory for the fixture");
     let path = directory.join("image.esc");
     std::fs::write(&path, &sequence).expect("write the fixture");
@@ -168,5 +187,23 @@ fn the_image_itself_never_reaches_the_response() {
         pane.len() < 4096,
         "the placement section is metadata-sized, not image-sized: {} bytes",
         pane.len()
+    );
+}
+
+/// Two fixtures never collide, so no test can delete another's.
+///
+/// This is the property the flake violated. It is asserted directly rather than
+/// by racing the tests, because the race is what made the failure rare enough
+/// to survive several merges.
+#[test]
+fn every_fixture_directory_is_its_own() {
+    let paths: Vec<PathBuf> = (0..8).map(|_| fixture_directory()).collect();
+    let mut unique = paths.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        paths.len(),
+        "each caller gets a directory no other caller will remove, got {paths:?}"
     );
 }

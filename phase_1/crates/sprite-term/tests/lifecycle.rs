@@ -136,8 +136,9 @@ fn the_login_shell_carries_sprite_identity() {
     });
     let text = support::pane_text(&bundle);
 
+    let identity = format!("IDENT:xterm-ghostty:Sprite:{}", env!("CARGO_PKG_VERSION"));
     assert!(
-        text.contains("IDENT:xterm-ghostty:Sprite:0.1.0"),
+        text.contains(&identity),
         "the child sees Sprite's terminal identity, got:\n{text}"
     );
     assert!(
@@ -156,14 +157,29 @@ fn the_login_shell_carries_sprite_identity() {
 }
 
 /// True while the process is still alive, asked the same way a shell would.
+/// Whether `pid` names a process that is still running.
+///
+/// `kill -0` cannot answer this on its own: it succeeds for a zombie — a
+/// process that has already died and whose parent has not yet reaped it — so a
+/// test asserting that cleanup killed something can find the corpse and call it
+/// alive. That window is real here, because the descendant's parent is the
+/// shell, which cleanup is killing at the same time; reparenting to init and
+/// the reap that follows take a moment, and a loaded machine lengthens it.
+///
+/// The state is asked for instead, with `Z` read as dead, which is what it
+/// means. `ps -o state=` is POSIX, so this stays one mechanism on both
+/// platforms rather than a `/proc` read that macOS could not make.
 fn process_is_alive(pid: &str) -> bool {
-    std::process::Command::new("/bin/kill")
-        .args(["-0", pid])
-        .stdout(std::process::Stdio::null())
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "state=", "-p", pid])
         .stderr(std::process::Stdio::null())
-        .status()
-        .expect("run /bin/kill")
-        .success()
+        .output()
+    else {
+        return false;
+    };
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    !state.is_empty() && !state.starts_with('Z')
 }
 
 /// Reads one `MARKER:a:b` line out of the pane text.
