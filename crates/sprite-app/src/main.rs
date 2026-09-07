@@ -104,16 +104,16 @@ fn open_window(args: WindowArgs) {
                     if !view.update(cx, |view, cx| view.confirm_close(cx)) {
                         return false;
                     }
-                    // The first close takes the worker and waits for it off the
-                    // GPUI thread, so the native window can shut immediately
-                    // while the child and helper threads finish joining.
-                    // Every pane, not just one: a window may hold several
-                    // sessions and each owns its own child.
-                    let handles = view.update(cx, |view, cx| view.begin_shutdown(cx));
-                    if !handles.is_empty() {
+                    // The first close takes each pane's blocking cleanup and
+                    // runs it off the GPUI thread, so the native window can
+                    // shut immediately while children and helper threads
+                    // finish joining. Every pane, not just one: a window may
+                    // hold several and each owns its own.
+                    let cleanups = view.update(cx, |view, cx| view.begin_shutdown(cx));
+                    if !cleanups.is_empty() {
                         let finished = cx.background_executor().spawn(async move {
-                            for handle in handles {
-                                let _ = handle.wait();
+                            for cleanup in cleanups {
+                                cleanup();
                             }
                         });
                         cx.spawn(async move |cx| {

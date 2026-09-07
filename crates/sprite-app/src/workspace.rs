@@ -10,8 +10,9 @@ use gpui::{
     Context, CursorStyle, FocusHandle, Focusable, KeyDownEvent, Pixels, SharedString, Size, Window,
     div, px, rgb,
 };
-use sprite_term::ShutdownHandle;
+use sprite_pane::PaneHandle;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::observation::endpoint::Endpoint;
@@ -47,7 +48,7 @@ const CONFIRM_BG: u32 = 0x5a3030;
 const CONFIRM_FG: u32 = 0xffe0e0;
 
 pub struct Workspace {
-    tabs: Tabs<gpui::Entity<TerminalView>>,
+    tabs: Tabs<Rc<dyn PaneHandle>>,
     /// This window's observation socket and key.
     ///
     /// `None` when the endpoint could not be opened — there is no private
@@ -189,23 +190,24 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Hands over every pane's worker so the window can wait for all of them.
+    /// Hands over every pane's blocking cleanup so the window can run all of
+    /// it off the GPUI thread.
     ///
-    /// Every tab, not only the visible one: a background tab's child is still
-    /// running and still owns a PTY.
-    pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<ShutdownHandle> {
+    /// Every tab, not only the visible one: a background tab's pane is still
+    /// running whatever it runs.
+    pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<Box<dyn FnOnce() + Send>> {
         // The window is going: its socket leaves the filesystem and its key
-        // stops being accepted now, not once the last child has been reaped.
+        // stops being accepted now, not once the last pane has finished.
         if let Some(endpoint) = self.endpoint.as_mut() {
             endpoint.close();
         }
         self.tabs
             .all_panes()
             .into_iter()
-            .map(|(_, _, view)| view.clone())
+            .map(|(_, _, pane)| Rc::clone(pane))
             .collect::<Vec<_>>()
             .into_iter()
-            .filter_map(|view| view.update(cx, |view, _cx| view.begin_shutdown()))
+            .filter_map(|pane| pane.begin_shutdown(cx))
             .collect()
     }
 
@@ -239,15 +241,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shuts a session down deliberately rather than leaving it to a drop, so
-    /// the child is reaped at a known moment.
-    fn shut_down(&self, view: gpui::Entity<TerminalView>, cx: &mut Context<Self>) {
-        let handle = view.update(cx, |view, _cx| view.begin_shutdown());
-        if let Some(handle) = handle {
+    /// Shuts a pane down deliberately rather than leaving it to a drop, so
+    /// whatever it owns is released at a known moment.
+    fn shut_down(&self, pane: Rc<dyn PaneHandle>, cx: &mut Context<Self>) {
+        if let Some(cleanup) = pane.begin_shutdown(cx) {
             cx.background_executor()
-                .spawn(async move {
-                    let _ = handle.wait();
-                })
+                .spawn(async move { cleanup() })
                 .detach();
         }
     }
@@ -319,30 +318,26 @@ impl Workspace {
 
     /// The programs a close would interrupt, one entry per busy pane.
     fn running_programs(&self, scope: CloseScope, cx: &Context<Self>) -> Vec<Option<String>> {
-        let views: Vec<&gpui::Entity<TerminalView>> = match scope {
+        let panes: Vec<&Rc<dyn PaneHandle>> = match scope {
             CloseScope::Pane => self.tabs.active().focused().into_iter().collect(),
             CloseScope::Tab => self
                 .tabs
                 .active()
                 .layout()
                 .into_iter()
-                .map(|(_, _, view)| view)
+                .map(|(_, _, pane)| pane)
                 .collect(),
             CloseScope::Window => self
                 .tabs
                 .all_panes()
                 .into_iter()
-                .map(|(_, _, view)| view)
+                .map(|(_, _, pane)| pane)
                 .collect(),
         };
-        views
+        panes
             .into_iter()
-            .filter_map(|view| {
-                let state = view.read(cx).foreground();
-                state
-                    .should_confirm()
-                    .then(|| state.program().map(str::to_owned))
-            })
+            .filter_map(|pane| pane.close_warning(cx))
+            .map(|warning| warning.program.map(|program| program.to_string()))
             .collect()
     }
 
@@ -509,32 +504,26 @@ impl Workspace {
     /// different size from its neighbours looks broken. Each pane re-measures
     /// its cell and tells its child the new grid, which is why this resizes
     /// rather than merely redraws.
-    fn adjust_font(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+    fn adjust_font(&mut self, delta: f32, cx: &mut Context<Self>) {
         let wanted = crate::config::Font::clamp_size(self.settings.font.size + delta);
-        self.apply_font_size(wanted, window, cx);
+        self.apply_font_size(wanted, cx);
     }
 
     /// Back to the configured size, which is what a person means by "reset" —
     /// not back to Sprite's built-in default.
-    fn reset_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset_font(&mut self, cx: &mut Context<Self>) {
         let configured = self.configured_font_size;
-        self.apply_font_size(configured, window, cx);
+        self.apply_font_size(configured, cx);
     }
 
-    fn apply_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
         if (size - self.settings.font.size).abs() < f32::EPSILON {
             return;
         }
         self.settings.font.size = size;
-        let views: Vec<_> = self
-            .tabs
-            .all_panes()
-            .into_iter()
-            .map(|(_, _, view)| view.clone())
-            .collect();
-        for view in views {
-            view.update(cx, |view, cx| view.set_font_size(size, window, cx));
-        }
+        // The size is a setting like any other, so it travels the way a reload
+        // does: published once, applied by every pane with its own window.
+        cx.set_global(crate::config::ActiveSettings(self.settings.clone()));
         cx.notify();
     }
 
@@ -552,7 +541,7 @@ impl Workspace {
         let Some(view) = self.tabs.active().get(pane) else {
             return;
         };
-        let handle = view.read(cx).focus_handle(cx);
+        let handle = view.focus_handle(cx);
         window.focus(&handle);
     }
 
@@ -601,11 +590,11 @@ fn make_pane<'a>(
     endpoint: Option<&'a Endpoint>,
     window: &'a mut Window,
     cx: &'a mut Context<Workspace>,
-) -> impl FnOnce(TabId, PaneId) -> gpui::Entity<TerminalView> + 'a {
+) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle> + 'a {
     move |tab, pane| {
         let environment = session_environment(endpoint, tab, pane);
         let link = pane_link(panes, endpoint, tab, pane);
-        cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx))
+        Rc::new(cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx)))
     }
 }
 
@@ -712,6 +701,10 @@ fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -
 
     outcome
 }
+
+/// One pane's place in the frame: its identity, its pixel rectangle as
+/// (x, y, width, height), and the pane itself.
+type PanePlacement = (PaneId, f32, f32, f32, f32, Rc<dyn PaneHandle>);
 
 /// A close waiting on a second press.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1057,26 +1050,24 @@ impl Render for Workspace {
 
         // Each pane learns its own allocation before it lays out its grid, so
         // every child is told the size of its pane rather than of the window.
-        let placements: Vec<(PaneId, f32, f32, f32, f32, gpui::Entity<TerminalView>)> = self
+        let placements: Vec<PanePlacement> = self
             .tabs
             .layout()
             .into_iter()
-            .map(|(pane, rect, view)| {
+            .map(|(pane, rect, handle)| {
                 (
                     pane,
                     rect.x * width,
                     rect.y * height,
                     (rect.width * width - DIVIDER_PX).max(1.0),
                     (rect.height * height - DIVIDER_PX).max(1.0),
-                    view.clone(),
+                    Rc::clone(handle),
                 )
             })
             .collect();
 
-        for (_, _, _, pane_width, pane_height, view) in &placements {
-            view.update(cx, |view, _cx| {
-                view.set_allocated(gpui::size(px(*pane_width), px(*pane_height)));
-            });
+        for (_, _, _, pane_width, pane_height, handle) in &placements {
+            handle.set_allocated(gpui::size(px(*pane_width), px(*pane_height)), cx);
         }
 
         // Every pane in `placements` gets an element in this frame, so a focus
@@ -1107,7 +1098,7 @@ impl Render for Workspace {
         // ends here rather than spanning the rest of the chain.
         let pane_children: Vec<gpui::Div> = placements
             .into_iter()
-            .map(|(pane, x, y, pane_width, pane_height, view)| {
+            .map(|(pane, x, y, pane_width, pane_height, handle)| {
                 let is_focused = pane == focused;
                 div()
                     .absolute()
@@ -1125,7 +1116,7 @@ impl Render for Workspace {
                             workspace.focus_pane(pane, cx);
                         }),
                     )
-                    .child(view)
+                    .child(handle.view())
                     .when(!is_focused, |element| element.opacity(0.92))
             })
             .collect();
@@ -1300,9 +1291,9 @@ impl Render for Workspace {
                         workspace.split(Orientation::Vertical, window, cx);
                     }
                     WorkspaceAction::ClosePane => workspace.close_focused_pane(cx),
-                    WorkspaceAction::FontLarger => workspace.adjust_font(1.0, window, cx),
-                    WorkspaceAction::FontSmaller => workspace.adjust_font(-1.0, window, cx),
-                    WorkspaceAction::FontReset => workspace.reset_font(window, cx),
+                    WorkspaceAction::FontLarger => workspace.adjust_font(1.0, cx),
+                    WorkspaceAction::FontSmaller => workspace.adjust_font(-1.0, cx),
+                    WorkspaceAction::FontReset => workspace.reset_font(cx),
                     WorkspaceAction::NewTab => workspace.open_tab(window, cx),
                     WorkspaceAction::CloseTab => workspace.close_active_tab(cx),
                     WorkspaceAction::NextTab => workspace.switch_tab(true, cx),
