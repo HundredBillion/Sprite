@@ -216,27 +216,40 @@ fn pixels_are_copied_once_per_generation_not_once_per_capture() {
 /// measures rather than assumes.
 #[test]
 fn a_pane_with_images_captures_text_as_fast_as_one_without() {
-    fn measure(with_image: bool) -> Duration {
-        let (mut session, _events, snapshots) = session(GraphicsPolicy::default());
-        if with_image {
-            feed(
-                &mut session,
-                &snapshots,
-                kitty("a=T,f=32,s=32,v=32,i=1", &base64(&[0x22_u8; 32 * 32 * 4])),
-            );
-        }
-
-        // Warm up, then time ordinary text captures.
-        feed(&mut session, &snapshots, "warm\\n".to_owned());
+    // Two panes timed in lockstep, not one after the other. Each round is a
+    // shell round trip whose duration carries whatever the machine was doing at
+    // that instant; timing the panes in separate phases lets load drift between
+    // the phases pose as a difference between them — which is how this failed on
+    // a shared CI runner while the panes were in truth equally fast. The rounds
+    // are interleaved so both meet the same conditions, and the fastest round of
+    // each drops the remaining scheduling noise. A real per-cell cost, the
+    // regression this guards against, would slow the image pane's every round
+    // alike and still be caught.
+    fn round(session: &mut TerminalSession, snapshots: &SnapshotPump) -> Duration {
         let started = Instant::now();
         for _ in 0..10 {
-            feed(&mut session, &snapshots, "line-of-text\\n".to_owned());
+            feed(session, snapshots, "line-of-text\\n".to_owned());
         }
         started.elapsed()
     }
 
-    let without = measure(false);
-    let with = measure(true);
+    let (mut plain, _plain_events, plain_snaps) = session(GraphicsPolicy::default());
+    let (mut imaged, _imaged_events, imaged_snaps) = session(GraphicsPolicy::default());
+    feed(
+        &mut imaged,
+        &imaged_snaps,
+        kitty("a=T,f=32,s=32,v=32,i=1", &base64(&[0x22_u8; 32 * 32 * 4])),
+    );
+
+    // Warm both, then take the fastest of several interleaved rounds.
+    feed(&mut plain, &plain_snaps, "warm\\n".to_owned());
+    feed(&mut imaged, &imaged_snaps, "warm\\n".to_owned());
+    let mut without = Duration::MAX;
+    let mut with = Duration::MAX;
+    for _ in 0..5 {
+        without = without.min(round(&mut plain, &plain_snaps));
+        with = with.min(round(&mut imaged, &imaged_snaps));
+    }
 
     // Generous, because this is a shell round trip rather than a micro
     // benchmark: what it catches is a per-cell cost, which would be far worse
