@@ -5042,6 +5042,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprite-pane"
+version = "0.1.3"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
 name = "sprite-term"
 version = "0.1.3"
 dependencies = [
