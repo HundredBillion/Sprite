@@ -340,9 +340,17 @@ violate it by accident.
   passes. No forbidden state matches, the Ghostty submodule is at its pinned
   commit, offline metadata resolves, terminfo and both licences are present, and
   the process still opens no TCP socket.
-- [ ] **OUTSTANDING — Security review** of image-source denial, payload bounds,
-  memory limits, and the observation exclusions. Prepared, not performed:
+- [x] **Security review performed, 2026-09-05** of image-source denial, payload
+  bounds, memory limits, and the observation exclusions:
+  [checkpoint-4-security-review.md](../review/checkpoint-4-security-review.md),
+  against the brief in
   [checkpoint-4-security-review-request.md](../review/checkpoint-4-security-review-request.md).
+  Verdict: the denials hold and the decoder is bounded on both sides of the
+  allocation. One finding — the PNG scratch buffer is retained at peak size for
+  the life of the pane, making the real per-pane ceiling about 256 MiB rather
+  than the 192 MiB the configuration implies. The base64 spray was checked and
+  is a display wart, not an escalation. No fuzzing was run; that is the gap to
+  close first.
 
 **Two defects in the benchmark itself, found by reading its output rather than
 trusting it.** It reported that showing an image made text capture *faster*,

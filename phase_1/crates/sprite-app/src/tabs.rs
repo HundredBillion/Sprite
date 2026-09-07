@@ -10,7 +10,7 @@
 //! schema exposes tab and pane IDs and a window holds many tabs.
 
 use crate::pane_registry::PaneRegistry;
-use crate::pane_tree::{Direction, Orientation, PaneId, PaneIds, Rect};
+use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneIds, Rect};
 
 /// One tab within a window. Never reused once its tab has closed.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -66,16 +66,8 @@ impl<T> Tabs<T> {
         &self.tabs[self.active].1
     }
 
-    pub fn active_mut(&mut self) -> &mut PaneRegistry<T> {
-        &mut self.tabs[self.active].1
-    }
-
     fn index_of(&self, tab: TabId) -> Option<usize> {
         self.tabs.iter().position(|(id, _)| *id == tab)
-    }
-
-    pub fn get(&self, tab: TabId) -> Option<&PaneRegistry<T>> {
-        self.index_of(tab).map(|index| &self.tabs[index].1)
     }
 
     /// Opens a tab at the end of the window's order, holding one new pane, and
@@ -178,6 +170,22 @@ impl<T> Tabs<T> {
     /// tab is laid out: the others are running, not shown.
     pub fn layout(&self) -> Vec<(PaneId, Rect, &T)> {
         self.active().layout()
+    }
+
+    /// The active tab's boundaries. Only the active tab is laid out, so only
+    /// its boundaries can be grabbed.
+    pub fn dividers(&self) -> Vec<Divider> {
+        self.active().dividers()
+    }
+
+    pub fn divider(&self, pane: PaneId, direction: Direction) -> Option<Divider> {
+        self.active().divider(pane, direction)
+    }
+
+    pub fn set_divider_ratio(&mut self, pane: PaneId, direction: Direction, ratio: f32) -> bool {
+        self.tabs[self.active]
+            .1
+            .set_divider_ratio(pane, direction, ratio)
     }
 
     /// Every pane in the window, tabs in window order.
@@ -454,6 +462,69 @@ mod tests {
             3,
             "but every session is still there"
         );
+    }
+
+    #[test]
+    fn dividers_belong_to_the_active_tab() {
+        let mut tabs = Tabs::new(|_, pane| pane);
+        tabs.split(Orientation::Horizontal, |_, pane| pane);
+        assert_eq!(tabs.dividers().len(), 1);
+
+        // A second tab starts with one pane, so it has no boundary at all.
+        tabs.open(|_, pane| pane);
+        assert!(tabs.dividers().is_empty());
+        assert!(!tabs.set_divider_ratio(PaneId(0), Direction::Right, 0.3));
+        // Same reasoning as `dividers` and `set_divider_ratio` just above: a
+        // lookup that reached into tab 0 regardless of which tab is active
+        // would find the first tab's boundary and answer `Some` here.
+        assert!(tabs.divider(PaneId(0), Direction::Right).is_none());
+    }
+
+    #[test]
+    fn a_boundary_moves_only_in_the_tab_that_owns_it() {
+        let mut tabs = Tabs::new(|_, pane| pane);
+        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane);
+        let first_tab = tabs.active_tab();
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.25));
+
+        tabs.open(|_, pane| pane);
+        assert!(tabs.dividers().is_empty());
+
+        assert!(tabs.focus_tab(first_tab));
+        let divider = tabs
+            .divider(split_pane, Direction::Left)
+            .expect("the first tab still has its boundary");
+        assert!((divider.ratio - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn evening_a_boundary_puts_it_back_where_a_split_starts_it() {
+        let mut tabs = Tabs::new(|_, pane| pane);
+        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane);
+        let fresh = tabs
+            .divider(split_pane, Direction::Left)
+            .expect("a split has a boundary")
+            .ratio;
+
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.85));
+        let dragged = tabs.divider(split_pane, Direction::Left).unwrap().ratio;
+        assert!(
+            (dragged - 0.85).abs() < 1e-6,
+            "the boundary has to have moved for evening it to mean anything"
+        );
+
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.5));
+        let evened = tabs.divider(split_pane, Direction::Left).unwrap().ratio;
+        assert!(
+            (evened - fresh).abs() < 1e-6,
+            "even is the ratio a split opens with, so evening undoes every drag"
+        );
+
+        // Evening what is already even is a no-op, so asking twice cannot
+        // leave the boundary somewhere a third ask would move it back from.
+        assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.5));
+        let again = tabs.divider(split_pane, Direction::Left).unwrap().ratio;
+        assert!((again - evened).abs() < 1e-6);
     }
 
     #[test]

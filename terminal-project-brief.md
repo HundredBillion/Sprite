@@ -2,7 +2,7 @@
 ## "Terminal with an editor" — not an editor with a terminal
 
 The build-ready plan for **Sprite**, reflecting the most recent decisions
-(2026-08-09). Historical decisions that were evaluated and discarded live in
+(2026-09-05). Historical decisions that were evaluated and discarded live in
 **Addendum A** at the bottom — the main document describes only what is being
 built and why.
 
@@ -10,22 +10,43 @@ built and why.
 
 ## 1. The Thesis
 
-Build a **terminal-first development environment** as two independent products:
+Build a **terminal-first development environment** as three independently
+useful products:
 
-1. **Sprite Terminal** — a fast, correct, general-purpose terminal for macOS and
-   Linux. Real terminal programs (ssh, tmux, htop, lazygit, Neovim, Croft) remain
-   first-class citizens. Sprite is useful without the IDE and the IDE never
-   becomes a dependency of the terminal.
-2. **The Croft fork** — a separately maintained Rust IDE that runs inside any
-   capable terminal but treats Sprite as its best host. Its north star is to be
-   **visually and functionally indistinguishable from VS Code in normal use**,
-   while starting faster, responding faster, using fewer resources, and adopting
+1. **Sprite Terminal** — a fast, correct, general-purpose terminal for macOS
+   and Linux. Real terminal programs (ssh, tmux, htop, lazygit, Neovim,
+   upstream Croft) remain first-class citizens. Sprite Terminal is useful
+   without any editor, and no editor ever becomes a dependency of it.
+2. **The Croft fork** — a separately maintained, GPUI-native editor: Croft's
+   model (editor state, LSP, DAP, Git, testing, tasks) with its ratatui view
+   layer replaced by GPUI. It maintains no TUI mode. Its north star is to be
+   **visually and functionally indistinguishable from VS Code in normal
+   use**, measured by the screenshot and workflow standards below, while
+   starting faster, responding faster, using fewer resources, and adopting
    the best product and architecture ideas proven by Zed.
+3. **Studio** (crate working name `sprite-studio`) — a pane-first workspace
+   that ships separately from Sprite Terminal: the same tabs, splits, and
+   terminal panes, plus the fork as a native editor pane type. Studio is the
+   designated home of future workspace features.
 
-The inversion still matters: VS Code and Zed are editors that contain terminals.
-Sprite is a terminal that can host a complete IDE without ceasing to be a
-terminal. Croft does not get linked into Sprite; it remains an ordinary child
-process with a standards-based TUI fallback.
+The inversion still matters, restated around panes. VS Code and Zed are
+office buildings with a kitchenette: the editor is the building, and the
+terminal is a small room inside it. Studio is a workshop full of benches:
+most benches are terminals, and one of them holds a first-class editor. The
+workshop's identity comes from the benches — any of them can hold an agent,
+a build, a server, or an editor — not from any single tool on them. The pane
+is the primitive; terminal panes are the default and majority case; the
+editor earns no special architectural status by being present. The fork is
+never linked into Sprite Terminal; remote and SSH editing is served by
+Neovim or unmodified upstream Croft running in an ordinary terminal pane.
+
+Terminology: **Sprite** unqualified names the project. The products are
+**Sprite Terminal** (`sprite-app`, installed as `/usr/bin/sprite`),
+**Studio** (`sprite-studio`, working name), and **the fork** (product name
+chosen at Phase 2.6). The engine library is **`sprite-engine`** (named
+`sprite-term` until the rename lands). Phase 1 documents predate this
+vocabulary and use "Sprite" for Sprite Terminal; they are grandfathered.
+See `CONTEXT.md`.
 
 "Indistinguishable" is a product goal with two measurable meanings:
 
@@ -61,12 +82,16 @@ improve measured user outcomes. Zed does not become a dependency.
 
 There are now two independent ceilings.
 
-**The terminal grid ceiling.** Croft's normal UI is rendered through `ratatui`
-and `crossterm` into terminal cells. It augments those cells with Kitty/iTerm2/
-sixel graphics for icons, previews, and the minimap. Sprite can host that path
-exceptionally well, but cells still constrain typography, spacing, rounded
-geometry, popovers, animation, and arbitrary pixel placement. A custom ratatui
-backend would still receive cells; it would not create a native widget tree.
+**The terminal grid ceiling — accepted, not fought.** Terminal panes render
+programs through cells, and cells constrain typography, spacing, rounded
+geometry, popovers, animation, and arbitrary pixel placement. The constraint
+is structural: it is the VT protocol itself — the pipe between a terminal
+and a program carries characters, not pixels — so no terminal
+implementation, however good, can lift it. The 2026-09-05 reversal (Addendum
+A.15) therefore moves the editor out of the grid entirely: the fork renders
+through GPUI in a Studio pane, and the grid ceiling remains only where it
+belongs — on actual terminal programs in terminal panes, which is what they
+expect.
 
 **The VS Code compatibility ceiling.** Croft is an independent IDE, not a VS
 Code frontend. It already implements a large editor/LSP/DAP/Git/terminal stack,
@@ -77,73 +102,79 @@ contribution points, extension-host isolation, API/version compatibility, and a
 legally usable extension registry such as Open VSX. This is the largest product
 risk and must not be hidden behind a generic "extensions" checkbox.
 
-**The nested-terminal boundary.** When Croft runs inside Sprite, Sprite owns the
-outer PTY and libghostty terminal state, while Croft's TERMINAL panel allocates
-another PTY and emulates it with `alacritty_terminal`. That is valid and useful,
-but it means Croft's internal terminal does not automatically inherit
-libghostty's behavior. Unifying those surfaces later requires a deliberate
-Sprite/Croft protocol; it is not a side effect of running Croft in Sprite.
+**The nested-terminal boundary dissolves.** Upstream Croft duplicates a
+terminal engine (`alacritty_terminal`) to implement its TERMINAL panel. The
+fork does not: terminal panes are Studio's own, powered by `sprite-engine`,
+so one terminal implementation serves the whole product and the fork's
+duplicated engine is removed rather than unified.
 
-**The escape path is progressive enhancement:**
+**The build path is now direct rather than progressive:**
 
-1. Croft must remain a correct standalone TUI in ordinary terminals.
-2. Sprite Phase 1 must fully support the standard Kitty keyboard and graphics
-   protocols Croft already uses.
-3. The fork may later advertise optional Sprite capabilities through a
-   versioned, capability-negotiated side channel.
-4. If screenshot tests prove the grid makes visual parity impossible, only then
-   extract a renderer seam or add a Sprite-native pixel surface. Croft's domain
-   model must remain independent of that renderer so terminal fallback survives.
+1. Croft's model is qualified and carved out of its ratatui view layer
+   (Phase 2); the GPUI view replaces the TUI. No dual-renderer seam is built
+   or maintained.
+2. Studio hosts the fork as a native editor pane beside terminal panes.
+3. Visual parity (Phase 3) is measured against the GPUI renderer with the
+   same screenshot standard as before.
+4. Remote and SSH editing needs no fork support: Neovim or unmodified
+   upstream Croft runs in a terminal pane.
 
-This preserves a usable product at every step and avoids turning a native
-renderer rewrite into a prerequisite for learning whether the Croft foundation
-actually satisfies the day-to-day IDE goal.
+Each step leaves a usable artifact: Sprite Terminal is already daily-driven,
+Studio is useful with terminal panes alone, and the fork's model
+qualification (Phase 2.3) produces regression coverage before any surgery.
 
 ---
 
 ## 3. Architecture (independent products, explicit boundary)
 
-1. **`sprite-term` — terminal engine adapter.** Owns one PTY/libghostty terminal
-   per terminal thread and exposes owned render snapshots, input commands,
-   selection, scrolling, Kitty graphics placements, and terminal events. It
-   contains no GPUI, Croft, Neovim, or product-level pane logic. Current
-   `libghostty-rs` handles are `!Send + !Sync`; only owned snapshots cross to the
-   UI thread.
+1. **`sprite-engine` — terminal engine library** (named `sprite-term` until
+   the rename lands). Owns one PTY/libghostty terminal per terminal thread
+   and exposes owned render snapshots, input commands, selection, scrolling,
+   Kitty graphics placements, and terminal events. It contains no GPUI,
+   Croft, Neovim, or product-level pane logic. Current `libghostty-rs`
+   handles are `!Send + !Sync`; only owned snapshots cross to the UI thread.
 
-2. **`sprite-app` — GPUI application and compositor.** Owns native windows,
-   tabs, split trees, focus, font shaping, GPU rendering, IME, configuration,
-   menus, packaging, and platform integration. It consumes `sprite-term` rather
-   than reaching through it to libghostty internals. The terminal renderer must
-   support Kitty image textures and z-layers, not only text cells.
+2. **`sprite-app` — Sprite Terminal.** GPUI application and compositor:
+   native windows, tabs, split trees, focus, font shaping, GPU rendering,
+   IME, configuration, menus, packaging, and platform integration. It
+   consumes `sprite-engine` rather than reaching through it to libghostty
+   internals. Pane, tab, and grid-rendering components are extracted into a
+   shared UI crate during the Studio foundation work (Phase 2.5) so Studio
+   reuses them without depending on the terminal product.
 
-3. **Croft fork — separate repository and process.** Starts from upstream Croft
-   under its MIT license, keeps an upstream remote, and initially changes as
-   little architecture as possible. It continues to run in other terminals.
-   Sprite sets honest capability identifiers; the fork recognizes Sprite
-   directly instead of pretending it is Ghostty or mutating Ghostty config.
+3. **Croft fork — separate repository, consumed as a crate.** Starts from
+   upstream Croft under its MIT license and keeps an upstream remote. Its
+   ratatui view layer is replaced with GPUI; the model (editor, LSP, DAP,
+   Git, testing, tasks) is retained. It is a Cargo dependency of Studio and
+   of nothing else — never of Sprite Terminal.
 
-4. **Optional Sprite enhancement protocol.** Added only after the standard TUI
-   path is characterized. The protocol is versioned, capability-negotiated, and
-   has a clean cell-rendered fallback. Candidate messages include semantic pane
-   metadata, context, hit regions, native sub-terminal requests, and eventually
-   higher-level drawing primitives. It must never become an undocumented path
-   that makes the fork unusable elsewhere.
+4. **`sprite-studio` — pane-first workspace product.** Depends on
+   `sprite-engine`, the shared UI crate, and the fork. Hosts two pane types:
+   Terminal (Studio's own panes — one terminal implementation for the whole
+   product) and Editor (the fork). Ships, versions, and fails independently
+   of Sprite Terminal. The OSC 1338 control namespace reserved in Phase 1
+   remains available for terminal-pane metadata (§9); the broader TUI
+   enhancement protocol is superseded (Addendum A.15).
 
-5. **VS Code compatibility subsystem inside the Croft fork.** Owns the
-   compatibility matrix for user settings, keybindings, commands, workspaces,
-   extension manifests, contribution points, extension-host lifecycle, and API
-   versions. It is isolated from Croft's editor model and renderer so extensions
-   cannot run on the input/render hot path or destabilize the terminal host.
+5. **VS Code compatibility subsystem inside the fork.** Owns the
+   compatibility matrix for user settings, keybindings, commands,
+   workspaces, extension manifests, contribution points, extension-host
+   lifecycle, and API versions. Extensions run out of process so extension
+   work can never sit on Studio's input/render hot path.
 
-The outer terminal and the IDE communicate as processes, not Rust crate
-dependencies. This is the primary dependency-control and failure-isolation seam.
+Two boundaries do the dependency control. Sprite Terminal ↔ everything else
+is a **product boundary**: no editor code links into the terminal. Studio ↔
+the extension host is a **process boundary**: extension work never blocks
+rendering. The fork inside Studio is deliberately *not* a process boundary —
+it is a crate dependency, chosen so the editor pane is native.
 
 ---
 
-## 4. Stack Decisions (current, 2026-08-09)
+## 4. Stack Decisions (current, 2026-09-05)
 
-- **Language: Rust.** Both Sprite and Croft are Rust projects, but they remain
-  separate binaries and repositories.
+- **Language: Rust.** Sprite Terminal, Studio, and the fork are Rust
+  projects in separate repositories; the fork compiles into Studio rather
+  than shipping its own binary.
 - **Sprite UI/renderer: GPUI.** Use GPUI for the native window, compositor,
   text/image rendering, and platform integration. Zed remains an architectural
   and performance reference, not a linked dependency.
@@ -162,12 +193,15 @@ dependencies. This is the primary dependency-control and failure-isolation seam.
 - **`tty7`: reference only.** Its GPUI tabs, split-tree, configuration, and
   packaging patterns are useful; its Alacritty terminal engine and dependency
   surface are not Sprite's foundation.
-- **PTY dependency:** `portable-pty` is acceptable for the first cross-platform
-  implementation. Hide it behind `sprite-term` so it can be replaced without
-  changing `sprite-app`.
-- **Croft: fork after Phase 1 validation.** Croft remains an external process
-  and never becomes a Sprite crate dependency. Preserve its standalone TUI
-  fallback and upstream relationship.
+- **PTY dependency:** `portable-pty` is acceptable for the first
+  cross-platform implementation. Hide it behind `sprite-engine` (named
+  `sprite-term` until the rename lands) so it can be replaced without
+  changing the products above it.
+- **Croft: fork after Phase 1 validation.** The fork's ratatui view layer is
+  replaced with GPUI and the result is consumed by Studio as a Cargo
+  dependency. It never becomes a dependency of Sprite Terminal. No TUI
+  fallback is maintained in the fork; unmodified upstream Croft remains the
+  TUI answer and Sprite Terminal's acceptance application.
 - **VS Code behavior reference: Code - OSS plus the supported VS Code product.**
   Use open code and documented behavior where licenses allow. Do not ship the
   Microsoft product name, logo, proprietary services, or Marketplace access
@@ -188,8 +222,9 @@ dependencies. This is the primary dependency-control and failure-isolation seam.
 
 ## 5. Ecosystem — current roles
 
-- **Croft (`vitali87/croft`)** — the chosen IDE foundation after Phase 1, under
-  MIT. Current source audit (2026-08-09, main at v0.1.701): about 181k Rust
+- **Croft (`vitali87/croft`)** — two roles, under MIT: the model foundation
+  for the fork, and the acceptance application for Sprite Terminal (the
+  moving-`main` CI gate stays). Current source audit (2026-08-09, main at v0.1.701): about 181k Rust
   lines, 137 Rust modules, ~3,100 tests, 64 direct Cargo dependencies, and 459
   locked packages. It already contains editor, LSP, DAP, Git, testing, tasks,
   remote sessions, collaboration, and an embedded terminal.
@@ -200,7 +235,10 @@ dependencies. This is the primary dependency-control and failure-isolation seam.
   Code extension-host compatibility; terminal-cell rendering; duplicated inner
   terminal engine; and tight UI/state coupling. About 50 modules reference
   `ratatui`; the central `App` module is ~34k lines and the editor module ~18k
-  lines, with no existing renderer abstraction suitable for a native GPUI port.
+  lines, with no existing renderer abstraction suitable for a native GPUI port;
+  and, for the fork specifically, a GPUI-only view rewrite diverges heavily
+  from upstream, so upstream syncs get harder over time — an accepted cost
+  (Addendum A.15).
 - **`libghostty-rs` (`Uzaaft/libghostty-rs`)** — chosen Rust interface to
   Ghostty's VT library. It exposes terminal/render state, input encoders, and
   Kitty graphics storage, decoded pixels, placements, geometry, generations,
@@ -219,19 +257,13 @@ dependencies. This is the primary dependency-control and failure-isolation seam.
   project-scale navigation, command UI, and architecture. Evaluate each idea by
   user value and measured cost rather than cloning Zed wholesale.
 
-### Deferred research: native Neovim and Helix panels
+### Native editor panes: scheduled via the fork
 
-The former roadmap centered on a native GPUI `NeovimPanel`, with a possible
-`HelixPanel` behind the same abstraction. Croft's discovery superseded that
-scheduled work: Neovim remains a first-class terminal program, while the Croft
-fork becomes the IDE product. A native editor panel returns to the roadmap only
-after the Croft fork reaches daily-driver quality and a measured grid limitation
-cannot be solved by standards-based graphics or progressive enhancement.
-
-No `NeovimPanel` or `HelixPanel` implementation is scheduled. Revisit only if a
-pixel-native editor protocol creates a clear structural advantage, or the Croft
-path fails a defined daily-driver requirement. The detailed 2026-07-22 Helix
-overtake analysis is historical context and no longer drives the build plan.
+The former roadmap deferred any native editor panel until the Croft TUI path
+failed a measured gate. The 2026-09-05 reversal (Addendum A.15) supersedes
+that: the fork itself becomes the native editor pane, hosted by Studio. No
+separate `NeovimPanel` or `HelixPanel` is scheduled; Neovim and Helix remain
+first-class terminal programs in terminal panes.
 
 ---
 
@@ -298,47 +330,48 @@ macOS. Croft is an acceptance-test application, not a dependency.
   accessibility services. Five cohesive checkpoints culminate in performance,
   soak, packaged Arch daily-drive, and real-macOS acceptance gates.
 
-### Phase 2 — Croft qualification and minimal fork
+### Phase 2 — Croft qualification, fork, and Studio foundation
 
 - **2.1 Freeze a baseline:** record the audited upstream commit, license,
   dependency graph, supported platforms, feature inventory, startup/resource
-  measurements, and known failures in Sprite. Do not fork from a moving branch
-  without a reproducible baseline.
-- **2.2 Create a separate fork repository:** preserve `upstream`, keep Sprite-
-  specific commits narrow, and establish a repeatable upstream-sync and release
-  process. The fork is never added to the Sprite Cargo workspace.
-- **2.3 Characterize before changing:** add end-to-end tests for startup, editor,
-  LSP, DAP, Git, testing, tasks, remote sessions, collaboration, embedded
-  terminal, Kitty graphics, and session persistence on Linux and macOS.
-- **2.4 Sprite compatibility:** recognize Sprite capability identifiers; remove
-  the need for `croft setup-ghostty` when running under Sprite; preserve normal
-  behavior under Ghostty, Kitty, WezTerm, iTerm2, and other supported terminals.
-- **2.5 Establish deep seams before feature growth:** split the central App into
-  bounded application services and separate editor state from cell rendering.
-  Introduce interfaces only where the fork's visual-parity or extension-host
-  work requires them; avoid a speculative full rewrite.
-- **2.6 Branding and configuration:** choose a distinct product name and assets,
-  centralize design tokens, and retain Croft attribution and MIT notices.
+  measurements, and known failures in Sprite Terminal. Do not fork from a
+  moving branch without a reproducible baseline.
+- **2.2 Create a separate fork repository:** preserve `upstream`, keep
+  Sprite-specific commits narrow, and establish a repeatable upstream-sync
+  and release process. The fork is consumed by Studio as a Cargo dependency
+  and is never added to Sprite Terminal's workspace.
+- **2.3 Characterize before changing:** add end-to-end tests for startup,
+  editor, LSP, DAP, Git, testing, tasks, and session behavior against the
+  frozen baseline, so model behavior is pinned before the view surgery
+  begins.
+- **2.4 Model/view separation:** carve Croft's model (editor state, LSP,
+  DAP, Git, testing, tasks) out of its ratatui view layer incrementally; the
+  GPUI view replaces the TUI as it goes. No dual-renderer seam is built or
+  maintained; the ratatui path is deleted, not preserved. The fork's
+  duplicated terminal engine (`alacritty_terminal`) is removed — Studio's
+  terminal panes serve that need.
+- **2.5 Studio foundation (parallel track, Sprite repository):** extract the
+  shared UI crate (pane tree, tabs, dividers, grid rendering) from
+  `sprite-app`; rename `sprite-term` to `sprite-engine`; generalize the pane
+  tree to pane types; stand up the `sprite-studio` crate hosting Terminal
+  panes and, when 2.4 delivers, the Editor pane.
+- **2.6 Branding and configuration:** choose a distinct product name and
+  assets for the fork, centralize design tokens, and retain Croft
+  attribution and MIT notices.
 
 ### Phase 3 — VS Code visual parity
 
 - **3.1 Reference corpus:** define supported VS Code layouts, resolutions,
-  themes, zoom levels, states, menus, popups, editor tabs, sidebars, panel tabs,
-  status bar, terminal, source-control, settings, and debug views. Capture
-  repeatable reference screenshots with licensed/legal fixtures.
+  themes, zoom levels, states, menus, popups, editor tabs, sidebars, panel
+  tabs, status bar, terminal, source-control, settings, and debug views.
+  Capture repeatable reference screenshots with licensed/legal fixtures.
 - **3.2 Tokenize the UI:** one semantic token system for colors, spacing,
-  typography, borders, icons, focus/hover/selection states, and motion. Map the
-  tokens onto Croft's ratatui path first.
-- **3.3 Close the TUI gap:** use Kitty graphics for crisp legal/open icons,
-  minimap and image surfaces; refine cell metrics, Unicode width behavior,
-  pointer hit targets, and transitions. Preserve the plain-cell fallback.
-- **3.4 Visual regression harness:** render deterministic workspaces and compare
-  them against the reference corpus. Record intentional platform/font variance
-  explicitly instead of accepting subjective "looks close" review.
-- **3.5 Grid-ceiling gate:** if defined parity states cannot pass because cells
-  cannot express the required geometry, design the smallest versioned Sprite
-  enhancement protocol or renderer extraction that closes those specific gaps.
-  A native GPUI Croft renderer is a last resort, not the default Phase 3 plan.
+  typography, borders, icons, focus/hover/selection states, and motion,
+  mapped onto the fork's GPUI components.
+- **3.3 Visual regression harness:** render deterministic workspaces in
+  Studio and compare them against the reference corpus. Record intentional
+  platform/font variance explicitly instead of accepting subjective "looks
+  close" review.
 
 ### Phase 4 — VS Code functional and extension compatibility
 
@@ -380,14 +413,17 @@ macOS. Croft is an acceptance-test application, not a dependency.
 - **5.4 Reliability and security:** crash recovery, extension isolation,
   workspace trust, remote boundary hardening, fuzz/property tests for protocol
   parsers, dependency auditing, signed releases, and rollback-capable upgrades.
-- **5.5 Distribution:** versioned Sprite and Croft-fork releases for macOS and
-  Linux, with Arch packaging first-class. The two products can be installed and
-  updated independently, plus an optional bundle that installs compatible
-  versions together.
+- **5.5 Distribution:** versioned Sprite Terminal and Studio releases for
+  macOS and Linux, with Arch packaging first-class (the fork ships inside
+  Studio). The products install and update independently, plus an optional
+  bundle that installs compatible versions together.
 
 ### Ongoing / cross-cutting
 - Daily-drive Sprite from Phase 1 and the Croft fork from Phase 2; every defect
   becomes a minimal reproduction and regression test in the owning repo.
+- Sprite Terminal quality-of-life: configurable line height, configurable
+  pane padding, and smooth scrolling remain Phase 1 maintenance items,
+  scheduled independently of Phases 2–5.
 - Maintain three distinct harnesses: terminal-protocol conformance, visual
   parity, and VS Code workflow/extension compatibility.
 - CI on macOS and Linux from Phase 1. Arch/Omarchy is a supported development
@@ -405,16 +441,18 @@ macOS. Croft is an acceptance-test application, not a dependency.
 
 Sprite Terminal reaching daily-driver quality is the bounded, high-confidence
 part: Ghostty provides the terminal semantics and multiple GPUI terminals prove
-the windowing/rendering path. Croft visual parity is plausible but may require a
-native enhancement once the cell ceiling is measured. Functional VS Code parity,
-especially extension compatibility, is the dominant risk and a multi-phase
-product program. Beating VS Code performance while adding compatibility is a
-separate empirical challenge.
+the windowing/rendering path. The fork's visual parity is pursued on the GPUI
+renderer, so the terminal cell ceiling no longer bounds it; the dominant parity
+risks are the model/view surgery itself and the fidelity work after it.
+Functional VS Code parity, especially extension compatibility, is the dominant
+risk and a multi-phase product program. Beating VS Code performance while
+adding compatibility is a separate empirical challenge.
 
-The plan therefore preserves stop points: Phase 1 is useful alone; Phase 2 is a
-usable Croft fork; Phase 3 can succeed without extension parity; and every Phase
-4 API slice can ship independently. Attrition and uncontrolled fork divergence
-remain larger risks than any single known protocol problem.
+The plan therefore preserves stop points: Phase 1 is useful alone; Phase 2
+leaves a qualified fork and a Studio that is useful with terminal panes alone;
+Phase 3 can succeed without extension parity; and every Phase 4 API slice can
+ship independently. Attrition and uncontrolled fork divergence remain larger
+risks than any single known protocol problem.
 
 ---
 
@@ -431,8 +469,9 @@ dirty/change counts, failing checks, and quick actions for each repository.
 Keep `git` as the behavioral authority; use a library only where it demonstrably
 reduces work without narrowing Git compatibility.
 
-Deep interactive operations that lazygit already solves well may open lazygit in
-Croft's embedded terminal, with the selected repository as its working directory.
+Deep interactive operations that lazygit already solves well may open
+lazygit in a Studio terminal pane, with the selected repository as its
+working directory.
 Do not reimplement interactive rebase merely to claim feature ownership.
 
 The Phase-0 Neovim plugin remains a useful standalone tool and prototype for
@@ -453,17 +492,17 @@ Use one semantic design-token model for the Croft fork:
    disabled and contrast states.
 2. **Geometry tokens:** spacing, row heights, panel and activity-bar widths,
    borders, radii, typography metrics, scrollbar geometry, popup placement, and
-   motion. The ratatui renderer may approximate tokens that cannot map to cells;
-   the visual harness records those gaps.
+   motion. GPUI maps geometry tokens directly; the visual harness records any
+   remaining platform and font variance.
 3. **Icon tokens:** semantic icon identifiers mapped to open/licensed assets.
    Never couple behavior to a particular glyph or Microsoft-branded asset.
 4. **Platform/font profiles:** pin the reference font and raster conditions for
    visual tests, while keeping production fallback and accessibility settings.
 
-Sprite Terminal has its own terminal theme and font configuration. The Croft
-fork may request or recommend a compatible palette, but must not mutate Sprite's
-configuration silently. Deterministic screenshot fixtures and interaction-state
-tests are the authority for visual parity.
+Sprite Terminal has its own terminal theme and font configuration.
+Studio and the fork may recommend a compatible palette, but must not mutate
+Sprite Terminal's configuration silently. Deterministic screenshot fixtures and
+interaction-state tests are the authority for visual parity.
 
 ---
 
@@ -489,8 +528,8 @@ than scraping terminal contents or embedding prompt input inside the editor.
   permissioned context service from that model, with user-visible scope and no
   implicit writes. Keep the Claude process out of the render/input hot path.
 - **Sprite version:** a terminal pane may publish only coarse process/pane
-  metadata through the optional Sprite protocol. Sprite must not inspect or
-  reinterpret arbitrary terminal contents as trusted editor context.
+  metadata through the OSC 1338 namespace reserved in Phase 1. Sprite must not
+  inspect or reinterpret arbitrary terminal contents as trusted editor context.
 - **Open design work:** choose the receiving contract (MCP, hooks, or another
   explicit local protocol), permission model, context freshness, and audit UI.
 - Note: an existing personal script opens the Neovim buffer for files Claude is
@@ -537,8 +576,9 @@ than scraping terminal contents or embedding prompt input inside the editor.
    existing IDE behavior, Git, language servers, debug adapters); build only
    the missing compatibility, integration, rendering, and product layers.
 2. **Each phase must leave a usable artifact** — attrition is the real risk.
-3. **The process boundary is a feature** — Sprite and the Croft fork install,
-   run, fail, update, and remain useful independently.
+3. **The product boundary is a feature** — Sprite Terminal and Studio
+   install, run, fail, update, and remain useful independently; the fork
+   ships inside Studio, and the extension host stays out of process.
 4. **Data/logic separated from rendering** — Croft's current coupling is debt to
    reduce where parity work touches it; new domain behavior cannot depend on
    terminal cells or GPUI.
@@ -550,8 +590,9 @@ than scraping terminal contents or embedding prompt input inside the editor.
 7. **Dependencies must earn their place** — prefer the standard library and
    native platform features; accept a dependency when it replaces a hard,
    maintained subsystem and keep it behind a narrow seam.
-8. **Fallbacks are product features** — Sprite remains a normal terminal and
-   the Croft fork remains a normal TUI when their optional integration is absent.
+8. **Fallbacks are product features** — Sprite Terminal remains a normal
+   terminal, and when Studio or the fork is absent, Neovim and unmodified
+   upstream Croft in a terminal pane remain the complete editing answer.
 9. **Upstream relationships are maintained assets** — pin reproducibly, record
    provenance, keep changes reviewable, and make upgrades deliberate.
 10. **Stop if satisfied** — if a bounded phase delivers the actual daily need,
@@ -891,3 +932,54 @@ wrapper that resolves moving `main`, records its SHA, and runs an ignored
 public-session smoke for the capabilities Checkpoint 1 actually claims. Normal
 Rust tests never fetch Croft; the complete visual/graphics interaction matrix
 becomes merge-blocking when Checkpoint 4 introduces those capabilities.
+
+## A.15 TUI-first Croft strategy and grid-ceiling gate: SUPERSEDED (2026-09-05)
+
+The plan pursued VS Code visual parity on Croft's ratatui/terminal-cell
+path, holding a native GPUI renderer as "a last resort" behind a Phase 3
+grid-ceiling gate: only if screenshot tests proved cells could not express
+the required geometry would renderer work be permitted. The
+progressive-enhancement escape path (§2), the deferred native-panel
+research (§5), and Phase 2.4's Sprite-compatibility work (capability
+identifiers, retiring `croft setup-ghostty` under Sprite) encoded the same
+posture.
+
+A 2026-09-05 code-level analysis of the Phase 1 renderer (`grid_paint.rs`,
+`grid.rs`, `terminal_view.rs`) concluded the gate was testing settled
+physics. Text position in a terminal is `origin + cell_index × cell_size`;
+one cell height rules every row of a pane; scrolling resolves to whole rows;
+Kitty graphics anchor to cells. These are properties of the VT protocol —
+the pipe between a terminal and a program carries characters, not pixels —
+so no terminal implementation, however good, can render an editor to
+pixel-level VS Code parity. Waiting for Phase 3 screenshot fixtures to fail
+would have spent the most expensive phase discovering an available
+conclusion.
+
+Decisions taken, and their trades:
+
+- **The fork goes GPUI-only.** Croft's model is retained; the ratatui view
+  is replaced, not abstracted. A dual-renderer seam was rejected: extracting
+  a stable seam from a ~34k-line App module with no renderer abstraction is
+  the hardest form of the surgery, and it would obligate every future
+  upstream sync to keep two renderers working. Accepted cost: the fork
+  diverges heavily from upstream and syncs get harder over time.
+- **No TUI fallback is owed.** Remote and SSH editing is served by Neovim or
+  unmodified upstream Croft in an ordinary terminal pane. The project owner
+  confirmed SSH editing is rare in his workflow and Neovim is his tool for
+  it.
+- **Studio (`sprite-studio`, working name) hosts the fork** as a native
+  editor pane beside terminal panes. Sprite Terminal stays pure — the
+  Phase 1 boundary survives; the fork links into Studio only. Studio is the
+  designated home of future workspace features.
+- **The optional Sprite enhancement protocol** (§3 item 4, pre-amendment) is
+  superseded along with the TUI path; the OSC 1338 namespace reserved in
+  Phase 1 remains available for terminal-pane metadata.
+- **Upstream Croft keeps both remaining roles:** acceptance application for
+  Sprite Terminal (the moving-`main` CI gate stays) and model source for the
+  fork.
+- **`sprite-term` is renamed `sprite-engine`** during the Studio foundation
+  work; the old name repeatedly misled by sounding like the terminal
+  product.
+
+Full decision record: `docs/PRDs/09-05-2026-gpui-editor-strategy-reversal.md`;
+vocabulary: `CONTEXT.md` (project root).

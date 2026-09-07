@@ -16,6 +16,30 @@
 use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{DecodePng, DecodedImage};
 
+/// The decoder a pane that shows no images installs.
+///
+/// Installed rather than clearing the decoder, because clearing is not the
+/// thread-local act it looks like. `set_png_decoder(None)` writes the
+/// thread-local *and* calls `ghostty_sys_set(GHOSTTY_SYS_OPT_DECODE_PNG, null)`,
+/// which is a library-wide option: one disabled pane would turn PNG decoding
+/// off for every other pane in the process. Refusing here leaves that callback
+/// registered for the panes that want it, while this thread declines — which is
+/// what a disabled pane means.
+///
+/// The defence is unchanged. No PNG parser runs: this returns before looking at
+/// a byte, and the pane's storage limit is zero besides.
+pub(crate) struct RefusingDecoder;
+
+impl DecodePng for RefusingDecoder {
+    fn decode_png<'alloc>(
+        &mut self,
+        _alloc: &'alloc Allocator<'_>,
+        _data: &[u8],
+    ) -> Option<DecodedImage<'alloc>> {
+        None
+    }
+}
+
 /// Decodes PNG transmissions into the RGBA pixels libghostty expects.
 pub(crate) struct PngDecoder {
     /// The most decoded bytes this decoder will produce for one image.

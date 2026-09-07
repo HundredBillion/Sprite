@@ -9,4 +9,5 @@ pub mod broker;
 pub mod client;
 pub mod endpoint;
 pub mod panes;
+pub(crate) mod request;
 pub mod schema;

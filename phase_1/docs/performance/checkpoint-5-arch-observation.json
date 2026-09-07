@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "sample_count": 30,
+  "metrics": {
+    "collect_four_panes": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.000805,
+      "p95": 0.000976,
+      "max": 0.009429,
+      "budget": 0.001074
+    },
+    "collect_sixteen_panes": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.002970,
+      "p95": 0.005482,
+      "max": 0.006944,
+      "budget": 0.006030
+    },
+    "collect_with_one_stalled_pane": {
+      "unit": "ms",
+      "samples": 6,
+      "median": 500.108330,
+      "p95": 500.222285,
+      "max": 500.222285,
+      "budget": 550.244514
+    },
+    "encode_default_request": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 1.423230,
+      "p95": 1.549978,
+      "max": 1.939521,
+      "budget": 1.704976
+    },
+    "encode_maximum_history": {
+      "unit": "ms",
+      "samples": 6,
+      "median": 18.417274,
+      "p95": 26.306661,
+      "max": 26.306661,
+      "budget": 28.937327
+    }
+  }
+}

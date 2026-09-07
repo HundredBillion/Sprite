@@ -297,6 +297,46 @@ One known macOS exposure already exists and is why CI parity is not optional:
 while Linux re-enables it transitively through `wayland`/`x11`. Sprite may not
 render text on macOS at all. The macOS CI job is expected to settle this.
 
+### Phase 1 acceptance: accepted on Linux, with two named milestones (amended 2026-09-05)
+
+Phase 1 is **accepted on Arch Linux**. All five checkpoints are built, merged,
+and green; the observation and graphics security reviews the TSPs required have
+been performed and are recorded in `docs/review`; the Croft moving-`main` gate
+passes in CI. Work moves to Phase 2 from here.
+
+Two requirements this PRD states are **not** met, and are carried as named
+milestones rather than quietly dropped. Neither is a thing the project can
+finish by deciding to.
+
+**Milestone A — macOS acceptance.** The 2026-08-19 amendment above says a
+checkpoint may be accepted on Linux while its macOS items remain open, but that
+Phase 1 itself may not. That rule is hereby **amended**: Phase 1 is accepted on
+Linux, and macOS acceptance becomes a milestone that must pass before Sprite is
+called a cross-platform product — not before Phase 2 begins. The reason is
+sequencing, not appetite: Phase 2 is Croft qualification, which depends on the
+Croft gate and not on macOS, and blocking it would stall the dependency spine on
+hardware access rather than on work. Scheduled for the week of 2026-09-07.
+
+The macOS milestone still owes: the interactive product smoke, resize and typing
+by hand, idle CPU/RSS inspection, benchmark baselines, the Ghostty comparison at
+the identical pinned commit, the Croft capability run, and packaging. It also
+owes a correction: the README says pane observation does not work on macOS, and
+the Checkpoint 3 security review finds that claim is probably wrong — the
+product's socket path fits the guard with room to spare, and it is the *test
+harness* that exceeds it. Settle that on the hardware and fix whichever document
+turns out to be lying.
+
+**Milestone B — accessibility.** PRD requirement 1.10 is not implemented and
+cannot be: GPUI `=0.2.2` exposes no accessibility surface at all. This is
+recorded in [ADR 0012](../adr/0012-use-gpui-for-the-application-shell.md) and is
+blocked on a GPUI release that ships AccessKit, which upstream `main` has and no
+release does. Sprite is not accessible today, and this document should not be
+read as claiming otherwise. Revisit on the next GPUI release.
+
+Smaller carried items, all recorded in their checkpoint TSPs: IME composition is
+unverified on this machine, shell-integration auto-loading is deliberately not
+implemented, and the selection override modifier is hardcoded to Shift.
+
 ### Primary module and test seam
 
 - The primary seam is the terminal-session workspace API owned by

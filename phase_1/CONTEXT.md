@@ -29,6 +29,13 @@ _Avoid_: frame number, render version
 One visible leaf in a tab's split layout that owns exactly one Terminal Session.
 _Avoid_: split (the action or layout relationship), terminal
 
+**Divider**:
+The boundary between the two sides of one split, addressed as the boundary on a
+given side of a Pane rather than by an identity of its own. Moving a Divider
+changes only how space is shared; it never creates, ends, reorders, or refocuses
+a Pane, and never disturbs a Terminal Session.
+_Avoid_: splitter, gutter, sash, handle, border
+
 **Sprite Window**:
 The top-level desktop window that owns tabs and Panes.
 _Avoid_: workspace, session, terminal window

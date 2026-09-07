@@ -18,19 +18,25 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::Terminal;
 use libghostty_vt::key;
-use libghostty_vt::kitty::graphics::PlacementIterator;
-use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::terminal::Options as TerminalOptions;
 use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 
 use crate::pty_unix;
 use crate::pty_unix::{GroupSignal, Pump};
-use crate::snapshot;
+use crate::snapshot::Projector;
 use crate::{
     CellPosition, ChildExit, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton,
     MouseEvent, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle,
-    TerminalCommand, TerminalEvent, TerminalSize,
+    TerminalCommand, TerminalEvent, TerminalSize, WheelEvent,
 };
+
+/// The most rows one wheel turn is allowed to send to a child.
+///
+/// A mouse report and a cursor key each carry one notch, so a large delta
+/// becomes that many events. A trackpad fling can accumulate a very large one,
+/// and a child should not be handed thousands of keypresses because a finger
+/// slipped.
+const MAX_WHEEL_TURNS: u32 = 32;
 
 /// The one ordered PTY-write path. Worker-local: it never crosses a thread or
 /// the public interface, so no `Arc`, writer thread, or extra channel exists.
@@ -342,11 +348,8 @@ pub(crate) fn run(
         }
     };
 
-    // Kept across captures so a still image is copied once rather than once
-    // a frame.
-    let mut pixels = crate::graphics::PixelCache::default();
-    let (mut render_state, mut rows, mut cells, mut placements) = match render_objects() {
-        Ok(objects) => objects,
+    let mut projector = match Projector::new() {
+        Ok(projector) => projector,
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));
             return;
@@ -375,19 +378,13 @@ pub(crate) fn run(
     let mut exit_status: Option<Result<ExitStatus, String>> = None;
     let mut pump_stopped = false;
     let mut fatal: Option<SessionError> = None;
-    let mut dirty = !publish(
-        generation,
-        size,
-        has_selection,
-        &terminal,
-        &mut render_state,
-        &mut rows,
-        &mut cells,
-        &mut placements,
-        &mut pixels,
-        &snapshots,
-        &events,
-    );
+    let mut dirty = match projector.capture(generation, size, has_selection, &terminal) {
+        Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
+        Err(error) => {
+            let _ = events.send_blocking(TerminalEvent::Error(error));
+            true
+        }
+    };
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -435,6 +432,10 @@ pub(crate) fn run(
                     }
                 }
             }
+            // Not a no-op: a wake. The snapshot slot holds one bundle
+            // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
+            // leaves `dirty` set with the loop blocked on `recv`. This gives
+            // the gate below a second pass once the app has drained the slot.
             Message::CaptureRequested => {}
             Message::Command(command) => match command {
                 TerminalCommand::Input(bytes) => {
@@ -499,6 +500,47 @@ pub(crate) fn run(
                     });
                     generation += 1;
                     dirty = true;
+                }
+                TerminalCommand::Wheel(event) => {
+                    // Where a wheel turn goes depends on terminal state the
+                    // application cannot see, so the decision is made here for
+                    // the same reason a click's is.
+                    match wheel_destination(&terminal, &event) {
+                        Ok(WheelDestination::Child(kind)) => {
+                            match encode_wheel(
+                                kind,
+                                &mut mouse_encoder,
+                                &mut encoder,
+                                &terminal,
+                                &event,
+                                size,
+                            ) {
+                                Ok(bytes) => {
+                                    if let Err(error) = write_all(&writer, &bytes) {
+                                        fatal = Some(error);
+                                        break;
+                                    }
+                                }
+                                Err(error) => {
+                                    if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(WheelDestination::Viewport) => {
+                            terminal.scroll_viewport(
+                                libghostty_vt::terminal::ScrollViewport::Delta(event.rows as isize),
+                            );
+                            generation += 1;
+                            dirty = true;
+                        }
+                        Err(error) => {
+                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                                break;
+                            }
+                        }
+                    }
                 }
                 TerminalCommand::Select {
                     anchor,
@@ -665,6 +707,7 @@ pub(crate) fn run(
                     }
                     // The colours live in the render state, so a frame has to be
                     // taken for anyone to see them.
+                    dirty = true;
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
                 TerminalCommand::SetCursor(cursor) => {
@@ -673,38 +716,35 @@ pub(crate) fn run(
                     {
                         break;
                     }
+                    dirty = true;
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
-                TerminalCommand::CaptureGraphics => {
-                    match crate::graphics::capture_graphics(&terminal, &mut placements) {
-                        Ok(snapshot) => {
-                            if events
-                                .send_blocking(TerminalEvent::Graphics(snapshot))
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            if events.send_blocking(TerminalEvent::Error(error)).is_err() {
-                                break;
-                            }
+                TerminalCommand::CaptureGraphics => match projector.capture_graphics(&terminal) {
+                    Ok(snapshot) => {
+                        if events
+                            .send_blocking(TerminalEvent::Graphics(snapshot))
+                            .is_err()
+                        {
+                            break;
                         }
                     }
-                }
+                    Err(error) => {
+                        if events.send_blocking(TerminalEvent::Error(error)).is_err() {
+                            break;
+                        }
+                    }
+                },
                 TerminalCommand::CaptureHistory(lines) => {
                     // Answered once, from this thread, against the same
                     // terminal the snapshots come from — so the rows returned
                     // belong to one generation rather than a moving target.
                     let foreground = foreground_executable(master.as_ref());
-                    match snapshot::capture_history(
+                    match projector.capture_history(
                         generation,
                         size,
                         lines.get(),
                         foreground,
                         &terminal,
-                        &mut render_state,
-                        &mut placements,
                     ) {
                         Ok(history) => {
                             if events
@@ -753,48 +793,35 @@ pub(crate) fn run(
         // newer generation would immediately replace wastes the terminal
         // owner's time and delivers nothing.
         if dirty && snapshots.is_empty() {
-            dirty = !publish(
-                generation,
-                size,
-                has_selection,
-                &terminal,
-                &mut render_state,
-                &mut rows,
-                &mut cells,
-                &mut placements,
-                &mut pixels,
-                &snapshots,
-                &events,
-            );
+            dirty = match projector.capture(generation, size, has_selection, &terminal) {
+                Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
+                Err(error) => {
+                    let _ = events.send_blocking(TerminalEvent::Error(error));
+                    true
+                }
+            };
         }
     }
 
     // The final generation still deserves delivery, so the last projection
     // displaces any stale one left in the slot.
-    if dirty
-        && let Ok(bundle) = snapshot::capture(
-            generation,
-            size,
-            has_selection,
-            &terminal,
-            &mut render_state,
-            &mut rows,
-            &mut cells,
-            &mut placements,
-            &mut pixels,
-        )
-    {
+    if dirty && let Ok(bundle) = projector.capture(generation, size, has_selection, &terminal) {
         let _ = snapshots.force_send(Arc::new(bundle));
     }
 
     // ---- Closing ----
     //
-    // Every libghostty value goes first, which also removes the PTY-write
-    // callback: from here the terminal can neither be mutated nor generate a
-    // reply, and application commands are read only to be discarded.
-    drop(cells);
-    drop(rows);
-    drop(render_state);
+    // The projection state goes before the terminal it reads from. Dropping
+    // the terminal also removes the PTY-write callback, so from here it can
+    // neither be mutated nor generate a reply, and application commands are
+    // read only to be discarded.
+    //
+    // Explicit rather than left to scope order because that one relationship
+    // is the only ordering here that matters, and nothing in Rust expresses
+    // it: these are handles into libghostty rather than borrows the compiler
+    // can see. The order among the projector's own objects is free — each
+    // frees only itself.
+    drop(projector);
     drop(encoder);
     drop(terminal);
 
@@ -1069,18 +1096,21 @@ fn apply_graphics_policy(
     // One worker thread per pane therefore means one decoder per pane, each
     // bounded by that pane's own storage limit.
     //
-    // Clearing it for a disabled pane is not a no-op: the setting belongs to
-    // the thread, so a pane must actively ensure no decoder is installed rather
-    // than assume none is. A pane that stores no images should not run a parser
-    // over bytes an arbitrary child printed.
-    let decoder: Option<Box<dyn graphics::DecodePng>> = if policy.enabled {
-        Some(Box::new(crate::png_decoder::PngDecoder::new(
-            policy.storage_bytes,
-        )))
+    // A disabled pane installs a decoder that refuses rather than passing
+    // `None`, because `None` is not the thread-local act it looks like: the
+    // binding also writes a null into `ghostty_sys_set`, a *library-wide*
+    // option, so one disabled pane turned PNG decoding off for every other pane
+    // in the process. That is what `tests/png_decoder_leak.rs` pins.
+    //
+    // A pane that stores no images still runs no parser over bytes an arbitrary
+    // child printed: the refusing decoder returns before reading one, and the
+    // storage limit above is zero.
+    let decoder: Box<dyn graphics::DecodePng> = if policy.enabled {
+        Box::new(crate::png_decoder::PngDecoder::new(policy.storage_bytes))
     } else {
-        None
+        Box::new(crate::png_decoder::RefusingDecoder)
     };
-    graphics::set_png_decoder(decoder).map_err(vt("kitty_png_decoder"))?;
+    graphics::set_png_decoder(Some(decoder)).map_err(vt("kitty_png_decoder"))?;
 
     Ok(())
 }
@@ -1125,59 +1155,6 @@ fn signal_groups(groups: &[i32], signal: &GroupSignal) {
 
 fn group_is_alive(group: i32) -> bool {
     pty_unix::group_is_alive(group)
-}
-
-/// Builds one coherent bundle and delivers it. Returns whether it was sent.
-#[allow(clippy::too_many_arguments)]
-fn publish<'vt>(
-    generation: u64,
-    size: TerminalSize,
-    has_selection: bool,
-    terminal: &Terminal<'vt, '_>,
-    render_state: &mut RenderState<'vt>,
-    rows: &mut RowIterator<'vt>,
-    cells: &mut CellIterator<'vt>,
-    placements: &mut PlacementIterator<'vt>,
-    pixels: &mut crate::graphics::PixelCache,
-    snapshots: &async_channel::Sender<Arc<SnapshotBundle>>,
-    events: &async_channel::Sender<TerminalEvent>,
-) -> bool {
-    match snapshot::capture(
-        generation,
-        size,
-        has_selection,
-        terminal,
-        render_state,
-        rows,
-        cells,
-        placements,
-        pixels,
-    ) {
-        Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_ok(),
-        Err(error) => {
-            let _ = events.send_blocking(TerminalEvent::Error(error));
-            false
-        }
-    }
-}
-
-type RenderObjects = (
-    RenderState<'static>,
-    RowIterator<'static>,
-    CellIterator<'static>,
-    PlacementIterator<'static>,
-);
-
-fn render_objects() -> Result<RenderObjects, SessionError> {
-    let render_state =
-        RenderState::new().map_err(|error| SessionError::new("create_render_state", error))?;
-    let rows =
-        RowIterator::new().map_err(|error| SessionError::new("create_row_iterator", error))?;
-    let cells =
-        CellIterator::new().map_err(|error| SessionError::new("create_cell_iterator", error))?;
-    let placements = PlacementIterator::new()
-        .map_err(|error| SessionError::new("create_placement_iterator", error))?;
-    Ok((render_state, rows, cells, placements))
 }
 
 /// Opens the PTY, launches the child, and hands the child to its waiter.
@@ -1382,6 +1359,159 @@ fn encode_focus(
         .encode(&mut buffer)
         .map_err(|error| SessionError::new("focus_encode", error))?;
     Ok(Some(buffer[..written].to_vec()))
+}
+
+/// Who a wheel turn belongs to.
+enum WheelDestination {
+    /// The child, encoded the way it has asked to hear about the wheel.
+    Child(WheelKind),
+    /// Sprite, which moves the viewport over its scrollback.
+    Viewport,
+}
+
+/// How a child that should hear the wheel wants it spelled.
+#[derive(Clone, Copy)]
+enum WheelKind {
+    /// A mouse report, for a child that turned reporting on.
+    Report,
+    /// Cursor keys, for a full-screen child that did not. This is what makes a
+    /// pager scroll, and what `mouse_alternate_scroll` describes.
+    CursorKeys,
+}
+
+/// Decides where one wheel turn goes.
+///
+/// Three cases, in the order every terminal resolves them:
+///
+/// 1. A child reporting the mouse hears the wheel as a mouse report, exactly as
+///    it hears a click.
+/// 2. A full-screen child that is not reporting gets cursor keys instead, while
+///    `mouse_alternate_scroll` is on — it is on unless the child turns it off.
+///    Without this a pager cannot be scrolled at all: the alternate screen has
+///    no scrollback for Sprite to move over.
+/// 3. Anything else is Sprite's own: move the viewport over the scrollback.
+///
+/// Shift overrides the first two, the same way it takes a click back for
+/// Sprite's selection.
+fn wheel_destination(
+    terminal: &Terminal<'_, '_>,
+    event: &WheelEvent,
+) -> Result<WheelDestination, SessionError> {
+    if event.shift {
+        return Ok(WheelDestination::Viewport);
+    }
+
+    let tracking = terminal
+        .is_mouse_tracking()
+        .map_err(|error| SessionError::new("mouse_tracking", error))?;
+    if tracking {
+        return Ok(WheelDestination::Child(WheelKind::Report));
+    }
+
+    let alternate = matches!(
+        terminal
+            .active_screen()
+            .map_err(|error| SessionError::new("active_screen", error))?,
+        libghostty_vt::screen::Screen::Alternate
+    );
+    let alternate_scroll = terminal
+        .mode(libghostty_vt::terminal::Mode::ALT_SCROLL)
+        .map_err(|error| SessionError::new("alt_scroll_mode", error))?;
+    if alternate && alternate_scroll {
+        return Ok(WheelDestination::Child(WheelKind::CursorKeys));
+    }
+
+    Ok(WheelDestination::Viewport)
+}
+
+/// Encodes one wheel turn as the bytes its child is expecting.
+///
+/// A turn of several rows is several events rather than one with a count:
+/// neither a mouse report nor a cursor key can carry a magnitude, and a child
+/// that receives three of them scrolls three lines.
+fn encode_wheel(
+    kind: WheelKind,
+    mouse_encoder: &mut libghostty_vt::mouse::Encoder<'_>,
+    key_encoder: &mut key::Encoder<'_>,
+    terminal: &Terminal<'_, '_>,
+    event: &WheelEvent,
+    size: TerminalSize,
+) -> Result<Vec<u8>, SessionError> {
+    let up = event.rows < 0;
+    let turns = event.rows.unsigned_abs().min(MAX_WHEEL_TURNS);
+
+    let mut bytes = Vec::new();
+    for _ in 0..turns {
+        match kind {
+            WheelKind::Report => {
+                encode_wheel_report(mouse_encoder, terminal, event, size, up, &mut bytes)?;
+            }
+            WheelKind::CursorKeys => {
+                let key = KeyEvent {
+                    logical_key: if up { "up" } else { "down" }.to_owned(),
+                    text: None,
+                    modifiers: KeyModifiers {
+                        shift: false,
+                        alt: false,
+                        control: false,
+                        platform: false,
+                        function: false,
+                    },
+                    action: KeyAction::Press,
+                    composing: false,
+                };
+                // Through the same encoder a typed arrow uses, so a child in
+                // application cursor mode gets SS3 rather than CSI without this
+                // having to know the difference.
+                bytes.extend_from_slice(&encode_key(key_encoder, terminal, &key)?);
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// One wheel notch as a mouse report.
+fn encode_wheel_report(
+    encoder: &mut libghostty_vt::mouse::Encoder<'_>,
+    terminal: &Terminal<'_, '_>,
+    event: &WheelEvent,
+    size: TerminalSize,
+    up: bool,
+    out: &mut Vec<u8>,
+) -> Result<(), SessionError> {
+    use libghostty_vt::mouse::{Action, Button, EncoderSize, Event, Position};
+
+    let mut encoded = Event::new().map_err(|error| SessionError::new("mouse_event", error))?;
+    // The wheel reports as a press of X11 buttons four and five, which is what
+    // becomes report buttons 64 and 65 on the wire.
+    encoded.set_action(Action::Press);
+    encoded.set_button(Some(if up { Button::Four } else { Button::Five }));
+
+    let mut mods = key::Mods::empty();
+    mods.set(key::Mods::ALT, event.alt);
+    mods.set(key::Mods::CTRL, event.control);
+    encoded.set_mods(mods);
+
+    encoded.set_position(Position {
+        x: f32::from(event.position.column) * size.cell_width_px as f32,
+        y: f32::from(event.position.row) * size.cell_height_px as f32,
+    });
+
+    encoder.set_options_from_terminal(terminal);
+    encoder.set_size(EncoderSize {
+        screen_width: u32::from(size.cols) * size.cell_width_px,
+        screen_height: u32::from(size.rows) * size.cell_height_px,
+        cell_width: size.cell_width_px,
+        cell_height: size.cell_height_px,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    });
+
+    encoder
+        .encode_to_vec(&encoded, out)
+        .map_err(|error| SessionError::new("mouse_encode", error))
 }
 
 /// Encodes one mouse event, or withholds it.

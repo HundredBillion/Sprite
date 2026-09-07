@@ -125,3 +125,19 @@ Alacritty uses winit with a custom renderer, WezTerm its own window crate, and
 Ghostty goes native per platform. GPUI is a deliberate bet that the framework's
 rendering control is worth its immaturity, justified by Kitty graphics and by
 the seam that keeps the bet reversible.
+
+## Amendment, September 2026
+
+The bound above was wrong, and recording it is the point of an ADR.
+
+`sprite-app` names `gpui` in **seven files totalling 4,779 lines**, against the
+"about 600 lines across three files" this decision was accepted on — roughly
+8.0 times the budgeted figure. No `observation/` module touches GPUI, so the
+`sprite-term` seam that made the risk acceptable has held exactly as described;
+what grew is the shell itself.
+
+The decision is not reversed. GPUI remains the right choice for the reasons
+given above, and the restructure analysis is unaffected. But a future reader
+should not take the 600-line figure as a live constraint that Sprite is
+meeting, and anyone re-running that restructure cost estimate should scale it
+accordingly.
