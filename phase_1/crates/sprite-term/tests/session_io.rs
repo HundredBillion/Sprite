@@ -31,6 +31,16 @@ fn plain(logical_key: &str, text: Option<&str>) -> TerminalCommand {
     })
 }
 
+fn release(logical_key: &str, text: Option<&str>) -> TerminalCommand {
+    let TerminalCommand::Key(event) = plain(logical_key, text) else {
+        unreachable!("plain builds a key command")
+    };
+    TerminalCommand::Key(KeyEvent {
+        action: KeyAction::Release,
+        ..event
+    })
+}
+
 fn session(script: &str) -> TerminalSession {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
@@ -284,6 +294,45 @@ fn kitty_keyboard_flags_change_the_encoding() {
     assert!(
         kitty.contains("1b 5b 39 37 75"),
         "the Kitty protocol encodes `a` as CSI 97 u, got:\n{kitty}"
+    );
+}
+
+/// A child that asks for key-release reporting (Kitty flag 2) must not receive
+/// the character a second time when the key comes back up. Neovim negotiates
+/// these flags, so a doubled release is what made one press of the space bar
+/// move the cursor two columns and broke a `<leader>` mapping.
+///
+/// The release is handed text here on purpose: a platform that reports a
+/// character on the way up must not be able to type it.
+#[test]
+fn a_key_release_types_nothing_under_release_reporting() {
+    // One read(2) that waits, then reports every byte the press and the
+    // release together delivered.
+    let script = "printf '\\033[>2u'; stty -icanon -echo min 0 time 15; printf 'READY\\n'; \
+                  dd bs=32 count=1 2>/dev/null | od -An -tx1; printf 'DONE\\n'";
+    let mut session = session(script);
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    // What one physical press of the space bar delivers: down, then up.
+    session
+        .send(plain("space", Some(" ")))
+        .expect("press space");
+    session
+        .send(release("space", Some(" ")))
+        .expect("release space");
+
+    let bundle = snapshots.wait_for("the decoded bytes", |b| pane_text(b).contains("DONE"));
+    let text = pane_text(&bundle);
+    assert!(
+        text.contains("20"),
+        "the press types one space, got:\n{text}"
+    );
+    assert!(
+        !text.contains("20 20"),
+        "one press of the space bar typed two spaces:\n{text}"
     );
 }
 

@@ -17,7 +17,14 @@ use sprite_term::{KeyAction, KeyEvent, KeyModifiers};
 pub(crate) fn gpui_key_event(keystroke: &Keystroke, action: KeyAction) -> KeyEvent {
     KeyEvent {
         logical_key: keystroke.key.clone(),
-        text: keystroke.key_char.clone(),
+        // A key release types nothing. GPUI fills `key_char` on both halves of
+        // a press, so carrying it up would claim the release produced a
+        // character — and a child that has asked for key-release reporting
+        // then receives that character a second time.
+        text: match action {
+            KeyAction::Release => None,
+            KeyAction::Press | KeyAction::Repeat => keystroke.key_char.clone(),
+        },
         modifiers: KeyModifiers {
             shift: keystroke.modifiers.shift,
             alt: keystroke.modifiers.alt,
@@ -63,6 +70,29 @@ mod tests {
             let event = gpui_key_event(&keystroke(name, None, none()), KeyAction::Press);
             assert_eq!(event.logical_key, name);
             assert_eq!(event.text, None, "{name} invents no text");
+        }
+    }
+
+    /// A key release produces no text. GPUI reuses one `Keystroke` for both
+    /// halves of a press, so `key_char` is still populated on the way up;
+    /// copying it would tell the encoder the release typed a character, and a
+    /// child that has asked for key-release reporting would receive it twice.
+    #[test]
+    fn a_release_carries_no_text() {
+        for (key, character) in [("space", " "), ("a", "a"), ("1", "1")] {
+            let event =
+                gpui_key_event(&keystroke(key, Some(character), none()), KeyAction::Release);
+
+            assert_eq!(event.logical_key, key);
+            assert_eq!(event.text, None, "{key} typed nothing on the way up");
+        }
+    }
+
+    #[test]
+    fn a_press_and_a_repeat_keep_their_text() {
+        for action in [KeyAction::Press, KeyAction::Repeat] {
+            let event = gpui_key_event(&keystroke("space", Some(" "), none()), action);
+            assert_eq!(event.text.as_deref(), Some(" "));
         }
     }
 

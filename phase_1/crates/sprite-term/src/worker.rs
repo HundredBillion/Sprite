@@ -1716,7 +1716,10 @@ fn encode_key(
 
     // libghostty requires the text field to be free of control codepoints;
     // named control and function keys carry their meaning in the key value.
-    if let Some(text) = &event.text
+    // A release carries no text either: the Kitty protocol reports one as an
+    // escape sequence, so text attached here would be typed a second time.
+    if event.action != KeyAction::Release
+        && let Some(text) = &event.text
         && is_encodable_text(text)
     {
         encoded.set_utf8(Some(text.clone()));
