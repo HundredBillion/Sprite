@@ -10,8 +10,6 @@ on:
       - "phase_1/**"
       - ".gitmodules"
       - ".github/workflows/phase-1.yml"
-  push:
-    branches: [phase_1]
   schedule:
     # Nightly, so a moving upstream is caught without waiting for a change here.
     - cron: "17 4 * * *"
