@@ -31,4 +31,9 @@ serde_json = { workspace = true }
 gpui = { workspace = true, features = ["wayland", "x11"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui = { workspace = true }
+# `font-kit` is off in the workspace default (`default-features = false`), but on
+# macOS gpui uses it to select its real text system: without the feature it
+# installs a `NoopTextSystem` that draws quads (the block cursor) and no glyphs,
+# so the terminal shows a cursor over blank rows. On Linux the `wayland`/`x11`
+# features already pull `font-kit` in, which is why only macOS needed this.
+gpui = { workspace = true, features = ["font-kit"] }
