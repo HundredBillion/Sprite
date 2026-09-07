@@ -6,6 +6,7 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{SessionConfig, SessionError, TerminalSize};
@@ -205,12 +206,34 @@ fn integration_directory() -> Option<PathBuf> {
 /// it to the search rather than replacing anything.
 ///
 /// Found relative to the executable rather than hard-coded, so an install under
-/// `/usr`, `/usr/local`, or `/opt/sprite` all work without a build-time prefix.
+/// `/usr`, `/usr/local`, `/opt/sprite`, or inside `Sprite.app` all work without
+/// a build-time prefix. The executable's path is canonicalised first: on macOS
+/// `current_exe` returns the path the process was started by, and a `sprite`
+/// that is a symlink into a bundle must find the database in the bundle, not
+/// beside the link.
 fn packaged_terminfo() -> Option<PathBuf> {
-    let directory = executable_directory()?
-        .parent()?
-        .join("share/sprite/terminfo");
-    directory.is_dir().then_some(directory)
+    let executable = env::current_exe().ok()?;
+    let executable = fs::canonicalize(&executable).unwrap_or(executable);
+    terminfo_candidates(&executable)
+        .into_iter()
+        .find(|directory| directory.is_dir())
+}
+
+/// Where a database may sit relative to an executable, in preference order.
+///
+/// `<prefix>/share/sprite/terminfo` for a prefix install, where the binary is
+/// `<prefix>/bin/sprite`. `<Contents>/Resources/terminfo` for an application
+/// bundle, where the binary is `<Contents>/MacOS/sprite`. Both are tried on
+/// every platform: a directory that is absent costs one `stat`, and a `cfg`
+/// would cost a code path nobody on the other platform exercises.
+fn terminfo_candidates(executable: &Path) -> Vec<PathBuf> {
+    let Some(prefix) = executable.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    vec![
+        prefix.join("share/sprite/terminfo"),
+        prefix.join("Resources/terminfo"),
+    ]
 }
 
 fn bootstrapped_terminfo() -> Option<PathBuf> {
@@ -242,6 +265,37 @@ fn prepend_path(directory: &Path, current: Option<&OsStr>) -> Option<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A prefix install keeps the database beside the binary's prefix, so
+    /// `/usr`, `/usr/local` and `/opt/sprite` all work without a build-time
+    /// path.
+    #[test]
+    fn a_prefix_install_looks_under_share() {
+        let candidates = terminfo_candidates(Path::new("/usr/local/bin/sprite"));
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/usr/local/share/sprite/terminfo"),
+                PathBuf::from("/usr/local/Resources/terminfo"),
+            ]
+        );
+    }
+
+    /// Inside an application bundle the binary is at Contents/MacOS and the
+    /// database, being a resource, is at Contents/Resources.
+    #[test]
+    fn a_bundle_looks_under_resources() {
+        let candidates =
+            terminfo_candidates(Path::new("/Applications/Sprite.app/Contents/MacOS/sprite"));
+        assert!(candidates.contains(&PathBuf::from(
+            "/Applications/Sprite.app/Contents/Resources/terminfo"
+        )));
+    }
+
+    #[test]
+    fn an_executable_with_no_parent_prefix_has_no_candidates() {
+        assert!(terminfo_candidates(Path::new("sprite")).is_empty());
+    }
 
     #[test]
     fn an_absolute_executable_shell_wins() {
