@@ -27,10 +27,10 @@ depends=(
     'xcb-util-keysyms'
 )
 makedepends=('git' 'ncurses' 'python' 'rustup' 'zig')
-source=("git+$url.git#branch=phase_1")
+source=("git+$url.git")
 sha256sums=('SKIP')
 
-_root="$srcdir/Sprite/phase_1"
+_root="$srcdir/Sprite"
 
 prepare() {
     cd "$srcdir/Sprite"
@@ -38,7 +38,7 @@ prepare() {
 
     # Exactly the toolchain rust-toolchain.toml pins, so the package is built
     # with the compiler the project is tested against.
-    rustup toolchain install --profile minimal "$(sed -n 's/^channel = "\(.*\)"/\1/p' phase_1/rust-toolchain.toml)"
+    rustup toolchain install --profile minimal "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
 
     cd "$_root"
     export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"

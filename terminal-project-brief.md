@@ -208,7 +208,7 @@ chosen so the pane renders natively through GPUI (§2).
   text/image rendering, and platform integration. Zed remains an architectural
   and performance reference, not a linked dependency.
 - **VT core: Ghostty through `libghostty-rs`.** Use the current safe
-  `libghostty-rs` interface with a `phase_1/vendor/ghostty` git submodule pinned
+  `libghostty-rs` interface with a `vendor/ghostty` git submodule pinned
   to the exact Ghostty commit that interface targets. The initial compatibility
   pin is `ab0b9da9e88fcb4b0533a1854e84628f663930af`; Ghostty v1.3.1 predates the
   terminal/render C interface and cannot satisfy the binding. Builds remain
@@ -335,10 +335,9 @@ fork and no longer imply a later native-panel port.
 Deliverable: an independent terminal suitable for daily use on Arch Linux and
 macOS. Croft is an acceptance-test application, not a dependency.
 
-- **1.1 Repository/workspace:** the `phase_1` directory contains its own Rust
-  workspace within the Sprite repository, with `sprite-term` (terminal adapter)
-  and `sprite-app` (GPUI product). Add
-  `phase_1/vendor/ghostty` as a git submodule pinned to exact compatibility
+- **1.1 Repository/workspace:** the Sprite repository is one Rust workspace,
+  with `sprite-term` (terminal adapter) and `sprite-app` (GPUI product). Add
+  `vendor/ghostty` as a git submodule pinned to exact compatibility
   commit `ab0b9da9e88fcb4b0533a1854e84628f663930af`; configure
   `libghostty-rs` to build against that source. Return to a reviewed stable tag
   when Ghostty releases the required terminal/render C interface. Pin official
@@ -610,8 +609,8 @@ than scraping terminal contents or embedding prompt input inside the editor.
 ## 10. Target platforms and current toolchain state (2026-08-09)
 
 - **Current implementation workspace:** Arch Linux under Omarchy, repository at
-  `~/Projects/Sprite`; `phase_1/` is the intended standalone Sprite Terminal
-  repo. Arch is the primary Linux development and daily-driver target.
+  `~/Projects/Sprite`, which is the Sprite Terminal repository itself. Arch is
+  the primary Linux development and daily-driver target.
 - **Target matrix:** Arch and distribution-neutral Linux packages plus macOS
   `.app` support. Omarchy integration is optional user configuration, never a
   runtime dependency or platform abstraction.

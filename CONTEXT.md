@@ -1,7 +1,7 @@
 # Sprite Project
 
 Project-wide vocabulary for the Sprite effort and its products. The terminal
-core's own vocabulary lives in `phase_1/CONTEXT.md`; see `CONTEXT-MAP.md`.
+core's own vocabulary lives in `crates/CONTEXT.md`; see `CONTEXT-MAP.md`.
 
 ## Language
 

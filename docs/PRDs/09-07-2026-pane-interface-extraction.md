@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-07
 **Type:** Implementation (Phase 2.1)
-**Target:** `phase_1/crates/sprite-pane` (new), `phase_1/crates/sprite-app`
+**Target:** `crates/sprite-pane` (new), `crates/sprite-app`
 **Status:** Draft
 
 ## Summary

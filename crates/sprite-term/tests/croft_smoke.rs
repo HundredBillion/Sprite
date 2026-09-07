@@ -7,7 +7,7 @@
 //! `sprite-term` types.
 //!
 //! Ignored by default because it needs an externally built binary. Run it
-//! through `phase_1/scripts/test-croft-main.sh`, which supplies
+//! through `scripts/test-croft-main.sh`, which supplies
 //! `SPRITE_CROFT_BIN`.
 
 mod support;

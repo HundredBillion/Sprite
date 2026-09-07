@@ -19,7 +19,7 @@ much maintained complexity the dependency removes from Sprite.
 ## Current direct dependencies
 
 Nine direct external crates, all pinned to exact versions in
-`phase_1/Cargo.toml` and locked in `phase_1/Cargo.lock`.
+`Cargo.toml` and locked in `Cargo.lock`.
 
 ### `toml` `=0.8.23`
 
@@ -299,7 +299,7 @@ interface directly.
 
 These are not runtime Rust dependencies.
 
-- **Ghostty source**, submodule `phase_1/vendor/ghostty` pinned to
+- **Ghostty source**, submodule `vendor/ghostty` pinned to
   `ab0b9da9e88fcb4b0533a1854e84628f663930af`. `libghostty-vt-sys 0.2.1` defaults
   to a different commit (`a887df42c56f6de86c0fe6da9c4eeca37931e083`);
   `.cargo/config.toml` forces `GHOSTTY_SOURCE_DIR` to the submodule so the pin
