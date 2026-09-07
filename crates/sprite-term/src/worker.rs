@@ -926,6 +926,23 @@ pub(crate) fn run(
             let _ =
                 events.send_blocking(TerminalEvent::Error(SessionError::new("wait_child", error)));
         }
+        // A requested shutdown reaches here with no status when the child could
+        // not be reaped inside the budget. On macOS a process that has taken a
+        // fatal signal can linger unreapable — in the kernel's exit path, `ps`
+        // state `E` — while the PTY master is open, so its waiter never returns.
+        // The session has still ended at the caller's request, and the contract
+        // that every session ends with an `Exited` or an `Error` is kept by
+        // saying so, rather than leaving a consumer to infer it from the stream
+        // closing. Not synthesised for an *unrequested* give-up: that is a stuck
+        // session the caller did not ask to end, and inventing an exit for it
+        // would hide the fault.
+        None if shutdown.load(Ordering::SeqCst) => {
+            let _ = events.send_blocking(TerminalEvent::Exited(ChildExit {
+                code: None,
+                signal: None,
+                requested: true,
+            }));
+        }
         None => {}
     }
 
