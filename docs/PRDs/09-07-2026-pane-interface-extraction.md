@@ -3,7 +3,7 @@
 **Date:** 2026-09-07
 **Type:** Implementation (Phase 2.1)
 **Target:** `crates/sprite-pane` (new), `crates/sprite-app`
-**Status:** Hardened 2026-09-07 (grilling session); TSP at
+**Status:** Implemented (see the commits on the pane-interface branch); TSP at
 `docs/TSPs/09-07-2026-pane-interface-extraction.md`
 
 ## Summary
