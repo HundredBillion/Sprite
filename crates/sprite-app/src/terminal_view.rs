@@ -132,6 +132,8 @@ pub struct TerminalView {
     _events: Task<()>,
     _snapshots: Task<()>,
     _blink: Task<()>,
+    /// Keeps the settings subscription alive for as long as the view is.
+    _settings: gpui::Subscription,
 }
 
 impl TerminalView {
@@ -177,7 +179,7 @@ impl TerminalView {
                     complaints.extend(refused);
                     config
                 }
-                Err(error) => return Self::failed(error.to_string(), font_family, cx),
+                Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
             },
         };
         // The initial 24x80 grid is kept; only the physical cell metrics are
@@ -226,7 +228,7 @@ impl TerminalView {
 
         let mut session = match TerminalSession::spawn(config) {
             Ok(session) => session,
-            Err(error) => return Self::failed(error.to_string(), font_family, cx),
+            Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
         };
 
         // Registered before the event task starts, so an answer can never
@@ -300,6 +302,15 @@ impl TerminalView {
             }
         });
 
+        // A reload publishes a new `ActiveSettings`; this is how it reaches a
+        // pane. Registered here so a pane created after a reload observes the
+        // next one too, having been constructed from the current one.
+        let settings_subscription =
+            cx.observe_global_in::<crate::config::ActiveSettings>(window, |view, window, cx| {
+                let settings = cx.global::<crate::config::ActiveSettings>().0.clone();
+                view.apply_settings(&settings, window, cx);
+            });
+
         Self {
             session: Some(session),
             observation,
@@ -328,6 +339,7 @@ impl TerminalView {
             _events: event_task,
             _snapshots: snapshot_task,
             _blink: blink_task,
+            _settings: settings_subscription,
         }
     }
 
@@ -337,7 +349,23 @@ impl TerminalView {
     /// shut down: its event and snapshot tasks are already finished. Spawning
     /// a throwaway shell just to fill the field would fork a process on the
     /// one path where the person's own program has already failed to start.
-    fn failed(message: String, font_family: SharedString, cx: &mut Context<Self>) -> Self {
+    fn failed(
+        message: String,
+        font_family: SharedString,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // A failed pane still re-shapes its message when the font changes; a
+        // view that ignored reloads would be the one exception to the rule
+        // the global relies on.
+        // A reload publishes a new `ActiveSettings`; this is how it reaches a
+        // pane. Registered here so a pane created after a reload observes the
+        // next one too, having been constructed from the current one.
+        let settings_subscription =
+            cx.observe_global_in::<crate::config::ActiveSettings>(window, |view, window, cx| {
+                let settings = cx.global::<crate::config::ActiveSettings>().0.clone();
+                view.apply_settings(&settings, window, cx);
+            });
         Self {
             session: None,
             // A view that never started a session has nothing to observe.
@@ -366,6 +394,7 @@ impl TerminalView {
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
             _blink: Task::ready(()),
+            _settings: settings_subscription,
         }
     }
 

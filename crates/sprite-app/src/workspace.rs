@@ -76,12 +76,6 @@ pub struct Workspace {
     /// the one discovery would have found: a window started with `--config`
     /// must not change which file it obeys halfway through its life.
     config_path: Option<std::path::PathBuf>,
-    /// A reloaded configuration, applied during the next render.
-    ///
-    /// Applied there for the same reason focus is: the panes need a `Window` to
-    /// re-measure a cell with, and the endpoint thread that asked for the
-    /// reload has none.
-    pending_settings: Option<crate::config::Settings>,
     /// Keeps the reload listener alive for as long as the window is.
     _reload: gpui::Task<()>,
     /// Handed to an endpoint opened later, when observation is turned back on.
@@ -123,6 +117,10 @@ impl Workspace {
             .flatten();
         let reload_sender = reload_tx.clone();
 
+        // Published before the first pane exists, so every pane — including
+        // the first — finds current settings the moment it subscribes.
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+
         let tabs = Tabs::new(make_pane(
             command.clone(),
             settings.clone(),
@@ -161,7 +159,6 @@ impl Workspace {
             pending_focus,
             divider_drag: None,
             pending_close: None,
-            pending_settings: None,
             config_path,
             _reload: reload_task,
             reload_sender,
@@ -374,9 +371,10 @@ impl Workspace {
         let (settings, complaints) = candidate;
 
         let outcome = classify(&self.settings, &settings);
-        // Recorded rather than applied here: a pane needs a `Window` to
-        // re-measure a cell with, and this runs without one.
-        self.pending_settings = Some(settings.clone());
+        // Published, not pushed: each pane observes the global with its own
+        // window in hand, which is what a cell re-measure needs and what this
+        // method, reached from an endpoint thread, does not have.
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
         self.settings = settings;
         self.configured_font_size = self.settings.font.size;
         // Observation is the one setting the window itself owns, and it can be
@@ -385,16 +383,6 @@ impl Workspace {
         cx.notify();
 
         outcome.describe(&path, &complaints.0)
-    }
-
-    /// Applies a reloaded configuration to every pane, during a render.
-    fn apply_pending_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(settings) = self.pending_settings.take() else {
-            return;
-        };
-        for (_, _, view) in self.tabs.all_panes() {
-            view.update(cx, |view, cx| view.apply_settings(&settings, window, cx));
-        }
     }
 
     fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
@@ -1093,7 +1081,6 @@ impl Render for Workspace {
 
         // Every pane in `placements` gets an element in this frame, so a focus
         // request recorded earlier can now be honoured.
-        self.apply_pending_settings(window, cx);
         self.apply_pending_focus(window, cx);
 
         // Published from here because this is where the layout is decided, and

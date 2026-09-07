@@ -27,6 +27,18 @@ pub struct Settings {
     pub scrollback: Scrollback,
 }
 
+/// The settings this window is running with, published for every pane.
+///
+/// A pane subscribes to this rather than being handed settings through the
+/// pane interface, so the interface never has to know what a terminal's
+/// settings contain. The cost is stated rather than hidden: a subscription is
+/// not compiler-enforced, so a pane that forgets to observe silently keeps
+/// stale settings. Sprite's own terminal observes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveSettings(pub Settings);
+
+impl gpui::Global for ActiveSettings {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneObservation {
     /// Whether this window offers observation at all.
@@ -707,6 +719,16 @@ mod tests {
 
     fn complaints(text: &str) -> Vec<String> {
         Settings::parse(text).1.0
+    }
+
+    /// The global is the only route a reloaded configuration takes to a pane,
+    /// so it must carry the whole of `Settings` and nothing narrower.
+    #[test]
+    fn the_active_settings_global_carries_settings_whole() {
+        let (settings, _) = Settings::parse("[font]\nsize = 17.0\n");
+        let global = ActiveSettings(settings.clone());
+        assert_eq!(global.0, settings);
+        assert_eq!(global.0.font.size, 17.0);
     }
 
     #[test]
