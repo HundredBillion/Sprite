@@ -1,4 +1,4 @@
-# Packaging Sprite for Linux
+# Packaging Sprite
 
 Four files and one script. `install.sh` is the only thing that knows where
 anything goes, so a distribution package and a manual install cannot disagree.
@@ -10,6 +10,8 @@ anything goes, so a distribution package and a manual install cannot disagree.
 | `sprite.svg` | The icon, scalable, for `hicolor/scalable/apps`. |
 | `PKGBUILD` | The Arch recipe, building from a clean checkout. |
 | `third-party-notices.py` | Regenerates `THIRD-PARTY-NOTICES.md` from Cargo's resolution. |
+| `macos/bundle.sh`, `macos/Info.plist` | Wrap a built Sprite as `Sprite.app`. Build nothing. |
+| `macos/update.sh` | Build, generate terminfo, bundle, install to `/Applications`, link the command. |
 
 ## What ends up where
 
@@ -54,6 +56,32 @@ depend on it would fail here rather than in somebody's package.
 The entry is compiled from the pinned Ghostty source at package time rather than
 from a copy kept in this repository, so it cannot drift from the engine that
 produces the sequences it describes.
+
+## macOS
+
+The same binary and the same terminfo, in a bundle:
+
+~~~
+/Applications/Sprite.app/Contents/MacOS/sprite
+/Applications/Sprite.app/Contents/Resources/sprite.icns
+/Applications/Sprite.app/Contents/Resources/terminfo/78/xterm-ghostty
+/Applications/Sprite.app/Contents/Resources/terminfo/67/ghostty
+/Applications/Sprite.app/Contents/Resources/LICENSE-MIT
+/Applications/Sprite.app/Contents/Resources/LICENSE-APACHE
+/Applications/Sprite.app/Contents/Resources/THIRD-PARTY-NOTICES.md
+/usr/local/bin/sprite -> /Applications/Sprite.app/Contents/MacOS/sprite
+~~~
+
+The database is at `Contents/Resources/terminfo` because that is where a bundle
+keeps files that are not code and where `codesign` seals them. Sprite finds it
+the same way it finds `share/sprite/terminfo`: relative to the executable —
+after resolving symlinks, because on macOS a process started through
+`/usr/local/bin/sprite` is told that path, not the bundle's.
+
+The icon is rendered from `sprite.svg` with `sips` and `iconutil` at bundle
+time. The signature is ad-hoc: enough for an app built on the machine that runs
+it, which is the only install path there is. A Developer ID and notarization
+protect a download, and there is no download yet.
 
 ## Building it
 

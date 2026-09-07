@@ -10,8 +10,9 @@ use gpui::{
     Context, CursorStyle, FocusHandle, Focusable, KeyDownEvent, Pixels, SharedString, Size, Window,
     div, px, rgb,
 };
-use sprite_term::ShutdownHandle;
+use sprite_pane::PaneHandle;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::observation::endpoint::Endpoint;
@@ -40,6 +41,8 @@ const DIVIDER_NUDGE_PX: f32 = 20.0;
 const DIVIDER_HOVER: u32 = 0x6a6a80;
 const TAB_STRIP_HEIGHT: f32 = 28.0;
 const TAB_ACTIVE_BG: u32 = 0x1d1d24;
+/// A tab whose name is being typed, so the edit is visibly somewhere.
+const TAB_EDIT_BG: u32 = 0x2a2a3a;
 const TAB_INACTIVE_FG: u32 = 0x8a8a99;
 const TAB_ACTIVE_FG: u32 = 0xe6e6ef;
 /// The close question, in the one colour nothing else in the window uses.
@@ -47,7 +50,7 @@ const CONFIRM_BG: u32 = 0x5a3030;
 const CONFIRM_FG: u32 = 0xffe0e0;
 
 pub struct Workspace {
-    tabs: Tabs<gpui::Entity<TerminalView>>,
+    tabs: Tabs<Rc<dyn PaneHandle>>,
     /// This window's observation socket and key.
     ///
     /// `None` when the endpoint could not be opened — there is no private
@@ -76,12 +79,6 @@ pub struct Workspace {
     /// the one discovery would have found: a window started with `--config`
     /// must not change which file it obeys halfway through its life.
     config_path: Option<std::path::PathBuf>,
-    /// A reloaded configuration, applied during the next render.
-    ///
-    /// Applied there for the same reason focus is: the panes need a `Window` to
-    /// re-measure a cell with, and the endpoint thread that asked for the
-    /// reload has none.
-    pending_settings: Option<crate::config::Settings>,
     /// Keeps the reload listener alive for as long as the window is.
     _reload: gpui::Task<()>,
     /// Handed to an endpoint opened later, when observation is turned back on.
@@ -99,6 +96,11 @@ pub struct Workspace {
     /// While this is set the pane area wears an overlay, which is what keeps
     /// the moves coming when the pointer outruns a seven-pixel strip.
     divider_drag: Option<DividerDrag>,
+    /// A tab name being typed. While set, the keyboard belongs to the label.
+    renaming: Option<TabRename>,
+    /// What the title bar currently says, so it is set only when it changes:
+    /// the platform call is not free, and render runs every frame.
+    window_title: Option<SharedString>,
 }
 
 impl Workspace {
@@ -122,6 +124,10 @@ impl Workspace {
             .then(|| open_endpoint(&panes, &reload_tx))
             .flatten();
         let reload_sender = reload_tx.clone();
+
+        // Published before the first pane exists, so every pane — including
+        // the first — finds current settings the moment it subscribes.
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
 
         let tabs = Tabs::new(make_pane(
             command.clone(),
@@ -160,8 +166,9 @@ impl Workspace {
             focus: cx.focus_handle(),
             pending_focus,
             divider_drag: None,
+            renaming: None,
+            window_title: None,
             pending_close: None,
-            pending_settings: None,
             config_path,
             _reload: reload_task,
             reload_sender,
@@ -192,23 +199,24 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Hands over every pane's worker so the window can wait for all of them.
+    /// Hands over every pane's blocking cleanup so the window can run all of
+    /// it off the GPUI thread.
     ///
-    /// Every tab, not only the visible one: a background tab's child is still
-    /// running and still owns a PTY.
-    pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<ShutdownHandle> {
+    /// Every tab, not only the visible one: a background tab's pane is still
+    /// running whatever it runs.
+    pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<Box<dyn FnOnce() + Send>> {
         // The window is going: its socket leaves the filesystem and its key
-        // stops being accepted now, not once the last child has been reaped.
+        // stops being accepted now, not once the last pane has finished.
         if let Some(endpoint) = self.endpoint.as_mut() {
             endpoint.close();
         }
         self.tabs
             .all_panes()
             .into_iter()
-            .map(|(_, _, view)| view.clone())
+            .map(|(_, _, pane)| Rc::clone(pane))
             .collect::<Vec<_>>()
             .into_iter()
-            .filter_map(|view| view.update(cx, |view, _cx| view.begin_shutdown()))
+            .filter_map(|pane| pane.begin_shutdown(cx))
             .collect()
     }
 
@@ -242,15 +250,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shuts a session down deliberately rather than leaving it to a drop, so
-    /// the child is reaped at a known moment.
-    fn shut_down(&self, view: gpui::Entity<TerminalView>, cx: &mut Context<Self>) {
-        let handle = view.update(cx, |view, _cx| view.begin_shutdown());
-        if let Some(handle) = handle {
+    /// Shuts a pane down deliberately rather than leaving it to a drop, so
+    /// whatever it owns is released at a known moment.
+    fn shut_down(&self, pane: Rc<dyn PaneHandle>, cx: &mut Context<Self>) {
+        if let Some(cleanup) = pane.begin_shutdown(cx) {
             cx.background_executor()
-                .spawn(async move {
-                    let _ = handle.wait();
-                })
+                .spawn(async move { cleanup() })
                 .detach();
         }
     }
@@ -322,30 +327,26 @@ impl Workspace {
 
     /// The programs a close would interrupt, one entry per busy pane.
     fn running_programs(&self, scope: CloseScope, cx: &Context<Self>) -> Vec<Option<String>> {
-        let views: Vec<&gpui::Entity<TerminalView>> = match scope {
+        let panes: Vec<&Rc<dyn PaneHandle>> = match scope {
             CloseScope::Pane => self.tabs.active().focused().into_iter().collect(),
             CloseScope::Tab => self
                 .tabs
                 .active()
                 .layout()
                 .into_iter()
-                .map(|(_, _, view)| view)
+                .map(|(_, _, pane)| pane)
                 .collect(),
             CloseScope::Window => self
                 .tabs
                 .all_panes()
                 .into_iter()
-                .map(|(_, _, view)| view)
+                .map(|(_, _, pane)| pane)
                 .collect(),
         };
-        views
+        panes
             .into_iter()
-            .filter_map(|view| {
-                let state = view.read(cx).foreground();
-                state
-                    .should_confirm()
-                    .then(|| state.program().map(str::to_owned))
-            })
+            .filter_map(|pane| pane.close_warning(cx))
+            .map(|warning| warning.program.map(|program| program.to_string()))
             .collect()
     }
 
@@ -374,9 +375,10 @@ impl Workspace {
         let (settings, complaints) = candidate;
 
         let outcome = classify(&self.settings, &settings);
-        // Recorded rather than applied here: a pane needs a `Window` to
-        // re-measure a cell with, and this runs without one.
-        self.pending_settings = Some(settings.clone());
+        // Published, not pushed: each pane observes the global with its own
+        // window in hand, which is what a cell re-measure needs and what this
+        // method, reached from an endpoint thread, does not have.
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
         self.settings = settings;
         self.configured_font_size = self.settings.font.size;
         // Observation is the one setting the window itself owns, and it can be
@@ -387,14 +389,38 @@ impl Workspace {
         outcome.describe(&path, &complaints.0)
     }
 
-    /// Applies a reloaded configuration to every pane, during a render.
-    fn apply_pending_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(settings) = self.pending_settings.take() else {
-            return;
-        };
-        for (_, _, view) in self.tabs.all_panes() {
-            view.update(cx, |view, cx| view.apply_settings(&settings, window, cx));
+    fn begin_rename(&mut self, cx: &mut Context<Self>) {
+        let tab = self.tabs.active_tab();
+        // Start from the current name, so a rename edits rather than retypes.
+        let text = self.tabs.name(tab).unwrap_or_default().to_owned();
+        self.renaming = Some(TabRename { tab, text });
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            cx.notify();
         }
+    }
+
+    /// One keystroke into a rename in progress. True when the key was for the
+    /// rename and must go no further.
+    fn rename_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        let Some(renaming) = self.renaming.as_mut() else {
+            return false;
+        };
+        match rename_step(&renaming.text, keystroke) {
+            RenameStep::Editing(text) => renaming.text = text,
+            RenameStep::Commit(text) => {
+                let tab = renaming.tab;
+                let name = (!text.is_empty()).then_some(text);
+                self.tabs.set_name(tab, name);
+                self.renaming = None;
+            }
+            RenameStep::Cancel => self.renaming = None,
+        }
+        cx.notify();
+        true
     }
 
     fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
@@ -509,6 +535,8 @@ impl Workspace {
     }
 
     fn focus_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        // A click on a tab is a person moving on from any rename in progress.
+        self.cancel_rename(cx);
         if self.tabs.focus_tab(tab) {
             self.request_focus(self.tabs.active().focus());
             cx.notify();
@@ -521,32 +549,26 @@ impl Workspace {
     /// different size from its neighbours looks broken. Each pane re-measures
     /// its cell and tells its child the new grid, which is why this resizes
     /// rather than merely redraws.
-    fn adjust_font(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+    fn adjust_font(&mut self, delta: f32, cx: &mut Context<Self>) {
         let wanted = crate::config::Font::clamp_size(self.settings.font.size + delta);
-        self.apply_font_size(wanted, window, cx);
+        self.apply_font_size(wanted, cx);
     }
 
     /// Back to the configured size, which is what a person means by "reset" —
     /// not back to Sprite's built-in default.
-    fn reset_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset_font(&mut self, cx: &mut Context<Self>) {
         let configured = self.configured_font_size;
-        self.apply_font_size(configured, window, cx);
+        self.apply_font_size(configured, cx);
     }
 
-    fn apply_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
         if (size - self.settings.font.size).abs() < f32::EPSILON {
             return;
         }
         self.settings.font.size = size;
-        let views: Vec<_> = self
-            .tabs
-            .all_panes()
-            .into_iter()
-            .map(|(_, _, view)| view.clone())
-            .collect();
-        for view in views {
-            view.update(cx, |view, cx| view.set_font_size(size, window, cx));
-        }
+        // The size is a setting like any other, so it travels the way a reload
+        // does: published once, applied by every pane with its own window.
+        cx.set_global(crate::config::ActiveSettings(self.settings.clone()));
         cx.notify();
     }
 
@@ -564,7 +586,7 @@ impl Workspace {
         let Some(view) = self.tabs.active().get(pane) else {
             return;
         };
-        let handle = view.read(cx).focus_handle(cx);
+        let handle = view.focus_handle(cx);
         window.focus(&handle);
     }
 
@@ -613,11 +635,11 @@ fn make_pane<'a>(
     endpoint: Option<&'a Endpoint>,
     window: &'a mut Window,
     cx: &'a mut Context<Workspace>,
-) -> impl FnOnce(TabId, PaneId) -> gpui::Entity<TerminalView> + 'a {
+) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle> + 'a {
     move |tab, pane| {
         let environment = session_environment(endpoint, tab, pane);
         let link = pane_link(panes, endpoint, tab, pane);
-        cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx))
+        Rc::new(cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx)))
     }
 }
 
@@ -725,6 +747,68 @@ fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -
     outcome
 }
 
+/// One pane's place in the frame: its identity, its pixel rectangle as
+/// (x, y, width, height), and the pane itself.
+type PanePlacement = (PaneId, f32, f32, f32, f32, Rc<dyn PaneHandle>);
+
+/// What a tab shows: the Tab Name if a person gave one, else the focused pane's
+/// Pane Title, else the tab's position counted from one.
+///
+/// The focused pane's title rather than any other pane's, because it is the
+/// only choice that stays stable as focus moves within a split tab. Pure, so
+/// the order can be asserted without a window.
+fn tab_label(name: Option<&str>, title: Option<&str>, index: usize) -> SharedString {
+    match (name, title) {
+        (Some(name), _) => name.to_owned().into(),
+        (None, Some(title)) => title.to_owned().into(),
+        (None, None) => format!("{}", index + 1).into(),
+    }
+}
+
+/// A tab whose name is being typed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TabRename {
+    tab: TabId,
+    text: String,
+}
+
+/// Where one keystroke leaves a name being typed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RenameStep {
+    Editing(String),
+    Commit(String),
+    Cancel,
+}
+
+/// The whole of a text field, for a name: append the typed character, delete
+/// the last one, keep, or abandon. GPUI has no text field, and a tab name needs
+/// none of what one would add — no cursor movement, no selection, no IME
+/// composition. Pure, so every key can be asserted without a window.
+fn rename_step(text: &str, keystroke: &gpui::Keystroke) -> RenameStep {
+    match keystroke.key.as_str() {
+        "enter" => RenameStep::Commit(text.to_owned()),
+        "escape" => RenameStep::Cancel,
+        "backspace" => {
+            let mut text = text.to_owned();
+            text.pop();
+            RenameStep::Editing(text)
+        }
+        _ => match &keystroke.key_char {
+            Some(typed) if !keystroke.modifiers.control && !keystroke.modifiers.platform => {
+                RenameStep::Editing(format!("{text}{typed}"))
+            }
+            _ => RenameStep::Editing(text.to_owned()),
+        },
+    }
+}
+
+/// The title bar: the focused pane's Pane Title alone, or the application's name
+/// when it has none. The Dock and the switcher already say which application
+/// this is, so the title is spent on what is running.
+fn window_title(title: Option<&str>) -> &str {
+    title.unwrap_or("Sprite")
+}
+
 /// A close waiting on a second press.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingClose {
@@ -801,6 +885,7 @@ enum WorkspaceAction {
     FontReset,
     NewTab,
     CloseTab,
+    RenameTab,
     NextTab,
     PreviousTab,
     Focus(Direction),
@@ -843,6 +928,7 @@ fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
         "0" | ")" => Some(WorkspaceAction::FontReset),
         "t" => Some(WorkspaceAction::NewTab),
         "q" => Some(WorkspaceAction::CloseTab),
+        "r" => Some(WorkspaceAction::RenameTab),
         "pagedown" => Some(WorkspaceAction::NextTab),
         "pageup" => Some(WorkspaceAction::PreviousTab),
         "left" => Some(WorkspaceAction::Focus(Direction::Left)),
@@ -1067,33 +1153,55 @@ impl Render for Workspace {
         let active_tab = self.tabs.active_tab();
         let tab_order = self.tabs.order();
 
+        // Each tab's label, resolved before the strip is built so the tab
+        // closure stays a pure placement of a value it is handed.
+        let labels: Vec<SharedString> = tab_order
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let title = self.tabs.focused_in(*tab).and_then(|pane| pane.title(cx));
+                tab_label(
+                    self.tabs.name(*tab),
+                    title.as_ref().map(|t| t.as_ref()),
+                    index,
+                )
+            })
+            .collect();
+
+        // The title bar follows the focused pane of the active tab.
+        let focused_title = self.tabs.active().focused().and_then(|pane| pane.title(cx));
+        let wanted: SharedString = window_title(focused_title.as_ref().map(|t| t.as_ref()))
+            .to_owned()
+            .into();
+        if self.window_title.as_ref() != Some(&wanted) {
+            window.set_window_title(&wanted);
+            self.window_title = Some(wanted);
+        }
+
         // Each pane learns its own allocation before it lays out its grid, so
         // every child is told the size of its pane rather than of the window.
-        let placements: Vec<(PaneId, f32, f32, f32, f32, gpui::Entity<TerminalView>)> = self
+        let placements: Vec<PanePlacement> = self
             .tabs
             .layout()
             .into_iter()
-            .map(|(pane, rect, view)| {
+            .map(|(pane, rect, handle)| {
                 (
                     pane,
                     rect.x * width,
                     rect.y * height,
                     (rect.width * width - DIVIDER_PX).max(1.0),
                     (rect.height * height - DIVIDER_PX).max(1.0),
-                    view.clone(),
+                    Rc::clone(handle),
                 )
             })
             .collect();
 
-        for (_, _, _, pane_width, pane_height, view) in &placements {
-            view.update(cx, |view, _cx| {
-                view.set_allocated(gpui::size(px(*pane_width), px(*pane_height)));
-            });
+        for (_, _, _, pane_width, pane_height, handle) in &placements {
+            handle.set_allocated(gpui::size(px(*pane_width), px(*pane_height)), cx);
         }
 
         // Every pane in `placements` gets an element in this frame, so a focus
         // request recorded earlier can now be honoured.
-        self.apply_pending_settings(window, cx);
         self.apply_pending_focus(window, cx);
 
         // Published from here because this is where the layout is decided, and
@@ -1120,7 +1228,7 @@ impl Render for Workspace {
         // ends here rather than spanning the rest of the chain.
         let pane_children: Vec<gpui::Div> = placements
             .into_iter()
-            .map(|(pane, x, y, pane_width, pane_height, view)| {
+            .map(|(pane, x, y, pane_width, pane_height, handle)| {
                 let is_focused = pane == focused;
                 div()
                     .absolute()
@@ -1138,7 +1246,7 @@ impl Render for Workspace {
                             workspace.focus_pane(pane, cx);
                         }),
                     )
-                    .child(view)
+                    .child(handle.view())
                     .when(!is_focused, |element| element.opacity(0.92))
             })
             .collect();
@@ -1228,7 +1336,17 @@ impl Render for Workspace {
             .enumerate()
             .map(|(index, tab)| {
                 let is_active = tab == active_tab;
-                let label: SharedString = format!("{}", index + 1).into();
+                let editing = self
+                    .renaming
+                    .as_ref()
+                    .filter(|renaming| renaming.tab == tab)
+                    .map(|renaming| renaming.text.clone());
+                // A thin bar after the text stands for the caret; there is no
+                // cursor to move, so a glyph is all the field needs.
+                let label: SharedString = match &editing {
+                    Some(text) => format!("{text}\u{258f}").into(),
+                    None => labels[index].clone(),
+                };
                 div()
                     .flex()
                     .items_center()
@@ -1237,6 +1355,7 @@ impl Render for Workspace {
                     .h_full()
                     .text_size(px(12.0))
                     .bg(rgb(if is_active { TAB_ACTIVE_BG } else { BACKGROUND }))
+                    .when(editing.is_some(), |element| element.bg(rgb(TAB_EDIT_BG)))
                     .text_color(rgb(if is_active {
                         TAB_ACTIVE_FG
                     } else {
@@ -1277,6 +1396,12 @@ impl Render for Workspace {
             // one event reaching two consumers, which the terminal's input
             // rules forbid.
             .capture_key_down(cx.listener(|workspace, event: &KeyDownEvent, window, cx| {
+                // A name being typed owns the keyboard, as the close question
+                // does: every key is for the label until Enter or Escape.
+                if workspace.rename_key(&event.keystroke, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 let action = workspace_action(&event.keystroke);
                 if workspace.pending_close.is_some() {
                     // Escape answers "no". It is claimed, because a question on
@@ -1313,11 +1438,12 @@ impl Render for Workspace {
                         workspace.split(Orientation::Vertical, window, cx);
                     }
                     WorkspaceAction::ClosePane => workspace.close_focused_pane(cx),
-                    WorkspaceAction::FontLarger => workspace.adjust_font(1.0, window, cx),
-                    WorkspaceAction::FontSmaller => workspace.adjust_font(-1.0, window, cx),
-                    WorkspaceAction::FontReset => workspace.reset_font(window, cx),
+                    WorkspaceAction::FontLarger => workspace.adjust_font(1.0, cx),
+                    WorkspaceAction::FontSmaller => workspace.adjust_font(-1.0, cx),
+                    WorkspaceAction::FontReset => workspace.reset_font(cx),
                     WorkspaceAction::NewTab => workspace.open_tab(window, cx),
                     WorkspaceAction::CloseTab => workspace.close_active_tab(cx),
+                    WorkspaceAction::RenameTab => workspace.begin_rename(cx),
                     WorkspaceAction::NextTab => workspace.switch_tab(true, cx),
                     WorkspaceAction::PreviousTab => workspace.switch_tab(false, cx),
                     WorkspaceAction::Focus(direction) => {
@@ -1399,8 +1525,9 @@ impl Render for Workspace {
 mod tests {
     use super::{
         CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction,
-        DividerDrag, Orientation, PaneId, WorkspaceAction, classify, describe_running,
-        divider_placements, divider_ratio, nudged_ratio, strip_leading, workspace_action,
+        DividerDrag, Orientation, PaneId, RenameStep, WorkspaceAction, classify, describe_running,
+        divider_placements, divider_ratio, nudged_ratio, rename_step, strip_leading, tab_label,
+        window_title, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1425,6 +1552,83 @@ mod tests {
             control: true,
             ..Modifiers::default()
         }
+    }
+
+    fn plain(key: &str, key_char: Option<&str>) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers::default(),
+            key: key.to_owned(),
+            key_char: key_char.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn rename_is_bound_to_ctrl_shift_r() {
+        assert_eq!(
+            workspace_action(&press("r", ctrl_shift())),
+            Some(WorkspaceAction::RenameTab)
+        );
+        assert_eq!(workspace_action(&press("r", ctrl())), None);
+    }
+
+    /// The whole of what a name needs: append, delete, keep, abandon.
+    #[test]
+    fn typing_edits_the_name_and_enter_keeps_it() {
+        assert_eq!(
+            rename_step("bui", &plain("l", Some("l"))),
+            RenameStep::Editing("buil".to_owned())
+        );
+        assert_eq!(
+            rename_step("build", &plain("backspace", None)),
+            RenameStep::Editing("buil".to_owned())
+        );
+        assert_eq!(
+            rename_step("", &plain("backspace", None)),
+            RenameStep::Editing(String::new())
+        );
+        assert_eq!(
+            rename_step("build", &plain("enter", None)),
+            RenameStep::Commit("build".to_owned())
+        );
+        assert_eq!(
+            rename_step("build", &plain("escape", None)),
+            RenameStep::Cancel
+        );
+    }
+
+    /// A key with no character — an arrow, a function key, a bare modifier — is
+    /// not a letter and changes nothing.
+    #[test]
+    fn a_key_without_a_character_leaves_the_name_alone() {
+        assert_eq!(
+            rename_step("build", &plain("left", None)),
+            RenameStep::Editing("build".to_owned())
+        );
+    }
+
+    /// Committing nothing removes the custom name rather than storing "".
+    #[test]
+    fn committing_an_empty_name_is_a_commit_of_nothing() {
+        assert_eq!(
+            rename_step("", &plain("enter", None)),
+            RenameStep::Commit(String::new())
+        );
+    }
+
+    /// Name, then Pane Title, then index. A name a person typed beats what the
+    /// program says; what the program says beats a number.
+    #[test]
+    fn a_tab_label_prefers_the_name_then_the_title_then_the_index() {
+        assert_eq!(tab_label(Some("build"), Some("vim"), 0), "build");
+        assert_eq!(tab_label(None, Some("vim"), 0), "vim");
+        assert_eq!(tab_label(None, None, 0), "1");
+        assert_eq!(tab_label(None, None, 4), "5");
+    }
+
+    #[test]
+    fn the_window_title_is_the_pane_title_or_sprite() {
+        assert_eq!(window_title(Some("vim README.md")), "vim README.md");
+        assert_eq!(window_title(None), "Sprite");
     }
 
     #[test]

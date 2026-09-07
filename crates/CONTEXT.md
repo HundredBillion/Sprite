@@ -29,6 +29,19 @@ _Avoid_: frame number, render version
 One visible leaf in a tab's split layout that owns exactly one Terminal Session.
 _Avoid_: split (the action or layout relationship), terminal
 
+**Pane Title**:
+What a Pane reports it is called: for a terminal Pane, the title its child set
+through the terminal, or else the name of the program in the foreground. Absent
+rather than guessed when the Pane has been told nothing. Every Pane type reports
+one through the pane interface.
+_Avoid_: window title, tab title, label
+
+**Tab Name**:
+A name a person gave a tab, kept by the tab itself and shown in place of any
+Pane Title until removed. Survives whatever the tab's Panes go on to run; is not
+kept across a restart.
+_Avoid_: tab title, label, override
+
 **Divider**:
 The boundary between the two sides of one split, addressed as the boundary on a
 given side of a Pane rather than by an identity of its own. Moving a Divider

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Filled by bundle.sh: @VERSION@ is the workspace version from Cargo.toml, so
+  the Finder and `sprite --version` cannot disagree. Everything else is fixed.
+  The identifier is what macOS keys the application's identity to, and changing
+  it would make the result a different application, so it is written here once
+  and never computed.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Sprite</string>
+  <key>CFBundleExecutable</key>
+  <string>sprite</string>
+  <key>CFBundleIconFile</key>
+  <string>sprite</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.github.hundredbillion.sprite</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Sprite</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.developer-tools</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>10.15.7</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>MIT OR Apache-2.0</string>
+</dict>
+</plist>

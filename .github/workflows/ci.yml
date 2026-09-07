@@ -209,6 +209,19 @@ jobs:
           cargo test --workspace --locked --offline --no-fail-fast
           cargo build --workspace --locked --offline
 
+      - name: Bundle the debug binary and verify the result
+        run: |
+          set -euo pipefail
+          # The gate's `cargo build --workspace` already produced this binary; a
+          # release build here would double the job's time to prove a folder
+          # layout. The bundle script does not care which profile it wraps.
+          BINARY=target/debug/sprite packaging/macos/bundle.sh
+          plutil -lint -s target/Sprite.app/Contents/Info.plist
+          codesign --verify --deep --strict target/Sprite.app
+          test -x target/Sprite.app/Contents/MacOS/sprite
+          test -f target/Sprite.app/Contents/Resources/terminfo/78/xterm-ghostty
+          target/Sprite.app/Contents/MacOS/sprite --version
+
   croft:
     name: croft moving main
     runs-on: ubuntu-latest

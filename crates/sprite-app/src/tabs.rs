@@ -9,6 +9,8 @@
 //! Identity is minted here rather than inside a tree, because the observation
 //! schema exposes tab and pane IDs and a window holds many tabs.
 
+use std::collections::HashMap;
+
 use crate::pane_registry::PaneRegistry;
 use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneIds, Rect};
 
@@ -21,6 +23,10 @@ pub struct Tabs<T> {
     tabs: Vec<(TabId, PaneRegistry<T>)>,
     /// Index into `tabs`, not an ID: the active tab moves when others close.
     active: usize,
+    /// Names people gave tabs. Beside the tabs rather than inside a pane,
+    /// because a name must survive the pane changing what it is doing and no
+    /// pane type should have to remember it.
+    names: HashMap<TabId, String>,
     panes: PaneIds,
     next_tab: u64,
 }
@@ -40,6 +46,7 @@ impl<T> Tabs<T> {
         Self {
             tabs: vec![(tab, first)],
             active: 0,
+            names: HashMap::new(),
             panes,
             next_tab: 1,
         }
@@ -64,6 +71,33 @@ impl<T> Tabs<T> {
 
     pub fn active(&self) -> &PaneRegistry<T> {
         &self.tabs[self.active].1
+    }
+
+    /// The name a person gave this tab, if any.
+    pub fn name(&self, tab: TabId) -> Option<&str> {
+        self.names.get(&tab).map(String::as_str)
+    }
+
+    /// Names a tab, or with `None` removes its name. False for an unknown tab.
+    pub fn set_name(&mut self, tab: TabId, name: Option<String>) -> bool {
+        if self.index_of(tab).is_none() {
+            return false;
+        }
+        match name {
+            Some(name) => {
+                self.names.insert(tab, name);
+            }
+            None => {
+                self.names.remove(&tab);
+            }
+        }
+        true
+    }
+
+    /// The focused pane of any tab, not only the active one.
+    pub fn focused_in(&self, tab: TabId) -> Option<&T> {
+        self.index_of(tab)
+            .and_then(|index| self.tabs[index].1.focused())
     }
 
     fn index_of(&self, tab: TabId) -> Option<usize> {
@@ -91,6 +125,8 @@ impl<T> Tabs<T> {
             return Vec::new();
         };
         let (_, registry) = self.tabs.remove(index);
+        // Identity is never reused, so a name must not outlive its tab.
+        self.names.remove(&tab);
         // Below the active tab, the active one shifts down with it; at or above
         // it, the selection stays put unless it ran off the end.
         if index < self.active {
@@ -278,6 +314,38 @@ mod tests {
         assert_eq!(tabs.active_tab(), second);
         assert_eq!(tabs.order(), vec![TabId(0), second]);
         assert!(ended(&log).is_empty(), "opening a tab ends nothing");
+    }
+
+    /// A Tab Name belongs to the tab, not to what it is running.
+    #[test]
+    fn a_tab_keeps_the_name_it_is_given() {
+        let log: Log = Rc::default();
+        let mut tabs = Tabs::new(|_, _| spy("a", &log));
+        let first = tabs.active_tab();
+        assert_eq!(tabs.name(first), None);
+        assert!(tabs.set_name(first, Some("build".to_owned())));
+        assert_eq!(tabs.name(first), Some("build"));
+        assert!(tabs.set_name(first, None));
+        assert_eq!(tabs.name(first), None);
+    }
+
+    #[test]
+    fn naming_an_unknown_tab_does_nothing() {
+        let log: Log = Rc::default();
+        let mut tabs = Tabs::new(|_, _| spy("a", &log));
+        assert!(!tabs.set_name(TabId(99), Some("ghost".to_owned())));
+        assert_eq!(tabs.name(TabId(99)), None);
+    }
+
+    /// Identity is never reused, so a name must not outlive its tab.
+    #[test]
+    fn a_closed_tab_forgets_its_name() {
+        let log: Log = Rc::default();
+        let mut tabs = Tabs::new(|_, _| spy("a", &log));
+        let second = tabs.open(|_, _| spy("b", &log));
+        tabs.set_name(second, Some("scratch".to_owned()));
+        tabs.close_tab(second);
+        assert_eq!(tabs.name(second), None);
     }
 
     /// The requirement this task exists to satisfy.

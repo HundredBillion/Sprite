@@ -3,7 +3,8 @@
 **Date:** 2026-09-07
 **Type:** Implementation (Phase 2.1)
 **Target:** `crates/sprite-pane` (new), `crates/sprite-app`
-**Status:** Draft
+**Status:** Implemented (see the commits on the pane-interface branch); TSP at
+`docs/TSPs/09-07-2026-pane-interface-extraction.md`
 
 ## Summary
 
@@ -19,14 +20,21 @@ This is the socket described in Addendum A.16. Nothing here links an editor, and
 
 ## User outcome
 
-Two visible changes, both small, both consequences of the interface rather than
-the point of it:
+Three visible changes, all small. The first two are consequences of the
+interface rather than the point of it; the third gives the second a writer:
 
 - **Tabs carry names.** A tab shows the name its focused pane reports — the
   title a program set through OSC, or the program that is running — instead of
   its index. A tab whose pane reports nothing still shows its index.
 - **The window title follows the focused pane**, so a Sprite window is
-  identifiable in a window switcher or bar by what is running in it.
+  identifiable in a window switcher or bar by what is running in it. It reads
+  the pane's title alone — `vim README.md`, `zsh` — and `Sprite` when the pane
+  reports none, as Terminal.app and Ghostty do; the Dock and the app switcher
+  already say which application it is.
+- **Tabs can be renamed.** `Ctrl+Shift+R` turns the active tab's label into an
+  edit field in place. Typing edits, Backspace deletes, Enter keeps the name,
+  Escape abandons the edit, and keeping an empty name removes the custom one.
+  A name a person gave a tab survives whatever the pane goes on to run.
 
 Everything else is unchanged: splits, focus, tabs, close confirmation,
 configuration reload, and every keybinding behave exactly as before.
@@ -54,8 +62,13 @@ sized value, and `read` downcasts to a concrete type. The trait object has to
 live one level out, around the handle, which is where Zed puts its own
 `ItemHandle` for the same reason.
 
-`sprite-pane` depends on `gpui` and `sprite-term` and on nothing else. Its
-`Cargo.toml` is the mechanically checkable form of the dependency invariant.
+`sprite-pane` depends on `gpui` and on nothing else. No member of the interface
+names a `sprite-term` type — the closure returned by `begin_shutdown` exists
+precisely so that none has to — and a dependency nothing uses is a dependency
+that rots unnoticed. `sprite-term` is added the day a member needs it. The
+crate's `Cargo.toml` is the mechanically checkable form of the dependency
+invariant, and a test in the crate reads that file and fails if the dependency
+list is anything but `gpui`.
 
 ## The interface
 
@@ -133,10 +146,12 @@ since `Entity<T>` is already refcounted.
 `Rc` rather than `Arc` because the workspace and its panes live on the GPUI
 thread. Should that stop being true, the change is one word.
 
-**`PaneTree`, `Tabs`, and `PaneRegistry` are not modified.** `PaneTree` is pure
-geometry and names no content type; `Tabs<T>` and `PaneRegistry<T>` are already
-generic with no trait bounds. Confirmed: all seven `TerminalView` references in
-the crate live in `workspace.rs` and none in the tree, tabs, or registry.
+**`PaneTree` and `PaneRegistry` are not modified, and `Tabs` is not retyped.**
+`PaneTree` is pure geometry and names no content type; `Tabs<T>` and
+`PaneRegistry<T>` are already generic with no trait bounds. Confirmed: all seven
+`TerminalView` references in the crate live in `workspace.rs` and none in the
+tree, tabs, or registry. `Tabs` changes only to remember a name per tab (see
+Titles), which is payload-independent.
 
 An enum of known pane types was rejected: it would require Sprite's own source
 to name every editor, which is the dependency invariant inverted. A variant that
@@ -199,7 +214,23 @@ Three changes:
 **A renamed tab is remembered by `Tabs`, not by the pane.** A name a person
 typed must survive the pane changing what it is doing, and no pane type should
 have to reimplement remembering it. Resolution is a pure function over
-(override, pane title, index), tested without GPUI.
+(name, pane title, index), tested without GPUI.
+
+**The name has a writer.** The 2026-09-07 grilling found that the first draft
+gave the label a person-given name with no way to give one, which is the same
+uncalled-member mistake this PRD refuses in the trait. Rather than drop the
+slot, the rename gesture is in scope: `Ctrl+Shift+R` (the only free letter
+chord that reads as *rename*) puts the active tab's label into an edit in
+place, in the same modal pattern the close confirmation already uses — a field
+on `Workspace`, a branch at the top of the key handler, no new widget. GPUI
+0.2.2 ships no text field, and the whole of what a tab name needs is append,
+Backspace, Enter, and Escape; a keystroke's `key_char` supplies the typed
+character. The step from (current text, keystroke) to (next text, or commit,
+or cancel) is a pure function, tested without GPUI. Any workspace action, or a
+click on a tab, abandons an edit in progress, exactly as it dismisses the
+close question. An edit that ends with an empty name removes the custom name.
+Names are not persisted: Sprite has no session persistence, and inventing one
+for tab names alone would be a second uncalled feature.
 
 **A tab shows its focused pane's title** when it holds a split, because that is
 the only source that stays stable as focus moves within the tab.
@@ -231,6 +262,10 @@ the same kind of uncalled machinery this PRD removes from the trait.
 `TerminalView` gains `impl Pane`, keeping its existing `Render`, `Focusable`,
 and `EntityInputHandler` implementations unchanged.
 
+`Tabs` gains a name per tab — set, read, and forgotten with the tab — and
+`Workspace` gains the rename mode, one action in `workspace_action`, and the
+label field's rendering. `README.md`'s key table gains the binding.
+
 ## Verification
 
 **The interface has two implementations from the first commit.** `sprite-pane`
@@ -249,15 +284,28 @@ Tests must prove:
 5. The window title follows the focused pane.
 6. Closing a pane running a program still asks, still names the program when it
    can, and still runs shutdown off the GPUI thread.
-7. Clicking a pane focuses it, clicks near a divider reach the divider rather
-   than the pane, and both hold regardless of pane type. The decision is
-   extracted from the render closure at `workspace.rs:1136` into a pure function
-   so it can be asserted at all; it has no test today.
+7. A tab can be renamed: the keystroke-to-edit step is tested as a pure
+   function (append, Backspace on empty, Enter commits, Escape cancels, an
+   empty commit clears), and `Tabs` forgets a name when its tab closes.
 8. Keyboard focus and resize behave identically: the nine existing
    `workspace_action` tests pass unmodified, `workspace_action` being untouched.
 9. A configuration reload reaches every pane through the global, and a pane
-   constructed after a reload sees current settings.
-10. `sprite-pane`'s second implementation exercises every trait member.
+   constructed after a reload sees current settings. The second half is a unit
+   test of what `make_pane` is handed; the first has no seam without a GPUI
+   `App`, and `gpui`'s `test-support` feature drags in Wayland and X11. It is
+   verified by hand — edit the font size, run `sprite config reload`, watch
+   every pane re-shape — and the step is written into the TSP as a checkbox.
+10. `sprite-pane`'s second implementation is compiled against every trait
+    member and against the blanket `PaneHandle`, in the crate's own tests. It
+    cannot be *run* without an `App`, for the reason in item 9; what the test
+    proves is that a type with no terminal in it satisfies the interface, which
+    is the assertion A.16 asks for.
+
+The 2026-09-07 grilling removed a tenth item from the first draft: extracting
+the click-versus-divider decision from the render closure into a pure function.
+GPUI resolves that by element order — divider strips are drawn after panes —
+so a function mirroring it would be a second model of the same rule with no
+caller, and this change does not touch the arrangement.
 
 The full workspace test suite passes unchanged where behaviour is unchanged,
 and the Croft compatibility gate (1.8) passes on Linux and macOS.
@@ -270,6 +318,8 @@ and the Croft compatibility gate (1.8) passes on Linux and macOS.
 - **The `Appearance` global.** Deferred to its first consumer.
 - **Input handling and session persistence in the interface.** Deferred to the
   pane that needs them.
+- **Persisting tab names** across a restart. There is nothing else to persist
+  them alongside.
 - **Right-click behaviour.** `MouseButton::Left` is the only button referenced
   in `sprite-app`; there is no right-click behaviour, and inventing one here
   would be an unrelated feature.

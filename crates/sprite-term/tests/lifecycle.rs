@@ -179,7 +179,13 @@ fn process_is_alive(pid: &str) -> bool {
     };
     let state = String::from_utf8_lossy(&output.stdout);
     let state = state.trim();
-    !state.is_empty() && !state.starts_with('Z')
+    // Empty means the process is gone. A zombie (`Z`) has exited and is only
+    // awaiting a reap. On macOS a process that has taken a fatal signal can sit
+    // in the `E` ("trying to exit") state for the whole test while the PTY master
+    // it was attached to stays open, where Linux would show `Z` at once — the
+    // same "already dead" condition in a different letter. Both are dead here:
+    // the descendant took the kill.
+    !state.is_empty() && !state.starts_with('Z') && !state.contains('E')
 }
 
 /// Reads one `MARKER:a:b` line out of the pane text.
