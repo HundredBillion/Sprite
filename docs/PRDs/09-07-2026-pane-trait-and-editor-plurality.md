@@ -3,7 +3,7 @@
 **Date:** 2026-09-07
 **Type:** Documentation amendment (decision reversal)
 **Target:** `terminal-project-brief.md`, `CONTEXT.md`
-**Status:** Draft
+**Status:** Implemented (commit `0698154d`)
 
 ## Problem Statement
 

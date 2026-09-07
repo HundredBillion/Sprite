@@ -298,7 +298,7 @@ chosen so the pane renders natively through GPUI (§2).
   but it no longer defines the product architecture or build sequence.
 - **Code - OSS / VS Code** — behavior, layout, and extension-API compatibility
   reference. The open repository and Microsoft's branded distribution are not
-  license-equivalent; the fork must keep its own identity.
+  license-equivalent; the Croft fork must keep its own identity.
 - **Zed** — benchmark and idea source for responsiveness, collaboration,
   project-scale navigation, command UI, and architecture. Evaluate each idea by
   user value and measured cost rather than cloning Zed wholesale.
@@ -510,7 +510,7 @@ upstreams' visual references and are not held to the VS Code corpus.
 
 Sprite Terminal reaching daily-driver quality is the bounded, high-confidence
 part: Ghostty provides the terminal semantics and multiple GPUI terminals prove
-the windowing/rendering path. The fork's visual parity is pursued on the GPUI
+the windowing/rendering path. The Croft fork's visual parity is pursued on the GPUI
 renderer, so the terminal cell ceiling no longer bounds it; the dominant parity
 risks are the model/view surgery itself and the fidelity work after it.
 Functional VS Code parity, especially extension compatibility, is the dominant
@@ -553,7 +553,7 @@ multi-repo interaction, but it has no build-time relationship to Croft.
 
 The previous goal reframe — "VS Code capability in your aesthetic, not pixel-
 identical" — is superseded. Visual indistinguishability is now an explicit
-target, while the fork retains its own name and legally safe assets.
+target, while the Croft fork retains its own name and legally safe assets.
 
 Use one semantic design-token model for the Croft fork:
 
