@@ -86,7 +86,7 @@ fn arrow_up_follows_cursor_key_mode() {
 
 fn arrow_up_encoding(set_mode: &str) -> String {
     let script = format!(
-        "{set_mode} stty -icanon -echo min 3 time 0; printf 'READY\\n'; head -c 3 | od -An -tx1"
+        "{set_mode} stty -icanon -echo min 3 time 0; printf 'READY\\n'; head -c 3 | od -An -tx1 | tr -s ' '"
     );
     let mut session = session(&script);
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
@@ -112,8 +112,9 @@ fn arrow_up_encoding(set_mode: &str) -> String {
 /// The reply is read back as hex so the parser cannot consume its own answer.
 #[test]
 fn terminal_answers_device_status_report() {
-    let mut session =
-        session("stty -icanon -echo min 4 time 0; printf '\\033[5n'; head -c 4 | od -An -tx1");
+    let mut session = session(
+        "stty -icanon -echo min 4 time 0; printf '\\033[5n'; head -c 4 | od -An -tx1 | tr -s ' '",
+    );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
     events.expect_ready();
@@ -270,7 +271,7 @@ fn kitty_keyboard_flags_change_the_encoding() {
     fn encoding_of(setup: &str, bytes: usize, marker: &str) -> String {
         let script = format!(
             "stty -icanon -icrnl -echo min {bytes} time 0; {setup} printf 'READY\\n'; \
-             head -c {bytes} | od -An -tx1"
+             head -c {bytes} | od -An -tx1 | tr -s ' '"
         );
         let mut session = session(&script);
         let events = EventPump::new(session.take_event_stream().expect("take event stream"));
@@ -309,7 +310,7 @@ fn a_key_release_types_nothing_under_release_reporting() {
     // One read(2) that waits, then reports every byte the press and the
     // release together delivered.
     let script = "printf '\\033[>2u'; stty -icanon -echo min 0 time 15; printf 'READY\\n'; \
-                  dd bs=32 count=1 2>/dev/null | od -An -tx1; printf 'DONE\\n'";
+                  dd bs=32 count=1 2>/dev/null | od -An -tx1 | tr -s ' '; printf 'DONE\\n'";
     let mut session = session(script);
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));

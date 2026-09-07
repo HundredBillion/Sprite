@@ -122,13 +122,11 @@ impl std::fmt::Debug for ForegroundWatch {
 
 /// The basename of a process, and nothing else about it.
 ///
-/// `/proc/<pid>/comm` holds a name and nothing more. The arguments and the
-/// environment sit beside it and are deliberately not read: a pane needs to say
-/// *what* is running, never with what secrets on its command line.
+/// The kernel's answer, per platform, and deliberately only the name: see
+/// `pty_unix::process_name` for why the arguments and environment beside it
+/// are never read.
 fn executable_name(pid: i32) -> Option<String> {
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    let name = comm.trim();
-    (!name.is_empty()).then(|| name.to_owned())
+    pty_unix::process_name(pid)
 }
 
 #[cfg(test)]

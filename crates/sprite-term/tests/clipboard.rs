@@ -115,7 +115,7 @@ fn an_oversized_payload_is_denied() {
 fn a_clipboard_read_request_is_never_answered() {
     let mut session = session(
         "stty -icanon -echo min 1 time 0; read _; printf '\\033]52;c;?\\007'; \
-         printf 'DONE\\n'; head -c 1 | od -An -tx1; printf 'ANSWERED\\n'; sleep 30",
+         printf 'DONE\\n'; head -c 1 | od -An -tx1 | tr -s ' '; printf 'ANSWERED\\n'; sleep 30",
     );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));

@@ -26,7 +26,7 @@ fn hex_reader(setup: &str, count: usize) -> String {
     // the tty rather than what Sprite actually wrote.
     format!(
         "stty -icanon -icrnl -echo min {count} time 0; {setup} printf 'READY\\n'; \
-         head -c {count} | od -An -tx1"
+         head -c {count} | od -An -tx1 | tr -s ' '"
     )
 }
 
@@ -122,10 +122,12 @@ fn paste_cannot_escape_its_own_brackets() {
     );
 }
 
-/// A paste larger than one accepted command is chunked rather than refused: the
-/// 16 KiB limit bounds a single write, not what a person may paste.
+/// A paste larger than one accepted command is queued rather than refused: the
+/// 16 KiB limit bounds a single input write, not what a person may paste. The
+/// pump feeds it to the child as the child reads, so a paste the child is slow
+/// to take cannot stall the pane (ADR 0015).
 #[test]
-fn a_large_paste_is_chunked_rather_than_rejected() {
+fn a_large_paste_is_queued_rather_than_rejected() {
     let mut session = session("stty -echo; cat > /tmp/sprite-paste-test.txt & sleep 30");
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     events.expect_ready();
