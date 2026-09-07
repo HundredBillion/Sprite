@@ -103,7 +103,11 @@ fn session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump)
         // `\\n` so printf receives the two characters backslash-n. A real
         // newline inside the quotes would leave the shell waiting for the rest
         // of an unterminated string.
-        .send(TerminalCommand::Input(b"printf 'READY\\n'\n".to_vec()))
+        // Split by a `%s` for the reason `marker_command` gives: the tty echoes
+        // this line before the shell has run it, and an echo that already read
+        // `READY` would end the wait below while the shell is still starting —
+        // exactly when a long line typed ahead of it can be lost.
+        .send(TerminalCommand::Input(b"printf 'RE%sADY\\n' ''\n".to_vec()))
         .expect("ask the shell to announce itself");
     snapshots.wait_for("the shell to start", |bundle| {
         pane_text(bundle).contains("READY")

@@ -23,7 +23,11 @@ fn start(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("snapshots"));
     events.expect_ready();
     session
-        .send(TerminalCommand::Input(b"printf 'READY\\n'\n".to_vec()))
+        // Split by a `%s` for the reason `marker_command` gives: the tty echoes
+        // this line before the shell has run it, and an echo that already read
+        // `READY` would end the wait below while the shell is still starting —
+        // exactly when a long line typed ahead of it can be lost.
+        .send(TerminalCommand::Input(b"printf 'RE%sADY\\n' ''\n".to_vec()))
         .expect("announce");
     snapshots.wait_for("the shell", |b| pane_text(b).contains("READY"));
     (session, events, snapshots)

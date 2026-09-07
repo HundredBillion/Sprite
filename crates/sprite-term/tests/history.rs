@@ -51,8 +51,13 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
 
 /// A shell that prints `count` numbered lines and then waits, so the scrollback
 /// is deep enough to ask for a slice of it.
+///
+/// `exec` so that `sleep` *is* the foreground program rather than a child of
+/// the shell: the kernel names the foreground group's leader, and a shell that
+/// forks its last command — bash 3.2, which macOS ships as `sh` — would stay
+/// that leader itself, where bash 5 happens to exec it.
 fn counting_session(count: usize) -> (TerminalSession, EventPump, SnapshotPump) {
-    let script = format!("for i in $(seq 1 {count}); do echo line-$i; done; sleep 300");
+    let script = format!("for i in $(seq 1 {count}); do echo line-$i; done; exec sleep 300");
     let config = SessionConfig::command("/bin/sh", args(&["-c", &script]));
     let mut session = TerminalSession::spawn(config).expect("spawn session");
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
@@ -403,9 +408,9 @@ fn a_history_answer_carries_the_metadata_the_schema_needs() {
         history.captured_at_unix_ms > 1_700_000_000_000,
         "a real wall-clock capture time, not zero"
     );
-    // The session's own program is `sh`, but the script ends in `sleep 300`,
-    // so `sleep` is what holds the terminal. Asserting that rather than `sh`
-    // is what proves this reports the *foreground* program instead of the
+    // The session's own program is `sh`, but the script ends in `exec sleep
+    // 300`, so `sleep` is what holds the terminal. Asserting that rather than
+    // `sh` is what proves this reports the *foreground* program instead of the
     // shell that happens to own the session.
     assert_eq!(
         history.foreground.as_deref(),

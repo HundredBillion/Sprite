@@ -6,7 +6,7 @@
 //! themselves.
 
 use std::cell::RefCell;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -38,17 +38,9 @@ use crate::{
 /// slipped.
 const MAX_WHEEL_TURNS: u32 = 32;
 
-/// The one ordered PTY-write path. Worker-local: it never crosses a thread or
-/// the public interface, so no `Arc`, writer thread, or extra channel exists.
-type PtyWriter = Rc<RefCell<Box<dyn Write + Send>>>;
-
-/// The first failure from the terminal's own reply callback, which cannot
+/// The first refusal from the terminal's own reply callback, which cannot
 /// return an error of its own.
 type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
-
-/// One paste is written in chunks of this size, matching the accepted `Input`
-/// limit so a large paste bounds its writes the same way typed input does.
-const PASTE_CHUNK_BYTES: usize = 16 * 1024;
 
 /// DEC private mode 2004: bracketed paste.
 const MODE_BRACKETED_PASTE: u16 = 2004;
@@ -79,6 +71,25 @@ pub(crate) enum PumpOutcome {
     Canceled,
     Eof,
     ReadError(String),
+    WriteError(String),
+}
+
+/// The session-ending failure a pump outcome carries, if it carries one.
+fn pump_failure(outcome: PumpOutcome) -> Option<SessionError> {
+    match outcome {
+        PumpOutcome::ReadError(error) => Some(SessionError::new("pty_read", error)),
+        PumpOutcome::WriteError(error) => Some(SessionError::new("pty_write", error)),
+        PumpOutcome::Canceled | PumpOutcome::Eof => None,
+    }
+}
+
+/// Tells the application about input the pump refused to queue.
+///
+/// Not fatal: the program has stopped reading, which is its business; the
+/// pane keeps showing whatever it does next. What matters is that the person
+/// hears their input did not arrive, rather than wondering.
+fn report_refused_input(events: &async_channel::Sender<TerminalEvent>, error: SessionError) {
+    let _ = events.send_blocking(TerminalEvent::Error(error));
 }
 
 /// Messages the worker accepts. Application commands and helper-thread reports
@@ -136,15 +147,17 @@ pub(crate) fn run(
     // it is running from the moment it opens.
     foreground.attach(master_fd, process_group);
 
-    // Declared before the terminal so they outlive the callback it holds.
-    let writer: PtyWriter = match master.take_writer() {
-        Ok(writer) => Rc::new(RefCell::new(writer)),
+    // Declared before the terminal so it outlives the callback that holds its
+    // input handle. Every byte for the PTY goes through the pump from here on;
+    // the worker itself never writes (ADR 0015).
+    let mut pump = match Pump::start(master_fd, reader, commands.clone()) {
+        Ok(pump) => pump,
         Err(error) => {
-            let _ =
-                events.send_blocking(TerminalEvent::Error(SessionError::new("pty_writer", error)));
+            let _ = events.send_blocking(TerminalEvent::Error(error));
             return;
         }
     };
+    let input = pump.input();
     let write_error: PtyWriteError = Rc::new(RefCell::new(None));
     // Deny until the application declares focus. A pane that has never been
     // focused cannot take the clipboard, which matters because a child can emit
@@ -214,12 +227,12 @@ pub(crate) fn run(
     // Terminal-generated replies (device status reports and the like) take the
     // same ordered write path as keyboard input.
     let registered = terminal.on_pty_write({
-        let writer = Rc::clone(&writer);
+        let input = input.clone();
         let write_error = Rc::clone(&write_error);
         move |_terminal: &Terminal<'_, '_>, data: &[u8]| {
-            if let Err(error) = write_all(&writer, data) {
+            if let Err(error) = input.write(data.to_vec()) {
                 let mut slot = write_error.borrow_mut();
-                // Keep the first failure: later ones are consequences.
+                // Keep the first refusal: later ones are consequences.
                 if slot.is_none() {
                     *slot = Some(error);
                 }
@@ -356,14 +369,6 @@ pub(crate) fn run(
         }
     };
 
-    let mut pump = match Pump::start(master_fd, reader, commands.clone()) {
-        Ok(pump) => pump,
-        Err(error) => {
-            let _ = events.send_blocking(TerminalEvent::Error(error));
-            return;
-        }
-    };
-
     if events.send_blocking(TerminalEvent::Ready).is_err() {
         return;
     }
@@ -403,12 +408,11 @@ pub(crate) fn run(
                 dirty = true;
                 pump.return_permit();
 
-                // The reply callback cannot fail loudly, so its first failure
-                // is collected here and ends this pane rather than silently
-                // dropping terminal answers.
+                // The reply callback cannot speak for itself, so a reply the
+                // pump refused to queue is reported from here rather than
+                // silently dropped.
                 if let Some(error) = write_error.borrow_mut().take() {
-                    fatal = Some(error);
-                    break;
+                    report_refused_input(&events, error);
                 }
 
                 // Lifecycle notices raised during parsing are delivered here,
@@ -442,9 +446,8 @@ pub(crate) fn run(
                     // Trusted, already-encoded bytes: one command, one write.
                     // Raw input is a transport, not a keystroke, so it does not
                     // move a reader who is looking at history.
-                    if let Err(error) = write_all(&writer, &bytes) {
-                        fatal = Some(error);
-                        break;
+                    if let Err(error) = input.write(bytes) {
+                        report_refused_input(&events, error);
                     }
                 }
                 TerminalCommand::Key(event) => {
@@ -456,9 +459,8 @@ pub(crate) fn run(
                     }
                     match encode_key(&mut encoder, &terminal, &event) {
                         Ok(bytes) => {
-                            if let Err(error) = write_all(&writer, &bytes) {
-                                fatal = Some(error);
-                                break;
+                            if let Err(error) = input.write(bytes) {
+                                report_refused_input(&events, error);
                             }
                         }
                         // An unencodable key is reported but does not end the
@@ -516,9 +518,8 @@ pub(crate) fn run(
                                 size,
                             ) {
                                 Ok(bytes) => {
-                                    if let Err(error) = write_all(&writer, &bytes) {
-                                        fatal = Some(error);
-                                        break;
+                                    if let Err(error) = input.write(bytes) {
+                                        report_refused_input(&events, error);
                                     }
                                 }
                                 Err(error) => {
@@ -590,9 +591,8 @@ pub(crate) fn run(
                     // decide without the two sides disagreeing.
                     match encode_mouse(&mut mouse_encoder, &terminal, &event, size) {
                         Ok(Some(bytes)) => {
-                            if let Err(error) = write_all(&writer, &bytes) {
-                                fatal = Some(error);
-                                break;
+                            if let Err(error) = input.write(bytes) {
+                                report_refused_input(&events, error);
                             }
                         }
                         // Withheld: the child is not reporting, or the override
@@ -619,17 +619,11 @@ pub(crate) fn run(
                         continue;
                     }
                     match encode_paste(&terminal, &text) {
+                        // Queued whole; the pump feeds it to the PTY as the
+                        // PTY has room, so its size costs the pane nothing.
                         Ok(bytes) => {
-                            // Written in chunks so one enormous paste cannot
-                            // monopolise the PTY, while still arriving intact.
-                            for chunk in bytes.chunks(PASTE_CHUNK_BYTES) {
-                                if let Err(error) = write_all(&writer, chunk) {
-                                    fatal = Some(error);
-                                    break;
-                                }
-                            }
-                            if fatal.is_some() {
-                                break;
+                            if let Err(error) = input.write(bytes) {
+                                report_refused_input(&events, error);
                             }
                         }
                         Err(error) => {
@@ -641,14 +635,8 @@ pub(crate) fn run(
                 }
                 TerminalCommand::PasteConfirmed(text) => match encode_paste(&terminal, &text) {
                     Ok(bytes) => {
-                        for chunk in bytes.chunks(PASTE_CHUNK_BYTES) {
-                            if let Err(error) = write_all(&writer, chunk) {
-                                fatal = Some(error);
-                                break;
-                            }
-                        }
-                        if fatal.is_some() {
-                            break;
+                        if let Err(error) = input.write(bytes) {
+                            report_refused_input(&events, error);
                         }
                     }
                     Err(error) => {
@@ -664,18 +652,16 @@ pub(crate) fn run(
                         generation += 1;
                         dirty = true;
                     }
-                    if let Err(error) = write_all(&writer, text.as_bytes()) {
-                        fatal = Some(error);
-                        break;
+                    if let Err(error) = input.write(text.into_bytes()) {
+                        report_refused_input(&events, error);
                     }
                 }
                 TerminalCommand::Focus(gained) => {
                     focused.set(gained);
                     match encode_focus(&terminal, gained) {
                         Ok(Some(bytes)) => {
-                            if let Err(error) = write_all(&writer, &bytes) {
-                                fatal = Some(error);
-                                break;
+                            if let Err(error) = input.write(bytes) {
+                                report_refused_input(&events, error);
                             }
                         }
                         // The child never asked for focus reports.
@@ -773,8 +759,8 @@ pub(crate) fn run(
                 continue;
             }
             Message::PumpStopped(outcome) => {
-                if let PumpOutcome::ReadError(error) = outcome {
-                    fatal.get_or_insert_with(|| SessionError::new("pty_read", error));
+                if let Some(error) = pump_failure(outcome) {
+                    fatal.get_or_insert(error);
                 }
                 pump_stopped = true;
                 // End of output usually means the child is already gone and its
@@ -878,8 +864,8 @@ pub(crate) fn run(
         match inbox.recv_timeout(CLOSING_SLICE) {
             Ok(Message::ChildExited(status)) => exit_status = Some(status),
             Ok(Message::PumpStopped(outcome)) => {
-                if let PumpOutcome::ReadError(error) = outcome {
-                    fatal.get_or_insert_with(|| SessionError::new("pty_read", error));
+                if let Some(error) = pump_failure(outcome) {
+                    fatal.get_or_insert(error);
                 }
                 pump_stopped = true;
             }
@@ -906,8 +892,8 @@ pub(crate) fn run(
         while !pump_stopped && Instant::now() < drain_deadline {
             match inbox.recv_timeout(CLOSING_SLICE) {
                 Ok(Message::PumpStopped(outcome)) => {
-                    if let PumpOutcome::ReadError(error) = outcome {
-                        fatal.get_or_insert_with(|| SessionError::new("pty_read", error));
+                    if let Some(error) = pump_failure(outcome) {
+                        fatal.get_or_insert(error);
                     }
                     pump_stopped = true;
                 }
@@ -943,7 +929,6 @@ pub(crate) fn run(
         None => {}
     }
 
-    drop(writer);
     drop(master);
 }
 
@@ -1118,15 +1103,12 @@ fn apply_graphics_policy(
 /// The basename of the program in the foreground of this terminal.
 ///
 /// Read from the process the kernel already reports as the terminal's
-/// foreground group leader, and only its `comm` — never its arguments and never
-/// its environment, both of which are readable there and neither of which any
-/// observer is entitled to. Anything unavailable is `None` rather than a guess:
-/// a wrong name is worse than no name.
+/// foreground group leader, and only its name — see `pty_unix::process_name`
+/// for what is deliberately not read, and why an unavailable name is `None`
+/// rather than a guess.
 fn foreground_executable(master: &(dyn MasterPty + Send)) -> Option<String> {
     let leader = master.process_group_leader()?;
-    let comm = std::fs::read_to_string(format!("/proc/{leader}/comm")).ok()?;
-    let name = comm.trim();
-    (!name.is_empty()).then(|| name.to_owned())
+    pty_unix::process_name(leader)
 }
 
 /// The process groups descendant cleanup must reach.
@@ -1680,17 +1662,6 @@ fn apply_resize(
             size.cell_height_px,
         )
         .map_err(|error| SessionError::new("resize_terminal", error))
-}
-
-/// One ordered write operation, flushed so the child sees it immediately.
-fn write_all(writer: &PtyWriter, bytes: &[u8]) -> Result<(), SessionError> {
-    let mut writer = writer.borrow_mut();
-    writer
-        .write_all(bytes)
-        .map_err(|error| SessionError::new("pty_write", error))?;
-    writer
-        .flush()
-        .map_err(|error| SessionError::new("pty_write", error))
 }
 
 /// Encodes one owned platform-neutral key event against live terminal state.

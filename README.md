@@ -221,9 +221,18 @@ exceeded it was the *test* harness, which nests a scratch directory inside
 comes from the platform, the harness leaves room for a macOS `$TMPDIR`, and a
 test pins that budget so it cannot drift back.
 
-The whole suite passes on Linux with `$TMPDIR` set to a macOS-length path, which
-is the closest this can be checked without a Mac. It is still not a measurement:
-until the suite has run on real hardware, treat macOS as untested.
+That is now measured, not inferred. The whole workspace — format, lints, every
+test, the build — was run on real hardware on 2026-09-07: an Apple-silicon Mac
+on macOS 26 with Xcode installed for the Metal shaders. The observation tests
+pass there. The same run found two dozen engine-test failures that Linux had
+hidden. Most were the harness assuming GNU `od` spacing, `/proc`, or a bash
+newer than the 3.2 Apple ships. One was Sprite's: the worker wrote PTY input
+inline with a blocking call, and macOS's 1 KiB PTY input queue turned a large
+paste into a pane frozen for good. Input now goes through the PTY pump, which
+is the subject of ADR 0015. After those fixes the whole suite passes on macOS.
+
+Linux remains the supported platform, and the only one with packaging. macOS
+builds, is tested, and is installed by hand with `packaging/install.sh`.
 
 ## Layout
 

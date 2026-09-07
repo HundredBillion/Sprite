@@ -39,7 +39,7 @@ fn a_child_with_reporting_enabled_receives_mouse_events() {
     // Enable X10 mouse reporting, then dump what arrives as hex.
     let mut session = session(
         "stty -icanon -echo min 6 time 0; printf '\\033[?1000h'; printf 'READY\\n'; \
-         head -c 6 | od -An -tx1",
+         head -c 6 | od -An -tx1 | tr -s ' '",
     );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
@@ -67,7 +67,7 @@ fn a_child_with_reporting_enabled_receives_mouse_events() {
 fn a_child_without_reporting_receives_no_mouse_events() {
     let mut session = session(
         "stty -icanon -echo min 1 time 0; printf 'READY\\n'; \
-         head -c 1 | od -An -tx1; printf 'GOT-INPUT\\n'",
+         head -c 1 | od -An -tx1 | tr -s ' '; printf 'GOT-INPUT\\n'",
     );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
@@ -100,7 +100,7 @@ fn a_child_without_reporting_receives_no_mouse_events() {
 fn the_override_modifier_withholds_the_event_from_the_child() {
     let mut session = session(
         "stty -icanon -echo min 1 time 0; printf '\\033[?1000h'; printf 'READY\\n'; \
-         head -c 1 | od -An -tx1; printf 'GOT-INPUT\\n'",
+         head -c 1 | od -An -tx1 | tr -s ' '; printf 'GOT-INPUT\\n'",
     );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
@@ -147,7 +147,7 @@ fn wheel(rows: i32, shift: bool) -> TerminalCommand {
 fn a_child_with_reporting_enabled_receives_the_wheel() {
     let mut session = session(
         "stty -icanon -echo min 6 time 0; printf '\\033[?1049h\\033[?1000h'; printf 'READY\\n'; \
-         head -c 6 | od -An -tx1",
+         head -c 6 | od -An -tx1 | tr -s ' '",
     );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
@@ -176,7 +176,7 @@ fn a_child_with_reporting_enabled_receives_the_wheel() {
 fn a_full_screen_child_without_reporting_receives_arrow_keys() {
     let mut session = session(
         "stty -icanon -echo min 3 time 0; printf '\\033[?1049h'; printf 'READY\\n'; \
-         head -c 3 | od -An -tx1",
+         head -c 3 | od -An -tx1 | tr -s ' '",
     );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
@@ -207,7 +207,7 @@ fn the_wheel_is_not_sent_to_a_child_on_the_primary_screen() {
     // anything arrived, so the absence of input is observable.
     let mut session = session(
         "stty -icanon -echo min 0 time 10; printf 'READY\\n'; \
-         head -c 3 | od -An -tx1; printf 'QUIET\\n'",
+         head -c 3 | od -An -tx1 | tr -s ' '; printf 'QUIET\\n'",
     );
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));

@@ -275,7 +275,12 @@ impl GraphicsSession {
         session
             // `\\n` so printf receives backslash-n; a real newline inside the
             // quotes would leave the shell waiting for the rest of a string.
-            .send(TerminalCommand::Input(b"printf 'READY\\n'\n".to_vec()))
+            // Split by a `%s` for the same reason `marker_command` is: the tty
+            // echoes this line before the shell has run it, and an echo that
+            // already read `READY` would satisfy the wait below while the shell
+            // is still starting — which is exactly when typing ahead into it
+            // can be lost.
+            .send(TerminalCommand::Input(b"printf 'RE%sADY\\n' ''\n".to_vec()))
             .expect("ask the shell to announce itself");
         snapshots.wait_for("the shell to start", |bundle| {
             pane_text(bundle).contains("READY")
