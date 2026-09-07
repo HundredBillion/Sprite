@@ -41,6 +41,8 @@ const DIVIDER_NUDGE_PX: f32 = 20.0;
 const DIVIDER_HOVER: u32 = 0x6a6a80;
 const TAB_STRIP_HEIGHT: f32 = 28.0;
 const TAB_ACTIVE_BG: u32 = 0x1d1d24;
+/// A tab whose name is being typed, so the edit is visibly somewhere.
+const TAB_EDIT_BG: u32 = 0x2a2a3a;
 const TAB_INACTIVE_FG: u32 = 0x8a8a99;
 const TAB_ACTIVE_FG: u32 = 0xe6e6ef;
 /// The close question, in the one colour nothing else in the window uses.
@@ -94,6 +96,11 @@ pub struct Workspace {
     /// While this is set the pane area wears an overlay, which is what keeps
     /// the moves coming when the pointer outruns a seven-pixel strip.
     divider_drag: Option<DividerDrag>,
+    /// A tab name being typed. While set, the keyboard belongs to the label.
+    renaming: Option<TabRename>,
+    /// What the title bar currently says, so it is set only when it changes:
+    /// the platform call is not free, and render runs every frame.
+    window_title: Option<SharedString>,
 }
 
 impl Workspace {
@@ -159,6 +166,8 @@ impl Workspace {
             focus: cx.focus_handle(),
             pending_focus,
             divider_drag: None,
+            renaming: None,
+            window_title: None,
             pending_close: None,
             config_path,
             _reload: reload_task,
@@ -380,6 +389,40 @@ impl Workspace {
         outcome.describe(&path, &complaints.0)
     }
 
+    fn begin_rename(&mut self, cx: &mut Context<Self>) {
+        let tab = self.tabs.active_tab();
+        // Start from the current name, so a rename edits rather than retypes.
+        let text = self.tabs.name(tab).unwrap_or_default().to_owned();
+        self.renaming = Some(TabRename { tab, text });
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// One keystroke into a rename in progress. True when the key was for the
+    /// rename and must go no further.
+    fn rename_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        let Some(renaming) = self.renaming.as_mut() else {
+            return false;
+        };
+        match rename_step(&renaming.text, keystroke) {
+            RenameStep::Editing(text) => renaming.text = text,
+            RenameStep::Commit(text) => {
+                let tab = renaming.tab;
+                let name = (!text.is_empty()).then_some(text);
+                self.tabs.set_name(tab, name);
+                self.renaming = None;
+            }
+            RenameStep::Cancel => self.renaming = None,
+        }
+        cx.notify();
+        true
+    }
+
     fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
         if self.pending_close.take().is_some() {
             cx.notify();
@@ -492,6 +535,8 @@ impl Workspace {
     }
 
     fn focus_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        // A click on a tab is a person moving on from any rename in progress.
+        self.cancel_rename(cx);
         if self.tabs.focus_tab(tab) {
             self.request_focus(self.tabs.active().focus());
             cx.notify();
@@ -706,6 +751,64 @@ fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -
 /// (x, y, width, height), and the pane itself.
 type PanePlacement = (PaneId, f32, f32, f32, f32, Rc<dyn PaneHandle>);
 
+/// What a tab shows: the Tab Name if a person gave one, else the focused pane's
+/// Pane Title, else the tab's position counted from one.
+///
+/// The focused pane's title rather than any other pane's, because it is the
+/// only choice that stays stable as focus moves within a split tab. Pure, so
+/// the order can be asserted without a window.
+fn tab_label(name: Option<&str>, title: Option<&str>, index: usize) -> SharedString {
+    match (name, title) {
+        (Some(name), _) => name.to_owned().into(),
+        (None, Some(title)) => title.to_owned().into(),
+        (None, None) => format!("{}", index + 1).into(),
+    }
+}
+
+/// A tab whose name is being typed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TabRename {
+    tab: TabId,
+    text: String,
+}
+
+/// Where one keystroke leaves a name being typed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RenameStep {
+    Editing(String),
+    Commit(String),
+    Cancel,
+}
+
+/// The whole of a text field, for a name: append the typed character, delete
+/// the last one, keep, or abandon. GPUI has no text field, and a tab name needs
+/// none of what one would add — no cursor movement, no selection, no IME
+/// composition. Pure, so every key can be asserted without a window.
+fn rename_step(text: &str, keystroke: &gpui::Keystroke) -> RenameStep {
+    match keystroke.key.as_str() {
+        "enter" => RenameStep::Commit(text.to_owned()),
+        "escape" => RenameStep::Cancel,
+        "backspace" => {
+            let mut text = text.to_owned();
+            text.pop();
+            RenameStep::Editing(text)
+        }
+        _ => match &keystroke.key_char {
+            Some(typed) if !keystroke.modifiers.control && !keystroke.modifiers.platform => {
+                RenameStep::Editing(format!("{text}{typed}"))
+            }
+            _ => RenameStep::Editing(text.to_owned()),
+        },
+    }
+}
+
+/// The title bar: the focused pane's Pane Title alone, or the application's name
+/// when it has none. The Dock and the switcher already say which application
+/// this is, so the title is spent on what is running.
+fn window_title(title: Option<&str>) -> &str {
+    title.unwrap_or("Sprite")
+}
+
 /// A close waiting on a second press.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingClose {
@@ -782,6 +885,7 @@ enum WorkspaceAction {
     FontReset,
     NewTab,
     CloseTab,
+    RenameTab,
     NextTab,
     PreviousTab,
     Focus(Direction),
@@ -824,6 +928,7 @@ fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
         "0" | ")" => Some(WorkspaceAction::FontReset),
         "t" => Some(WorkspaceAction::NewTab),
         "q" => Some(WorkspaceAction::CloseTab),
+        "r" => Some(WorkspaceAction::RenameTab),
         "pagedown" => Some(WorkspaceAction::NextTab),
         "pageup" => Some(WorkspaceAction::PreviousTab),
         "left" => Some(WorkspaceAction::Focus(Direction::Left)),
@@ -1048,6 +1153,31 @@ impl Render for Workspace {
         let active_tab = self.tabs.active_tab();
         let tab_order = self.tabs.order();
 
+        // Each tab's label, resolved before the strip is built so the tab
+        // closure stays a pure placement of a value it is handed.
+        let labels: Vec<SharedString> = tab_order
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let title = self.tabs.focused_in(*tab).and_then(|pane| pane.title(cx));
+                tab_label(
+                    self.tabs.name(*tab),
+                    title.as_ref().map(|t| t.as_ref()),
+                    index,
+                )
+            })
+            .collect();
+
+        // The title bar follows the focused pane of the active tab.
+        let focused_title = self.tabs.active().focused().and_then(|pane| pane.title(cx));
+        let wanted: SharedString = window_title(focused_title.as_ref().map(|t| t.as_ref()))
+            .to_owned()
+            .into();
+        if self.window_title.as_ref() != Some(&wanted) {
+            window.set_window_title(&wanted);
+            self.window_title = Some(wanted);
+        }
+
         // Each pane learns its own allocation before it lays out its grid, so
         // every child is told the size of its pane rather than of the window.
         let placements: Vec<PanePlacement> = self
@@ -1206,7 +1336,17 @@ impl Render for Workspace {
             .enumerate()
             .map(|(index, tab)| {
                 let is_active = tab == active_tab;
-                let label: SharedString = format!("{}", index + 1).into();
+                let editing = self
+                    .renaming
+                    .as_ref()
+                    .filter(|renaming| renaming.tab == tab)
+                    .map(|renaming| renaming.text.clone());
+                // A thin bar after the text stands for the caret; there is no
+                // cursor to move, so a glyph is all the field needs.
+                let label: SharedString = match &editing {
+                    Some(text) => format!("{text}\u{258f}").into(),
+                    None => labels[index].clone(),
+                };
                 div()
                     .flex()
                     .items_center()
@@ -1215,6 +1355,7 @@ impl Render for Workspace {
                     .h_full()
                     .text_size(px(12.0))
                     .bg(rgb(if is_active { TAB_ACTIVE_BG } else { BACKGROUND }))
+                    .when(editing.is_some(), |element| element.bg(rgb(TAB_EDIT_BG)))
                     .text_color(rgb(if is_active {
                         TAB_ACTIVE_FG
                     } else {
@@ -1255,6 +1396,12 @@ impl Render for Workspace {
             // one event reaching two consumers, which the terminal's input
             // rules forbid.
             .capture_key_down(cx.listener(|workspace, event: &KeyDownEvent, window, cx| {
+                // A name being typed owns the keyboard, as the close question
+                // does: every key is for the label until Enter or Escape.
+                if workspace.rename_key(&event.keystroke, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 let action = workspace_action(&event.keystroke);
                 if workspace.pending_close.is_some() {
                     // Escape answers "no". It is claimed, because a question on
@@ -1296,6 +1443,7 @@ impl Render for Workspace {
                     WorkspaceAction::FontReset => workspace.reset_font(cx),
                     WorkspaceAction::NewTab => workspace.open_tab(window, cx),
                     WorkspaceAction::CloseTab => workspace.close_active_tab(cx),
+                    WorkspaceAction::RenameTab => workspace.begin_rename(cx),
                     WorkspaceAction::NextTab => workspace.switch_tab(true, cx),
                     WorkspaceAction::PreviousTab => workspace.switch_tab(false, cx),
                     WorkspaceAction::Focus(direction) => {
@@ -1377,8 +1525,9 @@ impl Render for Workspace {
 mod tests {
     use super::{
         CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction,
-        DividerDrag, Orientation, PaneId, WorkspaceAction, classify, describe_running,
-        divider_placements, divider_ratio, nudged_ratio, strip_leading, workspace_action,
+        DividerDrag, Orientation, PaneId, RenameStep, WorkspaceAction, classify, describe_running,
+        divider_placements, divider_ratio, nudged_ratio, rename_step, strip_leading, tab_label,
+        window_title, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
 
@@ -1403,6 +1552,83 @@ mod tests {
             control: true,
             ..Modifiers::default()
         }
+    }
+
+    fn plain(key: &str, key_char: Option<&str>) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers::default(),
+            key: key.to_owned(),
+            key_char: key_char.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn rename_is_bound_to_ctrl_shift_r() {
+        assert_eq!(
+            workspace_action(&press("r", ctrl_shift())),
+            Some(WorkspaceAction::RenameTab)
+        );
+        assert_eq!(workspace_action(&press("r", ctrl())), None);
+    }
+
+    /// The whole of what a name needs: append, delete, keep, abandon.
+    #[test]
+    fn typing_edits_the_name_and_enter_keeps_it() {
+        assert_eq!(
+            rename_step("bui", &plain("l", Some("l"))),
+            RenameStep::Editing("buil".to_owned())
+        );
+        assert_eq!(
+            rename_step("build", &plain("backspace", None)),
+            RenameStep::Editing("buil".to_owned())
+        );
+        assert_eq!(
+            rename_step("", &plain("backspace", None)),
+            RenameStep::Editing(String::new())
+        );
+        assert_eq!(
+            rename_step("build", &plain("enter", None)),
+            RenameStep::Commit("build".to_owned())
+        );
+        assert_eq!(
+            rename_step("build", &plain("escape", None)),
+            RenameStep::Cancel
+        );
+    }
+
+    /// A key with no character — an arrow, a function key, a bare modifier — is
+    /// not a letter and changes nothing.
+    #[test]
+    fn a_key_without_a_character_leaves_the_name_alone() {
+        assert_eq!(
+            rename_step("build", &plain("left", None)),
+            RenameStep::Editing("build".to_owned())
+        );
+    }
+
+    /// Committing nothing removes the custom name rather than storing "".
+    #[test]
+    fn committing_an_empty_name_is_a_commit_of_nothing() {
+        assert_eq!(
+            rename_step("", &plain("enter", None)),
+            RenameStep::Commit(String::new())
+        );
+    }
+
+    /// Name, then Pane Title, then index. A name a person typed beats what the
+    /// program says; what the program says beats a number.
+    #[test]
+    fn a_tab_label_prefers_the_name_then_the_title_then_the_index() {
+        assert_eq!(tab_label(Some("build"), Some("vim"), 0), "build");
+        assert_eq!(tab_label(None, Some("vim"), 0), "vim");
+        assert_eq!(tab_label(None, None, 0), "1");
+        assert_eq!(tab_label(None, None, 4), "5");
+    }
+
+    #[test]
+    fn the_window_title_is_the_pane_title_or_sprite() {
+        assert_eq!(window_title(Some("vim README.md")), "vim README.md");
+        assert_eq!(window_title(None), "Sprite");
     }
 
     #[test]

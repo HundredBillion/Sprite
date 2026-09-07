@@ -159,11 +159,16 @@ builds do not reach the network.
 | `Ctrl+Shift+T` / `Ctrl+Shift+Q` | New tab / close tab |
 | `Ctrl+Shift+PageUp` / `PageDown` | Previous / next tab |
 | `Ctrl+Shift+W` | Close pane |
+| `Ctrl+Shift+R` | Rename the tab; Enter keeps, Escape abandons, empty removes |
 | `Ctrl+Shift+±` / `Ctrl+Shift+0` | Font size, and reset |
 
 Closing a pane, tab or window that is running a program asks first: the banner
 names what would be interrupted, and repeating the same gesture confirms.
 Escape keeps it.
+
+A tab shows the name you gave it, else what its focused pane is running — the
+title the program set, or the program's name — else its number. The window
+title follows the focused pane.
 
 ## Configuration
 
