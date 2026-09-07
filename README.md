@@ -120,6 +120,22 @@ like the old build.
 tree, which is what a distribution recipe should do. Sprite is not in any
 repository yet, so there is no `pacman -S sprite`.
 
+### On a Mac
+
+```sh
+packaging/macos/update.sh
+```
+
+That builds Sprite, wraps it as `Sprite.app`, puts it in `/Applications`, and
+links `/usr/local/bin/sprite` to the binary inside it, so Sprite opens from
+Launchpad and the Dock and the `sprite` command keeps working for anything that
+reads panes. It asks for your password once, for the link. Xcode is needed for
+the Metal shaders; `zig` for the terminfo source.
+
+To pick up later changes, run it again. If you installed with
+`packaging/install.sh` before this existed, the link replaces the binary it left
+at `/usr/local/bin/sprite`; `/usr/local/share/sprite` is yours to remove.
+
 ### Do not just copy the binary
 
 `target/release/sprite` on its own will start, and its children will get
@@ -236,8 +252,9 @@ inline with a blocking call, and macOS's 1 KiB PTY input queue turned a large
 paste into a pane frozen for good. Input now goes through the PTY pump, which
 is the subject of ADR 0015. After those fixes the whole suite passes on macOS.
 
-Linux remains the supported platform, and the only one with packaging. macOS
-builds, is tested, and is installed by hand with `packaging/install.sh`.
+Linux remains the supported platform, and the only one with a distribution
+package. macOS builds, is tested on every CI run, and installs as `Sprite.app`
+with `packaging/macos/update.sh`.
 
 ## Layout
 
