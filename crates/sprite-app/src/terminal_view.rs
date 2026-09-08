@@ -77,6 +77,9 @@ pub struct TerminalView {
     /// Measured from the font actually rendered, in logical pixels.
     cell_width: Pixels,
     cell_height: Pixels,
+    /// The configured line-height ratio, kept so a size change re-derives the
+    /// cell height from the same ratio the theme asked for.
+    line_height: f32,
     /// Resolved once, then used for both measuring and drawing.
     font_family: SharedString,
     /// Foreground and background to use before the first snapshot arrives.
@@ -187,7 +190,10 @@ impl TerminalView {
         config.size = TerminalSize {
             cell_width_px: physical(cell_width, scale_factor),
             cell_height_px: physical(
-                px(crate::config::Font::line_height(font.size)),
+                px(crate::config::Font::cell_height(
+                    font.size,
+                    font.line_height,
+                )),
                 scale_factor,
             ),
             ..config.size
@@ -323,7 +329,11 @@ impl TerminalView {
             textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
             focus: cx.focus_handle(),
             cell_width,
-            cell_height: px(crate::config::Font::line_height(font.size)),
+            cell_height: px(crate::config::Font::cell_height(
+                font.size,
+                font.line_height,
+            )),
+            line_height: font.line_height,
             font_family,
             fallback_colors,
             size: Some(initial_size),
@@ -375,9 +385,11 @@ impl TerminalView {
             textures: crate::graphics_cache::GraphicsCache::default(),
             focus: cx.focus_handle(),
             cell_width: px(8.0),
-            cell_height: px(crate::config::Font::line_height(
+            cell_height: px(crate::config::Font::cell_height(
                 crate::config::Font::DEFAULT_SIZE,
+                crate::config::Font::DEFAULT_LINE_HEIGHT,
             )),
+            line_height: crate::config::Font::DEFAULT_LINE_HEIGHT,
             font_family,
             fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
@@ -892,6 +904,7 @@ impl TerminalView {
         if family != self.font_family {
             self.font_family = family;
         }
+        self.line_height = settings.font.line_height;
         // Unconditional: the family may have changed under the same size, and
         // re-measuring a cell costs one text layout.
         self.set_font_size(settings.font.size, window, cx);
@@ -934,7 +947,7 @@ impl TerminalView {
     /// away from what is drawn.
     pub fn set_font_size(&mut self, size: f32, window: &Window, cx: &mut Context<Self>) {
         self.font_size = px(size);
-        self.cell_height = px(crate::config::Font::line_height(size));
+        self.cell_height = px(crate::config::Font::cell_height(size, self.line_height));
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         // Forces `synchronise_size` to recompute rather than compare against a
         // grid measured with the old cell.
