@@ -873,6 +873,9 @@ fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -
     if current.grid != next.grid {
         outcome.live.push("grid");
     }
+    if current.highlights != next.highlights {
+        outcome.live.push("highlights");
+    }
     if current.cursor != next.cursor {
         outcome.live.push("cursor");
     }
@@ -1936,6 +1939,18 @@ mod tests {
         grid.grid.padding = 24.0;
         let outcome = classify(&current, &grid);
         assert_eq!(outcome.live, vec!["grid"]);
+        assert!(outcome.next_session.is_empty());
+
+        let mut highlights = current.clone();
+        highlights.highlights.groups.push((
+            "Comment".to_owned(),
+            crate::config::HighlightStyle {
+                italic: Some(true),
+                ..Default::default()
+            },
+        ));
+        let outcome = classify(&current, &highlights);
+        assert_eq!(outcome.live, vec!["highlights"]);
         assert!(outcome.next_session.is_empty());
 
         let mut shell = current.clone();
