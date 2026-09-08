@@ -985,11 +985,7 @@ impl TerminalView {
         self.padding = settings.grid.padding;
         // The theme may have restyled a highlight group; every grid lays its
         // rows out again on its next frame.
-        for surface in self.surfaces.iter_mut() {
-            if let Body::Grid(grid) = &mut surface.body {
-                grid.invalidate();
-            }
-        }
+        self.refresh_grid_surfaces();
         // Unconditional: the family may have changed under the same size, and
         // re-measuring a cell costs one text layout.
         self.set_font_size(settings.font.size, window, cx);
@@ -1034,11 +1030,27 @@ impl TerminalView {
         self.font_size = px(size);
         self.cell_height = px(crate::config::Font::cell_height(size, self.line_height));
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
+        // A new cell size changes how many columns and rows fit the same
+        // pixels, which is all `surface_element` compares before it stays
+        // quiet; without this a grid keeps the cell count of the old font.
+        self.refresh_grid_surfaces();
         // Forces `synchronise_size` to recompute rather than compare against a
         // grid measured with the old cell.
         self.size = None;
         self.synchronise_size(window);
         cx.notify();
+    }
+
+    /// Makes every hosted grid Surface lay its rows out again and hear its
+    /// size again on the next frame. Idempotent, so the callers that reach it
+    /// both ways cost nothing extra.
+    fn refresh_grid_surfaces(&mut self) {
+        for surface in self.surfaces.iter_mut() {
+            if let Body::Grid(grid) = &mut surface.body {
+                grid.invalidate();
+                surface.told_size = None;
+            }
+        }
     }
 
     /// What a grid Surface borrows from this pane to draw like its terminal.
@@ -1348,12 +1360,7 @@ impl TerminalView {
             surface.told_size = Some(told);
             let event = match &surface.body {
                 Body::Grid(_) => {
-                    let cols = (f32::from(size.width) / f32::from(metrics.cell_width))
-                        .floor()
-                        .max(0.0) as u16;
-                    let rows = (f32::from(size.height) / f32::from(metrics.cell_height))
-                        .floor()
-                        .max(0.0) as u16;
+                    let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
                     event_grid_resize(told.0, told.1, cols, rows)
                 }
                 Body::Elements(_) => event_resize(told.0, told.1),

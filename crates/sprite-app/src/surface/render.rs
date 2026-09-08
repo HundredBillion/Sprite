@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, ElementId, Image, ImageFormat, InteractiveElement, IntoElement, ParentElement,
-    Pixels, SharedString, StatefulInteractiveElement, Styled, div, img, px, rgb,
+    Pixels, SharedString, Size, StatefulInteractiveElement, Styled, div, img, px, rgb,
 };
 use sprite_term::Rgb;
 
@@ -41,6 +41,30 @@ pub(crate) struct GridMetrics {
     /// The pane's default foreground and background, for a grid that set none.
     pub defaults: (Rgb, Rgb),
     pub blink_on: bool,
+}
+
+/// How many whole cells of this metric fit in a box of this size.
+///
+/// A part-cell of slack is not a column: the program is told what it can draw
+/// in full, and the remainder shows the wrapper's background. A pane not yet
+/// measured has no room at all rather than a column of nothing.
+pub(crate) fn cells_that_fit(size: Size<Pixels>, metrics: &GridMetrics) -> (u16, u16) {
+    let fit = |length: Pixels, cell: Pixels| -> u16 {
+        let cell = f32::from(cell);
+        if cell <= 0.0 {
+            return 0;
+        }
+        let count = (f32::from(length) / cell).floor();
+        if count <= 0.0 {
+            0
+        } else {
+            count.min(f32::from(u16::MAX)) as u16
+        }
+    };
+    (
+        fit(size.width, metrics.cell_width),
+        fit(size.height, metrics.cell_height),
+    )
 }
 
 /// A grid Surface as an element: the terminal's own painter over the grid's
@@ -180,6 +204,56 @@ mod tests {
         // Building the element tree needs no window; that is the property
         // this test locks down, since every frame rebuilds it.
         let _element = render(&parsed.description, SurfaceId(1), &registry, &connection);
+    }
+
+    #[test]
+    fn a_box_holds_the_whole_cells_that_fit_it_and_no_part_of_one() {
+        use gpui::size;
+
+        let metrics = GridMetrics {
+            cell_width: px(8.0),
+            cell_height: px(16.0),
+            font_family: "monospace".into(),
+            font_size: px(14.0),
+            defaults: (
+                crate::tokens::unpack(0xd8d8e0),
+                crate::tokens::unpack(0x101014),
+            ),
+            blink_on: true,
+        };
+
+        assert_eq!(
+            cells_that_fit(size(px(800.0), px(640.0)), &metrics),
+            (100, 40),
+            "exact multiples"
+        );
+        assert_eq!(
+            cells_that_fit(size(px(804.0), px(647.0)), &metrics),
+            (100, 40),
+            "a part-cell of slack is not a column or a row"
+        );
+        assert_eq!(cells_that_fit(size(px(0.0), px(0.0)), &metrics), (0, 0));
+        assert_eq!(
+            cells_that_fit(size(px(4.0), px(8.0)), &metrics),
+            (0, 0),
+            "smaller than one cell holds none"
+        );
+        assert_eq!(
+            cells_that_fit(size(px(-10.0), px(640.0)), &metrics),
+            (0, 40),
+            "a negative length is no room, not a wrapped count"
+        );
+
+        // A grid whose metrics have not been measured yet has no room at all.
+        let unmeasured = GridMetrics {
+            cell_width: px(0.0),
+            cell_height: px(0.0),
+            ..metrics
+        };
+        assert_eq!(
+            cells_that_fit(size(px(800.0), px(640.0)), &unmeasured),
+            (0, 0)
+        );
     }
 
     #[test]
