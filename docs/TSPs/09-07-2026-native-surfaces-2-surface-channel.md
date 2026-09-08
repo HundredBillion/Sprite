@@ -2597,11 +2597,16 @@ Expected: clean.
 
 **Amendments made during execution (2026-09-08).** Two defects in the code
 above were found and fixed while executing this task; the committed code is
-the reference, and this note records the difference. (1) `SurfaceConnection`
-gates `send` until the connection thread has written the `opened` line (an
-`establish`/`abandon` pair on a condition variable), because the window can
-send an event the moment it accepts an `open`, and without the gate that event
-could reach the client before its `opened` reply. (2) In the tests, dropping
+the reference, and this note records the difference. (1) `SurfaceConnection` is
+the one writer for everything the window and the connection thread send after
+the handshake: a line the window sends before the connection thread has
+answered the `open` waits in a queue and follows `opened` onto the wire, the
+refusals the connection thread writes after the handshake take the same lock
+as the window's events, and `send` never blocks the window (`ready`/`dead`
+flags and a queue replace the brief's bare mutex). Without this, an event
+could reach a client before its `opened` reply, two descriptors could
+interleave bytes, and a `warning` sent while the window was still deciding the
+open would have waited on a reply only the window could give. (2) In the tests, dropping
 `stream` alone did not close the connection, since the `BufReader` held a
 clone of the socket; both are dropped where the tests want the server to see
 EOF.
