@@ -763,7 +763,7 @@ classifier had no arm for it; the whole-branch review caught this and the
 arm was added, so a grid-only reload now reports `grid` instead of `nothing
 changed`.
 
-- [ ] **Step 4: Finish the branch**
+- [x] **Step 4: Finish the branch**
 
 Follow `dmi-superpowers:finishing-a-development-branch`: the branch is
 `native-surfaces`; the PR title is "Let the theme set the terminal's line
