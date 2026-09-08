@@ -125,6 +125,9 @@ impl Workspace {
             .flatten();
         let reload_sender = reload_tx.clone();
 
+        // Published before the settings, so a pane rendering on the first
+        // settings notification already finds its colours by name.
+        cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
         // Published before the first pane exists, so every pane — including
         // the first — finds current settings the moment it subscribes.
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -375,6 +378,8 @@ impl Workspace {
         let (settings, complaints) = candidate;
 
         let outcome = classify(&self.settings, &settings);
+        cx.global_mut::<crate::tokens::TokenRegistry>()
+            .apply_theme(&settings.colors);
         // Published, not pushed: each pane observes the global with its own
         // window in hand, which is what a cell re-measure needs and what this
         // method, reached from an endpoint thread, does not have.

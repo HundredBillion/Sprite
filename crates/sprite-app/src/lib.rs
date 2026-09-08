@@ -18,6 +18,7 @@ mod pane_tree;
 mod tabs;
 mod terminal_events;
 mod terminal_view;
+mod tokens;
 mod workspace;
 
 pub use cli::{Invocation, USAGE, WindowArgs, parse_arguments};

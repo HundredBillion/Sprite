@@ -25,6 +25,7 @@ use crate::grid::{
 };
 use crate::grid_paint::{RowPass, pack, terminal_font};
 use crate::input::gpui_key_event;
+use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FOREGROUND};
 
 /// The largest grid Terminal Core will accept, mirrored here so the view never
 /// asks for one it knows will be refused.
@@ -50,8 +51,6 @@ const MONOSPACE_PREFERENCES: [&str; 10] = [
     "Courier New",
 ];
 
-const BACKGROUND: u32 = 0x101014;
-const FOREGROUND: u32 = 0xd8d8e0;
 const STATUS: u32 = 0xf0a0a0;
 
 /// Half a blink. The rate every terminal has used since the VT100.

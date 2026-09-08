@@ -133,6 +133,12 @@ pub struct Colors {
     /// Sparse: someone who dislikes one shade of blue changes that one entry
     /// rather than restating the palette.
     pub palette: Vec<(u8, sprite_term::Rgb)>,
+    /// Colour tokens to override by name, sorted by name.
+    ///
+    /// The other keys in this section override Sprite's built-in tokens
+    /// (`terminal.background`, `ansi.4`, …) under their old names; this table
+    /// reaches tokens a program registers, such as `scm.addedForeground`.
+    pub tokens: Vec<(String, sprite_term::Rgb)>,
 }
 
 impl Colors {
@@ -335,6 +341,16 @@ impl Settings {
             out.push_str("\n[colors.palette]\n");
             for (index, color) in &self.colors.palette {
                 out.push_str(&format!("{index} = \"{}\"\n", hex(*color)));
+            }
+        }
+        if self.colors.tokens.is_empty() {
+            out.push_str("# no colour tokens are overridden\n");
+        } else {
+            out.push_str("\n[colors.tokens]\n");
+            for (name, color) in &self.colors.tokens {
+                // Quoted: token names contain dots, which TOML would otherwise
+                // read as nested tables.
+                out.push_str(&format!("\"{name}\" = \"{}\"\n", hex(*color)));
             }
         }
 
@@ -663,6 +679,30 @@ impl Settings {
                     "colors.palette",
                     "a table of index = \"#rrggbb\"",
                     "keeping the palette",
+                )),
+            }
+
+            match section.get("tokens") {
+                Some(toml::Value::Table(entries)) => {
+                    for (name, value) in entries {
+                        match value.as_str().and_then(Colors::parse_hex) {
+                            Some(color) => settings.colors.tokens.push((name.clone(), color)),
+                            None => complaints.0.push(format!(
+                                "colors.tokens.{name} is not a #rrggbb colour; \
+                                 keeping that token's default"
+                            )),
+                        }
+                    }
+                    // Sorted by name, so the order a file happens to be
+                    // written in does not change what Sprite does with it.
+                    // `Rgb` is not `Ord`, so the tuple can't sort itself.
+                    settings.colors.tokens.sort_by(|a, b| a.0.cmp(&b.0));
+                }
+                other => complaints.0.extend(wrong_type(
+                    other,
+                    "colors.tokens",
+                    "a table of \"name\" = \"#rrggbb\"",
+                    "keeping the tokens",
                 )),
             }
         }
@@ -1027,6 +1067,52 @@ mod tests {
     }
 
     #[test]
+    fn colour_tokens_are_read_sorted_and_bad_ones_are_reported() {
+        let settings =
+            parsed("[colors.tokens]\n\"scm.added\" = \"#40a02b\"\n\"demo.label\" = \"c0caf5\"\n");
+        assert_eq!(
+            settings.colors.tokens,
+            vec![
+                (
+                    "demo.label".to_owned(),
+                    sprite_term::Rgb {
+                        r: 0xc0,
+                        g: 0xca,
+                        b: 0xf5
+                    }
+                ),
+                (
+                    "scm.added".to_owned(),
+                    sprite_term::Rgb {
+                        r: 0x40,
+                        g: 0xa0,
+                        b: 0x2b
+                    }
+                ),
+            ]
+        );
+
+        {
+            // Scoped so this binding doesn't shadow the `complaints` helper
+            // before the next call.
+            let complaints = complaints("[colors.tokens]\n\"scm.added\" = \"green\"\n");
+            assert_eq!(complaints.len(), 1);
+            assert!(
+                complaints[0].contains("colors.tokens.scm.added"),
+                "{complaints:?}"
+            );
+            assert!(complaints[0].contains("#rrggbb"), "{complaints:?}");
+        }
+
+        let complaints = complaints("[colors]\ntokens = 3\n");
+        assert_eq!(complaints.len(), 1);
+        assert!(
+            complaints[0].contains("colors.tokens must be"),
+            "{complaints:?}"
+        );
+    }
+
+    #[test]
     fn colours_are_read_in_hex() {
         let settings = parsed(
             "[colors]\nbackground = \"#101014\"\nforeground = \"#d8d8e0\"\n\
@@ -1271,6 +1357,7 @@ mod tests {
         let text = "[font]\nfamily = \"Fira Code\"\nsize = 18\nline_height = 1.25\n\
                     [colors]\nbackground = \"#101018\"\ncursor = \"#ff8000\"\n\
                     [colors.palette]\n1 = \"#00ff00\"\n\
+                    [colors.tokens]\n\"scm.added\" = \"#40a02b\"\n\
                     [cursor]\nstyle = \"underline\"\nblink = true\n\
                     [shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\"]\n\
                     [scrollback]\nbytes = 4096\n\
