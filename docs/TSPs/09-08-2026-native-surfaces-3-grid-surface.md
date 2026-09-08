@@ -724,7 +724,7 @@ Colour precedence for a cell with highlight `hl`: the program's `define` for
 colours. `reverse` swaps foreground and background at paint time exactly as
 the terminal's inverse does.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/sprite-app/src/surface/grid.rs` with the tests only:
 
@@ -967,7 +967,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Add `pub mod grid;` to `crates/sprite-app/src/surface.rs` after `pub mod
 description;`.
@@ -976,7 +976,7 @@ Run: `cargo test -p sprite-app --locked --offline surface::grid::`
 Expected: compile error — `GridSurface`, `Op`, `parse_ops`, `is_op` are not
 defined.
 
-- [ ] **Step 3: Write the grid**
+- [x] **Step 3: Write the grid**
 
 Put this above the tests in `crates/sprite-app/src/surface/grid.rs`:
 
@@ -1592,7 +1592,7 @@ fn apply_theme(attrs: &mut Attrs, style: &HighlightStyle) {
 }
 ```
 
-- [ ] **Step 4: Run the tests and the gate**
+- [x] **Step 4: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline surface::grid::`
 Expected: all ten pass.
@@ -1602,7 +1602,7 @@ Expected: clean. (If clippy flags the module as unused until Task 5, add
 `#[allow(dead_code)]` on `pub mod grid;` in `surface.rs` with the comment
 `// Hosted by the terminal view, which follows.` and remove it in Task 5.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/grid.rs crates/sprite-app/src/surface.rs
