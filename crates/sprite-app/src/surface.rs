@@ -4,6 +4,9 @@
 pub mod channel;
 pub mod client;
 pub mod description;
+// Hosted by the terminal view, which follows.
+#[allow(dead_code)]
+pub mod grid;
 pub mod host;
 pub mod render;
 pub mod style;
