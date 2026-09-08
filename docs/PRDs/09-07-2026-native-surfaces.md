@@ -27,7 +27,9 @@ and it uses it **entirely from its own side of the wire**: Neovim's UI protocol
 already emits a complete, structured description of the editing screen on every
 keystroke — every line, every highlight group, every window's position, the
 cursor — so a small adapter beside Neovim forwards that stream as a grid
-surface, and plugins such as `svgtree.nvim` and `scm.nvim` send Surfaces of their own. All of that code lives in a Neovim repository. Sprite never learns the
+surface, and plugins such as `svgtree.nvim` and `scm.nvim` send Surfaces of
+their own. All of that code lives in a Neovim repository. Sprite never learns
+the
 name `nvim`. Nothing links into Sprite. Nothing needs bundling. There are two
 repositories — Sprite, and `sprite.nvim` — plus the plugins.
 
@@ -57,9 +59,12 @@ ideas Sprite deliberately declines.
   line height, gutter, padding, colours by highlight group. Quitting returns
   the shell, same directory, `$?` intact.
 - `svgtree.nvim` shows a real file tree beside the editor: proportional text,
-  full-colour vector icons, hover, smooth scrolling. `scm.nvim` shows a real source-control Surface docked beside the editor. Clicking a file in either opens it in Neovim. Neither
+  full-colour vector icons, hover, smooth scrolling. `scm.nvim` shows a real
+  source-control Surface docked beside the editor. Clicking a file in either
+  opens it in Neovim. Neither
   plugin contains a line of Rust.
-- Any program — a shell script, `htop`, an agent's CLI — can put up a Surface in its pane the same way, because nothing in the mechanism is
+- Any program — a shell script, `htop`, an agent's CLI — can put up a
+  Surface in its pane the same way, because nothing in the mechanism is
   Neovim's. A terminal built for agents gains a way for agents to show
   structured, styled output.
 - Every terminal program, unmodified, gets **Level 0** styling for free: the
@@ -407,21 +412,25 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
 1. **Unit, in Sprite.** The parser accepts each element kind and rejects an
    unknown kind, an unknown utility token, and an unsupported version with
    distinct reasons. Every supported utility token maps to a `Styled` call
-   (table-driven; the table *is* the supported vocabulary). The registry returns a built-in default, a program-registered default, a theme
-   override in that order of precedence, and, for an unknown name, the role's fixed fallback plus a `warning`
+   (table-driven; the table *is* the supported vocabulary). The registry
+   returns a built-in default, a program-registered default, a theme
+   override in that order of precedence, and, for an unknown name, the role's
+   fixed fallback plus a `warning`
    event; for the grid, a program's own OSC colour wins over all of
    them while it runs. Re-registering a name with the same default is a
    no-op; with a different default it is refused as `token conflict` and the
    first stands. The grid widget applies an incremental line update without
    repainting untouched rows; an element Surface's `update` replaces its
-   whole description, and nothing from the previous one survives. `TerminalView` hosts a fill, a dock (with the
+   whole description, and nothing from the previous one survives.
+   `TerminalView` hosts a fill, a dock (with the
    PTY told its new size), and an overlay, and returns the space when the
    connection closes. A surface opened with the default takes focus; one
    opened with `focus: false` leaves it where it was; `update` never moves
    focus; a `focus` request moves it; an overlay closing returns focus to
    the previous holder; `focus` and `blur` events are delivered. Two docks on
    different sides coexist; a second dock on an occupied side, or a second
-   fill, is refused as `position occupied`; overlays stack in open order. Level 0 changes a cell's drawn colour when the theme
+   fill, is refused as `position occupied`; overlays stack in open order.
+   Level 0 changes a cell's drawn colour when the theme
    remaps its token. `shell.rs` prepends a present integration directory and
    ignores an absent one. The observation grammar's own tests pass without
    change, and `observation/request.rs` still constructs no mutating variant.
@@ -439,7 +448,8 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    keystroke reaches the shell. Editing the
    theme's value for a token the Surface uses restyles the Surface live. The
    script exits; the Surface disappears and `tput cols` is restored. A second
-   script opens a *fill* surface streaming a small grid with two highlight
+   script runs `sprite surface open --fill`, streaming a small grid with two
+   highlight
    groups; the theme's flat highlight map colours them; closing it returns
    the shell.
 4. **End to end, by hand, Level 0.** With `nvim` and then `htop` running in
