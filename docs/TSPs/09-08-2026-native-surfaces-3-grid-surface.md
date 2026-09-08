@@ -2428,7 +2428,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Interfaces:** none new. `SPRITE_SURFACE_KEY` is now always distinct from
 `SPRITE_OBSERVATION_KEY`.
 
-- [ ] **Step 1: Make the change**
+- [x] **Step 1: Make the change**
 
 In `workspace.rs`, replace the `surface_key` `match` with:
 
@@ -2457,14 +2457,14 @@ In the TSP 2 document's "Amendments after the whole-branch review"
 paragraph, append the sentence: `Decision 3 was later reversed by TSP 3:
 the Surface Channel generates its own key, and \`Endpoint::key()\` is gone.`
 
-- [ ] **Step 2: Check by hand**
+- [x] **Step 2: Check by hand**
 
 Run `cargo run -p sprite-app --locked --offline -- -e /bin/sh -c 'env | grep SPRITE_.*KEY; sleep 3'`
 and read the two lines in the pane before it closes (or redirect them to a
 file): `SPRITE_OBSERVATION_KEY` and `SPRITE_SURFACE_KEY` are both present
 and differ.
 
-- [ ] **Step 3: Gate and commit**
+- [x] **Step 3: Gate and commit**
 
 Run: `cargo test -p sprite-app --locked --offline && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
