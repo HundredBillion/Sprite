@@ -2222,7 +2222,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
     metrics: &GridMetrics) -> AnyElement`.
   - `TerminalView::grid_metrics(&self) -> GridMetrics` (private).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `render.rs`'s tests:
 
@@ -2256,12 +2256,12 @@ In `render.rs`'s tests:
     }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p sprite-app --locked --offline surface::render::`
 Expected: compile error — `GridMetrics`, `render_grid` undefined.
 
-- [ ] **Step 3: Draw the grid**
+- [x] **Step 3: Draw the grid**
 
 In `render.rs`, add after `render`:
 
@@ -2388,7 +2388,7 @@ In `terminal_view.rs`:
         }
 ```
 
-- [ ] **Step 4: Run the tests and the gate**
+- [x] **Step 4: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including `a_grid_becomes_an_element_without_a_window`.
@@ -2396,7 +2396,7 @@ Expected: all pass, including `a_grid_becomes_an_element_without_a_window`.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/render.rs crates/sprite-app/src/terminal_view.rs
