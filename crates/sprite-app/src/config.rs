@@ -23,6 +23,7 @@ pub struct Settings {
     pub font: Font,
     pub colors: Colors,
     pub cursor: Cursor,
+    pub grid: Grid,
     pub shell: sprite_term::ShellPreference,
     pub scrollback: Scrollback,
 }
@@ -58,6 +59,11 @@ pub struct Font {
     /// of a font name would be worse than one that opens in the wrong font.
     pub family: Option<String>,
     pub size: f32,
+    /// Line height as a ratio of the size, applied and rounded per row.
+    ///
+    /// A ratio rather than pixels, so one setting survives a size change: a
+    /// person who likes airy lines at 14 gets airy lines at 18.
+    pub line_height: f32,
 }
 
 impl Font {
@@ -65,6 +71,13 @@ impl Font {
     pub const MIN_SIZE: f32 = 6.0;
     pub const MAX_SIZE: f32 = 72.0;
     pub const DEFAULT_SIZE: f32 = 14.0;
+
+    /// The ratio Sprite has always used — 16 pixels at size 14. Kept exactly,
+    /// so an unconfigured terminal draws as it did before this was a setting.
+    pub const DEFAULT_LINE_HEIGHT: f32 = 8.0 / 7.0;
+    /// Below 1.0 rows overlap; above 2.0 half of every row is empty.
+    pub const MIN_LINE_HEIGHT: f32 = 1.0;
+    pub const MAX_LINE_HEIGHT: f32 = 2.0;
 
     /// A size clamped into the usable range.
     pub fn clamp_size(size: f32) -> f32 {
@@ -74,14 +87,20 @@ impl Font {
         size.clamp(Self::MIN_SIZE, Self::MAX_SIZE)
     }
 
-    /// The line height for a given size.
+    /// A line-height ratio clamped into the usable range.
+    pub fn clamp_line_height(ratio: f32) -> f32 {
+        if ratio.is_nan() {
+            return Self::DEFAULT_LINE_HEIGHT;
+        }
+        ratio.clamp(Self::MIN_LINE_HEIGHT, Self::MAX_LINE_HEIGHT)
+    }
+
+    /// The height of one row for a size and a ratio, in whole pixels.
     ///
     /// Terminals need a fixed ratio rather than the font's own metrics, because
-    /// every row must be the same height whatever glyphs are on it. This is the
-    /// ratio Sprite has always used — 16 pixels at size 14 — now derived rather
-    /// than written twice.
-    pub fn line_height(size: f32) -> f32 {
-        (size * 8.0 / 7.0).round()
+    /// every row must be the same height whatever glyphs are on it.
+    pub fn cell_height(size: f32, line_height: f32) -> f32 {
+        (size * line_height).round()
     }
 }
 
@@ -90,6 +109,7 @@ impl Default for Font {
         Self {
             family: None,
             size: Self::DEFAULT_SIZE,
+            line_height: Self::DEFAULT_LINE_HEIGHT,
         }
     }
 }
@@ -164,6 +184,39 @@ impl Cursor {
     }
 }
 
+/// The grid's surroundings: what is not a cell.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grid {
+    /// Logical pixels between the grid and every edge of its pane.
+    ///
+    /// The smallest gap; the leftover from rounding the pane down to whole
+    /// cells is added to it. Zero is allowed: some people want every pixel.
+    pub padding: f32,
+}
+
+impl Grid {
+    /// The value Sprite always used, kept as the single source of truth.
+    pub const DEFAULT_PADDING: f32 = crate::grid::PANE_PADDING;
+    /// More than this and a small pane has no grid left.
+    pub const MAX_PADDING: f32 = 64.0;
+
+    /// A padding clamped into the usable range.
+    pub fn clamp_padding(padding: f32) -> f32 {
+        if padding.is_nan() {
+            return Self::DEFAULT_PADDING;
+        }
+        padding.clamp(0.0, Self::MAX_PADDING)
+    }
+}
+
+impl Default for Grid {
+    fn default() -> Self {
+        Self {
+            padding: Self::DEFAULT_PADDING,
+        }
+    }
+}
+
 /// How much output a pane remembers.
 ///
 /// Bytes, not lines, because that is what libghostty actually measures — its
@@ -223,6 +276,7 @@ impl Default for Settings {
             font: Font::default(),
             colors: Colors::default(),
             cursor: Cursor::default(),
+            grid: Grid::default(),
             shell: sprite_term::ShellPreference::default(),
             scrollback: Scrollback::default(),
             graphics: Graphics::default(),
@@ -257,6 +311,10 @@ impl Settings {
             None => out.push_str("# family is unset: Sprite finds an installed monospace font\n"),
         }
         out.push_str(&format!("size = {}\n", self.font.size));
+        out.push_str(&format!("line_height = {}\n", self.font.line_height));
+
+        out.push_str("\n[grid]\n");
+        out.push_str(&format!("padding = {}\n", self.grid.padding));
 
         out.push_str("\n[colors]\n");
         for (name, color) in [
@@ -346,6 +404,48 @@ fn style_name(style: sprite_term::CursorStyle) -> &'static str {
         sprite_term::CursorStyle::Bar => "bar",
         sprite_term::CursorStyle::Underline => "underline",
         sprite_term::CursorStyle::BlockHollow => "hollow",
+    }
+}
+
+/// Reads a numeric setting and clamps it into range, saying so.
+///
+/// Every number setting shares this shape: an integer is a number too (TOML
+/// tells them apart and a person should not have to); a value outside
+/// `range` is clamped with a complaint naming the range; a non-number keeps
+/// the default with a complaint. `None` means unset or unusable — either way
+/// the caller leaves its default alone. `setting` is the dotted name shown
+/// in complaints, such as `"font.size"`, whose last segment is the TOML key.
+fn read_clamped(
+    section: &toml::Value,
+    setting: &str,
+    range: std::ops::RangeInclusive<f32>,
+    clamp: impl Fn(f32) -> f32,
+    complaints: &mut Complaints,
+) -> Option<f32> {
+    let key = setting.rsplit_once('.').map_or(setting, |(_, key)| key);
+    let value = section.get(key)?;
+    match value
+        .as_float()
+        .or_else(|| value.as_integer().map(|v| v as f64))
+    {
+        Some(number) => {
+            let asked = number as f32;
+            let clamped = clamp(asked);
+            if (clamped - asked).abs() > f32::EPSILON {
+                complaints.0.push(format!(
+                    "{setting} {asked} is outside {}..={}; using {clamped}",
+                    range.start(),
+                    range.end()
+                ));
+            }
+            Some(clamped)
+        }
+        None => {
+            complaints
+                .0
+                .push(format!("{setting} must be a number; keeping the default"));
+            None
+        }
     }
 }
 
@@ -448,28 +548,36 @@ impl Settings {
                     "finding a monospace font instead",
                 )),
             }
-            if let Some(value) = section.get("size") {
-                match value
-                    .as_float()
-                    .or_else(|| value.as_integer().map(|v| v as f64))
-                {
-                    Some(size) => {
-                        let asked = size as f32;
-                        let clamped = Font::clamp_size(asked);
-                        if (clamped - asked).abs() > f32::EPSILON {
-                            complaints.0.push(format!(
-                                "font.size {asked} is outside {}..={}; using {clamped}",
-                                Font::MIN_SIZE,
-                                Font::MAX_SIZE
-                            ));
-                        }
-                        settings.font.size = clamped;
-                    }
-                    None => complaints
-                        .0
-                        .push("font.size must be a number; keeping the default".to_owned()),
-                }
+            if let Some(size) = read_clamped(
+                section,
+                "font.size",
+                Font::MIN_SIZE..=Font::MAX_SIZE,
+                Font::clamp_size,
+                &mut complaints,
+            ) {
+                settings.font.size = size;
             }
+            if let Some(ratio) = read_clamped(
+                section,
+                "font.line_height",
+                Font::MIN_LINE_HEIGHT..=Font::MAX_LINE_HEIGHT,
+                Font::clamp_line_height,
+                &mut complaints,
+            ) {
+                settings.font.line_height = ratio;
+            }
+        }
+
+        if let Some(section) = document.get("grid")
+            && let Some(padding) = read_clamped(
+                section,
+                "grid.padding",
+                0.0..=Grid::MAX_PADDING,
+                Grid::clamp_padding,
+                &mut complaints,
+            )
+        {
+            settings.grid.padding = padding;
         }
 
         if let Some(section) = document.get("graphics") {
@@ -849,12 +957,73 @@ mod tests {
         assert!(complaints("[font]\nfamily = 12\n")[0].contains("a name in quotes"));
     }
 
+    /// The ratio is applied to the size and rounded to whole pixels, so every
+    /// row is the same height whatever glyphs are on it.
     #[test]
-    fn line_height_follows_the_size() {
-        // The ratio Sprite has always used, now derived in one place.
-        assert_eq!(Font::line_height(14.0), 16.0);
-        assert_eq!(Font::line_height(28.0), 32.0);
-        assert!(Font::line_height(Font::MIN_SIZE) >= Font::MIN_SIZE);
+    fn cell_height_follows_the_size_and_the_ratio() {
+        assert_eq!(Font::cell_height(14.0, Font::DEFAULT_LINE_HEIGHT), 16.0);
+        assert_eq!(Font::cell_height(28.0, Font::DEFAULT_LINE_HEIGHT), 32.0);
+        assert_eq!(Font::cell_height(20.0, 1.5), 30.0);
+        assert!(Font::cell_height(Font::MIN_SIZE, Font::MIN_LINE_HEIGHT) >= Font::MIN_SIZE);
+    }
+
+    /// A line height must never be able to make the grid unreadable or
+    /// absurd, and a typo keeps the default rather than breaking the terminal.
+    #[test]
+    fn a_line_height_ratio_is_read_and_clamped() {
+        assert_eq!(parsed("[font]\nline_height = 1.5\n").font.line_height, 1.5);
+        // A whole number is a ratio too.
+        assert_eq!(parsed("[font]\nline_height = 2\n").font.line_height, 2.0);
+
+        assert_eq!(
+            parsed("[font]\nline_height = 0.2\n").font.line_height,
+            Font::MIN_LINE_HEIGHT
+        );
+        assert_eq!(
+            parsed("[font]\nline_height = 9\n").font.line_height,
+            Font::MAX_LINE_HEIGHT
+        );
+        assert!(complaints("[font]\nline_height = 9\n")[0].contains("outside"));
+
+        assert_eq!(
+            parsed("[font]\nline_height = \"tall\"\n").font.line_height,
+            Font::DEFAULT_LINE_HEIGHT
+        );
+        assert!(complaints("[font]\nline_height = \"tall\"\n")[0].contains("must be a number"));
+
+        assert_eq!(
+            Settings::default().font.line_height,
+            Font::DEFAULT_LINE_HEIGHT
+        );
+    }
+
+    /// The gap around the grid is a setting; it is clamped so a typo cannot
+    /// push the grid out of its own pane, and a nonsense value keeps the default.
+    #[test]
+    fn a_grid_padding_is_read_and_clamped() {
+        assert_eq!(parsed("[grid]\npadding = 12\n").grid.padding, 12.0);
+        assert_eq!(parsed("[grid]\npadding = 2.5\n").grid.padding, 2.5);
+        assert_eq!(parsed("[grid]\npadding = 0\n").grid.padding, 0.0);
+
+        assert_eq!(parsed("[grid]\npadding = -4\n").grid.padding, 0.0);
+        assert_eq!(
+            parsed("[grid]\npadding = 500\n").grid.padding,
+            Grid::MAX_PADDING
+        );
+        assert!(complaints("[grid]\npadding = 500\n")[0].contains("outside"));
+
+        assert_eq!(
+            parsed("[grid]\npadding = \"wide\"\n").grid.padding,
+            Grid::DEFAULT_PADDING
+        );
+        assert!(complaints("[grid]\npadding = \"wide\"\n")[0].contains("must be a number"));
+
+        assert_eq!(Settings::default().grid.padding, Grid::DEFAULT_PADDING);
+        assert_eq!(
+            Grid::DEFAULT_PADDING,
+            8.0,
+            "the default is the constant Sprite always used"
+        );
     }
 
     #[test]
@@ -1099,12 +1268,13 @@ mod tests {
     /// configuration.
     #[test]
     fn the_printed_configuration_parses_back_into_itself() {
-        let text = "[font]\nfamily = \"Fira Code\"\nsize = 18\n\
+        let text = "[font]\nfamily = \"Fira Code\"\nsize = 18\nline_height = 1.25\n\
                     [colors]\nbackground = \"#101018\"\ncursor = \"#ff8000\"\n\
                     [colors.palette]\n1 = \"#00ff00\"\n\
                     [cursor]\nstyle = \"underline\"\nblink = true\n\
                     [shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\"]\n\
-                    [scrollback]\nbytes = 4096\n";
+                    [scrollback]\nbytes = 4096\n\
+                    [grid]\npadding = 12\n";
         let settings = parsed(text);
 
         let printed = settings.to_toml();

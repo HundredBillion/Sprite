@@ -76,6 +76,49 @@ A local shell tool, initially `sprite panes snapshot`, that requests Pane
 Snapshots from its Sprite Window.
 _Avoid_: LLM client, agent, remote client
 
+**Surface**:
+Native UI that a program running in a Pane describes and Sprite draws inside
+that Pane — at one position: fill, dock, or overlay — for as long as the
+program keeps its Surface Channel connection open. Drawn by GPUI as elements,
+never as terminal cells; takes the keyboard when it opens unless it declines,
+and may hand it back.
+_Avoid_: panel, widget, popup, view (unqualified), native pane
+
+**Surface Channel**:
+Protected, local access by a process launched inside Sprite to open and
+update Surfaces in its own Pane and to receive their input and events. It is
+the one line that grants control of what a Pane shows; Pane Observation grants
+none, and the two never share a grammar.
+_Avoid_: the observation socket, the socket (unqualified), IPC, the API
+
+**Surface Description**:
+The versioned document a program sends over the Surface Channel saying what a
+Surface contains: element kinds, utility tokens for style, and token names
+for colour. It is what Sprite draws; it is never code.
+_Avoid_: markup, HTML, template, DSL, layout code
+
+**Semantic Token**:
+A named colour role — `terminal.background`, `ansi.4`, `scm.addedForeground`
+— that a Surface Description or the terminal grid refers to instead of a
+literal colour. Built into Sprite or registered by a program; each carries
+one default and a description.
+_Avoid_: colour variable, CSS variable, theme key, palette entry (for a
+registered token)
+
+**Token Registry**:
+The single table of Semantic Tokens Sprite resolves at draw time: built-in
+defaults, then program-registered defaults, then the active theme's overrides
+by name. Session-scoped; the first registration of a name stands. One active
+theme; no theme kinds.
+_Avoid_: theme struct, colour map, stylesheet
+
+**Surface Client**:
+A local shell tool — `sprite surface` and `sprite token` — that opens and
+drives Surfaces in its own Pane from the command line: events out as JSON
+lines, updates in from standard input. The reference implementation of the
+Surface Channel; other clients may speak the socket directly.
+_Avoid_: the CLI (unqualified), sprite.nvim, the adapter
+
 **Croft Compatibility Gate**:
 Unmodified upstream Croft used as an external acceptance application against
 its moving `main`; it is not part of Sprite Terminal.

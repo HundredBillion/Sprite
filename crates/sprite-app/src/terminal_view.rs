@@ -21,8 +21,7 @@ use sprite_term::{
 };
 
 use crate::grid::{
-    PANE_PADDING, PositionedCell, ScrollAccumulator, cell_at, content_area, grid_origin,
-    lay_out_row,
+    PositionedCell, ScrollAccumulator, cell_at, content_area, grid_origin, lay_out_row,
 };
 use crate::grid_paint::{RowPass, pack, terminal_font};
 use crate::input::gpui_key_event;
@@ -77,6 +76,11 @@ pub struct TerminalView {
     /// Measured from the font actually rendered, in logical pixels.
     cell_width: Pixels,
     cell_height: Pixels,
+    /// The configured line-height ratio, kept so a size change re-derives the
+    /// cell height from the same ratio the theme asked for.
+    line_height: f32,
+    /// The configured gap around the grid, in logical pixels.
+    padding: f32,
     /// Resolved once, then used for both measuring and drawing.
     font_family: SharedString,
     /// Foreground and background to use before the first snapshot arrives.
@@ -155,6 +159,7 @@ impl TerminalView {
             cursor,
             shell,
             scrollback,
+            grid,
             ..
         } = settings;
 
@@ -187,7 +192,10 @@ impl TerminalView {
         config.size = TerminalSize {
             cell_width_px: physical(cell_width, scale_factor),
             cell_height_px: physical(
-                px(crate::config::Font::line_height(font.size)),
+                px(crate::config::Font::cell_height(
+                    font.size,
+                    font.line_height,
+                )),
                 scale_factor,
             ),
             ..config.size
@@ -323,7 +331,11 @@ impl TerminalView {
             textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
             focus: cx.focus_handle(),
             cell_width,
-            cell_height: px(crate::config::Font::line_height(font.size)),
+            cell_height: px(crate::config::Font::cell_height(
+                font.size,
+                font.line_height,
+            )),
+            line_height: font.line_height,
             font_family,
             fallback_colors,
             size: Some(initial_size),
@@ -331,7 +343,8 @@ impl TerminalView {
             title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
-            origin: point(px(PANE_PADDING), px(PANE_PADDING)),
+            origin: point(px(grid.padding), px(grid.padding)),
+            padding: grid.padding,
             content_origin: None,
             pending_unsafe_paste: None,
             preedit: None,
@@ -375,9 +388,11 @@ impl TerminalView {
             textures: crate::graphics_cache::GraphicsCache::default(),
             focus: cx.focus_handle(),
             cell_width: px(8.0),
-            cell_height: px(crate::config::Font::line_height(
+            cell_height: px(crate::config::Font::cell_height(
                 crate::config::Font::DEFAULT_SIZE,
+                crate::config::Font::DEFAULT_LINE_HEIGHT,
             )),
+            line_height: crate::config::Font::DEFAULT_LINE_HEIGHT,
             font_family,
             fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
@@ -386,7 +401,11 @@ impl TerminalView {
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag: None,
-            origin: point(px(PANE_PADDING), px(PANE_PADDING)),
+            origin: point(
+                px(crate::config::Grid::DEFAULT_PADDING),
+                px(crate::config::Grid::DEFAULT_PADDING),
+            ),
+            padding: crate::config::Grid::DEFAULT_PADDING,
             content_origin: None,
             pending_unsafe_paste: None,
             preedit: None,
@@ -514,7 +533,7 @@ impl TerminalView {
     fn synchronise_size(&mut self, window: &Window) {
         let available = self.allocated.unwrap_or_else(|| window.viewport_size());
         let Some(size) = grid_size(
-            content_area(available),
+            content_area(available, self.padding),
             self.cell_width,
             self.cell_height,
             window.scale_factor(),
@@ -525,7 +544,13 @@ impl TerminalView {
         // Recomputed before the grid is compared, because a pane can be resized
         // by less than a cell: the grid is then unchanged but the gap around it
         // is not.
-        self.origin = grid_origin(available, size, self.cell_width, self.cell_height);
+        self.origin = grid_origin(
+            available,
+            size,
+            self.cell_width,
+            self.cell_height,
+            self.padding,
+        );
 
         if self.size == Some(size) {
             return;
@@ -892,6 +917,8 @@ impl TerminalView {
         if family != self.font_family {
             self.font_family = family;
         }
+        self.line_height = settings.font.line_height;
+        self.padding = settings.grid.padding;
         // Unconditional: the family may have changed under the same size, and
         // re-measuring a cell costs one text layout.
         self.set_font_size(settings.font.size, window, cx);
@@ -934,7 +961,7 @@ impl TerminalView {
     /// away from what is drawn.
     pub fn set_font_size(&mut self, size: f32, window: &Window, cx: &mut Context<Self>) {
         self.font_size = px(size);
-        self.cell_height = px(crate::config::Font::line_height(size));
+        self.cell_height = px(crate::config::Font::cell_height(size, self.line_height));
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         // Forces `synchronise_size` to recompute rather than compare against a
         // grid measured with the old cell.
