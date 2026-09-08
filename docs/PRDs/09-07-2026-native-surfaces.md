@@ -119,11 +119,22 @@ a *name* and a theme swaps the *value*. Zed's theme is a JSON file filling a
 fixed `ThemeColors` struct; a plugin cannot add a field. Sprite's plugins
 must: `scm.nvim` needs `scm.addedForeground`, `svgtree.nvim` needs icon
 tokens. So Sprite keeps a registry: a program registers a token over the
-socket with per-theme-kind defaults and a description; the theme in
+Surface Channel with **one default** and a description; the theme in
 `config.rs` overrides by name; descriptions reference tokens by name and
 Sprite resolves them at draw time, so changing the theme restyles every
-surface at once. A literal colour is accepted as an escape hatch and is
-discouraged in the documentation.
+surface at once. VS Code's per-kind defaults (`light`, `dark`, `hcDark`,
+`hcLight`) are deliberately not copied: Sprite has one active theme and no
+theme kinds (`config.rs`'s `Colors` is a single `background`, `foreground`,
+`cursor`, and `palette`), and inventing kinds is a feature no plugin asked
+for. The light/dark toggle the project owner wants later is a feature that
+selects *which theme is active*; it sits above the registry and changes
+nothing about how a token is registered, since a per-kind default is a
+superset of a single one. Resolution precedence, in one place: for the
+terminal grid, a program's own OSC colours → the theme's override → the
+program-registered default → the built-in default → libghostty's colour
+(the first step is the rule `config.rs:100–105` already keeps); for a
+surface, the same without the OSC step. A literal colour is accepted as an
+escape hatch and is discouraged in the documentation.
 
 **A first-class grid widget, styled by a flat highlight map.** The editing
 area is not a thousand tiny elements; it is one **grid** widget, updated
@@ -214,9 +225,14 @@ needs it and not before.
 holds* a structured grid of every terminal program's screen — that is what
 the terminal is. **Level 0** applies the theme to that existing grid: font,
 line height, cell padding, and colour remapping by token, for every program,
-with no protocol and no adapter. It is a small change inside `grid_paint.rs`
-and `config.rs` and it makes Neovim, Helix, Croft, `htop`, and everything
-else look like the theme immediately. **Level 1** is semantic: a program
+with no protocol and no adapter. Its colour tokens already exist: `Colors`'s
+`background`, `foreground`, `cursor`, and sixteen `palette` slots
+(`config.rs:107–115`) become the built-in tokens `terminal.background`,
+`terminal.foreground`, `terminal.cursor`, and `ansi.0`–`ansi.15`, and the
+existing `[colors]` TOML keys keep working as their overrides; what Level 0
+adds is line height and cell padding. It is a small change inside
+`grid_paint.rs` and `config.rs` and it makes Neovim, Helix, Croft, `htop`,
+and everything else look like the theme immediately. **Level 1** is semantic: a program
 streams a grid surface with highlight ids, and styling follows highlight
 groups. Level 0 ships first because it is nearly free and because it is the
 right fallback when Level 1 is absent.
@@ -263,9 +279,10 @@ styling or panels.
   `gpui::Styled` calls; builds GPUI elements for each kind; owns the grid
   widget, which shares its cell painter with `grid_paint.rs`.
 - **Token registry (new, in `config.rs` alongside `Settings`):** built-in
-  tokens with per-theme-kind defaults and descriptions; `register` from
-  programs; theme overrides by name; `resolve(name) -> Rgba` with a
-  documented fallback for an unknown token.
+  tokens — the existing `Colors` fields under token names — each with one
+  default and a description; `register` from programs; theme overrides by
+  name; `resolve(name) -> Rgba` with a documented fallback for an unknown
+  token. One active theme; no theme kinds.
 - **Surface Channel (`surface/channel.rs`, new):** a second `Endpoint`, its
   socket path exported to children as `SPRITE_SURFACE_SOCKET`, sharing the
   observation key, runtime directory, and authentication code. Its own
@@ -308,10 +325,10 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
 1. **Unit, in Sprite.** The parser accepts each element kind and rejects an
    unknown kind, an unknown utility token, and an unsupported version with
    distinct reasons. Every supported utility token maps to a `Styled` call
-   (table-driven; the table *is* the supported vocabulary). The registry
-   returns a built-in default, a program-registered default, a theme
+   (table-driven; the table *is* the supported vocabulary). The registry returns a built-in default, a program-registered default, a theme
    override in that order of precedence, and the documented fallback for an
-   unknown name. The grid widget applies an incremental line update without
+   unknown name; for the grid, a program's own OSC colour wins over all of
+   them while it runs. The grid widget applies an incremental line update without
    repainting untouched rows. `TerminalView` hosts a fill, a dock (with the
    PTY told its new size), and an overlay, and returns the space when the
    connection closes. Level 0 changes a cell's drawn colour when the theme
@@ -356,4 +373,6 @@ named below as absent, not deferred by accident.
   driven by the adapter can position them later without a Sprite change.
 - **Helix and Croft forks.** No longer required for appearance. An adapter
   for either is that project's choice.
+- **A light/dark theme toggle.** Wanted later; it selects which theme is
+  active and sits above the registry, changing no registration.
 - **Automating the by-hand verification.**

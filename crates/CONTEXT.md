@@ -96,6 +96,20 @@ Surface contains: element kinds, utility tokens for style, and token names
 for colour. It is what Sprite draws; it is never code.
 _Avoid_: markup, HTML, template, DSL, layout code
 
+**Semantic Token**:
+A named colour role — `terminal.background`, `ansi.4`, `scm.addedForeground`
+— that a Surface Description or the terminal grid refers to instead of a
+literal colour. Built into Sprite or registered by a program; each carries
+one default and a description.
+_Avoid_: colour variable, CSS variable, theme key, palette entry (for a
+registered token)
+
+**Token Registry**:
+The single table of Semantic Tokens Sprite resolves at draw time: built-in
+defaults, then program-registered defaults, then the active theme's overrides
+by name. One active theme; no theme kinds.
+_Avoid_: theme struct, colour map, stylesheet
+
 **Croft Compatibility Gate**:
 Unmodified upstream Croft used as an external acceptance application against
 its moving `main`; it is not part of Sprite Terminal.
