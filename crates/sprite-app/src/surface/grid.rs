@@ -392,14 +392,10 @@ impl GridSurface {
         }
     }
 
-    // Read by the grid painter, which lands separately; until then, reached
-    // only by this module's own tests.
-    #[allow(dead_code)]
     pub fn cols(&self) -> u16 {
         self.cols
     }
 
-    #[allow(dead_code)]
     pub fn rows(&self) -> u16 {
         self.rows
     }
@@ -548,13 +544,11 @@ impl GridSurface {
     }
 
     /// Forgets the laid-out rows, for when the theme changed under them.
-    #[allow(dead_code)]
     pub fn invalidate(&mut self) {
         self.laid_out = None;
     }
 
     /// The rows as the painter takes them, laid out on demand.
-    #[allow(dead_code)]
     pub fn positioned_rows(&mut self, theme: &Highlights) -> &[Vec<PositionedCell>] {
         if self.laid_out.is_none() {
             let rows = self
@@ -567,7 +561,6 @@ impl GridSurface {
         self.laid_out.as_deref().expect("laid out just above")
     }
 
-    #[allow(dead_code)]
     fn lay_out(&self, row: &[Cell], theme: &Highlights) -> Vec<PositionedCell> {
         let mut placed = Vec::with_capacity(row.len());
         for (column, cell) in row.iter().enumerate() {
@@ -590,7 +583,6 @@ impl GridSurface {
 
     /// The program's attrs for an id, with the theme's say over the group the
     /// id was named as, in the shape the painter reads for a terminal cell.
-    #[allow(dead_code)]
     fn style_for(&self, hl: u32, theme: &Highlights) -> CellStyle {
         let mut attrs = self.attrs.get(&hl).cloned().unwrap_or_default();
         if let Some(style) = self.groups.get(&hl).and_then(|name| theme.get(name)) {
@@ -613,7 +605,6 @@ impl GridSurface {
         }
     }
 
-    #[allow(dead_code)]
     pub fn cursor_snapshot(&self) -> CursorSnapshot {
         CursorSnapshot {
             row: self.cursor.row,
@@ -625,7 +616,6 @@ impl GridSurface {
     }
 
     /// The grid's default colours, falling back to the pane's.
-    #[allow(dead_code)]
     pub fn default_colors(&self, fallback: (Rgb, Rgb)) -> (Rgb, Rgb) {
         (
             self.defaults.fg.unwrap_or(fallback.0),

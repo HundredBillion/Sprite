@@ -8,13 +8,16 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, ElementId, Image, ImageFormat, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, div, img, rgb,
+    Pixels, SharedString, StatefulInteractiveElement, Styled, div, img, px, rgb,
 };
+use sprite_term::Rgb;
 
-use crate::grid_paint::pack;
+use crate::config::Highlights;
+use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass, pack};
 use crate::surface::SurfaceId;
 use crate::surface::channel::{SurfaceConnection, event_click};
 use crate::surface::description::{Description, Element, Kind};
+use crate::surface::grid::GridSurface;
 use crate::surface::style;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -26,6 +29,54 @@ pub(crate) fn render(
 ) -> AnyElement {
     let mut next = 0u64;
     element(&description.root, surface, registry, connection, &mut next)
+}
+
+/// What a grid borrows from the pane it lives in, so it is drawn with the same
+/// font, cell, colours, and blink phase as the terminal beside it.
+pub(crate) struct GridMetrics {
+    pub cell_width: Pixels,
+    pub cell_height: Pixels,
+    pub font_family: SharedString,
+    pub font_size: Pixels,
+    /// The pane's default foreground and background, for a grid that set none.
+    pub defaults: (Rgb, Rgb),
+    pub blink_on: bool,
+}
+
+/// A grid Surface as an element: the terminal's own painter over the grid's
+/// rows, inside a box exactly the grid's size so the painter, which fills its
+/// parent, lands cell-for-cell.
+pub(crate) fn render_grid(
+    grid: &mut GridSurface,
+    highlights: &Highlights,
+    metrics: &GridMetrics,
+) -> AnyElement {
+    let (default_fg, default_bg) = grid.default_colors(metrics.defaults);
+    // A blinking cursor is absent for half of each blink, exactly as the
+    // terminal's is; a steady one ignores the phase.
+    let cursor = Some(grid.cursor_snapshot()).filter(|cursor| metrics.blink_on || !cursor.blinking);
+    let rows = grid.positioned_rows(highlights).to_vec();
+    let paint = GridPaint::new(GridPaintSpec {
+        rows,
+        pass: RowPass::Whole,
+        cursor,
+        cursor_color: None,
+        default_fg,
+        default_bg,
+        palette: None,
+        cell_width: metrics.cell_width,
+        cell_height: metrics.cell_height,
+        font_family: metrics.font_family.clone(),
+        font_size: metrics.font_size,
+    });
+    let width = px(f32::from(metrics.cell_width) * f32::from(grid.cols()));
+    let height = px(f32::from(metrics.cell_height) * f32::from(grid.rows()));
+    div()
+        .w(width)
+        .h(height)
+        .bg(rgb(pack(default_bg)))
+        .child(paint)
+        .into_any_element()
 }
 
 fn element(
@@ -129,5 +180,36 @@ mod tests {
         // Building the element tree needs no window; that is the property
         // this test locks down, since every frame rebuilds it.
         let _element = render(&parsed.description, SurfaceId(1), &registry, &connection);
+    }
+
+    #[test]
+    fn a_grid_becomes_an_element_without_a_window() {
+        use crate::surface::grid::{GridSurface, parse_ops};
+        use gpui::px;
+
+        let mut grid = GridSurface::new(4, 2);
+        grid.apply_all(
+            parse_ops(&json!({ "type": "batch", "ops": [
+                { "type": "highlights", "define": { "1": { "bold": true } }, "groups": { "Keyword": 1 } },
+                { "type": "rows", "rows": [{ "row": 0, "cells": [["l", 1], ["e"], ["t"], [" ", 0]] }] },
+                { "type": "cursor", "row": 0, "col": 3 }
+            ] }))
+            .expect("ops"),
+        )
+        .expect("apply");
+        let metrics = GridMetrics {
+            cell_width: px(8.0),
+            cell_height: px(16.0),
+            font_family: "monospace".into(),
+            font_size: px(14.0),
+            defaults: (
+                crate::tokens::unpack(0xd8d8e0),
+                crate::tokens::unpack(0x101014),
+            ),
+            blink_on: true,
+        };
+        // As for element Surfaces: the tree is rebuilt every frame and needs no
+        // window to build; only painting does.
+        let _element = render_grid(&mut grid, &crate::config::Highlights::default(), &metrics);
     }
 }

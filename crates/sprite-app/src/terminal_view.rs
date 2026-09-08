@@ -20,6 +20,7 @@ use sprite_term::{
     ShutdownHandle, SnapshotBundle, TerminalCommand, TerminalSession, TerminalSize, WheelEvent,
 };
 
+use crate::config::Highlights;
 use crate::grid::{
     PositionedCell, ScrollAccumulator, cell_at, content_area, grid_origin, lay_out_row,
 };
@@ -27,7 +28,7 @@ use crate::grid_paint::{RowPass, pack, terminal_font};
 use crate::input::gpui_key_event;
 use crate::surface::channel::{
     FocusTarget, Open, Position, SurfaceConnection, event_blur, event_closed, event_focus,
-    event_input, event_refused, event_resize, event_warning,
+    event_grid_resize, event_input, event_refused, event_resize, event_warning,
 };
 use crate::surface::description::{self, Description};
 use crate::surface::grid::{GridSurface, parse_ops};
@@ -982,6 +983,13 @@ impl TerminalView {
         }
         self.line_height = settings.font.line_height;
         self.padding = settings.grid.padding;
+        // The theme may have restyled a highlight group; every grid lays its
+        // rows out again on its next frame.
+        for surface in self.surfaces.iter_mut() {
+            if let Body::Grid(grid) = &mut surface.body {
+                grid.invalidate();
+            }
+        }
         // Unconditional: the family may have changed under the same size, and
         // re-measuring a cell costs one text layout.
         self.set_font_size(settings.font.size, window, cx);
@@ -1031,6 +1039,18 @@ impl TerminalView {
         self.size = None;
         self.synchronise_size(window);
         cx.notify();
+    }
+
+    /// What a grid Surface borrows from this pane to draw like its terminal.
+    fn grid_metrics(&self) -> crate::surface::render::GridMetrics {
+        crate::surface::render::GridMetrics {
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            font_family: self.font_family.clone(),
+            font_size: self.font_size,
+            defaults: self.default_colors(),
+            blink_on: self.blink_on,
+        }
     }
 
     /// The docks' widths at this pane size: what each asked for, but never more
@@ -1238,14 +1258,14 @@ impl TerminalView {
         &mut self,
         allocated: Size<Pixels>,
         registry: &TokenRegistry,
+        metrics: &crate::surface::render::GridMetrics,
+        highlights: &Highlights,
         cx: &mut Context<Self>,
     ) -> SurfaceLayers {
         let (left_width, right_width) = self.dock_widths(allocated);
-        let fill = self
-            .surfaces
-            .fill
-            .as_mut()
-            .map(|surface| Self::surface_element(surface, allocated, registry, cx, true));
+        let fill = self.surfaces.fill.as_mut().map(|surface| {
+            Self::surface_element(surface, allocated, registry, metrics, highlights, cx, true)
+        });
         let left = self.surfaces.left.as_mut().map(|surface| {
             let strip = Size {
                 width: px(left_width),
@@ -1257,7 +1277,9 @@ impl TerminalView {
                 .left(px(0.0))
                 .w(strip.width)
                 .h_full()
-                .child(Self::surface_element(surface, strip, registry, cx, true))
+                .child(Self::surface_element(
+                    surface, strip, registry, metrics, highlights, cx, true,
+                ))
                 .into_any_element()
         });
         let right = self.surfaces.right.as_mut().map(|surface| {
@@ -1271,7 +1293,9 @@ impl TerminalView {
                 .right(px(0.0))
                 .w(strip.width)
                 .h_full()
-                .child(Self::surface_element(surface, strip, registry, cx, true))
+                .child(Self::surface_element(
+                    surface, strip, registry, metrics, highlights, cx, true,
+                ))
                 .into_any_element()
         });
         // Each overlay is centred in its own full-pane layer, so later ones
@@ -1288,7 +1312,7 @@ impl TerminalView {
                     .items_center()
                     .justify_center()
                     .child(Self::surface_element(
-                        surface, allocated, registry, cx, false,
+                        surface, allocated, registry, metrics, highlights, cx, false,
                     ))
                     .into_any_element()
             })
@@ -1311,6 +1335,8 @@ impl TerminalView {
         surface: &mut HostedSurface,
         size: Size<Pixels>,
         registry: &TokenRegistry,
+        metrics: &crate::surface::render::GridMetrics,
+        highlights: &Highlights,
         cx: &mut Context<Self>,
         fills: bool,
     ) -> AnyElement {
@@ -1320,18 +1346,28 @@ impl TerminalView {
         );
         if surface.told_size != Some(told) {
             surface.told_size = Some(told);
-            surface.connection.send(&event_resize(told.0, told.1));
+            let event = match &surface.body {
+                Body::Grid(_) => {
+                    let cols = (f32::from(size.width) / f32::from(metrics.cell_width))
+                        .floor()
+                        .max(0.0) as u16;
+                    let rows = (f32::from(size.height) / f32::from(metrics.cell_height))
+                        .floor()
+                        .max(0.0) as u16;
+                    event_grid_resize(told.0, told.1, cols, rows)
+                }
+                Body::Elements(_) => event_resize(told.0, told.1),
+            };
+            surface.connection.send(&event);
         }
-        let body = match &surface.body {
+        let body = match &mut surface.body {
             Body::Elements(description) => crate::surface::render::render(
                 description,
                 surface.id,
                 registry,
                 &surface.connection,
             ),
-            // Painted in the next change; a grid draws its background only
-            // until then.
-            Body::Grid(_) => div().size_full().into_any_element(),
+            Body::Grid(grid) => crate::surface::render::render_grid(grid, highlights, metrics),
         };
         let keys = Arc::clone(&surface.connection);
         let focus = surface.focus.clone();
@@ -1537,7 +1573,13 @@ impl Render for TerminalView {
             SurfaceLayers::default()
         } else {
             let registry = cx.global::<TokenRegistry>().clone();
-            self.surface_layers(allocated, &registry, cx)
+            let metrics = self.grid_metrics();
+            let highlights = cx
+                .global::<crate::config::ActiveSettings>()
+                .0
+                .highlights
+                .clone();
+            self.surface_layers(allocated, &registry, &metrics, &highlights, cx)
         };
 
         // Everything the terminal draws lives inside the grid box, which is
