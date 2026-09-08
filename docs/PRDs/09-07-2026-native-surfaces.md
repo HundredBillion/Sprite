@@ -205,6 +205,29 @@ through the PTY, as before (`sprite-term` surfaces only OSCs 7, 10, 11, 12,
 socket distinguished by protocol token, because that makes the read-only
 promise true of *some lines on a socket* rather than of the socket.
 
+**Focus: a Surface takes the keyboard when it opens.** A person opens a dock
+to use it — `neo-tree` and `nvim-tree` already work this way: toggle the tree,
+focus lands in it, `j`/`k`/Enter — so a Surface receives focus on `open` by
+default at every position. Fill always holds it, there being nothing else to
+focus; an overlay takes it on open and **returns it to the previous holder on
+close**. Two rules keep the default from misfiring. First, focus changes only
+on `open`, never on `update`: a dock refreshing itself steals nothing.
+Second, `open` carries `focus: bool`, default `true`, so a program pushing a
+Surface the person did not ask for — an agent's status view arriving
+mid-word — passes `focus: false`. The channel also carries a **`focus`
+request** in the other direction, by which a program hands the keyboard back
+to the terminal or to another of its Surfaces; that is how a tree returns
+you to the buffer after a pick, and it is the plugin's decision, as in
+`neo-tree`. Sprite sends `focus` and `blur` events so a Surface can draw its
+focused state. Clicking focuses what was clicked, as GPUI already does
+(`TerminalView` owns one `FocusHandle`, `terminal_view.rs:74`, and a hosted
+Surface brings its own through `PaneHandle::focus_handle()`). One workspace
+keybinding cycles focus terminal → Surfaces → terminal, a safety net for a
+program that forgets to hand it back. Two alternatives were rejected: every
+Surface declaring intent with no default makes the common case verbose, and
+Surfaces never taking the keyboard kills keyboard navigation of a file tree —
+the very thing a Neovim user does.
+
 **A small, versioned schema, grown only under demand.** The single largest
 risk in this design is scope: a description language for UI is a browser
 engine if nobody says no. VS Code's answer to "extensions want arbitrary UI"
@@ -284,8 +307,9 @@ styling or Surfaces.
   socket path exported to children as `SPRITE_SURFACE_SOCKET`, sharing the
   observation key, runtime directory, and authentication code. Its own
   newline-delimited-JSON grammar: `open { pane, position: fill|dock|overlay,
-  version }`, `update`, `close`, `token register`, and the event direction
-  (`input`, `resize`, `event`) on the same long-lived connection. Refusals
+  focus, version }`, `update`, `close`, `focus`, `token register`, and the
+  event direction (`input`, `resize`, `event`, `focus`, `blur`) on the same
+  long-lived connection. Refusals
   are distinct: unknown pane, pane not a terminal, unsupported version,
   malformed description, unknown element kind or token. **`observation/` is
   not modified**; its read-only-by-construction grammar and tests are
@@ -293,8 +317,11 @@ styling or Surfaces.
 - **`TerminalView` (`terminal_view.rs`):** hosts zero or more surfaces by
   position. *Fill* renders the surface instead of the grid and forwards
   focus, size, and input. *Dock* splits the pane's rectangle, renders both,
-  and resizes the PTY. *Overlay* paints above. When a surface's connection
-  closes, its space returns to the grid. The `sprite-pane` interface from
+  and resizes the PTY. *Overlay* paints above. A surface takes focus when it
+  opens unless its `open` said `focus: false`; a `focus` request moves it; an
+  overlay returns focus to the previous holder when it closes; one workspace
+  keybinding cycles focus. When a surface's connection closes, its space
+  returns to the grid. The `sprite-pane` interface from
   PR #27 is what a hosted surface presents to the pane.
 - **Level 0 (`grid_paint.rs`, `config.rs`):** theme-driven font, line height,
   cell padding, and token-remapped colours applied to the existing terminal
@@ -328,7 +355,10 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    them while it runs. The grid widget applies an incremental line update without
    repainting untouched rows. `TerminalView` hosts a fill, a dock (with the
    PTY told its new size), and an overlay, and returns the space when the
-   connection closes. Level 0 changes a cell's drawn colour when the theme
+   connection closes. A surface opened with the default takes focus; one
+   opened with `focus: false` leaves it where it was; `update` never moves
+   focus; a `focus` request moves it; an overlay closing returns focus to
+   the previous holder; `focus` and `blur` events are delivered. Level 0 changes a cell's drawn colour when the theme
    remaps its token. `shell.rs` prepends a present integration directory and
    ignores an absent one. The observation grammar's own tests pass without
    change, and `observation/request.rs` still constructs no mutating variant.
@@ -340,8 +370,10 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    script opens a *dock* surface describing a docked Surface: a title, a list of
    three rows each with an SVG icon and a label, styled with utility tokens
    and colours referenced by token name. The Surface appears beside the
-   terminal; `tput cols` in the shell reports the narrower width. Clicking a
-   row delivers an `event` to the script, which prints it. Editing the
+   terminal; `tput cols` in the shell reports the narrower width. The Surface has
+   focus the moment it opens. Clicking a row delivers an `event` to the
+   script, which prints it; the script then sends `focus` and the next
+   keystroke reaches the shell. Editing the
    theme's value for a token the Surface uses restyles the Surface live. The
    script exits; the Surface disappears and `tput cols` is restored. A second
    script opens a *fill* surface streaming a small grid with two highlight

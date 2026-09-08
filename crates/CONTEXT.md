@@ -80,7 +80,8 @@ _Avoid_: LLM client, agent, remote client
 Native UI that a program running in a Pane describes and Sprite draws inside
 that Pane — at one position: fill, dock, or overlay — for as long as the
 program keeps its Surface Channel connection open. Drawn by GPUI as elements,
-never as terminal cells.
+never as terminal cells; takes the keyboard when it opens unless it declines,
+and may hand it back.
 _Avoid_: panel, widget, popup, view (unqualified), native pane
 
 **Surface Channel**:
