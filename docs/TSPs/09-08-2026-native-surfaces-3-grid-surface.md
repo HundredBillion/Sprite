@@ -1677,7 +1677,7 @@ Surface in the same pane; an id this pane does not host is refused
 `target` with the same refusals and replies `focused` on success; `sprite
 surface focus` takes an optional Surface id and sends it as `target`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `description.rs`'s tests:
 
@@ -1829,13 +1829,13 @@ and add `event_grid_resize(240, 812, 30, 40)` to the list in
 if that assertion fails on key order, compare parsed `Value`s as the file's
 other exact-string test does).
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline surface::`
 Expected: compile errors — `Kind::Grid`, `GridSize`, `FocusTarget`,
 `SurfaceRequest::Grid`, `event_grid_resize` undefined.
 
-- [ ] **Step 3: The description**
+- [x] **Step 3: The description**
 
 In `description.rs`:
 
@@ -1905,7 +1905,7 @@ impl Description {
   than `Box`/`List` with `a grid has no children`. Include `grid` in the
   final `Ok(Element { … })`.
 
-- [ ] **Step 4: The wire**
+- [x] **Step 4: The wire**
 
 In `channel.rs`:
 
@@ -1999,7 +1999,7 @@ pub fn event_grid_resize(width: u32, height: u32, cols: u16, rows: u16) -> Strin
 }
 ```
 
-- [ ] **Step 5: The hosting state**
+- [x] **Step 5: The hosting state**
 
 In `terminal_view.rs`:
 
@@ -2174,7 +2174,7 @@ pub fn run_surface_focus(target: Option<u64>, out: &mut dyn Write, errors: &mut 
 }
 ```
 
-- [ ] **Step 6: Run the tests and the gate**
+- [x] **Step 6: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including the four new tests.
@@ -2182,7 +2182,7 @@ Expected: all pass, including the four new tests.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/description.rs crates/sprite-app/src/surface/channel.rs crates/sprite-app/src/workspace.rs crates/sprite-app/src/terminal_view.rs crates/sprite-app/src/surface.rs
