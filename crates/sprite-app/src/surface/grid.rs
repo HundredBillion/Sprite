@@ -384,7 +384,12 @@ pub struct GridSurface {
     rows: u16,
     cells: Vec<Vec<Cell>>,
     attrs: HashMap<u32, Attrs>,
-    groups: HashMap<u32, String>,
+    /// Every group name an id has been given, in the order they arrived.
+    ///
+    /// One id commonly stands for several names — an editor maps `Comment`,
+    /// `@comment`, and `@comment.lua` to the same attrs — so keeping only the
+    /// last would let one name shadow a theme entry written for another.
+    groups: HashMap<u32, Vec<String>>,
     defaults: Defaults,
     cursor: Cursor,
     /// The rows as the painter wants them, rebuilt only when something
@@ -466,7 +471,10 @@ impl GridSurface {
                     self.attrs.insert(id, attrs);
                 }
                 for (name, id) in groups {
-                    self.groups.insert(id, name);
+                    let names = self.groups.entry(id).or_default();
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
                 }
             }
             Op::Defaults(defaults) => {
@@ -611,8 +619,15 @@ impl GridSurface {
     /// id was named as, in the shape the painter reads for a terminal cell.
     fn style_for(&self, hl: u32, theme: &Highlights) -> CellStyle {
         let mut attrs = self.attrs.get(&hl).cloned().unwrap_or_default();
-        if let Some(style) = self.groups.get(&hl).and_then(|name| theme.get(name)) {
-            apply_theme(&mut attrs, style);
+        // Every theme entry that names this id is applied, in the order the
+        // names were received, so a later name layers over an earlier one for
+        // the fields it sets and leaves the rest alone. Within one `highlights`
+        // message that order is the JSON object's key order; across messages it
+        // is the order the messages arrived.
+        if let Some(names) = self.groups.get(&hl) {
+            for style in names.iter().filter_map(|name| theme.get(name)) {
+                apply_theme(&mut attrs, style);
+            }
         }
         let color = |value: Option<Rgb>| value.map_or(SnapshotColor::Default, SnapshotColor::Rgb);
         CellStyle {
@@ -837,6 +852,57 @@ mod tests {
             themed[0][1].style.background,
             SnapshotColor::Rgb(unpack(0xff0000))
         );
+    }
+
+    #[test]
+    fn several_group_names_for_one_id_each_reach_the_theme_and_the_later_one_layers_over() {
+        let mut grid = GridSurface::new(1, 1);
+        // Two messages, so the order the names arrived in is the order written
+        // here rather than the order a JSON object happens to enumerate.
+        grid.apply_all(ops(json!({ "type": "batch", "ops": [
+            { "type": "highlights", "define": { "1": { "italic": true } }, "groups": { "Comment": 1 } },
+            { "type": "highlights", "groups": { "@comment.lua": 1 } },
+            { "type": "rows", "rows": [{ "row": 0, "cells": [["a", 1]] }] }
+        ] })))
+        .expect("apply");
+
+        let entry = |color: u32, bold: Option<bool>| HighlightStyle {
+            color: Some(unpack(color)),
+            bold,
+            italic: None,
+            underline: None,
+            background: None,
+        };
+        // `Highlights::get` searches a sorted table, and '@' sorts before 'C'.
+        let comment = ("Comment".to_owned(), entry(0x00ff00, Some(true)));
+        let lua = ("@comment.lua".to_owned(), entry(0x0000ff, None));
+
+        // A theme that names only the first of the two still reaches the cell.
+        grid.invalidate();
+        let styled = grid.positioned_rows(&Highlights {
+            groups: vec![comment.clone()],
+        })[0][0]
+            .style;
+        assert_eq!(styled.foreground, SnapshotColor::Rgb(unpack(0x00ff00)));
+        assert!(styled.bold);
+        assert!(
+            styled.italic,
+            "the program's own italic stands where the theme says nothing"
+        );
+
+        // With both named, the later name wins the field they both set and
+        // leaves the earlier one's other fields alone.
+        grid.invalidate();
+        let styled = grid.positioned_rows(&Highlights {
+            groups: vec![lua, comment],
+        })[0][0]
+            .style;
+        assert_eq!(
+            styled.foreground,
+            SnapshotColor::Rgb(unpack(0x0000ff)),
+            "@comment.lua was received second"
+        );
+        assert!(styled.bold, "and Comment's bold, which it does not set");
     }
 
     #[test]
