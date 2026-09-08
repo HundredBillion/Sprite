@@ -701,7 +701,15 @@ impl Workspace {
     /// its cell and tells its child the new grid, which is why this resizes
     /// rather than merely redraws.
     fn adjust_font(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let wanted = crate::config::Font::clamp_size(self.settings.font.size + delta);
+        let asked = self.settings.font.size + delta;
+        // `Font::clamp_size` is gone; a size zoom cannot go through
+        // `read_clamped` (there is no complaint to show), so it clamps here
+        // the same way that helper did.
+        let wanted = if asked.is_nan() {
+            crate::config::Font::DEFAULT_SIZE
+        } else {
+            asked.clamp(crate::config::Font::MIN_SIZE, crate::config::Font::MAX_SIZE)
+        };
         self.apply_font_size(wanted, cx);
     }
 
