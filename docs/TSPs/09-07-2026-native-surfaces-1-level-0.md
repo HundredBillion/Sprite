@@ -75,7 +75,7 @@ crate's existing inline `#[cfg(test)] mod tests` with `parsed(text)` and
     the TOML key. Task 2 calls it for `grid.padding`.
   - `TerminalView` gains a private field `line_height: f32`.
 
-- [ ] **Step 1: Write the failing tests in `config.rs`**
+- [x] **Step 1: Write the failing tests in `config.rs`**
 
 Replace the existing test `line_height_follows_the_size` (~line 852) with
 this, and add the second test beside it:
@@ -126,12 +126,12 @@ the first line of `text` so the round trip exercises the new key:
         let text = "[font]\nfamily = \"Fira Code\"\nsize = 18\nline_height = 1.25\n\
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline config::tests -- line_height cell_height parses_back`
 Expected: compile error — `no field \`line_height\`` / `no function or associated item named \`cell_height\``.
 
-- [ ] **Step 3: Implement the setting in `config.rs`**
+- [x] **Step 3: Implement the setting in `config.rs`**
 
 Change the `Font` struct and its `impl`:
 
@@ -286,7 +286,7 @@ In `to_toml`, directly after `out.push_str(&format!("size = {}\n", self.font.siz
         out.push_str(&format!("line_height = {}\n", self.font.line_height));
 ```
 
-- [ ] **Step 4: Thread the ratio through `terminal_view.rs`**
+- [x] **Step 4: Thread the ratio through `terminal_view.rs`**
 
 Add a field to the `TerminalView` struct, directly after `cell_height: Pixels,`:
 
@@ -341,7 +341,7 @@ Constructor B (`failed`, ~line 378). Replace the `cell_height:` initialiser with
 There are no other callers: `grep -rn 'Font::line_height' crates/` must
 return nothing after this step.
 
-- [ ] **Step 5: Run the tests and the gate**
+- [x] **Step 5: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including `cell_height_follows_the_size_and_the_ratio`,
@@ -351,7 +351,7 @@ Expected: all pass, including `cell_height_follows_the_size_and_the_ratio`,
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: no output from fmt; clippy finishes with no warnings.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sprite-app/src/config.rs crates/sprite-app/src/terminal_view.rs
@@ -397,7 +397,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   - `PANE_PADDING` stays, as the default's single source of truth.
   - `TerminalView` gains a private field `padding: f32`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/sprite-app/src/grid.rs`, module `padding_tests`, give every
 existing call its padding argument and add one new test. The six edits are
@@ -457,14 +457,14 @@ add this line after the `[scrollback]` line:
 (replacing the `";` that previously ended the `[scrollback]` line, so the
 string stays one literal).
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline -- padding`
 Expected: compile errors — `this function takes 1 argument but 2 arguments
 were supplied` for `content_area`, and `no field \`grid\`` / `cannot find
 type \`Grid\``.
 
-- [ ] **Step 3: Give the layout helpers their padding parameter (`grid.rs`)**
+- [x] **Step 3: Give the layout helpers their padding parameter (`grid.rs`)**
 
 Replace `content_area` and `grid_origin`:
 
@@ -513,7 +513,7 @@ Leave `PANE_PADDING` where it is; update its doc comment's first sentence to
 "The default gap Sprite keeps between the grid and every edge of its pane, in
 logical pixels; `[grid] padding` changes it."
 
-- [ ] **Step 4: Add the setting in `config.rs`**
+- [x] **Step 4: Add the setting in `config.rs`**
 
 Add the struct after `Cursor` (before `Scrollback`):
 
@@ -593,7 +593,7 @@ before `out.push_str("\n[colors]\n");`):
         out.push_str(&format!("padding = {}\n", self.grid.padding));
 ```
 
-- [ ] **Step 5: Thread the padding through `terminal_view.rs`**
+- [x] **Step 5: Thread the padding through `terminal_view.rs`**
 
 Add a field directly after the `line_height: f32,` field from Task 1:
 
@@ -668,7 +668,7 @@ further change.
 If `PANE_PADDING` is no longer referenced in `terminal_view.rs`, remove it
 from the `use crate::grid::{…}` import at line 24; `grid.rs` still uses it.
 
-- [ ] **Step 6: Run the tests and the gate**
+- [x] **Step 6: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including `a_configured_padding_changes_the_content_area_and_the_origin`,
@@ -678,7 +678,7 @@ test, and `the_printed_configuration_parses_back_into_itself`.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sprite-app/src/grid.rs crates/sprite-app/src/config.rs crates/sprite-app/src/terminal_view.rs
@@ -702,7 +702,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Run the whole CI gate**
+- [x] **Step 1: Run the whole CI gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -714,7 +714,7 @@ cargo build --workspace --locked --offline
 Expected: every command succeeds; `cargo test` reports `0 failed` in every
 crate.
 
-- [ ] **Step 2: Confirm plain `sprite` is unchanged**
+- [x] **Step 2: Confirm plain `sprite` is unchanged**
 
 Run: `cargo run -p sprite-app --locked --offline -- config print | grep -E '^(line_height|padding) ='`
 Expected:
@@ -725,7 +725,7 @@ padding = 8
 (the exact float text may differ in its last digit; what matters is that
 `Font::cell_height(14.0, <that value>)` is 16, which Task 1's test proves).
 
-- [ ] **Step 3: Level 0 by hand — the PRD's verification step 4**
+- [x] **Step 3: Level 0 by hand — the PRD's verification step 4**
 
 1. Open Sprite. In a pane, run `nvim` and leave it open. In a second pane,
    run `htop`.
@@ -752,6 +752,14 @@ padding = 8
 
 Record the result as a checked box here; there is no automated seam for it,
 and the PRD names that as absent rather than deferred by accident.
+
+Result (2026-09-07, commit 7ccacfc, macOS): passed. Driven against a scratch
+`--config` file so no user configuration was touched; `top` stood in for
+`htop`, which is not installed. Rows in `nvim`, `top`, and the shell grew
+taller and the grid moved in from every edge on the first reload; the tight
+reload put the first column against the pane edge; the plain reload restored
+the pre-TSP look. The reload reply names `font` and `colors` but not `grid`,
+though the padding applied.
 
 - [ ] **Step 4: Finish the branch**
 
