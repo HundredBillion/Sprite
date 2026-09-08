@@ -12,6 +12,10 @@ same commit, and supersedes the "Terminal pane / Editor pane" framing of the
 plurality PRD for editors. That PRD's dependency invariant — *Sprite's
 manifest names no editor* — is preserved unchanged and is made true by
 construction here.
+Level 0 implemented (PR #29). The Surface Channel, token registry, element
+Surfaces, hosting, and the `sprite surface` client implemented by
+`docs/TSPs/09-07-2026-native-surfaces-2-surface-channel.md`; the grid widget,
+`tree`, `rows` updates, and the highlight map follow in TSP 3.
 
 ## Summary
 

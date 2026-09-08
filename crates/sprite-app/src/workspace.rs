@@ -19,8 +19,11 @@ use crate::observation::endpoint::Endpoint;
 use crate::observation::panes::{PaneLink, Placement, WindowPanes};
 use crate::observation::request::ConfigVerb;
 use crate::pane_tree::{Direction, Orientation, PaneId};
+use crate::surface::Refusal;
+use crate::surface::channel::{SurfaceEndpoint, SurfaceRequest};
 use crate::tabs::{TabId, Tabs};
 use crate::terminal_view::TerminalView;
+use crate::tokens::TokenRegistry;
 
 const BACKGROUND: u32 = 0x101014;
 /// Drawn between panes so a split is visible without a separate widget.
@@ -83,6 +86,10 @@ pub struct Workspace {
     _reload: gpui::Task<()>,
     /// Handed to an endpoint opened later, when observation is turned back on.
     reload_sender: async_channel::Sender<ReloadRequest>,
+    /// The Surface Channel, if the window could open one.
+    surfaces: Option<SurfaceEndpoint>,
+    /// Keeps the surface request loop alive for as long as the window is.
+    _surface_requests: gpui::Task<()>,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
     /// A pane created by a split has no element in the dispatch tree until the
@@ -125,6 +132,21 @@ impl Workspace {
             .flatten();
         let reload_sender = reload_tx.clone();
 
+        let (surface_tx, surface_rx) = async_channel::bounded::<SurfaceRequest>(64);
+        // The observation key when observation is on, so a session's one
+        // secret opens both lines; a key of its own otherwise, so turning off
+        // the read line does not turn off native UI.
+        let surface_key = match endpoint.as_ref() {
+            Some(endpoint) => Some(endpoint.key()),
+            None => crate::observation::endpoint::ObservationKey::generate()
+                .ok()
+                .map(Arc::new),
+        };
+        let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_tx).ok());
+
+        // Published before the settings, so a pane rendering on the first
+        // settings notification already finds its colours by name.
+        cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
         // Published before the first pane exists, so every pane — including
         // the first — finds current settings the moment it subscribes.
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -134,6 +156,7 @@ impl Workspace {
             settings.clone(),
             &panes,
             endpoint.as_ref(),
+            surfaces.as_ref(),
             window,
             cx,
         ));
@@ -151,6 +174,17 @@ impl Workspace {
                 // The endpoint thread is waiting on this with a timeout of its
                 // own, so a failure here costs it a wait rather than a thread.
                 let _ = request.reply.send(answer);
+            }
+        });
+
+        let surface_task = cx.spawn_in(window, async move |workspace, cx| {
+            while let Ok(request) = surface_rx.recv().await {
+                let served = workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.serve_surface_request(request, window, cx);
+                });
+                if served.is_err() {
+                    break;
+                }
             }
         });
 
@@ -172,6 +206,8 @@ impl Workspace {
             config_path,
             _reload: reload_task,
             reload_sender,
+            surfaces,
+            _surface_requests: surface_task,
         }
     }
 
@@ -205,6 +241,8 @@ impl Workspace {
     /// Every tab, not only the visible one: a background tab's pane is still
     /// running whatever it runs.
     pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<Box<dyn FnOnce() + Send>> {
+        // No new Surface may open while the window winds down.
+        self.surfaces = None;
         // The window is going: its socket leaves the filesystem and its key
         // stops being accepted now, not once the last pane has finished.
         if let Some(endpoint) = self.endpoint.as_mut() {
@@ -229,6 +267,7 @@ impl Workspace {
                 self.settings.clone(),
                 &self.panes,
                 self.endpoint.as_ref(),
+                self.surfaces.as_ref(),
                 window,
                 cx,
             ),
@@ -243,6 +282,7 @@ impl Workspace {
             self.settings.clone(),
             &self.panes,
             self.endpoint.as_ref(),
+            self.surfaces.as_ref(),
             window,
             cx,
         ));
@@ -375,6 +415,8 @@ impl Workspace {
         let (settings, complaints) = candidate;
 
         let outcome = classify(&self.settings, &settings);
+        cx.global_mut::<crate::tokens::TokenRegistry>()
+            .apply_theme(&settings.colors);
         // Published, not pushed: each pane observes the global with its own
         // window in hand, which is what a cell re-measure needs and what this
         // method, reached from an endpoint thread, does not have.
@@ -387,6 +429,106 @@ impl Workspace {
         cx.notify();
 
         outcome.describe(&path, &complaints.0)
+    }
+
+    /// One message from a Surface connection, applied to the pane it names.
+    fn serve_surface_request(
+        &mut self,
+        request: SurfaceRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match request {
+            SurfaceRequest::Open {
+                id,
+                pane,
+                open,
+                connection,
+                reply,
+            } => {
+                let answer = self.terminal(pane).and_then(|view| {
+                    view.update(cx, |view, cx| {
+                        view.open_surface(id, open, connection, window, cx)
+                    })
+                });
+                let _ = reply.send(answer);
+            }
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description,
+            } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| view.update_surface(id, description, cx));
+                }
+            }
+            SurfaceRequest::Focus { pane, .. } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| view.focus_terminal(window, cx));
+                }
+            }
+            SurfaceRequest::Close { id, pane } | SurfaceRequest::Closed { id, pane } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| view.close_surface(id, window, cx));
+                }
+            }
+            SurfaceRequest::FocusTerminal { pane, reply } => {
+                let answer = self
+                    .terminal(pane)
+                    .map(|view| view.update(cx, |view, cx| view.focus_terminal(window, cx)));
+                let _ = reply.send(answer);
+            }
+            SurfaceRequest::RegisterToken {
+                name,
+                default,
+                description,
+                reply,
+            } => {
+                let answer = cx
+                    .global_mut::<TokenRegistry>()
+                    .register(&name, default, &description)
+                    .map(|_| ())
+                    .map_err(|_| Refusal::TokenConflict);
+                if answer.is_ok() {
+                    // A Surface already drawn with this name's fallback picks up
+                    // the real colour on its next frame.
+                    self.repaint_terminals(cx);
+                }
+                let _ = reply.send(answer);
+            }
+        }
+    }
+
+    /// The terminal view behind a pane id, or why there is none: a Surface can
+    /// only be drawn into a pane that exists and is a terminal.
+    fn terminal(&self, pane: PaneId) -> Result<gpui::Entity<TerminalView>, Refusal> {
+        let (_, _, handle) = self
+            .tabs
+            .all_panes()
+            .into_iter()
+            .find(|(_, id, _)| *id == pane)
+            .ok_or(Refusal::UnknownPane)?;
+        handle
+            .view()
+            .downcast::<TerminalView>()
+            .map_err(|_| Refusal::NotATerminal)
+    }
+
+    fn repaint_terminals(&self, cx: &mut Context<Self>) {
+        for (_, _, handle) in self.tabs.all_panes() {
+            if let Ok(view) = handle.view().downcast::<TerminalView>() {
+                view.update(cx, |_view, cx| cx.notify());
+            }
+        }
+    }
+
+    /// Ctrl+Shift+Space: the focused pane cycles the keyboard between its
+    /// terminal and its Surfaces.
+    fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = self.tabs.active().focus();
+        if let Ok(view) = self.terminal(focused) {
+            view.update(cx, |view, cx| view.cycle_focus(window, cx));
+        }
     }
 
     fn begin_rename(&mut self, cx: &mut Context<Self>) {
@@ -633,11 +775,12 @@ fn make_pane<'a>(
     settings: crate::config::Settings,
     panes: &'a Arc<WindowPanes>,
     endpoint: Option<&'a Endpoint>,
+    surfaces: Option<&'a SurfaceEndpoint>,
     window: &'a mut Window,
     cx: &'a mut Context<Workspace>,
 ) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle> + 'a {
     move |tab, pane| {
-        let environment = session_environment(endpoint, tab, pane);
+        let environment = session_environment(endpoint, surfaces, tab, pane);
         let link = pane_link(panes, endpoint, tab, pane);
         Rc::new(cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx)))
     }
@@ -667,12 +810,19 @@ fn pane_link(
 /// could only produce confusing failures.
 fn session_environment(
     endpoint: Option<&Endpoint>,
+    surfaces: Option<&SurfaceEndpoint>,
     tab: TabId,
     pane: PaneId,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    endpoint
+    let mut environment = endpoint
         .map(|endpoint| endpoint.environment(tab, pane))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    environment.extend(
+        surfaces
+            .into_iter()
+            .flat_map(|surfaces| surfaces.environment(tab, pane)),
+    );
+    environment
 }
 
 /// What a reload changed, and when each change takes effect.
@@ -891,6 +1041,7 @@ enum WorkspaceAction {
     RenameTab,
     NextTab,
     PreviousTab,
+    CycleFocus,
     Focus(Direction),
     Resize(Direction),
 }
@@ -934,6 +1085,7 @@ fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
         "r" => Some(WorkspaceAction::RenameTab),
         "pagedown" => Some(WorkspaceAction::NextTab),
         "pageup" => Some(WorkspaceAction::PreviousTab),
+        "space" => Some(WorkspaceAction::CycleFocus),
         "left" => Some(WorkspaceAction::Focus(Direction::Left)),
         "right" => Some(WorkspaceAction::Focus(Direction::Right)),
         "up" => Some(WorkspaceAction::Focus(Direction::Up)),
@@ -1449,6 +1601,7 @@ impl Render for Workspace {
                     WorkspaceAction::RenameTab => workspace.begin_rename(cx),
                     WorkspaceAction::NextTab => workspace.switch_tab(true, cx),
                     WorkspaceAction::PreviousTab => workspace.switch_tab(false, cx),
+                    WorkspaceAction::CycleFocus => workspace.cycle_surface_focus(window, cx),
                     WorkspaceAction::Focus(direction) => {
                         workspace.focus_direction(direction, cx);
                     }
@@ -1642,6 +1795,19 @@ mod tests {
         );
         assert_eq!(workspace_action(&press("d", ctrl())), None);
         assert_eq!(workspace_action(&press("d", Modifiers::default())), None);
+    }
+
+    #[test]
+    fn ctrl_shift_space_cycles_focus_between_the_terminal_and_its_surfaces() {
+        assert_eq!(
+            workspace_action(&press("space", ctrl_shift())),
+            Some(WorkspaceAction::CycleFocus)
+        );
+        assert_eq!(workspace_action(&press("space", ctrl())), None);
+        assert_eq!(
+            workspace_action(&press("space", Modifiers::default())),
+            None
+        );
     }
 
     /// The defect this checkpoint's live test found: GPUI folds shift into the

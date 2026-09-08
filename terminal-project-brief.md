@@ -171,16 +171,21 @@ about Sprite's dependency graph, not about runtime loading.
    remains available for terminal-pane metadata (§9); the broader TUI
    enhancement protocol is superseded (Addendum A.15).
 
-4. **Editor panes — separate repositories, consumed as crates.** Each
-   depends on `sprite-pane` and `gpui`, implements the trait, and ships no
-   binary of its own. Three are scheduled: a **Neovim pane** (Neovim runs as
-   a child process speaking msgpack-RPC through `nvim_ui_attach`; the pane is
-   a GPUI client drawing what Neovim reports — no fork, no editor code
-   linked), a **Helix fork** (a GPUI frontend replacing `helix-term` against
-   the existing `helix-core`/`helix-view` seam), and a **Croft fork**
-   (Croft's model retained, its ratatui view replaced). The dependency
-   direction is the whole boundary: editor repositories depend on Sprite,
-   and Sprite's `Cargo.toml` never names a concrete editor.
+4. **Programs describe UI; Sprite draws it.** There is one pane type. A
+   program running in a pane — Neovim's adapter, a Lua plugin, a shell
+   script — opens a *Surface* over the Surface Channel (a second authenticated
+   socket beside Pane Observation) and sends a versioned description: element
+   kinds, utility tokens for style, colour tokens the theme can override.
+   Sprite draws it with GPUI beside, over, or in place of the grid. Editors
+   integrate as clients of that protocol from their own repositories
+   (`sprite.nvim` first); nothing about an editor is compiled into Sprite.
+   The pane interface (`sprite-pane`, PR #27) is the contract a *hosted
+   Surface* satisfies inside a terminal pane, not a second pane type. The
+   Neovim pane, Helix fork, and Croft fork of the earlier plan are superseded
+   by `docs/PRDs/09-07-2026-native-surfaces.md`; a Helix or Croft fork is no
+   longer required for them to look native — Level 0 styles every terminal
+   program's grid from the theme, and a Level 1 adapter is theirs to write if
+   they want semantic styling or Surfaces.
 
 5. **VS Code compatibility subsystem inside the Croft fork.** Owns the
    compatibility matrix for user settings, keybindings, commands,
@@ -193,9 +198,9 @@ Two boundaries do the dependency control. Sprite Terminal ↔ editors is a
 **dependency invariant**, and it is mechanically checkable: Sprite's
 `Cargo.toml` names no concrete editor, so the arrows point inward and never
 out. An editor pane ↔ its extension host is a **process boundary**:
-extension work never blocks rendering. An editor pane inside a composed
-build is deliberately *not* a process boundary — it is a crate dependency,
-chosen so the pane renders natively through GPUI (§2).
+extension work never blocks rendering. A Surface's producer ↔ Sprite is also a
+**process boundary**: what crosses it is a description, never a call, so the
+dependency invariant is structural — there is nothing to bundle.
 
 ---
 
@@ -314,6 +319,12 @@ Neovim panel that A.8 deferred and A.15 declared unscheduled is now
 scheduled *first*, because it needs no fork and therefore tests the interface
 at the lowest cost. Neovim, Helix, and Croft also remain first-class terminal
 programs in terminal panes; a native pane is an addition, not a replacement.
+
+**2026-09-07, later:** superseded again by native Surfaces
+(`docs/PRDs/09-07-2026-native-surfaces.md`). The three repositories remain
+the places editor integration lives, but as clients of the Surface Channel
+rather than as crates Sprite consumes. `sprite.nvim` is first and needs no
+fork.
 
 ---
 

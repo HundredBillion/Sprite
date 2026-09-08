@@ -10,6 +10,10 @@ use std::path::PathBuf;
 
 use crate::observation::request::Scope;
 use crate::pane_tree::PaneId;
+use crate::surface::channel::{
+    DEFAULT_DOCK_SIZE, MAX_DOCK_SIZE, MIN_DOCK_SIZE, Position as SurfacePosition,
+    Side as SurfaceSide,
+};
 
 /// What the command line asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +26,9 @@ pub enum Invocation {
     ConfigReload,
     /// Print the configuration that is actually in effect.
     ConfigPrint(ConfigPrintArgs),
+    SurfaceOpen(SurfaceOpenArgs),
+    SurfaceFocus,
+    TokenRegister(TokenRegisterArgs),
     Help,
     Version,
 }
@@ -31,6 +38,23 @@ pub enum Invocation {
 pub struct ConfigPrintArgs {
     /// Read this file instead of asking the window, or of discovery.
     pub path: Option<PathBuf>,
+}
+
+/// Where to open a Surface, and whether it takes the keyboard.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SurfaceOpenArgs {
+    pub position: SurfacePosition,
+    pub side: SurfaceSide,
+    /// A dock's width in logical pixels.
+    pub size: u32,
+    pub focus: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenRegisterArgs {
+    pub name: String,
+    pub default: sprite_term::Rgb,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -80,6 +104,10 @@ sprite — a terminal
     sprite panes snapshot        print what other panes in this window show
     sprite config reload         re-read the configuration file in this window
     sprite config print          print the settings that are actually in effect
+    sprite surface open …        draw native UI in this pane from a description on stdin
+    sprite surface focus         hand the keyboard back to this pane's terminal
+    sprite token register <name> <#rrggbb> [description]
+                                 add a colour token the theme can override
 
 Options for `config print`:
     --config <path>              describe this file instead of asking the window
@@ -90,6 +118,19 @@ Options for `panes snapshot`:
     --window                     every pane in this window
     --lines <n>                  history lines per pane (0-5000, default 500)
     --pretty                     lay the JSON out for a human
+
+Options for `surface open` (one position is required):
+    --fill                       in place of the grid
+    --dock left|right            in a strip beside the grid
+    --overlay                    floating over the grid
+    --size <px>                  a dock's width (64-4096, default 240)
+    --no-focus                   open without taking the keyboard
+
+For `surface open`, standard input carries the description as JSON, then any
+number of further JSON documents: a description replaces the Surface;
+{\"type\":\"focus\"} hands the keyboard back; {\"type\":\"close\"} closes it, as
+does closing standard input. Events arrive on standard output, one JSON line
+each.
 
 The JSON goes to standard output and diagnostics to standard error. A response
 that parses exits zero even when `complete` is false, because the panes that did
@@ -152,6 +193,27 @@ where
                 None => Err(UsageError("arguments must be valid text".to_owned())),
             }
         }
+        Some("surface") => match arguments.next().as_deref().and_then(text).as_deref() {
+            Some("open") => Ok(Invocation::SurfaceOpen(surface_open(arguments)?)),
+            Some("focus") => match arguments.next() {
+                None => Ok(Invocation::SurfaceFocus),
+                Some(extra) => Err(UsageError(format!(
+                    "surface focus takes no arguments, but was given {}",
+                    extra.to_string_lossy()
+                ))),
+            },
+            Some(other) => Err(UsageError(format!("unknown surface command: {other}"))),
+            None => Err(UsageError(
+                "surface needs a command, such as: open".to_owned(),
+            )),
+        },
+        Some("token") => match arguments.next().as_deref().and_then(text).as_deref() {
+            Some("register") => Ok(Invocation::TokenRegister(token_register(arguments)?)),
+            Some(other) => Err(UsageError(format!("unknown token command: {other}"))),
+            None => Err(UsageError(
+                "token needs a command, such as: register".to_owned(),
+            )),
+        },
         Some(other) => Err(UsageError(format!("unknown argument: {other}"))),
         None => Err(UsageError("arguments must be valid text".to_owned())),
     }
@@ -261,6 +323,97 @@ fn snapshot(arguments: impl Iterator<Item = OsString>) -> Result<SnapshotArgs, U
         }
     }
     Ok(parsed)
+}
+
+fn surface_open(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<SurfaceOpenArgs, UsageError> {
+    let mut position = None;
+    let mut side = SurfaceSide::Left;
+    let mut size = DEFAULT_DOCK_SIZE as u32;
+    let mut focus = true;
+    while let Some(argument) = arguments.next() {
+        match text(&argument).as_deref() {
+            Some("--fill") => set_position(&mut position, SurfacePosition::Fill)?,
+            Some("--overlay") => set_position(&mut position, SurfacePosition::Overlay)?,
+            Some("--dock") => {
+                set_position(&mut position, SurfacePosition::Dock)?;
+                let name = arguments
+                    .next()
+                    .and_then(|value| text(&value))
+                    .ok_or_else(|| UsageError("--dock needs a side: left or right".to_owned()))?;
+                side = SurfaceSide::parse(&name)
+                    .ok_or_else(|| UsageError(format!("--dock takes left or right, not {name}")))?;
+            }
+            Some("--size") => {
+                let pixels = number(&mut arguments, "--size")?;
+                let allowed = (MIN_DOCK_SIZE as u64)..=(MAX_DOCK_SIZE as u64);
+                if !allowed.contains(&pixels) {
+                    return Err(UsageError(format!(
+                        "--size is between {} and {} pixels",
+                        MIN_DOCK_SIZE as u64, MAX_DOCK_SIZE as u64
+                    )));
+                }
+                size = pixels as u32;
+            }
+            Some("--no-focus") => focus = false,
+            _ => {
+                return Err(UsageError(format!(
+                    "unknown option: {}",
+                    argument.to_string_lossy()
+                )));
+            }
+        }
+    }
+    let position = position.ok_or_else(|| {
+        UsageError(
+            "surface open needs a position: --fill, --dock left|right, or --overlay".to_owned(),
+        )
+    })?;
+    Ok(SurfaceOpenArgs {
+        position,
+        side,
+        size,
+        focus,
+    })
+}
+
+fn set_position(
+    slot: &mut Option<SurfacePosition>,
+    position: SurfacePosition,
+) -> Result<(), UsageError> {
+    if slot.is_some() {
+        return Err(UsageError("surface open takes one position".to_owned()));
+    }
+    *slot = Some(position);
+    Ok(())
+}
+
+fn token_register(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<TokenRegisterArgs, UsageError> {
+    let name = arguments
+        .next()
+        .and_then(|value| text(&value))
+        .ok_or_else(|| {
+            UsageError(
+                "token register needs a name, a #rrggbb default, and a description".to_owned(),
+            )
+        })?;
+    let default = arguments
+        .next()
+        .and_then(|value| text(&value))
+        .and_then(|value| crate::config::Colors::parse_hex(&value))
+        .ok_or_else(|| UsageError(format!("token register {name} needs a #rrggbb default")))?;
+    let description = arguments
+        .filter_map(|value| text(&value))
+        .collect::<Vec<String>>()
+        .join(" ");
+    Ok(TokenRegisterArgs {
+        name,
+        default,
+        description,
+    })
 }
 
 fn number(arguments: &mut impl Iterator<Item = OsString>, option: &str) -> Result<u64, UsageError> {
@@ -478,5 +631,75 @@ mod tests {
         assert_eq!(parsed(&["-h"]), Invocation::Help);
         assert_eq!(parsed(&["--version"]), Invocation::Version);
         assert_eq!(parsed(&["-V"]), Invocation::Version);
+    }
+
+    #[test]
+    fn a_surface_open_names_its_position_and_options() {
+        assert_eq!(
+            parsed(&[
+                "surface",
+                "open",
+                "--dock",
+                "right",
+                "--size",
+                "300",
+                "--no-focus"
+            ]),
+            Invocation::SurfaceOpen(SurfaceOpenArgs {
+                position: SurfacePosition::Dock,
+                side: SurfaceSide::Right,
+                size: 300,
+                focus: false,
+            })
+        );
+        assert_eq!(
+            parsed(&["surface", "open", "--fill"]),
+            Invocation::SurfaceOpen(SurfaceOpenArgs {
+                position: SurfacePosition::Fill,
+                side: SurfaceSide::Left,
+                size: 240,
+                focus: true,
+            })
+        );
+        assert_eq!(parsed(&["surface", "focus"]), Invocation::SurfaceFocus);
+    }
+
+    #[test]
+    fn a_surface_open_needs_exactly_one_position_and_a_sane_size() {
+        assert!(rejected(&["surface", "open"]).contains("position"));
+        assert!(rejected(&["surface", "open", "--fill", "--overlay"]).contains("one position"));
+        assert!(rejected(&["surface", "open", "--dock"]).contains("left or right"));
+        assert!(rejected(&["surface", "open", "--dock", "top"]).contains("left or right"));
+        assert!(rejected(&["surface", "open", "--fill", "--size", "10"]).contains("64"));
+        assert!(rejected(&["surface", "open", "--fill", "--sparkle"]).contains("unknown option"));
+        assert!(rejected(&["surface", "focus", "now"]).contains("no arguments"));
+        assert!(rejected(&["surface"]).contains("needs a command"));
+        assert!(rejected(&["surface", "close"]).contains("unknown surface command"));
+    }
+
+    #[test]
+    fn a_token_registration_takes_a_name_a_colour_and_the_rest_as_its_description() {
+        assert_eq!(
+            parsed(&[
+                "token",
+                "register",
+                "scm.added",
+                "#40a02b",
+                "Added",
+                "lines"
+            ]),
+            Invocation::TokenRegister(TokenRegisterArgs {
+                name: "scm.added".to_owned(),
+                default: sprite_term::Rgb {
+                    r: 0x40,
+                    g: 0xa0,
+                    b: 0x2b
+                },
+                description: "Added lines".to_owned(),
+            })
+        );
+        assert!(rejected(&["token", "register"]).contains("needs a name"));
+        assert!(rejected(&["token", "register", "scm.added", "green"]).contains("#rrggbb"));
+        assert!(rejected(&["token", "list"]).contains("unknown token command"));
     }
 }

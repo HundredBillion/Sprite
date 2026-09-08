@@ -13,7 +13,7 @@ use gpui::{
 };
 use sprite_app::{
     Invocation, Settings, USAGE, WindowArgs, Workspace, parse_arguments, run_config_print,
-    run_config_reload, run_snapshot,
+    run_config_reload, run_snapshot, run_surface_focus, run_surface_open, run_token_register,
 };
 
 fn main() -> ExitCode {
@@ -36,6 +36,22 @@ fn main() -> ExitCode {
             let mut out = std::io::stdout().lock();
             let mut errors = std::io::stderr().lock();
             ExitCode::from(run_config_print(&args, &mut out, &mut errors) as u8)
+        }
+        Ok(Invocation::SurfaceOpen(args)) => {
+            let mut errors = std::io::stderr().lock();
+            ExitCode::from(
+                run_surface_open(&args, std::io::stdin(), std::io::stdout(), &mut errors) as u8,
+            )
+        }
+        Ok(Invocation::SurfaceFocus) => {
+            let mut out = std::io::stdout().lock();
+            let mut errors = std::io::stderr().lock();
+            ExitCode::from(run_surface_focus(&mut out, &mut errors) as u8)
+        }
+        Ok(Invocation::TokenRegister(args)) => {
+            let mut out = std::io::stdout().lock();
+            let mut errors = std::io::stderr().lock();
+            ExitCode::from(run_token_register(&args, &mut out, &mut errors) as u8)
         }
         Ok(Invocation::Help) => {
             println!("{USAGE}");
