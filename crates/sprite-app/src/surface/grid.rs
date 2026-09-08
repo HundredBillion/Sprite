@@ -631,6 +631,13 @@ impl GridSurface {
         }
     }
 
+    /// Whether this grid's cursor is asking the pane for a blink phase. A
+    /// grid that fills its pane hides the terminal, so the pane's phase has
+    /// to follow the grid's cursor or the grid's cursor never blinks.
+    pub fn cursor_blinks(&self) -> bool {
+        self.cursor.visible && self.cursor.blink
+    }
+
     pub fn cursor_snapshot(&self) -> CursorSnapshot {
         CursorSnapshot {
             row: self.cursor.row,
@@ -957,6 +964,83 @@ mod tests {
         let rows = grid.positioned_rows(&Highlights::default());
         assert_eq!(text_of(&rows[0]), "  ");
         assert!(!rows[0][0].style.bold, "clear resets highlights to 0");
+    }
+
+    #[test]
+    fn only_a_visible_blinking_cursor_asks_the_pane_for_a_blink_phase() {
+        let mut grid = GridSurface::new(2, 1);
+        assert!(
+            !grid.cursor_blinks(),
+            "a fresh grid's cursor is visible but steady"
+        );
+        grid.apply_all(ops(
+            json!({ "type": "cursor", "row": 0, "col": 0, "blink": true, "visible": false }),
+        ))
+        .expect("apply");
+        assert!(!grid.cursor_blinks(), "a hidden cursor blinks nothing");
+        grid.apply_all(ops(
+            json!({ "type": "cursor", "row": 0, "col": 0, "visible": true }),
+        ))
+        .expect("apply");
+        assert!(grid.cursor_blinks());
+        grid.apply_all(ops(
+            json!({ "type": "cursor", "row": 0, "col": 0, "blink": false }),
+        ))
+        .expect("apply");
+        assert!(!grid.cursor_blinks(), "visible but steady");
+    }
+
+    #[test]
+    fn a_cursor_outside_the_grid_is_refused_and_the_cursor_stays_put() {
+        let mut grid = GridSurface::new(4, 2);
+        grid.apply_all(ops(
+            json!({ "type": "cursor", "row": 1, "col": 3, "shape": "bar" }),
+        ))
+        .expect("apply");
+        for message in [
+            json!({ "type": "cursor", "row": 2, "col": 0 }),
+            json!({ "type": "cursor", "row": 0, "col": 4 }),
+        ] {
+            let refusal = grid.apply_all(ops(message.clone()));
+            assert!(
+                matches!(&refusal, Err(Refusal::Malformed(why)) if why.contains("outside the grid")),
+                "{message}: {refusal:?}"
+            );
+        }
+        let cursor = grid.cursor_snapshot();
+        assert_eq!((cursor.row, cursor.column), (1, 3));
+        assert_eq!(cursor.style, CursorStyle::Bar);
+    }
+
+    #[test]
+    fn a_cell_whose_highlight_was_never_defined_takes_the_grids_default_style() {
+        let mut grid = GridSurface::new(2, 1);
+        grid.apply_all(ops(json!({ "type": "batch", "ops": [
+            { "type": "highlights", "define": { "1": { "bold": true } } },
+            { "type": "rows", "rows": [{ "row": 0, "cells": [["a", 1], ["b", 99]] }] }
+        ] })))
+        .expect("apply");
+        let rows = grid.positioned_rows(&Highlights::default());
+        // Every field is Default or off: the painter fills the colours from
+        // `default_colors`, exactly as it does for an unstyled terminal cell.
+        assert_eq!(
+            rows[0][1].style,
+            CellStyle {
+                foreground: SnapshotColor::Default,
+                background: SnapshotColor::Default,
+                underline_color: SnapshotColor::Default,
+                bold: false,
+                italic: false,
+                faint: false,
+                blink: false,
+                inverse: false,
+                invisible: false,
+                strikethrough: false,
+                overline: false,
+                underline: UnderlineStyle::None,
+            },
+            "an undefined id is not the id before it, and not bold"
+        );
     }
 
     #[test]

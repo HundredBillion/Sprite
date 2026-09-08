@@ -635,11 +635,18 @@ impl TerminalView {
     /// blinking, so a program that stops the blink cannot leave the cursor
     /// hidden.
     fn tick_blink(&mut self, cx: &mut Context<Self>) {
-        let blinking = self
+        let terminal_blinks = self
             .bundle
             .as_ref()
             .is_some_and(|bundle| bundle.render.cursor.blinking && bundle.render.cursor.visible);
-        if !blinking {
+        // A grid Surface draws its cursor from this same phase, and a fill
+        // grid hides the terminal behind it, so a grid asking for a blink is
+        // reason enough for the pane to keep one.
+        let grid_blinks = self.surfaces.iter().any(|surface| match &surface.body {
+            Body::Grid(grid) => grid.cursor_blinks(),
+            Body::Elements(_) => false,
+        });
+        if !(terminal_blinks || grid_blinks) {
             if !self.blink_on {
                 self.blink_on = true;
                 cx.notify();

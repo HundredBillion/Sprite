@@ -77,7 +77,9 @@ pub(crate) fn render_grid(
 ) -> AnyElement {
     let (default_fg, default_bg) = grid.default_colors(metrics.defaults);
     // A blinking cursor is absent for half of each blink, exactly as the
-    // terminal's is; a steady one ignores the phase.
+    // terminal's is; a steady one ignores the phase. The phase is the pane's,
+    // and the pane keeps one whenever a hosted grid's cursor blinks, so this
+    // holds even for a fill grid with no terminal cursor showing behind it.
     let cursor = Some(grid.cursor_snapshot()).filter(|cursor| metrics.blink_on || !cursor.blinking);
     let rows = grid.positioned_rows(highlights).to_vec();
     let paint = GridPaint::new(GridPaintSpec {
