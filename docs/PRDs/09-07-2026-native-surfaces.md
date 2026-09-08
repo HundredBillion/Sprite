@@ -16,7 +16,7 @@ construction here.
 ## Summary
 
 Sprite gains one capability: **a program running in a pane can describe user
-interface, and Sprite draws it natively.** A panel with a list. A tree with
+interface, and Sprite draws it natively.** A docked list. A tree with
 full-colour SVG icons. A whole text grid. The description travels over a
 second authenticated socket beside the one every child process already knows —
 the Surface Channel — and Sprite renders it with GPUI, styled by name against a
@@ -27,8 +27,7 @@ and it uses it **entirely from its own side of the wire**: Neovim's UI protocol
 already emits a complete, structured description of the editing screen on every
 keystroke — every line, every highlight group, every window's position, the
 cursor — so a small adapter beside Neovim forwards that stream as a grid
-surface, and plugins such as `svgtree.nvim` and `scm.nvim` send panels of their
-own. All of that code lives in a Neovim repository. Sprite never learns the
+surface, and plugins such as `svgtree.nvim` and `scm.nvim` send Surfaces of their own. All of that code lives in a Neovim repository. Sprite never learns the
 name `nvim`. Nothing links into Sprite. Nothing needs bundling. There are two
 repositories — Sprite, and `sprite.nvim` — plus the plugins.
 
@@ -58,11 +57,9 @@ ideas Sprite deliberately declines.
   line height, gutter, padding, colours by highlight group. Quitting returns
   the shell, same directory, `$?` intact.
 - `svgtree.nvim` shows a real file tree beside the editor: proportional text,
-  full-colour vector icons, hover, smooth scrolling. `scm.nvim` shows a real
-  source-control panel. Clicking a file in either opens it in Neovim. Neither
+  full-colour vector icons, hover, smooth scrolling. `scm.nvim` shows a real source-control Surface docked beside the editor. Clicking a file in either opens it in Neovim. Neither
   plugin contains a line of Rust.
-- Any program — a shell script, `htop`, an agent's CLI — can put up a native
-  panel in its pane the same way, because nothing in the mechanism is
+- Any program — a shell script, `htop`, an agent's CLI — can put up a Surface in its pane the same way, because nothing in the mechanism is
   Neovim's. A terminal built for agents gains a way for agents to show
   structured, styled output.
 - Every terminal program, unmodified, gets **Level 0** styling for free: the
@@ -243,7 +240,7 @@ is available only over RPC, so the adapter is a process: it runs
 (`grid_line`, `win_pos`, `hl_attr_define`, cursor and mode events) into grid
 surface updates, and translates Sprite's input events back into
 `nvim_input`. This is what Neovide's core does; it is well-trodden.
-`sprite.nvim` also holds the Lua API plugins call to describe panels and the
+`sprite.nvim` also holds the Lua API plugins call to describe Surfaces and the
 `nvim` launcher that starts the adapter when a person types `nvim .`. That
 launcher inherits the takeover PRD's fail-open rule — no socket, refusal, or
 unknown protocol means `exec` the real Neovim in text mode — and its PATH and
@@ -268,7 +265,7 @@ PRD gets a status line pointing here. The dependency invariant and the three
 editor repositories are restated, not removed — with the note that a Helix or
 Croft *fork* is no longer required for them to look native; Level 0 covers
 appearance, and a Level 1 adapter is theirs to write if they want semantic
-styling or panels.
+styling or Surfaces.
 
 ## What ends up where
 
@@ -311,9 +308,9 @@ styling or panels.
 ~~~
 sprite.nvim/                      separate repository — Neovim's side of the wire
   adapter/                        runs `nvim --embed`, nvim_ui_attach, redraw -> grid surface
-  lua/sprite/                     the API plugins call to describe panels and register tokens
+  lua/sprite/                     the API plugins call to describe Surfaces and register tokens
   bin/nvim                        the launcher: fails open to text-mode Neovim
-svgtree.nvim, scm.nvim            send panel descriptions; register their tokens; pure Lua
+svgtree.nvim, scm.nvim            send Surface Descriptions; register their tokens; pure Lua
 ~~~
 
 ## Verification
@@ -340,13 +337,13 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    `fmt`, `clippy -D warnings`, and the `--locked --offline` build pass.
    Plain `sprite` with no surface open behaves as before, byte for byte.
 3. **End to end, by hand, with a script.** From a shell in a Sprite pane, a
-   script opens a *dock* surface describing a panel: a title, a list of
+   script opens a *dock* surface describing a docked Surface: a title, a list of
    three rows each with an SVG icon and a label, styled with utility tokens
-   and colours referenced by token name. The panel appears beside the
+   and colours referenced by token name. The Surface appears beside the
    terminal; `tput cols` in the shell reports the narrower width. Clicking a
    row delivers an `event` to the script, which prints it. Editing the
-   theme's value for a token the panel uses restyles the panel live. The
-   script exits; the panel disappears and `tput cols` is restored. A second
+   theme's value for a token the Surface uses restyles the Surface live. The
+   script exits; the Surface disappears and `tput cols` is restored. A second
    script opens a *fill* surface streaming a small grid with two highlight
    groups; the theme's flat highlight map colours them; closing it returns
    the shell.
