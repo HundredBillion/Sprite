@@ -852,14 +852,6 @@ mod tests {
     fn a_client_with_the_wrong_key_is_refused_with_one_fixed_answer() {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
-        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let _window = window(rx, {
-            let reached = Arc::clone(&reached);
-            move |_| {
-                reached.store(true, Ordering::SeqCst);
-                true
-            }
-        });
 
         for first_line in ["", "deadbeef", &format!("deadbeef {}", open_message(1))] {
             let (mut stream, mut reader) = connect(&endpoint);
@@ -868,12 +860,14 @@ mod tests {
                 line(&mut reader),
                 json!({ "type": "refused", "reason": "denied" })
             );
+            // The refusal is written before an authenticated first message
+            // could ever produce a `SurfaceRequest`, so having already read
+            // it is proof nothing reached the window — no wait needed.
+            assert!(
+                rx.try_recv().is_err(),
+                "the window was asked by an unauthorised caller"
+            );
         }
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(
-            !reached.load(Ordering::SeqCst),
-            "the window was asked by an unauthorised caller"
-        );
     }
 
     #[test]
@@ -1012,20 +1006,17 @@ mod tests {
 
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
-        assert_eq!(line(&mut reader)["type"], "refused");
+        assert_eq!(
+            line(&mut reader),
+            json!({ "type": "refused", "reason": "position occupied" })
+        );
 
+        // `abandon` runs on the connection thread before `refuse` writes the
+        // refusal line above (serve_surface, channel.rs:533-534), so having
+        // already read that line is proof the connection is already marked
+        // dead — no wait needed.
         let connection = connection_rx.recv().expect("connection");
-        // `abandon` runs on the connection thread once it reads this reply,
-        // which races the assertion below; poll instead of assuming it has
-        // already happened by the time this test thread gets here.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if !connection.send(&event_focus()) {
-                break;
-            }
-            assert!(Instant::now() < deadline, "abandon never ran");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(!connection.send(&event_focus()));
     }
 
     #[test]
