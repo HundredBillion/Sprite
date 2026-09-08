@@ -25,7 +25,7 @@ pub(crate) fn render(
     description: &Description,
     surface: SurfaceId,
     registry: &TokenRegistry,
-    connection: &Arc<SurfaceConnection>,
+    connection: &SurfaceConnection,
 ) -> AnyElement {
     let mut next = 0u64;
     element(&description.root, surface, registry, connection, &mut next)
@@ -133,7 +133,7 @@ fn element(
     node: &Element,
     surface: SurfaceId,
     registry: &TokenRegistry,
-    connection: &Arc<SurfaceConnection>,
+    connection: &SurfaceConnection,
     next: &mut u64,
 ) -> AnyElement {
     // Numbered in tree order, so a clickable element's identity is stable for
@@ -169,7 +169,7 @@ fn element(
         None => boxed.into_any_element(),
         Some(name) => {
             let name = name.clone();
-            let connection = Arc::clone(connection);
+            let connection = connection.clone();
             boxed
                 .id(ElementId::NamedInteger(
                     SharedString::from(format!("surface-{}", surface.0)),
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn every_kind_becomes_an_element_without_a_window() {
         let (ours, _theirs) = UnixStream::pair().expect("socket pair");
-        let connection = Arc::new(SurfaceConnection::new(&ours).expect("connection"));
+        let connection = SurfaceConnection::new(&ours).expect("connection");
         let registry = TokenRegistry::new(&Colors::default());
         let parsed = description::parse(
             &json!({

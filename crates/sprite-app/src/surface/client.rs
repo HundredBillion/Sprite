@@ -23,6 +23,14 @@ use crate::surface::channel::{KEY_VARIABLE, SOCKET_VARIABLE, VERSION};
 /// it lives as long as the Surface.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// One line to the window, flushed, with the truth about whether it went.
+fn send_line(stream: &UnixStream, line: &str) -> bool {
+    let mut writer = stream;
+    writeln!(writer, "{line}")
+        .and_then(|_| writer.flush())
+        .is_ok()
+}
+
 struct Credentials {
     socket: String,
     key: String,
@@ -141,18 +149,12 @@ pub fn run_surface_open(
         let _ = writeln!(errors, "sprite: could not read from the surface channel");
         return Exit::Unreachable;
     };
-    {
-        let mut writer = &stream;
-        if writeln!(writer, "{} {open}", credentials.key)
-            .and_then(|_| writer.flush())
-            .is_err()
-        {
-            let _ = writeln!(
-                errors,
-                "sprite: the window closed the connection before the surface opened"
-            );
-            return Exit::Unreachable;
-        }
+    if !send_line(&stream, &format!("{} {open}", credentials.key)) {
+        let _ = writeln!(
+            errors,
+            "sprite: the window closed the connection before the surface opened"
+        );
+        return Exit::Unreachable;
     }
     let verdict = match first_line(&mut reader, errors) {
         Ok(verdict) => verdict,
@@ -186,11 +188,7 @@ pub fn run_surface_open(
                 break;
             }
         };
-        let mut writer = &stream;
-        if writeln!(writer, "{message}")
-            .and_then(|_| writer.flush())
-            .is_err()
-        {
+        if !send_line(&stream, &message.to_string()) {
             break;
         }
     }
@@ -248,20 +246,14 @@ fn one_exchange(
         let _ = writeln!(errors, "sprite: could not read from the surface channel");
         return Exit::Unreachable;
     };
-    {
-        let mut writer = &stream;
-        if writeln!(writer, "{} {message}", credentials.key)
-            .and_then(|_| writer.flush())
-            .is_err()
-        {
-            let _ = writeln!(
-                errors,
-                "sprite: the window closed the connection without answering"
-            );
-            return Exit::Unreachable;
-        }
-        let _ = stream.shutdown(Shutdown::Write);
+    if !send_line(&stream, &format!("{} {message}", credentials.key)) {
+        let _ = writeln!(
+            errors,
+            "sprite: the window closed the connection without answering"
+        );
+        return Exit::Unreachable;
     }
+    let _ = stream.shutdown(Shutdown::Write);
     let verdict = match first_line(&mut reader, errors) {
         Ok(verdict) => verdict,
         Err(exit) => return exit,

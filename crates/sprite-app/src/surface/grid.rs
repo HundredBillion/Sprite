@@ -427,10 +427,16 @@ impl GridSurface {
     }
 
     /// Applies operations in order and stops at the first bad one, which is
-    /// refused; the ones before it stand, as a terminal's would.
+    /// refused; the ones before it stand, as a terminal's would. Inside a
+    /// batch of several, the refusal names the operation's index so a client
+    /// can tell which ones stood.
     pub fn apply_all(&mut self, ops: Vec<Op>) -> Result<(), Refusal> {
-        for op in ops {
-            self.apply(op)?;
+        let several = ops.len() > 1;
+        for (index, op) in ops.into_iter().enumerate() {
+            self.apply(op).map_err(|refusal| match (several, refusal) {
+                (true, Refusal::Malformed(why)) => Refusal::Malformed(format!("op {index}: {why}")),
+                (_, other) => other,
+            })?;
         }
         Ok(())
     }
@@ -705,6 +711,26 @@ mod tests {
 
     fn refused(message: serde_json::Value) -> Refusal {
         parse_ops(&message).expect_err("invalid operations")
+    }
+
+    #[test]
+    fn a_refusal_inside_a_batch_names_the_operation_that_failed() {
+        let mut grid = GridSurface::new(4, 2);
+        let ops = parse_ops(&json!({ "type": "batch", "ops": [
+            { "type": "clear" },
+            { "type": "cursor", "row": 7, "col": 0 },
+        ] }))
+        .expect("parses");
+        let refused = grid.apply_all(ops).expect_err("row 7 is outside");
+        assert!(
+            refused.reason().starts_with("malformed: op 1: "),
+            "{}",
+            refused.reason()
+        );
+        // A bare operation is refused without a prefix.
+        let ops = parse_ops(&json!({ "type": "cursor", "row": 7, "col": 0 })).expect("parses");
+        let refused = grid.apply_all(ops).expect_err("row 7 is outside");
+        assert!(!refused.reason().contains("op "), "{}", refused.reason());
     }
 
     fn text_of(row: &[PositionedCell]) -> String {

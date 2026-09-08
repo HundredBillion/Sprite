@@ -482,9 +482,9 @@ impl Workspace {
                 });
                 let _ = reply.send(answer);
             }
-            SurfaceRequest::Grid { id, pane, message } => {
+            SurfaceRequest::Grid { id, pane, ops } => {
                 if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.grid_operations(id, message, cx));
+                    view.update(cx, |view, cx| view.grid_operations(id, ops, cx));
                 }
             }
             SurfaceRequest::RegisterToken {

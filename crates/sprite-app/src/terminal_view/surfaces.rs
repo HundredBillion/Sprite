@@ -6,8 +6,6 @@
 use super::input::application_shortcut;
 use super::*;
 
-use std::sync::Arc;
-
 use gpui::prelude::*;
 
 use gpui::{
@@ -21,7 +19,7 @@ use crate::surface::channel::{
     event_grid_resize, event_input, event_refused, event_resize, event_warning,
 };
 use crate::surface::description::{self, Description, Element};
-use crate::surface::grid::{GridSurface, parse_ops};
+use crate::surface::grid::{GridSurface, Op};
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
 
@@ -42,7 +40,7 @@ pub(super) enum Body {
 pub(super) struct HostedSurface {
     id: SurfaceId,
     pub(super) body: Body,
-    connection: Arc<SurfaceConnection>,
+    connection: SurfaceConnection,
     focus: FocusHandle,
     /// A dock's requested width in logical pixels; unused elsewhere.
     pub(super) size: f32,
@@ -75,16 +73,15 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Result<(), Refusal> {
         let parsed = description::parse(&open.description, cx.global::<TokenRegistry>())?;
-        let connection = Arc::new(connection);
         let focus = cx.focus_handle();
         let on_focus = cx.on_focus(&focus, window, {
-            let connection = Arc::clone(&connection);
+            let connection = connection.clone();
             move |_view, _window, _cx| {
                 connection.send(&event_focus());
             }
         });
         let on_blur = cx.on_blur(&focus, window, {
-            let connection = Arc::clone(&connection);
+            let connection = connection.clone();
             move |_view, _window, _cx| {
                 connection.send(&event_blur());
             }
@@ -104,7 +101,7 @@ impl TerminalView {
         let hosted = HostedSurface {
             id,
             body,
-            connection: Arc::clone(&connection),
+            connection: connection.clone(),
             focus: focus.clone(),
             size: open.size,
             told_size: None,
@@ -168,12 +165,7 @@ impl TerminalView {
     /// Applies a grid operation, or a batch of them, to a grid Surface. The
     /// first bad operation is refused on the connection; what came before it
     /// stands, and the Surface is never removed for a bad message.
-    pub(crate) fn grid_operations(
-        &mut self,
-        id: SurfaceId,
-        message: serde_json::Value,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn grid_operations(&mut self, id: SurfaceId, ops: Vec<Op>, cx: &mut Context<Self>) {
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
             return;
         };
@@ -183,8 +175,7 @@ impl TerminalView {
             ));
             return;
         };
-        let outcome = parse_ops(&message).and_then(|ops| grid.apply_all(ops));
-        if let Err(refusal) = outcome {
+        if let Err(refusal) = grid.apply_all(ops) {
             surface.connection.send(&event_refused(&refusal.reason()));
         }
         cx.notify();
@@ -373,7 +364,7 @@ impl TerminalView {
                 crate::surface::render::render_grid(grid, highlights, metrics)
             }
         };
-        let keys = Arc::clone(&surface.connection);
+        let keys = surface.connection.clone();
         let focus = surface.focus.clone();
         let mut wrapper = div();
         if fills {
