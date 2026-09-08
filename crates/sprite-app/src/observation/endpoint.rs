@@ -69,9 +69,9 @@ const KEY_BYTES: usize = 32;
 /// Deliberately not read from `libc`: that would be a new direct dependency,
 /// and a third-party notice, for two integers each platform's headers fix.
 #[cfg(target_os = "macos")]
-const MAX_SOCKET_PATH: usize = 103;
+pub(crate) const MAX_SOCKET_PATH: usize = 103;
 #[cfg(not(target_os = "macos"))]
-const MAX_SOCKET_PATH: usize = 107;
+pub(crate) const MAX_SOCKET_PATH: usize = 107;
 
 /// A per-window secret, compared in constant time and wiped when dropped.
 pub struct ObservationKey {
@@ -285,6 +285,14 @@ impl Endpoint {
         self.key.to_hex()
     }
 
+    /// The key itself, for a second endpoint of this window that shares it.
+    // Not yet called: the window does not open a second endpoint until it
+    // wires the Surface Channel to a live GPUI thread.
+    #[allow(dead_code)]
+    pub(crate) fn key(&self) -> Arc<ObservationKey> {
+        Arc::clone(&self.key)
+    }
+
     /// What one pane's session needs to talk to this endpoint.
     ///
     /// A session learns the socket, the key, and **its own** identity. It is
@@ -443,7 +451,7 @@ fn refuse(stream: &mut UnixStream) {
 /// A socket with a live window behind it accepts a connection and is left
 /// alone; only one that refuses is removed. That is what makes this safe to run
 /// while other windows are open.
-fn sweep_dead_sockets(directory: &Path) {
+pub(crate) fn sweep_dead_sockets(directory: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
@@ -469,7 +477,7 @@ fn sweep_dead_sockets(directory: &Path) {
 /// reach is the whole point, so it is better to have no observation surface
 /// than one in a place another user can reach.
 #[cfg(not(target_os = "macos"))]
-fn runtime_directory() -> std::io::Result<PathBuf> {
+pub(crate) fn runtime_directory() -> std::io::Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
         std::io::Error::other(
             "XDG_RUNTIME_DIR is not set, so there is no private directory for the \
@@ -492,7 +500,7 @@ fn runtime_directory() -> std::io::Result<PathBuf> {
 /// the mode is not taken on trust either way, since [`Endpoint::open_in`]
 /// applies 0700 to the directory it is given before the socket exists.
 #[cfg(target_os = "macos")]
-fn runtime_directory() -> std::io::Result<PathBuf> {
+pub(crate) fn runtime_directory() -> std::io::Result<PathBuf> {
     let base = std::env::var_os("TMPDIR").ok_or_else(|| {
         std::io::Error::other(
             "TMPDIR is not set, so there is no private directory for the \

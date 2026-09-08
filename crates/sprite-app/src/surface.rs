@@ -1,6 +1,7 @@
 //! Native Surfaces: what a program describes over the Surface Channel and
 //! Sprite draws inside that program's pane.
 
+pub mod channel;
 pub mod description;
 pub mod style;
 

@@ -32,8 +32,12 @@ pub use observation::broker::{
 };
 pub use observation::client::{run_config_print, run_config_reload, run_snapshot};
 pub use observation::endpoint::Endpoint;
+pub use observation::endpoint::ObservationKey;
 pub use observation::schema::render as render_schema;
 pub use pane_tree::{PaneId, Rect};
 pub use sprite_term::HistoryLines;
+pub use surface::channel::{
+    Position as SurfacePosition, Side as SurfaceSide, SurfaceEndpoint, SurfaceRequest,
+};
 pub use tabs::TabId;
 pub use workspace::Workspace;
