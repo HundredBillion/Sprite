@@ -2596,7 +2596,7 @@ states" rule).
 `nvim` and `top`: everything as on `master`, and an underlined word in a man
 page (`man ls`, headings) now shows its underline.
 
-- [ ] **Step 5: End to end, by hand, with the script — the PRD's Verification 3, second script**
+- [x] **Step 5: End to end, by hand, with the script — the PRD's Verification 3, second script**
 
 Screen unlocked, debug Sprite open with a scratch configuration
 (`cargo run -p sprite-app --locked --offline -- --config /tmp/surface-grid.toml`),
@@ -2630,6 +2630,20 @@ the debug `sprite` first on PATH in the pane (`command -v sprite`).
    not a grid`.
 
 Record the result here as a checked box with a sentence of what was seen.
+
+- [x] Seen on 2026-09-08 10:42–10:46 with a debug Sprite on a scratch config:
+  the 40×8 grid replaced the shell with a grey italic comment row, bold
+  purple `local`, a darker band row, and a bar cursor after `x = `, cells the
+  terminal's size; `config reload` with a red upright `Comment` restyled the
+  first row live and replied `applied now: colors, highlights`; the batch
+  scrolled the content up one row with the cursor following; the shell
+  returned at its former size when the script ended. Focus: an overlay's
+  `{"type":"focus","target":4}` gave the dock a `focus` event and the overlay
+  a `blur`; `target: 999` was refused `malformed: no Surface 999 in this
+  pane`. Refusals: `cols: 0` exited 5 with `malformed: a grid needs cols from
+  1 to 1024`; an `update` to a grid was refused `malformed: a grid Surface
+  takes rows, not an update`; `rows` to an element Surface was refused
+  `malformed: this Surface is not a grid`.
 
 - [ ] **Step 6: Finish the branch**
 
