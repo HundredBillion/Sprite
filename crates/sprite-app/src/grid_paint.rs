@@ -54,9 +54,10 @@ use std::sync::Arc;
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, Font, FontFeatures, FontStyle, FontWeight,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Position, Rgba,
-    SharedString, Style, TextRun, Window, fill, outline, point, px, relative, rgb,
+    SharedString, StrikethroughStyle, Style, TextRun, Window, fill, outline, point, px, relative,
+    rgb,
 };
-use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor};
+use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor, UnderlineStyle};
 
 use crate::block_elements::{block_fill, fill_rects};
 use crate::box_drawing::{self, box_glyph, box_outlines, box_rects};
@@ -141,6 +142,49 @@ pub(crate) fn terminal_font(family: &SharedString, bold: bool, italic: bool) -> 
             FontStyle::Normal
         },
     }
+}
+
+/// One sixteenth of the row, and never less than a logical pixel: an
+/// underline two pixels thick is a bold stripe at size 8 and a hairline at
+/// size 48, so the thickness follows the row the way the cursor's does.
+const DECORATION_STROKE: f32 = 1.0 / 16.0;
+
+/// The underline and strikethrough a cell asks for, as GPUI draws them.
+///
+/// GPUI can draw a straight or a wavy line, so double, dotted, and dashed
+/// underlines draw straight: a program that asked for an underline gets one,
+/// rather than nothing, while the exact dash pattern waits on the toolkit.
+/// The underline colour is the cell's own when it set one and its text colour
+/// otherwise, which is what terminals do with SGR 58.
+pub(crate) fn decorations(
+    style: &CellStyle,
+    foreground: Rgba,
+    default_fg: Rgb,
+    palette: Option<&[Rgb; 256]>,
+    cell_height: Pixels,
+) -> (Option<gpui::UnderlineStyle>, Option<StrikethroughStyle>) {
+    let thickness = px((f32::from(cell_height) * DECORATION_STROKE)
+        .round()
+        .max(1.0));
+    let underline = match style.underline {
+        UnderlineStyle::None => None,
+        kind => {
+            let color = match style.underline_color {
+                SnapshotColor::Default => foreground,
+                other => resolve(other, default_fg, palette),
+            };
+            Some(gpui::UnderlineStyle {
+                thickness,
+                color: Some(color.into()),
+                wavy: kind == UnderlineStyle::Curly,
+            })
+        }
+    };
+    let strikethrough = style.strikethrough.then(|| StrikethroughStyle {
+        thickness,
+        color: Some(foreground.into()),
+    });
+    (underline, strikethrough)
 }
 
 /// The grid of one pane, painted without a layout pass.
@@ -524,13 +568,20 @@ impl GridPaint {
         }
 
         let text = SharedString::from(cell.text.clone());
+        let (underline, strikethrough) = decorations(
+            &cell.style,
+            drawn.foreground,
+            self.default_fg,
+            self.palette.as_deref(),
+            self.cell_height,
+        );
         let run = TextRun {
             len: text.len(),
             font: terminal_font(&self.font_family, cell.style.bold, cell.style.italic),
             color: drawn.foreground.into(),
             background_color: None,
-            underline: None,
-            strikethrough: None,
+            underline,
+            strikethrough,
         };
         let line = window
             .text_system()
@@ -738,7 +789,7 @@ impl IntoElement for GridPaint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sprite_term::UnderlineStyle;
+    use crate::tokens::unpack;
 
     #[test]
     fn snapping_lands_on_whole_device_pixels() {
@@ -1060,5 +1111,90 @@ mod tests {
             "reversed and invisible together should settle on the pre-swap \
              foreground, since invisible acts after the swap"
         );
+    }
+
+    fn decorated(underline: UnderlineStyle, strikethrough: bool) -> CellStyle {
+        CellStyle {
+            underline,
+            strikethrough,
+            ..plain_style(SnapshotColor::Default, SnapshotColor::Default, false)
+        }
+    }
+
+    #[test]
+    fn an_undecorated_cell_asks_for_no_underline_and_no_strikethrough() {
+        let style = decorated(UnderlineStyle::None, false);
+        let (underline, strikethrough) =
+            decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(16.0));
+        assert!(underline.is_none());
+        assert!(strikethrough.is_none());
+    }
+
+    #[test]
+    fn a_single_underline_is_straight_and_a_curly_one_is_wavy() {
+        let straight = decorations(
+            &decorated(UnderlineStyle::Single, false),
+            rgb(0xd8d8e0),
+            unpack(0xd8d8e0),
+            None,
+            px(16.0),
+        )
+        .0
+        .expect("an underline");
+        assert!(!straight.wavy);
+        let wavy = decorations(
+            &decorated(UnderlineStyle::Curly, false),
+            rgb(0xd8d8e0),
+            unpack(0xd8d8e0),
+            None,
+            px(16.0),
+        )
+        .0
+        .expect("an underline");
+        assert!(wavy.wavy);
+        // GPUI draws straight or wavy; the other kinds draw straight rather
+        // than not at all.
+        for kind in [
+            UnderlineStyle::Double,
+            UnderlineStyle::Dotted,
+            UnderlineStyle::Dashed,
+        ] {
+            let line = decorations(
+                &decorated(kind, false),
+                rgb(0xd8d8e0),
+                unpack(0xd8d8e0),
+                None,
+                px(16.0),
+            )
+            .0
+            .expect("an underline");
+            assert!(!line.wavy);
+        }
+    }
+
+    #[test]
+    fn an_underline_takes_the_cells_underline_colour_or_its_foreground() {
+        let mut style = decorated(UnderlineStyle::Single, false);
+        let plain = decorations(&style, rgb(0x123456), unpack(0xd8d8e0), None, px(16.0))
+            .0
+            .expect("an underline");
+        assert_eq!(plain.color, Some(rgb(0x123456).into()));
+
+        style.underline_color = SnapshotColor::Rgb(unpack(0xff0000));
+        let coloured = decorations(&style, rgb(0x123456), unpack(0xd8d8e0), None, px(16.0))
+            .0
+            .expect("an underline");
+        assert_eq!(coloured.color, Some(rgb(0xff0000).into()));
+    }
+
+    #[test]
+    fn decoration_thickness_scales_with_the_row_and_never_vanishes() {
+        let style = decorated(UnderlineStyle::Single, true);
+        let (underline, strikethrough) =
+            decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(48.0));
+        assert_eq!(underline.expect("underline").thickness, px(3.0));
+        assert_eq!(strikethrough.expect("strikethrough").thickness, px(3.0));
+        let (thin, _) = decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(8.0));
+        assert_eq!(thin.expect("underline").thickness, px(1.0));
     }
 }
