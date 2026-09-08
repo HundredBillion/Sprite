@@ -163,7 +163,7 @@ docs, gate, by-hand proof, PR.
     u32 = 0xd8d8e0`, `tokens::unpack(u32) -> Rgb`.
   - `Colors.tokens: Vec<(String, Rgb)>`, sorted by name.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/sprite-app/src/tokens.rs` with only the tests for now (the
 implementation comes in Step 3), so the file compiles as a test module once the
@@ -309,7 +309,7 @@ extend the `text` literal: directly after the `[colors.palette]` entries add
 "scm.added" = "#40a02b"
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Add `mod tokens;` to `crates/sprite-app/src/lib.rs` after `mod terminal_view;`.
 
@@ -318,7 +318,7 @@ Expected: compile error — `TokenRegistry`, `Role`, `Resolved`, `Registration`,
 `TokenConflict`, `unpack`, `DEFAULT_BACKGROUND` are not defined, and
 `Colors` has no field `tokens`.
 
-- [ ] **Step 3: Write the registry**
+- [x] **Step 3: Write the registry**
 
 Replace the top of `crates/sprite-app/src/tokens.rs` (above `#[cfg(test)]`)
 with:
@@ -529,7 +529,7 @@ pub fn unpack(packed: u32) -> Rgb {
 }
 ```
 
-- [ ] **Step 4: Add the setting in `config.rs`**
+- [x] **Step 4: Add the setting in `config.rs`**
 
 In `Colors` (~line 125), after the `palette` field:
 
@@ -590,7 +590,7 @@ In `to_toml`, directly after the palette block (after the `}` that closes
         }
 ```
 
-- [ ] **Step 5: Point the terminal's defaults at the tokens, and publish the registry**
+- [x] **Step 5: Point the terminal's defaults at the tokens, and publish the registry**
 
 In `crates/sprite-app/src/terminal_view.rs`, replace the two constants
 
@@ -625,7 +625,7 @@ In `Workspace::reload`, directly before
             .apply_theme(&settings.colors);
 ```
 
-- [ ] **Step 6: Run the tests and the gate**
+- [x] **Step 6: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including the seven `tokens::tests` and
@@ -635,7 +635,7 @@ test.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sprite-app/src/tokens.rs crates/sprite-app/src/lib.rs crates/sprite-app/src/config.rs crates/sprite-app/src/terminal_view.rs crates/sprite-app/src/workspace.rs
@@ -724,7 +724,7 @@ fields are ignored so a newer client can talk to an older Sprite. A
 description with more than 4096 elements or nesting deeper than 32 is
 `malformed`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/sprite-app/src/surface.rs`:
 
@@ -995,7 +995,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Add `mod surface;` to `crates/sprite-app/src/lib.rs` after `mod pane_tree;`.
 
@@ -1003,7 +1003,7 @@ Run: `cargo test -p sprite-app --locked --offline surface::`
 Expected: compile error — `parse`, `Parsed`, `Kind`, `ColorRef`, `MAX_DEPTH`,
 `vocabulary`, `step`, `apply`, `apply_all`, `is_known` are not defined.
 
-- [ ] **Step 3: Write the style table**
+- [x] **Step 3: Write the style table**
 
 Put this above the tests in `crates/sprite-app/src/surface/style.rs`:
 
@@ -1229,7 +1229,7 @@ when compiled (the macro generates `Length` for prefixes that allow `auto`),
 pass `definite` there instead and note it in the report; the vocabulary does
 not change.
 
-- [ ] **Step 4: Write the description parser**
+- [x] **Step 4: Write the description parser**
 
 Put this above the tests in `crates/sprite-app/src/surface/description.rs`:
 
@@ -1467,7 +1467,7 @@ fn color_ref(
 }
 ```
 
-- [ ] **Step 5: Run the tests and the gate**
+- [x] **Step 5: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline surface::`
 Expected: all pass — one test in `surface::tests`, five in
@@ -1479,7 +1479,7 @@ Task 3; if clippy reports dead code, add `#[allow(dead_code)]` on the
 `surface` module declaration in `lib.rs` with the comment `// Consumed by
 the Surface Channel, which follows.` and remove it in Task 5.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface.rs crates/sprite-app/src/surface/description.rs crates/sprite-app/src/surface/style.rs crates/sprite-app/src/lib.rs
@@ -1563,7 +1563,7 @@ removed and nothing is sent. Lines are capped at 16 MiB each (a description
 carrying an SVG icon set can be large; the observation socket's 8 KiB cap is
 for a different job). The reply timeout for the GPUI thread is five seconds.
 
-- [ ] **Step 1: Make the shared pieces of `endpoint.rs` reachable**
+- [x] **Step 1: Make the shared pieces of `endpoint.rs` reachable**
 
 In `crates/sprite-app/src/observation/endpoint.rs`:
 
@@ -1585,7 +1585,7 @@ In `crates/sprite-app/src/observation/endpoint.rs`:
 Nothing else in the file changes. Run `cargo test -p sprite-app --locked
 --offline observation::` and confirm every observation test still passes.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `crates/sprite-app/src/surface/channel.rs` with the tests only:
 
@@ -1915,7 +1915,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 Add `pub mod channel;` to `crates/sprite-app/src/surface.rs` before
 `pub mod description;`.
@@ -1924,7 +1924,7 @@ Run: `cargo test -p sprite-app --locked --offline surface::channel::`
 Expected: compile error — `SurfaceEndpoint`, `SurfaceRequest`, `Position`,
 `event_*` are not defined.
 
-- [ ] **Step 4: Write the channel**
+- [x] **Step 4: Write the channel**
 
 Put this above the tests in `crates/sprite-app/src/surface/channel.rs`:
 
@@ -2573,7 +2573,7 @@ assertions in `every_event_is_one_json_line_with_a_type` check that. If they
 fail because keys come out in source order, change those two assertions to
 parse both sides as `Value` and compare, and note it in the report.
 
-- [ ] **Step 5: Re-export what the integration tests will need**
+- [x] **Step 5: Re-export what the integration tests will need**
 
 In `crates/sprite-app/src/lib.rs`, after `pub use observation::endpoint::Endpoint;`:
 
@@ -2584,7 +2584,7 @@ pub use surface::channel::{
 };
 ```
 
-- [ ] **Step 6: Run the tests and the gate**
+- [x] **Step 6: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline surface::channel::`
 Expected: all nine pass.
@@ -2627,7 +2627,7 @@ constants are `#[cfg(test)]`; a malformed later input document makes `sprite
 surface open` exit 2; the README says "the observation socket cannot draw"
 rather than the stronger claim key sharing (decision 3) does not support.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/channel.rs crates/sprite-app/src/surface.rs crates/sprite-app/src/observation/endpoint.rs crates/sprite-app/src/lib.rs
@@ -2663,7 +2663,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   surface: SurfaceId, registry: &TokenRegistry, connection:
   &Arc<SurfaceConnection>) -> gpui::AnyElement`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/sprite-app/src/surface/render.rs` with the test only:
 
@@ -2710,7 +2710,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Add `pub mod render;` to `crates/sprite-app/src/surface.rs` after
 `pub mod description;`. In `channel.rs`, change `fn new(stream: &UnixStream)`
@@ -2719,7 +2719,7 @@ on `SurfaceConnection` to `pub(crate) fn new(stream: &UnixStream)`.
 Run: `cargo test -p sprite-app --locked --offline surface::render::`
 Expected: compile error — `render` is not defined.
 
-- [ ] **Step 3: Write the renderer**
+- [x] **Step 3: Write the renderer**
 
 Put this above the test in `crates/sprite-app/src/surface/render.rs`:
 
@@ -2818,7 +2818,7 @@ fn element(
 }
 ```
 
-- [ ] **Step 4: Run the test and the gate**
+- [x] **Step 4: Run the test and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline surface::`
 Expected: all pass, including `every_kind_becomes_an_element_without_a_window`.
@@ -2827,7 +2827,7 @@ Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --loc
 Expected: clean (see Task 2 Step 5 about a temporary `dead_code` allowance if
 clippy needs one; it goes in Task 5).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/render.rs crates/sprite-app/src/surface.rs crates/sprite-app/src/surface/channel.rs
@@ -2887,7 +2887,7 @@ capture before any of this runs. Ctrl+Shift+Space (Task 6) cycles terminal →
 Surfaces → terminal. When a Surface's connection closes, its space returns
 to the grid and nothing else changes.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/sprite-app/src/surface/host.rs` with the tests only:
 
@@ -2966,7 +2966,7 @@ In `crates/sprite-app/src/terminal_view.rs`, inside its existing `mod tests`
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Add `pub mod host;` to `crates/sprite-app/src/surface.rs` after `pub mod
 description;`.
@@ -2974,7 +2974,7 @@ description;`.
 Run: `cargo test -p sprite-app --locked --offline host::`
 Expected: compile error — `SurfaceHost` and `grid_room` are not defined.
 
-- [ ] **Step 3: Write the host**
+- [x] **Step 3: Write the host**
 
 Put this above the tests in `crates/sprite-app/src/surface/host.rs`:
 
@@ -3075,7 +3075,7 @@ impl<S> SurfaceHost<S> {
 }
 ```
 
-- [ ] **Step 4: Give `TerminalView` its Surfaces**
+- [x] **Step 4: Give `TerminalView` its Surfaces**
 
 In `crates/sprite-app/src/terminal_view.rs`:
 
@@ -3458,7 +3458,7 @@ grid_box` line down to directly precede the outer `div()`.
 **The `dead_code` allowance.** If Task 2 or 4 added `#[allow(dead_code)]` on
 `mod surface;` in `lib.rs`, remove it now; everything is used.
 
-- [ ] **Step 5: Run the tests and the gate**
+- [x] **Step 5: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including the four `surface::host::tests` and
@@ -3470,7 +3470,7 @@ Task 6; if clippy flags them, add `#[allow(dead_code)]` on each with the
 comment `// Called by the workspace's surface request loop, which follows.`
 and remove them in Task 6.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/host.rs crates/sprite-app/src/surface.rs crates/sprite-app/src/terminal_view.rs crates/sprite-app/src/lib.rs
@@ -3506,7 +3506,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   `SPRITE_SURFACE_SOCKET` and `SPRITE_SURFACE_KEY`; `WorkspaceAction::CycleFocus`
   on Ctrl+Shift+Space.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `workspace.rs`'s `mod tests`, beside the test that checks `press("d",
 ctrl_shift())` maps to `SplitRight` (~line 1640), add:
@@ -3523,12 +3523,12 @@ ctrl_shift())` maps to `SplitRight` (~line 1640), add:
     }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p sprite-app --locked --offline ctrl_shift_space_cycles_focus`
 Expected: compile error — no variant `CycleFocus`.
 
-- [ ] **Step 3: Open the channel and serve it**
+- [x] **Step 3: Open the channel and serve it**
 
 In `crates/sprite-app/src/workspace.rs`:
 
@@ -3727,7 +3727,7 @@ In the `capture_key_down` handler's `match action`, add:
 
 Remove any `#[allow(dead_code)]` Task 5 left on the `TerminalView` methods.
 
-- [ ] **Step 4: Run the tests and the gate**
+- [x] **Step 4: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including `ctrl_shift_space_cycles_focus_between_the_terminal_and_its_surfaces`.
@@ -3735,7 +3735,7 @@ Expected: all pass, including `ctrl_shift_space_cycles_focus_between_the_termina
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 5: Try it by hand, briefly**
+- [x] **Step 5: Try it by hand, briefly**
 
 Run `cargo run -p sprite-app --locked --offline` and, in the pane it opens:
 
@@ -3748,7 +3748,7 @@ the observation variables, and `SPRITE_SURFACE_KEY` equals
 `SPRITE_OBSERVATION_KEY`. (The client arrives in Task 7; this only proves the
 channel is open and advertised.) Close the window.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sprite-app/src/workspace.rs crates/sprite-app/src/terminal_view.rs
@@ -3810,7 +3810,7 @@ for the window to finish, and exits 0. Exit codes are the observation
 client's: 2 usage, 3 not inside a Sprite window, 4 the window's socket could
 not be reached or answered nothing, 5 the window refused.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/sprite-app/src/cli.rs`'s `mod tests`, using the existing `parsed`
 and `rejected` helpers:
@@ -4032,13 +4032,13 @@ pub use cli::{SurfaceOpenArgs, TokenRegisterArgs};
 (`SurfaceEndpoint`, `SurfaceRequest`, `SurfacePosition`, `SurfaceSide`, and
 `ObservationKey` were exported in Task 3.)
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline --test client surface`
 Expected: compile error — the `sprite_app::SurfaceRefusal` and `run_*`
 exports and `Invocation::SurfaceOpen` do not exist.
 
-- [ ] **Step 3: Parse the commands**
+- [x] **Step 3: Parse the commands**
 
 In `crates/sprite-app/src/cli.rs`:
 
@@ -4227,7 +4227,7 @@ fn token_register(
 }
 ```
 
-- [ ] **Step 4: Write the client**
+- [x] **Step 4: Write the client**
 
 Create `crates/sprite-app/src/surface/client.rs`:
 
@@ -4501,7 +4501,7 @@ In `crates/sprite-app/src/main.rs`, add three arms after `Ok(Invocation::ConfigP
 and extend `main.rs`'s `use sprite_app::{…}` with `run_surface_focus,
 run_surface_open, run_token_register`.
 
-- [ ] **Step 5: Run the tests and the gate**
+- [x] **Step 5: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including the three new `cli::tests` and the four new
@@ -4510,7 +4510,7 @@ Expected: all pass, including the three new `cli::tests` and the four new
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings && cargo build --workspace --locked --offline`
 Expected: clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/client.rs crates/sprite-app/src/surface.rs crates/sprite-app/src/cli.rs crates/sprite-app/src/main.rs crates/sprite-app/src/lib.rs crates/sprite-app/tests/client.rs
@@ -4545,7 +4545,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   duplicates removed. Plain `sprite` sets no integration directory, so
   nothing changes for it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `shell.rs`'s `mod tests`, change the three existing PATH tests to pass a
 slice, and add one:
@@ -4599,12 +4599,12 @@ slice, and add one:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-term --locked --offline path`
 Expected: compile error — `prepend_path` takes a `&Path`, not a slice.
 
-- [ ] **Step 3: Prepend both directories**
+- [x] **Step 3: Prepend both directories**
 
 Replace `prepend_path` with:
 
@@ -4666,7 +4666,7 @@ with
     }
 ```
 
-- [ ] **Step 4: Run the tests and the gate**
+- [x] **Step 4: Run the tests and the gate**
 
 Run: `cargo test -p sprite-term --locked --offline`
 Expected: all pass, including the four PATH tests.
@@ -4674,7 +4674,7 @@ Expected: all pass, including the four PATH tests.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/sprite-term/src/shell.rs
@@ -4705,7 +4705,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Document the client and the tokens in the README**
+- [x] **Step 1: Document the client and the tokens in the README**
 
 Replace the last paragraph of `## Configuration` ("Colours, cursor and font
 apply immediately. …") with:
@@ -4749,7 +4749,7 @@ reading protects drawing, and the two travel on separate sockets: nothing
 that can read a pane can draw in it.
 ```
 
-- [ ] **Step 2: Amend the brief and the plurality PRD**
+- [x] **Step 2: Amend the brief and the plurality PRD**
 
 In `terminal-project-brief.md`, replace §3 item 4 (the paragraph beginning
 `4. **Editor panes — separate repositories, consumed as crates.**`) with:
@@ -4813,7 +4813,7 @@ Surfaces, hosting, and the `sprite surface` client implemented by
 `tree`, `rows` updates, and the highlight map follow in TSP 3.
 ```
 
-- [ ] **Step 3: Commit the demo script**
+- [x] **Step 3: Commit the demo script**
 
 Create `scripts/surface-dock-demo.sh`, mode `0755`:
 
@@ -4880,7 +4880,7 @@ other scripts.
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 4: Run the whole CI gate**
+- [x] **Step 4: Run the whole CI gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -4893,7 +4893,7 @@ Expected: every command succeeds; `cargo test` reports `0 failed` in every
 crate, including `sprite-pane`'s manifest test and every `observation` test
 unchanged.
 
-- [ ] **Step 5: Confirm plain `sprite` is unchanged**
+- [x] **Step 5: Confirm plain `sprite` is unchanged**
 
 Run: `cargo run -p sprite-app --locked --offline -- config print | grep -c 'no colour tokens are overridden'`
 Expected: `1`.
@@ -4903,7 +4903,7 @@ shell in three panes, resize the window: everything behaves as on `master`.
 `sprite panes snapshot --window --pretty` returns the same JSON shape as
 before. Close the window.
 
-- [ ] **Step 6: End to end, by hand, with the script — the PRD's verification step 3**
+- [x] **Step 6: End to end, by hand, with the script — the PRD's verification step 3**
 
 1. Open a fresh debug Sprite with a scratch configuration:
    `cargo run -p sprite-app --locked --offline -- --config /tmp/surface-demo.toml`
@@ -4939,6 +4939,24 @@ before. Close the window.
 Record the result here as a checked box with a sentence of what was seen;
 there is no automated seam for it, and the PRD names that as absent rather
 than deferred by accident.
+
+Result (2026-09-08, commit df757ca, macOS): passed. Driven against a scratch
+`--config` file in a debug window with the debug `sprite` first on PATH. The
+dock opened with title, three icon rows, and focus (`opened`, `resize`
+220×915, `focus`); the shell went from 87 to 61 columns. A real mouse click on
+the second row printed `event row-2` and the script's `focus` blurred the dock.
+A `[colors.tokens]` override for `demo.label` plus `sprite config reload` in a
+second pane turned the labels red with no help from the script, and the dock
+shrank to half the narrower pane (`resize` 189×915). Enter closed it
+(`closed`); the shell was back at the pane's full width. Refusals: no
+description exits 2; `unknown element kind: blob` exits 5; a second dock on
+an occupied side exits 5 with `position occupied`. The overlay button sat
+centred; typing produced `input` events; Ctrl+Shift+Space sent `blur` and the
+next keys reached the shell; a second press sent `focus` and the next key was
+an `input` event again; when the overlay closed, focus returned to the shell
+and the client exited 0. One observation: the SVG circles drew orange although
+the icon says blue, which points at a red/blue channel swap in GPUI's
+SVG-to-image path, not in this branch.
 
 - [ ] **Step 7: Finish the branch**
 
