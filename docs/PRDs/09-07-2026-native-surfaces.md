@@ -131,7 +131,20 @@ terminal grid, a program's own OSC colours → the theme's override → the
 program-registered default → the built-in default → libghostty's colour
 (the first step is the rule `config.rs:100–105` already keeps); for a
 surface, the same without the OSC step. A literal colour is accepted as an
-escape hatch and is discouraged in the documentation.
+escape hatch and is discouraged in the documentation. Four rules govern the
+registry itself. Names are global and dotted by convention (`scm.*`,
+`svgtree.*`). Registering a name that already exists with the same default and
+description is a no-op, so a program registers on every start without
+ceremony; registering it with a different default is refused as `token
+conflict`, and the first registration stands, so no colour ever depends on
+launch order. The registry is session-scoped — cleared when Sprite exits and
+rebuilt as programs start — while theme overrides in `config.rs` persist and
+apply the moment a matching token exists. An unknown name resolves to a fixed
+fallback, `terminal.foreground` for a text role and `terminal.background` for
+a fill, and Sprite sends the program a `warning` event naming it: a typo dims
+one element and never blanks a plugin. Per-program namespacing was rejected
+because a theme could no longer override by a stable, human name;
+last-registration-wins was rejected as nondeterministic.
 
 **A first-class grid widget, styled by a flat highlight map.** The editing
 area is not a thousand tiny elements; it is one **grid** widget, updated
@@ -318,18 +331,20 @@ styling or Surfaces.
 - **Token registry (new, in `config.rs` alongside `Settings`):** built-in
   tokens — the existing `Colors` fields under token names — each with one
   default and a description; `register` from programs; theme overrides by
-  name; `resolve(name) -> Rgba` with a documented fallback for an unknown
-  token. One active theme; no theme kinds.
+  name; `resolve(name) -> Rgba`, falling back to `terminal.foreground` or
+  `terminal.background` by role for an unknown name and sending a `warning`
+  event. Session-scoped; the first registration of a name stands; identical
+  re-registration is a no-op. One active theme; no theme kinds.
 - **Surface Channel (`surface/channel.rs`, new):** a second `Endpoint`, its
   socket path exported to children as `SPRITE_SURFACE_SOCKET`, sharing the
   observation key, runtime directory, and authentication code. Its own
   newline-delimited-JSON grammar: `open { pane, position: fill|dock|overlay,
   side, focus, version }`, `update` (the whole description for an element Surface; `rows` for the
   grid), `close`, `focus`, `token register`, and the
-  event direction (`input`, `resize`, `event`, `focus`, `blur`) on the same
+  event direction (`input`, `resize`, `event`, `focus`, `blur`, `warning`) on the same
   long-lived connection. Refusals
   are distinct: unknown pane, pane not a terminal, unsupported version,
-  malformed description, unknown element kind or token, position occupied.
+  malformed description, unknown element kind or token, position occupied, token conflict.
   **`observation/` is
   not modified**; its read-only-by-construction grammar and tests are
   untouched.
@@ -370,9 +385,11 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    unknown kind, an unknown utility token, and an unsupported version with
    distinct reasons. Every supported utility token maps to a `Styled` call
    (table-driven; the table *is* the supported vocabulary). The registry returns a built-in default, a program-registered default, a theme
-   override in that order of precedence, and the documented fallback for an
-   unknown name; for the grid, a program's own OSC colour wins over all of
-   them while it runs. The grid widget applies an incremental line update without
+   override in that order of precedence, and, for an unknown name, the role's fixed fallback plus a `warning`
+   event; for the grid, a program's own OSC colour wins over all of
+   them while it runs. Re-registering a name with the same default is a
+   no-op; with a different default it is refused as `token conflict` and the
+   first stands. The grid widget applies an incremental line update without
    repainting untouched rows; an element Surface's `update` replaces its
    whole description, and nothing from the previous one survives. `TerminalView` hosts a fill, a dock (with the
    PTY told its new size), and an overlay, and returns the space when the

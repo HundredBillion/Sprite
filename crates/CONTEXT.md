@@ -108,7 +108,8 @@ registered token)
 **Token Registry**:
 The single table of Semantic Tokens Sprite resolves at draw time: built-in
 defaults, then program-registered defaults, then the active theme's overrides
-by name. One active theme; no theme kinds.
+by name. Session-scoped; the first registration of a name stands. One active
+theme; no theme kinds.
 _Avoid_: theme struct, colour map, stylesheet
 
 **Croft Compatibility Gate**:
