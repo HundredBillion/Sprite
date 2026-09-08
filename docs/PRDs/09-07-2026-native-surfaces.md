@@ -135,7 +135,7 @@ escape hatch and is discouraged in the documentation.
 
 **A first-class grid widget, styled by a flat highlight map.** The editing
 area is not a thousand tiny elements; it is one **grid** widget, updated
-incrementally, drawn by a generalisation of the painter Sprite already has for
+row by row, drawn by a generalisation of the painter Sprite already has for
 its terminal (`grid_paint.rs`, which paints cells without a layout pass for
 exactly this reason). Its cells carry a highlight id, and the theme maps
 highlight groups to style with a **flat** map in Zed's shape —
@@ -249,7 +249,14 @@ button, grid), the utility tokens the interpreter maps, the token registry
 verbs, and the events. It carries a protocol version of its
 own, and an unknown version is refused the way the observation grammar refuses
 one. A kind or token is added when a real plugin
-needs it and not before.
+needs it and not before. An `update` has exactly two shapes. For a box, list,
+tree, or any other element Surface it carries the **whole description** again
+and Sprite re-renders it — the immediate-mode model GPUI already runs, since
+Zed rebuilds its element tree on every `render()` and GPUI diffs the result.
+For the grid widget alone it carries `rows: [{ row, cells }]`, mirroring
+Neovim's own `grid_line`. No element ids, no patch semantics. Id-addressed
+patching is the named escalation if a real plugin's tree ever outgrows
+whole-replace; a few hundred nodes do not.
 
 **Two levels, delivered in order, the cheap one first.** Sprite *already
 holds* a structured grid of every terminal program's screen — that is what
@@ -317,7 +324,8 @@ styling or Surfaces.
   socket path exported to children as `SPRITE_SURFACE_SOCKET`, sharing the
   observation key, runtime directory, and authentication code. Its own
   newline-delimited-JSON grammar: `open { pane, position: fill|dock|overlay,
-  side, focus, version }`, `update`, `close`, `focus`, `token register`, and the
+  side, focus, version }`, `update` (the whole description for an element Surface; `rows` for the
+  grid), `close`, `focus`, `token register`, and the
   event direction (`input`, `resize`, `event`, `focus`, `blur`) on the same
   long-lived connection. Refusals
   are distinct: unknown pane, pane not a terminal, unsupported version,
@@ -365,7 +373,8 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    override in that order of precedence, and the documented fallback for an
    unknown name; for the grid, a program's own OSC colour wins over all of
    them while it runs. The grid widget applies an incremental line update without
-   repainting untouched rows. `TerminalView` hosts a fill, a dock (with the
+   repainting untouched rows; an element Surface's `update` replaces its
+   whole description, and nothing from the previous one survives. `TerminalView` hosts a fill, a dock (with the
    PTY told its new size), and an overlay, and returns the space when the
    connection closes. A surface opened with the default takes focus; one
    opened with `focus: false` leaves it where it was; `update` never moves
@@ -416,6 +425,8 @@ named below as absent, not deferred by accident.
   driven by the adapter can position them later without a Sprite change.
 - **Helix and Croft forks.** No longer required for appearance. An adapter
   for either is that project's choice.
+- **Id-addressed patch updates.** The escalation if a plugin's Surface ever
+  outgrows whole-description replace; a few hundred elements do not.
 - **A light/dark theme toggle.** Wanted later; it selects which theme is
   active and sits above the registry, changing no registration.
 - **Automating the by-hand verification.**
