@@ -100,13 +100,32 @@ pub struct Cell {
     pub hl: u32,
 }
 
-/// A run of cells written from `col` on `row`, with repeats expanded and the
-/// carried highlight filled in, so nothing downstream re-reads the wire rules.
+/// A run of cells written from `col` on `row`, with the carried highlight
+/// filled in but repeats still counted rather than expanded, so nothing
+/// downstream re-reads the wire rules.
+///
+/// The repeat stays a count until the operation is known to fit: a message of
+/// `["", 0, 1024]` chunks would otherwise demand gigabytes of cells at parse
+/// time and only then be refused for running past the grid's edge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RowChunk {
     pub row: u16,
     pub col: u16,
-    pub cells: Vec<Cell>,
+    /// Each cell and how many columns it fills; every count is at least one.
+    pub cells: Vec<(Cell, u32)>,
+}
+
+impl RowChunk {
+    /// The column just past the chunk's last, in `u64` so repeats that sum
+    /// beyond `u16` still compare against the grid instead of wrapping.
+    fn end_col(&self) -> u64 {
+        u64::from(self.col)
+            + self
+                .cells
+                .iter()
+                .map(|(_, repeat)| u64::from(*repeat))
+                .sum::<u64>()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -289,18 +308,20 @@ fn parse_chunk(value: &Value) -> Result<RowChunk, Refusal> {
                 .ok_or_else(|| malformed("a cell's hl is a number"))?;
         }
         let repeat = match parts.get(2) {
-            None => 1,
+            None => 1u32,
             Some(count) => count
                 .as_u64()
                 .filter(|count| (1..=u64::from(MAX_COLS)).contains(count))
+                .map(|count| count as u32)
                 .ok_or_else(|| malformed(format!("a cell's repeat is 1 to {MAX_COLS}")))?,
         };
-        for _ in 0..repeat {
-            cells.push(Cell {
+        cells.push((
+            Cell {
                 text: text.to_owned(),
                 hl,
-            });
-        }
+            },
+            repeat,
+        ));
     }
     Ok(RowChunk { row, col, cells })
 }
@@ -412,15 +433,17 @@ impl GridSurface {
     pub fn apply(&mut self, op: Op) -> Result<(), Refusal> {
         match op {
             Op::Rows(chunks) => {
+                // Every chunk is checked before any is written, so a bad one
+                // late in the operation leaves the grid as it was — and no
+                // repeat is expanded until the whole operation is known to fit.
                 for chunk in &chunks {
-                    let end = usize::from(chunk.col) + chunk.cells.len();
                     if chunk.row >= self.rows {
                         return Err(malformed(format!(
                             "row {} is past the grid's {} rows",
                             chunk.row, self.rows
                         )));
                     }
-                    if end > usize::from(self.cols) {
+                    if chunk.end_col() > u64::from(self.cols) {
                         return Err(malformed(format!(
                             "the chunk at row {} col {} runs past the grid's {} columns",
                             chunk.row, chunk.col, self.cols
@@ -429,9 +452,12 @@ impl GridSurface {
                 }
                 for chunk in chunks {
                     let row = &mut self.cells[usize::from(chunk.row)];
-                    let start = usize::from(chunk.col);
-                    for (offset, cell) in chunk.cells.into_iter().enumerate() {
-                        row[start + offset] = cell;
+                    let mut column = usize::from(chunk.col);
+                    for (cell, repeat) in chunk.cells {
+                        for _ in 0..repeat {
+                            row[column] = cell.clone();
+                            column += 1;
+                        }
                     }
                 }
             }
@@ -718,6 +744,34 @@ mod tests {
         assert_eq!(
             text_of(&grid.positioned_rows(&Highlights::default())[0]),
             "    "
+        );
+    }
+
+    #[test]
+    fn repeats_that_sum_past_the_grid_are_refused_before_anything_is_expanded() {
+        let mut grid = GridSurface::new(8, 1);
+        let parsed = ops(json!({ "type": "rows", "rows": [
+            { "row": 0, "cells": [["a", 0, 4]] },
+            { "row": 0, "col": 4, "cells": [["b", 0, 1024], ["c", 0, 1024]] }
+        ] }));
+        let Op::Rows(chunks) = &parsed[0] else {
+            panic!("a rows operation");
+        };
+        // The cost of parsing is the number of entries the message wrote, not
+        // the number of columns they claim: 2048 repeats are still two cells.
+        assert_eq!(chunks[0].cells.len(), 1);
+        assert_eq!(chunks[1].cells.len(), 2);
+        assert_eq!(chunks[1].cells[0].1, 1024);
+
+        let refusal = grid.apply_all(parsed);
+        assert!(
+            matches!(&refusal, Err(Refusal::Malformed(why)) if why.contains("past the grid")),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            text_of(&grid.positioned_rows(&Highlights::default())[0]),
+            "        ",
+            "the first chunk's repeats never reached the grid either"
         );
     }
 
