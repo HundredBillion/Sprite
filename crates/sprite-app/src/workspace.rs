@@ -467,14 +467,9 @@ impl Workspace {
                     view.update(cx, |view, cx| view.focus_terminal(window, cx));
                 }
             }
-            SurfaceRequest::Close { id, pane } => {
+            SurfaceRequest::Close { id, pane } | SurfaceRequest::Closed { id, pane } => {
                 if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.close_surface(id, true, window, cx));
-                }
-            }
-            SurfaceRequest::Closed { id, pane } => {
-                if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.close_surface(id, false, window, cx));
+                    view.update(cx, |view, cx| view.close_surface(id, window, cx));
                 }
             }
             SurfaceRequest::FocusTerminal { pane, reply } => {

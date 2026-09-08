@@ -81,6 +81,7 @@ pub(crate) struct HostedSurface {
 }
 
 /// The Surfaces of one frame, already built, in the layers they paint.
+#[derive(Default)]
 struct SurfaceLayers {
     fill: Option<AnyElement>,
     left: Option<AnyElement>,
@@ -1116,21 +1117,21 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Removes a Surface and returns its space to the grid. `announce` is
-    /// false when the connection is already gone and nobody is listening.
+    /// Removes a Surface and returns its space to the grid. Always answers
+    /// `closed`: a write to a connection that is already gone simply fails
+    /// (and, per `SurfaceConnection::send`, marks it dead), and a client that
+    /// only half-closed its write side — it is done sending, but is still
+    /// reading — still hears `closed` the way its code expects.
     pub(crate) fn close_surface(
         &mut self,
         id: SurfaceId,
-        announce: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((surface, position)) = self.surfaces.take(|surface| surface.id == id) else {
             return;
         };
-        if announce {
-            surface.connection.send(&event_closed());
-        }
+        surface.connection.send(&event_closed());
         if surface.focus.is_focused(window) {
             // An overlay gives the keyboard back to whoever had it. Anything
             // else — or a previous holder that has since closed — falls back to
@@ -1174,7 +1175,7 @@ impl TerminalView {
             .surfaces
             .fill
             .as_mut()
-            .map(|surface| Self::surface_element(surface, allocated, registry, cx));
+            .map(|surface| Self::surface_element(surface, allocated, registry, cx, true));
         let left = self.surfaces.left.as_mut().map(|surface| {
             let strip = Size {
                 width: px(left_width),
@@ -1186,7 +1187,7 @@ impl TerminalView {
                 .left(px(0.0))
                 .w(strip.width)
                 .h_full()
-                .child(Self::surface_element(surface, strip, registry, cx))
+                .child(Self::surface_element(surface, strip, registry, cx, true))
                 .into_any_element()
         });
         let right = self.surfaces.right.as_mut().map(|surface| {
@@ -1200,7 +1201,7 @@ impl TerminalView {
                 .right(px(0.0))
                 .w(strip.width)
                 .h_full()
-                .child(Self::surface_element(surface, strip, registry, cx))
+                .child(Self::surface_element(surface, strip, registry, cx, true))
                 .into_any_element()
         });
         // Each overlay is centred in its own full-pane layer, so later ones
@@ -1216,7 +1217,9 @@ impl TerminalView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Self::surface_element(surface, allocated, registry, cx))
+                    .child(Self::surface_element(
+                        surface, allocated, registry, cx, false,
+                    ))
                     .into_any_element()
             })
             .collect();
@@ -1229,12 +1232,17 @@ impl TerminalView {
     }
 
     /// One Surface as an element: its drawing, wrapped in the box that owns
-    /// its keyboard and mouse.
+    /// its keyboard and mouse. `fills` is true for the fill position and both
+    /// docks, which are meant to fill the space they are given; an overlay
+    /// passes `false` so its wrapper is exactly its body's size, rather than
+    /// filling — and so capturing every click and scroll over — the whole
+    /// centring layer around it.
     fn surface_element(
         surface: &mut HostedSurface,
         size: Size<Pixels>,
         registry: &TokenRegistry,
         cx: &mut Context<Self>,
+        fills: bool,
     ) -> AnyElement {
         let told = (
             f32::from(size.width).round() as u32,
@@ -1252,8 +1260,11 @@ impl TerminalView {
         );
         let keys = Arc::clone(&surface.connection);
         let focus = surface.focus.clone();
-        div()
-            .size_full()
+        let mut wrapper = div();
+        if fills {
+            wrapper = wrapper.size_full();
+        }
+        wrapper
             .overflow_hidden()
             .track_focus(&surface.focus)
             .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _window, cx| {
@@ -1444,9 +1455,15 @@ impl Render for TerminalView {
             (build(RowPass::Whole, rows), None)
         };
 
-        let registry = cx.global::<TokenRegistry>().clone();
-        let allocated = self.allocated.unwrap_or_default();
-        let layers = self.surface_layers(allocated, &registry, cx);
+        // With nothing hosted, the frame must cost what it cost before
+        // Surfaces existed: no registry clone, no layer construction.
+        let allocated = self.allocated.unwrap_or_else(|| window.viewport_size());
+        let layers = if self.surfaces.is_empty() {
+            SurfaceLayers::default()
+        } else {
+            let registry = cx.global::<TokenRegistry>().clone();
+            self.surface_layers(allocated, &registry, cx)
+        };
 
         // Everything the terminal draws lives inside the grid box, which is
         // inset from the pane by the padding. Row and cell offsets are

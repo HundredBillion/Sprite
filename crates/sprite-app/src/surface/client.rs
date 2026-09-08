@@ -175,12 +175,14 @@ pub fn run_surface_open(
             }
         }
     });
+    let mut bad_input = false;
     for document in documents {
         let message = match document {
             Ok(value) if value.get("type").is_some() => value,
             Ok(value) => json!({ "type": "update", "description": value }),
             Err(error) => {
                 let _ = writeln!(errors, "sprite: standard input is not JSON: {error}");
+                bad_input = true;
                 break;
             }
         };
@@ -195,7 +197,7 @@ pub fn run_surface_open(
     // Standard input is done: tell the window, and let it say `closed`.
     let _ = stream.shutdown(Shutdown::Write);
     let _ = events.join();
-    Exit::Ok
+    if bad_input { Exit::Usage } else { Exit::Ok }
 }
 
 pub fn run_surface_focus(out: &mut dyn Write, errors: &mut dyn Write) -> Exit {

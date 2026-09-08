@@ -256,8 +256,8 @@ change as one JSON line, sends each further document on standard input as a
 replacement, and closes the Surface when standard input closes. A Surface
 takes the keyboard when it opens; the program hands it back with
 `{"type":"focus"}`, or Ctrl+Shift+Space cycles it. The same key that protects
-reading protects drawing, and the two travel on separate sockets: nothing
-that can read a pane can draw in it.
+reading protects drawing. Reading and drawing travel on separate sockets, and
+the observation socket cannot draw.
 
 ## Platform
 

@@ -286,9 +286,6 @@ impl Endpoint {
     }
 
     /// The key itself, for a second endpoint of this window that shares it.
-    // Not yet called: the window does not open a second endpoint until it
-    // wires the Surface Channel to a live GPUI thread.
-    #[allow(dead_code)]
     pub(crate) fn key(&self) -> Arc<ObservationKey> {
         Arc::clone(&self.key)
     }

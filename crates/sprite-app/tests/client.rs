@@ -180,6 +180,31 @@ fn a_refused_surface_open_reports_the_reason_and_exits_five() {
 }
 
 #[test]
+fn a_malformed_later_document_closes_the_surface_and_exits_two() {
+    let (endpoint, window) = surface_window(|request| match request {
+        sprite_app::SurfaceRequest::Open { reply, .. } => {
+            reply.send(Ok(())).expect("reply");
+            true
+        }
+        sprite_app::SurfaceRequest::Closed { .. } => false,
+        other => panic!("unexpected {other:?}"),
+    });
+    let credentials = surface_credentials(&endpoint, "4");
+    let input = format!("{DESCRIPTION}\nthis is not json\n");
+
+    let outcome = run_with_input(
+        &["surface", "open", "--fill"],
+        &borrowed(&credentials),
+        &input,
+    );
+    window.join().expect("the window saw the connection close");
+
+    assert_eq!(outcome.status, 2, "{}", outcome.errors);
+    assert!(outcome.out.contains(r#""opened""#), "{}", outcome.out);
+    assert!(outcome.errors.contains("not JSON"), "{}", outcome.errors);
+}
+
+#[test]
 fn outside_a_sprite_window_a_surface_cannot_be_opened_and_says_why() {
     let outcome = run_with_input(&["surface", "open", "--fill"], &[], DESCRIPTION);
     assert_eq!(outcome.status, 3);

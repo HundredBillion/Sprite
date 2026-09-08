@@ -85,7 +85,6 @@ impl<S> SurfaceHost<S> {
             .chain(self.overlays.iter_mut())
     }
 
-    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
     pub fn is_empty(&self) -> bool {
         self.iter().next().is_none()
     }

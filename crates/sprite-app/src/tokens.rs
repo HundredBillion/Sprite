@@ -81,9 +81,6 @@ pub struct Registered {
 }
 
 /// What a registration did.
-// No caller registers a token yet; a program does that once it can open a
-// Surface.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Registration {
     New,
@@ -94,8 +91,8 @@ pub enum Registration {
 
 /// A name registered again with a different default. The first stands, so no
 /// colour depends on which program started first.
-// No caller registers a token yet; a program does that once it can open a
-// Surface.
+// Non-test callers discard `name` and `standing` behind `Refusal::TokenConflict`;
+// its fields are read by tests, via the `assert_eq!` on this struct below.
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenConflict {
@@ -156,9 +153,6 @@ impl TokenRegistry {
         }
     }
 
-    // No caller registers a token yet; a program does that once it can open
-    // a Surface.
-    #[allow(dead_code)]
     pub fn register(
         &mut self,
         name: &str,

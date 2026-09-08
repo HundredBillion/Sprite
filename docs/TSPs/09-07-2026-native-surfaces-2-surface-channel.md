@@ -2611,6 +2611,24 @@ open would have waited on a reply only the window could give. (2) In the tests, 
 clone of the socket; both are dropped where the tests want the server to see
 EOF.
 
+**Amendments after the whole-branch review (2026-09-08).** Four cross-seam
+gaps and some tidying were fixed in one commit after every task had passed
+its own review; the committed code is the reference. (1) When the window does
+not answer an `open` within the reply timeout, the connection thread now also
+sends `Closed`, so a Surface the window places late is removed rather than
+left with a dead connection. (2) A failed write in `SurfaceConnection::send`
+marks the connection dead and shuts the socket, so a client that stops
+reading costs the window one failed write, not a two-second wait per event.
+(3) Only fill and dock Surfaces are wrapped `size_full`; an overlay's wrapper
+is its body's size, so overlays centre and clicks beside them reach the
+terminal. (4) A pane with no Surface skips the registry clone and the layer
+build each frame. Also: `close_surface` always announces `closed`; test-only
+constants are `#[cfg(test)]`; a malformed later input document makes `sprite
+surface open` exit 2; the README says "the observation socket cannot draw"
+rather than the stronger claim key sharing (decision 3) does not support.
+
+EOF.
+
 - [ ] **Step 7: Commit**
 
 ```bash

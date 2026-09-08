@@ -10,7 +10,7 @@
 use gpui::{DefiniteLength, FontWeight, Length, Styled, rems};
 
 /// Tokens that stand alone, in the order a reader might look for them.
-#[allow(dead_code)] // Read only by `vocabulary`, which is test-only.
+#[cfg(test)] // Read only by `vocabulary`, which is test-only.
 const FIXED: [&str; 41] = [
     "flex",
     "flex_col",
@@ -56,7 +56,7 @@ const FIXED: [&str; 41] = [
 ];
 
 /// Prefixes that take a step on the spacing scale: `p_2`, `gap_x_4`, `w_16`.
-#[allow(dead_code)] // Read only by `vocabulary`, which is test-only.
+#[cfg(test)] // Read only by `vocabulary`, which is test-only.
 const SPACED: [&str; 24] = [
     "p", "px", "py", "pt", "pb", "pl", "pr", "m", "mx", "my", "mt", "mb", "ml", "mr", "gap",
     "gap_x", "gap_y", "w", "h", "size", "min_w", "min_h", "max_w", "max_h",

@@ -64,7 +64,7 @@ const NO_ANSWER: &str = "this window did not answer in time";
 /// macOS `$TMPDIR` in the tests below; a longer name would not fit there.
 const SOCKET_HEX: usize = 16;
 /// The width of `<SOCKET_HEX hex>.surface.sock`.
-#[allow(dead_code)] // Measured only by the macOS path-length test below.
+#[cfg(test)] // Measured only by the macOS path-length test below.
 const SOCKET_NAME_BYTES: usize = SOCKET_HEX + ".surface.sock".len();
 
 /// Where in its pane a Surface sits.
@@ -184,6 +184,10 @@ impl SurfaceConnection {
     /// Sends one event line, or queues it if `opened` has not gone out yet.
     /// `false` means the client is gone — refused, timed out, or the
     /// connection has already closed — and nothing was queued or written.
+    /// A failed write marks the connection dead: the socket is shut down so
+    /// the connection thread's blocked read notices at once and reports the
+    /// Surface closed, rather than every later `send` paying the write
+    /// timeout again for a client that is never coming back.
     pub fn send(&self, line: &str) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
@@ -195,9 +199,14 @@ impl SurfaceConnection {
             wire.queued.push(line.to_owned());
             return true;
         }
-        writeln!(wire.stream, "{line}")
+        let ok = writeln!(wire.stream, "{line}")
             .and_then(|_| wire.stream.flush())
-            .is_ok()
+            .is_ok();
+        if !ok {
+            wire.dead = true;
+            let _ = wire.stream.shutdown(Shutdown::Both);
+        }
+        ok
     }
 
     /// Writes the connection's first line, then every line a program queued
@@ -528,6 +537,11 @@ fn serve_surface(
         Err(_) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
+            // The `Open` may still be sitting in the window's queue and get
+            // served later; tell the window this Surface is already gone so
+            // it never places one with a dead connection. `close_surface`
+            // ignores an unknown id, so this is safe either way.
+            let _ = requests.send_blocking(SurfaceRequest::Closed { id, pane });
             return;
         }
     }
@@ -957,6 +971,30 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_write_marks_the_connection_dead() {
+        let (here, there) = UnixStream::pair().expect("pair");
+        let connection = SurfaceConnection::new(&here).expect("connection");
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        drop(there);
+
+        let mut failed = false;
+        for _ in 0..64 {
+            if !connection.send(&event_focus()) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "send never reported the connection dead");
+
+        let start = Instant::now();
+        assert!(!connection.send(&event_focus()));
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "a send after the connection is marked dead should not wait on the write timeout"
+        );
+    }
+
+    #[test]
     fn a_send_after_a_refused_open_reports_the_client_gone() {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
@@ -988,6 +1026,53 @@ mod tests {
             assert!(Instant::now() < deadline, "abandon never ran");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_window_that_never_answers_still_hears_the_surface_closed() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (seen_tx, seen_rx) = mpsc::channel::<SurfaceRequest>();
+        let _window = window(rx, move |request| {
+            let stop = matches!(request, SurfaceRequest::Closed { .. });
+            seen_tx.send(request).expect("seen");
+            !stop
+        });
+
+        let (mut stream, mut reader) = connect(&endpoint);
+        // `connect` sets a 5s read timeout; this test waits out the real
+        // `REPLY_TIMEOUT`, so give it more room than that.
+        reader
+            .get_ref()
+            .set_read_timeout(Some(REPLY_TIMEOUT + Duration::from_secs(5)))
+            .expect("timeout");
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
+
+        // Held alive until this test is done: dropping the `Open` request's
+        // `reply` here would disconnect the answer channel and make the
+        // connection thread's `recv_timeout` return at once, rather than let
+        // it actually wait out `REPLY_TIMEOUT` the way a slow window would.
+        let open = seen_rx.recv().expect("open");
+        let id = match &open {
+            SurfaceRequest::Open { id, .. } => *id,
+            other => panic!("unexpected {other:?}"),
+        };
+
+        let refused = line(&mut reader);
+        assert_eq!(refused["type"], "refused");
+        assert_eq!(refused["reason"], "this window did not answer in time");
+
+        match seen_rx.recv().expect("closed") {
+            SurfaceRequest::Closed {
+                id: closed_id,
+                pane,
+            } => {
+                assert_eq!(closed_id, id);
+                assert_eq!(pane, PaneId(1));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        drop(open);
     }
 
     #[test]
