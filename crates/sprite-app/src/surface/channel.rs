@@ -167,7 +167,7 @@ pub struct SurfaceConnection {
 }
 
 impl SurfaceConnection {
-    fn new(stream: &UnixStream) -> std::io::Result<Self> {
+    pub(crate) fn new(stream: &UnixStream) -> std::io::Result<Self> {
         let stream = stream.try_clone()?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         Ok(Self {

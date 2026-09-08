@@ -3,6 +3,7 @@
 
 pub mod channel;
 pub mod description;
+pub mod render;
 pub mod style;
 
 /// One Surface, for the life of the connection that opened it.
