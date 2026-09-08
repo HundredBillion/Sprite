@@ -423,7 +423,7 @@ git commit -m "Clamp settings by their range and refuse nan out loud"
   and `WRITE_TIMEOUT` with `cfg(test)` values; `#[cfg(test)]
   SurfaceConnection::is_dead(&self) -> bool`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `channel.rs`'s tests, replace `a_failed_write_marks_the_connection_dead`
 (1031–1052) with one that goes red on a `send` that retries a dead peer:
@@ -519,7 +519,7 @@ In `grid.rs`'s tests, add:
     }
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test -p sprite-app --locked --offline channel:: grid::a_refusal_inside`
 Expected: compile errors for `is_dead`, `HANDSHAKE_TIMEOUT`, and the `ops`
@@ -527,7 +527,7 @@ field; after stubbing those, `a_silent_handshake…` hangs (so keep a
 `timeout 30` around the command while red) and the batch test fails on the
 prefix.
 
-- [ ] **Step 3: Timeouts, `establish`, and `is_dead`**
+- [x] **Step 3: Timeouts, `establish`, and `is_dead`**
 
 In `channel.rs`, replace the `WRITE_TIMEOUT` const (50–51) with:
 
@@ -602,7 +602,7 @@ Replace `establish` (223–238) with:
     }
 ```
 
-- [ ] **Step 4: Operations parsed on the connection thread**
+- [x] **Step 4: Operations parsed on the connection thread**
 
 Change the variant (293–300):
 
@@ -670,7 +670,7 @@ In `grid.rs`, replace `apply_all` (431–436):
     }
 ```
 
-- [ ] **Step 5: No `Arc` around a type that is already shared**
+- [x] **Step 5: No `Arc` around a type that is already shared**
 
 `SurfaceConnection` is `Clone` over an `Arc<Mutex<Wire>>`. In
 `terminal_view/surfaces.rs`: `connection: SurfaceConnection` on
@@ -680,7 +680,7 @@ In `grid.rs`, replace `apply_all` (431–436):
 become `&SurfaceConnection` and the test at 199 drops `Arc::new`. Remove
 `use std::sync::Arc` wherever it is now unused.
 
-- [ ] **Step 6: One way to write a line from the client**
+- [x] **Step 6: One way to write a line from the client**
 
 In `client.rs`, add near the top of the file:
 
@@ -701,7 +701,7 @@ blocks (143–157, 189–195, 251–263) with `if !send_line(&stream, &format!("
 respectively, keeping each block's error message and the `shutdown(Write)`
 that follows the third.
 
-- [ ] **Step 7: Run the tests and the gate**
+- [x] **Step 7: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass; the three new channel tests together take under two
@@ -710,7 +710,7 @@ seconds.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings && grep -rnE "thread::sleep|Timer::after|request_animation_frame" --include='*.rs' crates/sprite-app`
 Expected: clean; the grep prints nothing.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface crates/sprite-app/src/terminal_view crates/sprite-app/src/workspace.rs
