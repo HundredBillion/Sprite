@@ -624,9 +624,7 @@ impl GridSurface {
     }
 }
 
-/// Feeds `style_for`, which is itself reached only by this module's tests
-/// until the grid painter lands.
-#[allow(dead_code)]
+/// Lays a theme's highlight-group override over a program's attrs.
 fn apply_theme(attrs: &mut Attrs, style: &HighlightStyle) {
     if let Some(color) = style.color {
         attrs.fg = Some(color);

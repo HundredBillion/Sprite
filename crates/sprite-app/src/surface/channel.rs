@@ -804,10 +804,7 @@ pub fn event_resize(width: u32, height: u32) -> String {
 }
 
 /// A grid Surface's size in cells as well as pixels, so an editor's adapter
-/// can resize its grid without knowing the pane's cell metrics. Sent by the
-/// grid painter, which lands separately; reached only by this module's own
-/// tests until then.
-#[allow(dead_code)]
+/// can resize its grid without knowing the pane's cell metrics.
 pub fn event_grid_resize(width: u32, height: u32, cols: u16, rows: u16) -> String {
     json!({ "type": "resize", "width": width, "height": height, "cols": cols, "rows": rows })
         .to_string()
