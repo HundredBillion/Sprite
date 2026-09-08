@@ -2,6 +2,7 @@
 //! Sprite draws inside that program's pane.
 
 pub mod channel;
+pub mod client;
 pub mod description;
 pub mod host;
 pub mod render;

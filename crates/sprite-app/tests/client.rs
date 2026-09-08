@@ -46,6 +46,191 @@ fn run(arguments: &[&str], environment: &[(&str, &str)]) -> Outcome {
     }
 }
 
+/// Like `run`, but with something on standard input, which closes once written.
+fn run_with_input(arguments: &[&str], environment: &[(&str, &str)], input: &str) -> Outcome {
+    use std::io::Write;
+    let started = Instant::now();
+    let mut child = Command::new(SPRITE)
+        .args(arguments)
+        .env_clear()
+        .envs(environment.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sprite");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin.write_all(input.as_bytes()).expect("write stdin");
+    }
+    let output = child.wait_with_output().expect("wait");
+    Outcome {
+        status: output.status.code().unwrap_or(-1),
+        out: String::from_utf8_lossy(&output.stdout).into_owned(),
+        errors: String::from_utf8_lossy(&output.stderr).into_owned(),
+        took: started.elapsed(),
+    }
+}
+
+/// A window with a Surface Channel and a script for answering it.
+fn surface_window(
+    script: impl FnMut(sprite_app::SurfaceRequest) -> bool + Send + 'static,
+) -> (sprite_app::SurfaceEndpoint, std::thread::JoinHandle<()>) {
+    let (tx, rx) = async_channel::bounded(8);
+    let key = std::sync::Arc::new(sprite_app::ObservationKey::generate().expect("key"));
+    let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), key, tx).expect("endpoint");
+    let mut script = script;
+    let window = std::thread::spawn(move || {
+        while let Ok(request) = rx.recv_blocking() {
+            if !script(request) {
+                break;
+            }
+        }
+    });
+    (endpoint, window)
+}
+
+fn surface_credentials(
+    endpoint: &sprite_app::SurfaceEndpoint,
+    pane: &str,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            "SPRITE_SURFACE_SOCKET".to_owned(),
+            endpoint.socket_path().to_str().expect("utf-8").to_owned(),
+        ),
+        ("SPRITE_SURFACE_KEY".to_owned(), endpoint.key_hex()),
+        ("SPRITE_PANE".to_owned(), pane.to_owned()),
+    ]
+}
+
+const DESCRIPTION: &str = r#"{ "version": 1, "root": { "kind": "text", "text": "hello", "color": "terminal.foreground" } }"#;
+
+#[test]
+fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
+    let (endpoint, window) = surface_window(|request| match request {
+        sprite_app::SurfaceRequest::Open {
+            pane,
+            open,
+            connection,
+            reply,
+            ..
+        } => {
+            assert_eq!(pane, sprite_app::PaneId(4));
+            assert_eq!(open.position, sprite_app::SurfacePosition::Dock);
+            assert_eq!(open.side, sprite_app::SurfaceSide::Left);
+            assert_eq!(open.size, 220.0);
+            assert!(open.focus);
+            assert_eq!(open.description["root"]["text"], "hello");
+            reply.send(Ok(())).expect("reply");
+            assert!(connection.send(r#"{"type":"focus"}"#));
+            true
+        }
+        sprite_app::SurfaceRequest::Update { description, .. } => {
+            assert_eq!(description["root"]["text"], "again");
+            true
+        }
+        sprite_app::SurfaceRequest::Focus { .. } => true,
+        sprite_app::SurfaceRequest::Closed { .. } => false,
+        other => panic!("unexpected {other:?}"),
+    });
+    let credentials = surface_credentials(&endpoint, "4");
+    let input = format!(
+        "{DESCRIPTION}\n{{ \"version\": 1, \"root\": {{ \"kind\": \"text\", \"text\": \"again\" }} }}\n{{\"type\":\"focus\",\"target\":\"terminal\"}}\n"
+    );
+
+    let outcome = run_with_input(
+        &["surface", "open", "--dock", "left", "--size", "220"],
+        &borrowed(&credentials),
+        &input,
+    );
+    window.join().expect("the window saw the connection close");
+
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    let lines: Vec<&str> = outcome.out.lines().collect();
+    assert!(lines[0].contains(r#""type":"opened""#), "{lines:?}");
+    assert!(lines.contains(&r#"{"type":"focus"}"#), "{lines:?}");
+    assert!(outcome.errors.is_empty(), "{}", outcome.errors);
+}
+
+#[test]
+fn a_refused_surface_open_reports_the_reason_and_exits_five() {
+    let (endpoint, _window) = surface_window(|request| match request {
+        sprite_app::SurfaceRequest::Open { reply, .. } => {
+            reply
+                .send(Err(sprite_app::SurfaceRefusal::PositionOccupied))
+                .expect("reply");
+            false
+        }
+        _ => false,
+    });
+    let credentials = surface_credentials(&endpoint, "4");
+    let outcome = run_with_input(
+        &["surface", "open", "--fill"],
+        &borrowed(&credentials),
+        DESCRIPTION,
+    );
+    assert_eq!(outcome.status, 5);
+    assert!(outcome.out.is_empty(), "{}", outcome.out);
+    assert!(
+        outcome.errors.contains("position occupied"),
+        "{}",
+        outcome.errors
+    );
+}
+
+#[test]
+fn outside_a_sprite_window_a_surface_cannot_be_opened_and_says_why() {
+    let outcome = run_with_input(&["surface", "open", "--fill"], &[], DESCRIPTION);
+    assert_eq!(outcome.status, 3);
+    assert!(
+        outcome.errors.contains("SPRITE_SURFACE_SOCKET"),
+        "{}",
+        outcome.errors
+    );
+    assert!(outcome.took < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn a_token_registration_is_acknowledged() {
+    let (endpoint, _window) = surface_window(|request| match request {
+        sprite_app::SurfaceRequest::RegisterToken {
+            name,
+            default,
+            description,
+            reply,
+        } => {
+            assert_eq!(name, "demo.label");
+            assert_eq!(
+                default,
+                sprite_app::Rgb {
+                    r: 0xc0,
+                    g: 0xca,
+                    b: 0xf5
+                }
+            );
+            assert_eq!(description, "Row labels");
+            reply.send(Ok(())).expect("reply");
+            false
+        }
+        _ => false,
+    });
+    let credentials = surface_credentials(&endpoint, "4");
+    let outcome = run(
+        &[
+            "token",
+            "register",
+            "demo.label",
+            "#c0caf5",
+            "Row",
+            "labels",
+        ],
+        &borrowed(&credentials),
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert_eq!(outcome.out.trim(), r#"{"type":"registered"}"#);
+}
+
 /// A directory of this test's own for the endpoint's socket.
 ///
 /// Taken explicitly rather than read from `XDG_RUNTIME_DIR`, which a container

@@ -22,7 +22,7 @@ mod terminal_view;
 mod tokens;
 mod workspace;
 
-pub use cli::{Invocation, USAGE, WindowArgs, parse_arguments};
+pub use cli::{Invocation, SurfaceOpenArgs, TokenRegisterArgs, USAGE, WindowArgs, parse_arguments};
 pub use config::Settings;
 pub use observation::broker::{
     Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report,
@@ -34,8 +34,11 @@ pub use observation::endpoint::ObservationKey;
 pub use observation::schema::render as render_schema;
 pub use pane_tree::{PaneId, Rect};
 pub use sprite_term::HistoryLines;
+pub use sprite_term::Rgb;
+pub use surface::Refusal as SurfaceRefusal;
 pub use surface::channel::{
     Position as SurfacePosition, Side as SurfaceSide, SurfaceEndpoint, SurfaceRequest,
 };
+pub use surface::client::{run_surface_focus, run_surface_open, run_token_register};
 pub use tabs::TabId;
 pub use workspace::Workspace;
