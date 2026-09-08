@@ -76,6 +76,26 @@ A local shell tool, initially `sprite panes snapshot`, that requests Pane
 Snapshots from its Sprite Window.
 _Avoid_: LLM client, agent, remote client
 
+**Surface**:
+Native UI that a program running in a Pane describes and Sprite draws inside
+that Pane — at one position: fill, dock, or overlay — for as long as the
+program keeps its Surface Channel connection open. Drawn by GPUI as elements,
+never as terminal cells.
+_Avoid_: panel, widget, popup, view (unqualified), native pane
+
+**Surface Channel**:
+Protected, local access by a process launched inside Sprite to open and
+update Surfaces in its own Pane and to receive their input and events. It is
+the one line that grants control of what a Pane shows; Pane Observation grants
+none, and the two never share a grammar.
+_Avoid_: the observation socket, the socket (unqualified), IPC, the API
+
+**Surface Description**:
+The versioned document a program sends over the Surface Channel saying what a
+Surface contains: element kinds, utility tokens for style, and token names
+for colour. It is what Sprite draws; it is never code.
+_Avoid_: markup, HTML, template, DSL, layout code
+
 **Croft Compatibility Gate**:
 Unmodified upstream Croft used as an external acceptance application against
 its moving `main`; it is not part of Sprite Terminal.

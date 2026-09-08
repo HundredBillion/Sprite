@@ -2,8 +2,9 @@
 
 **Date:** 2026-09-07
 **Type:** Architecture (a generic capability of Sprite Terminal)
-**Target:** `crates/sprite-app` (`observation/`, a new `surface` module,
-`terminal_view.rs`, `grid_paint.rs`, `config.rs`), `terminal-project-brief.md`,
+**Target:** `crates/sprite-app` (a new `surface` module beside `observation/`,
+`terminal_view.rs`, `grid_paint.rs`, `config.rs`), `crates/CONTEXT.md`,
+`terminal-project-brief.md`,
 `docs/PRDs/09-07-2026-pane-trait-and-editor-plurality.md` (status note)
 **Status:** Designed 2026-09-07 (brainstorming session). Supersedes
 `09-07-2026-program-takeover-of-terminal-panes.md`, which is removed in the
@@ -16,10 +17,10 @@ construction here.
 
 Sprite gains one capability: **a program running in a pane can describe user
 interface, and Sprite draws it natively.** A panel with a list. A tree with
-full-colour SVG icons. A whole text grid. The description travels over the
-authenticated socket every child process already knows how to reach, and Sprite
-renders it with GPUI, styled by name against a registry of semantic tokens that
-programs can extend and themes can override.
+full-colour SVG icons. A whole text grid. The description travels over a
+second authenticated socket beside the one every child process already knows —
+the Surface Channel — and Sprite renders it with GPUI, styled by name against a
+registry of semantic tokens that programs can extend and themes can override.
 
 The capability knows nothing about editors. Neovim is simply its first user,
 and it uses it **entirely from its own side of the wire**: Neovim's UI protocol
@@ -153,20 +154,48 @@ told so through the PTY, as on any window resize), or **overlay** (it floats
 above). Inside the surface, Taffy flex does the work through GPUI, as in
 Zed. Nothing about tabs, splits, or dividers changes.
 
-**Transport: the observation socket, one long-lived connection per surface.**
+**Transport: a second endpoint beside observation — the Surface Channel.**
 Every child already receives `SPRITE_PANE` (`observation/endpoint.rs:308`),
-`SPRITE_OBSERVATION_SOCKET`, and `SPRITE_OBSERVATION_KEY`, and the `Workspace`
-already serves authenticated requests on that socket (`workspace.rs:608`;
-`sprite panes snapshot` and `sprite config reload` use it). Surfaces add verbs
-beside them. A `surface` connection stays open: the program streams
-incremental updates (a changed grid line, a re-rendered panel) and receives
-input and events (a click, a key while the surface has focus, a resize) on
-the same connection, then closes it to remove the surface. The endpoint's
-short request timeout does not apply to surface connections. A private OSC
-sequence through the PTY was rejected, as before: `sprite-term` surfaces only
-specific OSCs (7, 10, 11, 12, 4, 52, 133) and has no passthrough, and the
-socket is already authenticated so a stray program on the machine cannot
-draw into someone's pane.
+`SPRITE_OBSERVATION_SOCKET`, and `SPRITE_OBSERVATION_KEY`, so the
+authentication and the pane identity a surface needs already exist. What must
+not be reused is the observation *grammar*. `observation/request.rs` is
+explicit that it is read-only by construction — "`broker` promises that a
+request which could mutate cannot be constructed" (lines 12–15), and "there is
+deliberately no variant that writes, sends input, subscribes, or opens a
+stream" (lines 25–29) — and the Terminal Core glossary defines Pane
+Observation as access that "never grants control of a Pane or its child."
+That promise is what makes it safe for any program, and for any LLM reading a
+pane through it, to hold that socket; a surface is nothing but control. The
+grammar is also the wrong shape: a request "crosses two processes as a line
+of text" of space-separated words, while a description is a structured
+document flowing both ways. So surfaces get a **second `Endpoint`** with its
+own socket file, named to children as `SPRITE_SURFACE_SOCKET`, sharing the
+key, the runtime directory, and the authentication code, and speaking
+newline-delimited JSON. One connection per surface stays open for the
+surface's life: the program streams incremental updates down it and receives
+input and events (a click, a key while the surface has focus, a resize) up
+it; closing the connection — or the program dying — removes the surface. The
+observation endpoint's short request timeout does not apply, and the line
+buffer is not capped small, a lesson Zed records in its own agent transport
+(`crates/agent_servers/src/acp.rs:674`: "512 KiB is not enough").
+
+Two mature LLM integrations keep exactly this separation. Zed labels every
+agent tool `ToolKind::Read` or `ToolKind::Edit` and gates only edits
+(`crates/agent/src/tools/read_file_tool.rs:215`, `edit_file_tool.rs:235`;
+`acp_thread/src/connection.rs:538`). VS Code's Agent Host routes every tool
+call through a `CanUseTool` gate and a resource-scoped
+`AgentHostPermissionMode` (`src/vs/platform/agentHost/common/agentHostResourceService.ts:47`).
+Reading is ungated; acting is where gating lives. A second endpoint puts
+Sprite's one read line beyond gating altogether — control is *absent* from
+it, not merely denied — and puts any future permission model where acting
+is. The cost is one file descriptor and one thread asleep in `accept()`
+(`endpoint.rs:267`); per message the two options share the same kernel path,
+and the second line keeps a keystroke-rate grid stream off the listener an
+LLM reads through. Two alternatives were rejected: a private OSC sequence
+through the PTY, as before (`sprite-term` surfaces only OSCs 7, 10, 11, 12,
+4, 52, 133 and has no passthrough); and surface verbs on the observation
+socket distinguished by protocol token, because that makes the read-only
+promise true of *some lines on a socket* rather than of the socket.
 
 **A small, versioned schema, grown only under demand.** The single largest
 risk in this design is scope: a description language for UI is a browser
@@ -176,8 +205,9 @@ iframe running `pre/index.html`) — an actual embedded browser, which VS Code
 can afford because it *is* one. Sprite declines that route. The schema is
 enumerated: a handful of element kinds (box, text, list, tree, image/SVG,
 button, grid), the utility tokens the interpreter maps, the token registry
-verbs, and the events. It carries a protocol version; the endpoint already
-refuses `UnsupportedProtocol`. A kind or token is added when a real plugin
+verbs, and the events. It carries a protocol version of its
+own, and an unknown version is refused the way the observation grammar refuses
+one. A kind or token is added when a real plugin
 needs it and not before.
 
 **Two levels, delivered in order, the cheap one first.** Sprite *already
@@ -236,12 +266,16 @@ styling or panels.
   tokens with per-theme-kind defaults and descriptions; `register` from
   programs; theme overrides by name; `resolve(name) -> Rgba` with a
   documented fallback for an unknown token.
-- **Observation protocol (`observation/request.rs`, `endpoint.rs`):** verbs
-  `surface open { pane, position: fill|dock|overlay, version }`,
-  `surface update`, `surface close`, `token register`, and the event
-  direction (`input`, `resize`, `event`) on the same connection. Refusals
+- **Surface Channel (`surface/channel.rs`, new):** a second `Endpoint`, its
+  socket path exported to children as `SPRITE_SURFACE_SOCKET`, sharing the
+  observation key, runtime directory, and authentication code. Its own
+  newline-delimited-JSON grammar: `open { pane, position: fill|dock|overlay,
+  version }`, `update`, `close`, `token register`, and the event direction
+  (`input`, `resize`, `event`) on the same long-lived connection. Refusals
   are distinct: unknown pane, pane not a terminal, unsupported version,
-  malformed description, unknown element kind or token.
+  malformed description, unknown element kind or token. **`observation/` is
+  not modified**; its read-only-by-construction grammar and tests are
+  untouched.
 - **`TerminalView` (`terminal_view.rs`):** hosts zero or more surfaces by
   position. *Fill* renders the surface instead of the grid and forwards
   focus, size, and input. *Dock* splits the pane's rectangle, renders both,
@@ -282,7 +316,8 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    PTY told its new size), and an overlay, and returns the space when the
    connection closes. Level 0 changes a cell's drawn colour when the theme
    remaps its token. `shell.rs` prepends a present integration directory and
-   ignores an absent one.
+   ignores an absent one. The observation grammar's own tests pass without
+   change, and `observation/request.rs` still constructs no mutating variant.
 2. **Invariant, in Sprite.** The `sprite-pane` manifest test still finds
    `gpui` alone; no Sprite `Cargo.toml` names an editor. The full suite,
    `fmt`, `clippy -D warnings`, and the `--locked --offline` build pass.
