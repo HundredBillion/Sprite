@@ -30,7 +30,7 @@ use crate::surface::channel::{
     FocusTarget, Open, Position, SurfaceConnection, event_blur, event_closed, event_focus,
     event_grid_resize, event_input, event_refused, event_resize, event_warning,
 };
-use crate::surface::description::{self, Description};
+use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, parse_ops};
 use crate::surface::host::SurfaceHost;
 use crate::surface::{Refusal, SurfaceId};
@@ -70,7 +70,13 @@ const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530
 /// grid mutated by operations.
 pub(crate) enum Body {
     Elements(Description),
-    Grid(GridSurface),
+    Grid {
+        grid: GridSurface,
+        /// The description's root element, kept for the `style` and `bg` it
+        /// may carry: a grid's wrapper is styled from them exactly as an
+        /// element root's box is.
+        root: Element,
+    },
 }
 
 /// A Surface this pane is drawing, and the connection that owns it.
@@ -643,7 +649,7 @@ impl TerminalView {
         // grid hides the terminal behind it, so a grid asking for a blink is
         // reason enough for the pane to keep one.
         let grid_blinks = self.surfaces.iter().any(|surface| match &surface.body {
-            Body::Grid(grid) => grid.cursor_blinks(),
+            Body::Grid { grid, .. } => grid.cursor_blinks(),
             Body::Elements(_) => false,
         });
         if !(terminal_blinks || grid_blinks) {
@@ -1053,7 +1059,7 @@ impl TerminalView {
     /// both ways cost nothing extra.
     fn refresh_grid_surfaces(&mut self) {
         for surface in self.surfaces.iter_mut() {
-            if let Body::Grid(grid) = &mut surface.body {
+            if let Body::Grid { grid, .. } = &mut surface.body {
                 grid.invalidate();
                 surface.told_size = None;
             }
@@ -1110,7 +1116,10 @@ impl TerminalView {
         };
         let warnings = parsed.warnings;
         let body = match parsed.description.grid() {
-            Some(size) => Body::Grid(GridSurface::new(size.cols, size.rows)),
+            Some(size) => Body::Grid {
+                grid: GridSurface::new(size.cols, size.rows),
+                root: parsed.description.root,
+            },
             None => Body::Elements(parsed.description),
         };
         let hosted = HostedSurface {
@@ -1149,7 +1158,7 @@ impl TerminalView {
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
             return;
         };
-        if matches!(surface.body, Body::Grid(_)) {
+        if matches!(surface.body, Body::Grid { .. }) {
             surface.connection.send(&event_refused(
                 &Refusal::Malformed("a grid Surface takes rows, not an update".to_owned()).reason(),
             ));
@@ -1189,7 +1198,7 @@ impl TerminalView {
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
             return;
         };
-        let Body::Grid(grid) = &mut surface.body else {
+        let Body::Grid { grid, .. } = &mut surface.body else {
             surface.connection.send(&event_refused(
                 &Refusal::Malformed("this Surface is not a grid".to_owned()).reason(),
             ));
@@ -1366,7 +1375,7 @@ impl TerminalView {
         if surface.told_size != Some(told) {
             surface.told_size = Some(told);
             let event = match &surface.body {
-                Body::Grid(_) => {
+                Body::Grid { .. } => {
                     let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
                     event_grid_resize(told.0, told.1, cols, rows)
                 }
@@ -1381,13 +1390,23 @@ impl TerminalView {
                 registry,
                 &surface.connection,
             ),
-            Body::Grid(grid) => crate::surface::render::render_grid(grid, highlights, metrics),
+            Body::Grid { grid, .. } => {
+                crate::surface::render::render_grid(grid, highlights, metrics)
+            }
         };
         let keys = Arc::clone(&surface.connection);
         let focus = surface.focus.clone();
         let mut wrapper = div();
         if fills {
             wrapper = wrapper.size_full();
+        }
+        // A grid root's style and bg belong to the wrapper, which is the box
+        // that owns the whole space the Surface was given: they show in the
+        // slack between the cell box and its edge. The cell box keeps the
+        // grid's own default colours, which come from the program's
+        // `defaults`, not from the description.
+        if let Body::Grid { root, .. } = &surface.body {
+            wrapper = crate::surface::render::apply_described_style(wrapper, root, registry);
         }
         wrapper
             .overflow_hidden()

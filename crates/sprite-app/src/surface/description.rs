@@ -456,7 +456,13 @@ mod tests {
             grid.description.grid(),
             Some(GridSize { cols: 80, rows: 24 })
         );
+        // A grid root's style and bg are kept, not dropped for being a grid:
+        // they dress the wrapper the cell box sits in.
         assert_eq!(grid.description.root.style, vec!["p_1"]);
+        assert_eq!(
+            grid.description.root.background,
+            Some(ColorRef::Token("terminal.background".into()))
+        );
 
         let no_grid = parsed(json!({ "version": 1, "root": { "kind": "box" } }));
         assert_eq!(no_grid.description.grid(), None);

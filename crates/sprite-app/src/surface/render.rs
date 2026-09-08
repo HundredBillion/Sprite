@@ -105,6 +105,30 @@ pub(crate) fn render_grid(
         .into_any_element()
 }
 
+/// A described element's style tokens and colours, put on whatever GPUI
+/// element stands for it.
+///
+/// A grid's wrapper takes this same path, so `style` and `bg` on a grid root
+/// mean there what they mean on any other root: there is one styler, not one
+/// per body.
+pub(crate) fn apply_described_style<E: Styled>(
+    mut target: E,
+    node: &Element,
+    registry: &TokenRegistry,
+) -> E {
+    target = style::apply_all(target, &node.style);
+    if let Some(color) = &node.color {
+        target = target.text_color(rgb(pack(color.resolve(registry, Role::Text))));
+    }
+    if let Some(background) = &node.background {
+        target = target.bg(rgb(pack(background.resolve(registry, Role::Fill))));
+    }
+    if let Some(border) = &node.border {
+        target = target.border_color(rgb(pack(border.resolve(registry, Role::Fill))));
+    }
+    target
+}
+
 fn element(
     node: &Element,
     surface: SurfaceId,
@@ -130,16 +154,7 @@ fn element(
     if node.kind == Kind::Button {
         boxed = boxed.cursor_pointer();
     }
-    boxed = style::apply_all(boxed, &node.style);
-    if let Some(color) = &node.color {
-        boxed = boxed.text_color(rgb(pack(color.resolve(registry, Role::Text))));
-    }
-    if let Some(background) = &node.background {
-        boxed = boxed.bg(rgb(pack(background.resolve(registry, Role::Fill))));
-    }
-    if let Some(border) = &node.border {
-        boxed = boxed.border_color(rgb(pack(border.resolve(registry, Role::Fill))));
-    }
+    boxed = apply_described_style(boxed, node, registry);
     if let Some(text) = &node.text {
         boxed = boxed.child(SharedString::from(text.clone()));
     }
@@ -206,6 +221,44 @@ mod tests {
         // Building the element tree needs no window; that is the property
         // this test locks down, since every frame rebuilds it.
         let _element = render(&parsed.description, SurfaceId(1), &registry, &connection);
+    }
+
+    #[test]
+    fn a_grid_roots_style_and_bg_dress_its_wrapper_exactly_as_a_box_roots_do() {
+        let registry = TokenRegistry::new(&Colors::default());
+        let style_of = |root: serde_json::Value| {
+            let parsed = description::parse(&json!({ "version": 1, "root": root }), &registry)
+                .expect("a valid description");
+            let mut dressed = apply_described_style(div(), &parsed.description.root, &registry);
+            dressed.style().clone()
+        };
+
+        let dress = |kind: serde_json::Value| {
+            let mut root = kind;
+            let object = root.as_object_mut().expect("an object");
+            object.insert("style".into(), json!("p_2"));
+            object.insert("bg".into(), json!("terminal.background"));
+            object.insert("color".into(), json!("#c0caf5"));
+            root
+        };
+        let grid = style_of(dress(json!({ "kind": "grid", "cols": 8, "rows": 2 })));
+        assert_eq!(
+            grid,
+            style_of(dress(json!({ "kind": "box" }))),
+            "there is one styler, so a grid root is dressed like a box root"
+        );
+        assert!(
+            grid.background.is_some(),
+            "the bg reached the wrapper, where it shows in the slack \
+             between the cell box and the edge"
+        );
+
+        // A grid root that asks for nothing still leaves the wrapper bare.
+        let mut bare = div();
+        assert_eq!(
+            style_of(json!({ "kind": "grid", "cols": 8, "rows": 2 })),
+            bare.style().clone()
+        );
     }
 
     #[test]
