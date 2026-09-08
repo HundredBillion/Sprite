@@ -2493,7 +2493,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:** none.
 
-- [ ] **Step 1: The second verification script**
+- [x] **Step 1: The second verification script**
 
 Create `scripts/surface-grid-demo.sh`, mode `0755`:
 
@@ -2540,7 +2540,7 @@ rows=$(printf '{"type":"rows","rows":[%s,%s,%s,%s]}' \
 (The `fold`/`read` loop emits one cell per character so the script needs no
 JSON tool; a multi-byte character would be split, so the demo text is ASCII.)
 
-- [ ] **Step 2: Docs**
+- [x] **Step 2: Docs**
 
 In `README.md`, extend `## Drawing in a pane from a program` with a final
 paragraph:
@@ -2576,7 +2576,7 @@ git commit -m "Document the grid Surface and keep its proof beside the dock's
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 3: Run the whole CI gate**
+- [x] **Step 3: Run the whole CI gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -2590,7 +2590,7 @@ crate. Also `grep -rnE "thread::sleep|Timer::after|request_animation_frame"
 --include='*.rs' crates/sprite-app` prints nothing (the CI "forbidden
 states" rule).
 
-- [ ] **Step 4: Confirm plain `sprite` is unchanged, save for decorations**
+- [x] **Step 4: Confirm plain `sprite` is unchanged, save for decorations**
 
 `cargo run -p sprite-app --locked --offline -- config print | grep -c 'no highlight groups are styled'` prints `1`. Open the debug Sprite and run
 `nvim` and `top`: everything as on `master`, and an underlined word in a man
@@ -2640,6 +2640,31 @@ into its terminal pane"; the body follows
 developers, Evidence — steps 4 and 5 above).
 
 ---
+
+**Amendments after the whole-branch review (2026-09-08).** Five cross-seam
+findings and three deferred Minors were fixed before merge, none changing the
+wire format. (1) `rows` keeps each cell's `repeat` as a count in the parsed
+chunk and sums the run in `u64` for the bounds check before any cell is
+allocated, so a hostile or buggy `["",0,1024]` stream is refused before it
+can demand gigabytes. (2) `told_size` is cleared for every grid Surface when
+settings or the font size change (`refresh_grid_surfaces`), so the grid is
+told its new `cols`/`rows`; the arithmetic lives in the pure
+`cells_that_fit`. (3) `GridSurface::cursor_blinks()` feeds `tick_blink`, so a
+grid cursor with `blink: true` blinks even when the terminal's own cursor is
+hidden behind a fill. (4) `groups` is `HashMap<u32, Vec<String>>`, not
+`HashMap<u32, String>` as Task 3 wrote: Neovim links many group names to one
+attr id, and `style_for` now applies every matching `[highlights]` entry in
+the order the names arrived (sorted key order within one message). (5) The
+demo script feeds `fold` a trailing newline so `read` sees every character.
+Deferred Minors fixed: direct tests for a cursor outside the grid and an
+undefined highlight id; a grid root's `style` and `bg` are kept
+(`Body::Grid { grid, root }`) and dressed onto the wrapper through the one
+`apply_described_style` helper that element roots use. Recorded for the
+follow-ups TSP: per-cell `String` allocation at the 1024×1024 bound and the
+per-frame `positioned_rows` clone; a collapsed strip may be told `0` cells;
+`SurfaceRequest::Grid` clones the message; batch refusals name no op index;
+one `GridMetrics` for terminal and grids; parsing ops on the connection
+thread; a failed pane runs no blink timer.
 
 ## Self-review against the PRD
 
