@@ -197,9 +197,18 @@ sprite config print     # what this window is actually using
 sprite config reload    # re-read, and report what changed
 ```
 
-Colours, cursor and font apply immediately. Shell and scrollback apply to the
-next session, because changing them under a running program would not be
-honest about what that program is attached to.
+Colours, cursor, font, and grid spacing apply immediately. Shell and
+scrollback apply to the next session, because changing them under a running
+program would not be honest about what that program is attached to.
+
+Every colour Sprite draws has a name — `terminal.background`, `ansi.4` — and
+a program can add its own, such as `scm.addedForeground`. The `[colors]` keys
+override the built-in names; `[colors.tokens]` overrides any name:
+
+```toml
+[colors.tokens]
+"scm.addedForeground" = "#40a02b"
+```
 
 ## Not yet
 
@@ -229,6 +238,26 @@ Read-only, authenticated by a per-window key, and scoped to the window that
 issued it — a pane in another window is not merely refused, it is not
 addressable. Responses declare their content untrusted, because terminal
 output is whatever a program chose to print.
+
+## Drawing in a pane from a program
+
+```sh
+sprite surface open --dock left < tree.json   # a strip beside the grid
+sprite surface open --fill      < editor.json # in place of the grid
+sprite surface open --overlay   < picker.json # floating over it
+sprite token register scm.added '#40a02b' 'Added lines'
+```
+
+A description is a small JSON tree — box, text, list, image (inline SVG),
+button — styled with Tailwind-shaped utility tokens (`flex flex_col gap_2
+p_3`) and coloured by token name, so the theme restyles it. The command
+holds the Surface open, prints each click, keystroke, resize, and focus
+change as one JSON line, sends each further document on standard input as a
+replacement, and closes the Surface when standard input closes. A Surface
+takes the keyboard when it opens; the program hands it back with
+`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. The same key that protects
+reading protects drawing, and the two travel on separate sockets: nothing
+that can read a pane can draw in it.
 
 ## Platform
 

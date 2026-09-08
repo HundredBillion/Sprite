@@ -3,7 +3,10 @@
 **Date:** 2026-09-07
 **Type:** Documentation amendment (decision reversal)
 **Target:** `terminal-project-brief.md`, `CONTEXT.md`
-**Status:** Implemented (commit `0698154d`)
+**Status:** Implemented (commit `0698154d`); partially superseded by
+`09-07-2026-native-surfaces.md` — one pane type; programs describe UI over the
+Surface Channel and Sprite draws it; the pane interface is what a hosted
+Surface satisfies, not a second pane type.
 
 ## Problem Statement
 
