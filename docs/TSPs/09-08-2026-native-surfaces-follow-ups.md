@@ -272,7 +272,7 @@ git commit -m "Split the terminal view into one file per concern"
   8.0`. `Font::clamp_size`, `Font::clamp_line_height`, `Grid::clamp_padding`
   and `grid::PANE_PADDING` no longer exist.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `config.rs`'s tests, add to `a_line_height_ratio_is_read_and_clamped`
 after the `"tall"` assertions:
@@ -293,13 +293,13 @@ and to `a_grid_padding_is_read_and_clamped`:
         assert!(complaints("[grid]\npadding = nan\n")[0].contains("nan"));
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test -p sprite-app --locked --offline config::tests::a_line_height_ratio_is_read_and_clamped config::tests::a_grid_padding_is_read_and_clamped`
 Expected: FAIL on the `contains("nan")` assertions (index out of bounds: no
 complaint was pushed).
 
-- [ ] **Step 3: Clamp by range**
+- [x] **Step 3: Clamp by range**
 
 Replace `read_clamped` (510–556) with:
 
@@ -360,7 +360,7 @@ Change the three callers to pass the default instead of a function:
 `Grid::clamp_padding` (256–261) with their doc comments; `cargo build` must
 report no other caller (there is none).
 
-- [ ] **Step 4: One padding constant**
+- [x] **Step 4: One padding constant**
 
 In `config.rs`, replace `pub const DEFAULT_PADDING: f32 = crate::grid::PANE_PADDING;`
 and its comment with the comment now on `PANE_PADDING` and the literal:
@@ -381,7 +381,7 @@ In `grid.rs`, delete `PANE_PADDING` (15–22) and in its test module add
 `use crate::config::Grid;` and replace every `PANE_PADDING` with
 `Grid::DEFAULT_PADDING` (lines 409–476, fourteen uses).
 
-- [ ] **Step 5: Run the tests and the gate**
+- [x] **Step 5: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline config:: grid::`
 Expected: all pass, including the two extended tests.
@@ -389,7 +389,7 @@ Expected: all pass, including the two extended tests.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sprite-app/src/config.rs crates/sprite-app/src/grid.rs
