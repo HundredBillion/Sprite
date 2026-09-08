@@ -2626,6 +2626,8 @@ build each frame. Also: `close_surface` always announces `closed`; test-only
 constants are `#[cfg(test)]`; a malformed later input document makes `sprite
 surface open` exit 2; the README says "the observation socket cannot draw"
 rather than the stronger claim key sharing (decision 3) does not support.
+Decision 3 was later reversed by TSP 3: the Surface Channel generates its
+own key, and `Endpoint::key()` is gone.
 
 - [x] **Step 7: Commit**
 

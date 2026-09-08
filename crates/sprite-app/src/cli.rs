@@ -27,7 +27,8 @@ pub enum Invocation {
     /// Print the configuration that is actually in effect.
     ConfigPrint(ConfigPrintArgs),
     SurfaceOpen(SurfaceOpenArgs),
-    SurfaceFocus,
+    /// Hand the keyboard to this pane's terminal, or to the Surface named.
+    SurfaceFocus(Option<u64>),
     TokenRegister(TokenRegisterArgs),
     Help,
     Version,
@@ -105,7 +106,7 @@ sprite — a terminal
     sprite config reload         re-read the configuration file in this window
     sprite config print          print the settings that are actually in effect
     sprite surface open …        draw native UI in this pane from a description on stdin
-    sprite surface focus         hand the keyboard back to this pane's terminal
+    sprite surface focus [ID]    hand the keyboard to this pane's terminal, or to Surface ID
     sprite token register <name> <#rrggbb> [description]
                                  add a colour token the theme can override
 
@@ -196,11 +197,14 @@ where
         Some("surface") => match arguments.next().as_deref().and_then(text).as_deref() {
             Some("open") => Ok(Invocation::SurfaceOpen(surface_open(arguments)?)),
             Some("focus") => match arguments.next() {
-                None => Ok(Invocation::SurfaceFocus),
-                Some(extra) => Err(UsageError(format!(
-                    "surface focus takes no arguments, but was given {}",
-                    extra.to_string_lossy()
-                ))),
+                None => Ok(Invocation::SurfaceFocus(None)),
+                Some(id) => match id.to_string_lossy().parse::<u64>() {
+                    Ok(id) => Ok(Invocation::SurfaceFocus(Some(id))),
+                    Err(_) => Err(UsageError(format!(
+                        "surface focus takes a Surface id, not {}",
+                        id.to_string_lossy()
+                    ))),
+                },
             },
             Some(other) => Err(UsageError(format!("unknown surface command: {other}"))),
             None => Err(UsageError(
@@ -661,7 +665,15 @@ mod tests {
                 focus: true,
             })
         );
-        assert_eq!(parsed(&["surface", "focus"]), Invocation::SurfaceFocus);
+        assert_eq!(
+            parsed(&["surface", "focus"]),
+            Invocation::SurfaceFocus(None)
+        );
+        assert_eq!(
+            parsed(&["surface", "focus", "7"]),
+            Invocation::SurfaceFocus(Some(7))
+        );
+        assert!(parse_arguments(["surface", "focus", "blob"].iter().map(OsString::from)).is_err());
     }
 
     #[test]
@@ -672,7 +684,7 @@ mod tests {
         assert!(rejected(&["surface", "open", "--dock", "top"]).contains("left or right"));
         assert!(rejected(&["surface", "open", "--fill", "--size", "10"]).contains("64"));
         assert!(rejected(&["surface", "open", "--fill", "--sparkle"]).contains("unknown option"));
-        assert!(rejected(&["surface", "focus", "now"]).contains("no arguments"));
+        assert!(rejected(&["surface", "focus", "now"]).contains("Surface id"));
         assert!(rejected(&["surface"]).contains("needs a command"));
         assert!(rejected(&["surface", "close"]).contains("unknown surface command"));
     }

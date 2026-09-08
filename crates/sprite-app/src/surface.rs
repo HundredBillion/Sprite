@@ -4,6 +4,7 @@
 pub mod channel;
 pub mod client;
 pub mod description;
+pub mod grid;
 pub mod host;
 pub mod render;
 pub mod style;

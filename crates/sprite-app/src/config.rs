@@ -22,6 +22,7 @@ pub struct Settings {
     pub graphics: Graphics,
     pub font: Font,
     pub colors: Colors,
+    pub highlights: Highlights,
     pub cursor: Cursor,
     pub grid: Grid,
     pub shell: sprite_term::ShellPreference,
@@ -161,6 +162,51 @@ impl Colors {
     }
 }
 
+/// How the theme wants one highlight group drawn, over whatever the program
+/// said. `None` leaves the program's value alone; `Some` replaces it, so a
+/// theme can turn a decoration off as well as on.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HighlightStyle {
+    pub color: Option<sprite_term::Rgb>,
+    pub background: Option<sprite_term::Rgb>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<sprite_term::UnderlineStyle>,
+}
+
+/// The theme's styling of highlight groups by name — `Comment`, `Keyword`,
+/// `@lsp.type.comment` — for programs that stream a grid with named
+/// highlights. Flat by design: the program has already resolved which group
+/// each cell belongs to, so no selector language is needed here.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Highlights {
+    /// Sorted by name, so file order is not meaning.
+    pub groups: Vec<(String, HighlightStyle)>,
+}
+
+impl Highlights {
+    pub fn get(&self, name: &str) -> Option<&HighlightStyle> {
+        self.groups
+            .binary_search_by(|(candidate, _)| candidate.as_str().cmp(name))
+            .ok()
+            .map(|index| &self.groups[index].1)
+    }
+
+    /// The five underline kinds a terminal knows, and `none`.
+    pub fn parse_underline(text: &str) -> Option<sprite_term::UnderlineStyle> {
+        use sprite_term::UnderlineStyle::*;
+        Some(match text {
+            "single" => Single,
+            "double" => Double,
+            "curly" => Curly,
+            "dotted" => Dotted,
+            "dashed" => Dashed,
+            "none" => None,
+            _ => return Option::None,
+        })
+    }
+}
+
 /// The cursor, which is the one part of a terminal that is always moving.
 ///
 /// Both settings are *defaults* rather than overrides: DECSCUSR lets a program
@@ -281,6 +327,7 @@ impl Default for Settings {
         Self {
             font: Font::default(),
             colors: Colors::default(),
+            highlights: Highlights::default(),
             cursor: Cursor::default(),
             grid: Grid::default(),
             shell: sprite_term::ShellPreference::default(),
@@ -353,6 +400,31 @@ impl Settings {
                 out.push_str(&format!("\"{name}\" = \"{}\"\n", hex(*color)));
             }
         }
+        if self.highlights.groups.is_empty() {
+            out.push_str("# no highlight groups are styled\n");
+        } else {
+            out.push_str("\n[highlights]\n");
+            for (name, style) in &self.highlights.groups {
+                let mut fields = Vec::new();
+                if let Some(color) = style.color {
+                    fields.push(format!("color = \"{}\"", hex(color)));
+                }
+                if let Some(color) = style.background {
+                    fields.push(format!("bg = \"{}\"", hex(color)));
+                }
+                if let Some(bold) = style.bold {
+                    fields.push(format!("bold = {bold}"));
+                }
+                if let Some(italic) = style.italic {
+                    fields.push(format!("italic = {italic}"));
+                }
+                if let Some(underline) = style.underline {
+                    fields.push(format!("underline = \"{}\"", underline_name(underline)));
+                }
+                // Quoted: group names such as @lsp.type.comment contain dots.
+                out.push_str(&format!("\"{name}\" = {{ {} }}\n", fields.join(", ")));
+            }
+        }
 
         out.push_str("\n[cursor]\n");
         match self.cursor.style {
@@ -412,6 +484,18 @@ impl Settings {
 
 fn hex(color: sprite_term::Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn underline_name(kind: sprite_term::UnderlineStyle) -> &'static str {
+    use sprite_term::UnderlineStyle::*;
+    match kind {
+        None => "none",
+        Single => "single",
+        Double => "double",
+        Curly => "curly",
+        Dotted => "dotted",
+        Dashed => "dashed",
+    }
 }
 
 fn style_name(style: sprite_term::CursorStyle) -> &'static str {
@@ -705,6 +789,72 @@ impl Settings {
                     "keeping the tokens",
                 )),
             }
+        }
+
+        match document.get("highlights") {
+            None => {}
+            Some(toml::Value::Table(groups)) => {
+                for (name, entry) in groups {
+                    let Some(fields) = entry.as_table() else {
+                        complaints.0.extend(wrong_type(
+                            Some(entry),
+                            &format!("highlights.{name}"),
+                            "a table such as { color = \"#rrggbb\", bold = true }",
+                            "ignoring it",
+                        ));
+                        continue;
+                    };
+                    let mut style = HighlightStyle::default();
+                    for (key, value) in fields {
+                        let setting = format!("highlights.{name}.{key}");
+                        match (key.as_str(), value) {
+                            ("color", toml::Value::String(text)) | ("bg", toml::Value::String(text)) => {
+                                match Colors::parse_hex(text) {
+                                    Some(color) if key == "color" => style.color = Some(color),
+                                    Some(color) => style.background = Some(color),
+                                    None => complaints.0.push(format!(
+                                        "{setting} is {text:?}, which is not a #rrggbb colour; ignoring it"
+                                    )),
+                                }
+                            }
+                            ("bold", toml::Value::Boolean(flag)) => style.bold = Some(*flag),
+                            ("italic", toml::Value::Boolean(flag)) => style.italic = Some(*flag),
+                            ("underline", toml::Value::Boolean(true)) => {
+                                style.underline = Some(sprite_term::UnderlineStyle::Single);
+                            }
+                            ("underline", toml::Value::Boolean(false)) => {
+                                style.underline = Some(sprite_term::UnderlineStyle::None);
+                            }
+                            ("underline", toml::Value::String(text)) => match Highlights::parse_underline(text) {
+                                Some(kind) => style.underline = Some(kind),
+                                None => complaints.0.push(format!(
+                                    "{setting} is {text:?}; it is single, double, curly, dotted, dashed, or none; ignoring it"
+                                )),
+                            },
+                            ("color" | "bg" | "bold" | "italic" | "underline", other) => {
+                                complaints.0.extend(wrong_type(
+                                    Some(other),
+                                    &setting,
+                                    if key == "color" || key == "bg" { "a #rrggbb colour in quotes" } else { "true or false" },
+                                    "ignoring it",
+                                ));
+                            }
+                            _ => complaints.0.push(format!("{setting} is not a highlight setting; ignoring it")),
+                        }
+                    }
+                    settings.highlights.groups.push((name.clone(), style));
+                }
+                // Sorted by name, so the order a file happens to be written in
+                // does not change what Sprite does with it, and so lookups can
+                // binary-search.
+                settings.highlights.groups.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            other => complaints.0.extend(wrong_type(
+                other,
+                "highlights",
+                "a table of \"Group\" = { color = \"#rrggbb\", … }",
+                "keeping the highlights",
+            )),
         }
 
         if let Some(section) = document.get("cursor") {
@@ -1113,6 +1263,102 @@ mod tests {
     }
 
     #[test]
+    fn highlight_groups_are_read_sorted_and_bad_ones_are_reported() {
+        let settings = parsed(
+            "[highlights]\n\
+             \"Keyword\" = { color = \"#cba6f7\", bold = true }\n\
+             \"Comment\" = { color = \"#6c7086\", italic = true, underline = \"curly\" }\n\
+             \"Search\" = { bg = \"#f9e2af\", underline = false }\n",
+        );
+        let groups = &settings.highlights.groups;
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].0, "Comment");
+        assert_eq!(
+            groups[0].1.color,
+            Some(sprite_term::Rgb {
+                r: 0x6c,
+                g: 0x70,
+                b: 0x86
+            })
+        );
+        assert_eq!(groups[0].1.italic, Some(true));
+        assert_eq!(
+            groups[0].1.underline,
+            Some(sprite_term::UnderlineStyle::Curly)
+        );
+        assert_eq!(groups[1].0, "Keyword");
+        assert_eq!(groups[1].1.bold, Some(true));
+        assert_eq!(groups[2].0, "Search");
+        assert_eq!(
+            groups[2].1.background,
+            Some(sprite_term::Rgb {
+                r: 0xf9,
+                g: 0xe2,
+                b: 0xaf
+            })
+        );
+        assert_eq!(
+            groups[2].1.underline,
+            Some(sprite_term::UnderlineStyle::None)
+        );
+        assert_eq!(
+            settings.highlights.get("Keyword").map(|s| s.bold),
+            Some(Some(true))
+        );
+        assert_eq!(settings.highlights.get("Nope"), None);
+
+        {
+            // Scoped so this binding doesn't shadow the `complaints` helper
+            // before the next call.
+            let complaints = complaints(
+                "[highlights]\n\"Comment\" = { color = \"green\", sparkle = true }\n\"Bad\" = 3\n",
+            );
+            assert_eq!(complaints.len(), 3, "{complaints:?}");
+            assert!(
+                complaints
+                    .iter()
+                    .any(|c| c.contains("highlights.Comment.color")),
+                "{complaints:?}"
+            );
+            assert!(
+                complaints
+                    .iter()
+                    .any(|c| c.contains("highlights.Comment.sparkle")),
+                "{complaints:?}"
+            );
+            assert!(
+                complaints
+                    .iter()
+                    .any(|c| c.contains("highlights.Bad must be")),
+                "{complaints:?}"
+            );
+        }
+
+        let complaints = complaints("highlights = 3\n");
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(
+            complaints[0].contains("highlights must be"),
+            "{complaints:?}"
+        );
+    }
+
+    #[test]
+    fn an_underline_setting_reads_every_spelling() {
+        use sprite_term::UnderlineStyle::*;
+        for (text, kind) in [
+            ("single", Single),
+            ("double", Double),
+            ("curly", Curly),
+            ("dotted", Dotted),
+            ("dashed", Dashed),
+            ("none", None),
+        ] {
+            assert_eq!(Highlights::parse_underline(text), Some(kind), "{text}");
+        }
+        assert_eq!(Highlights::parse_underline("wavy"), Option::None);
+    }
+
+    #[test]
     fn colours_are_read_in_hex() {
         let settings = parsed(
             "[colors]\nbackground = \"#101014\"\nforeground = \"#d8d8e0\"\n\
@@ -1358,6 +1604,8 @@ mod tests {
                     [colors]\nbackground = \"#101018\"\ncursor = \"#ff8000\"\n\
                     [colors.palette]\n1 = \"#00ff00\"\n\
                     [colors.tokens]\n\"scm.added\" = \"#40a02b\"\n\
+                    [highlights]\n\"Comment\" = { color = \"#6c7086\", italic = true, underline = \"curly\" }\n\
+                    \"Search\" = { bg = \"#f9e2af\", bold = false, underline = \"none\" }\n\
                     [cursor]\nstyle = \"underline\"\nblink = true\n\
                     [shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\"]\n\
                     [scrollback]\nbytes = 4096\n\

@@ -29,6 +29,13 @@ pub struct Description {
     pub root: Element,
 }
 
+impl Description {
+    /// The grid this description opens, when its root is one.
+    pub fn grid(&self) -> Option<GridSize> {
+        self.root.grid
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
     Box,
@@ -36,6 +43,7 @@ pub enum Kind {
     List,
     Image,
     Button,
+    Grid,
 }
 
 impl Kind {
@@ -46,6 +54,7 @@ impl Kind {
             "list" => Kind::List,
             "image" => Kind::Image,
             "button" => Kind::Button,
+            "grid" => Kind::Grid,
             _ => return None,
         })
     }
@@ -57,6 +66,7 @@ impl Kind {
             Kind::List => "list",
             Kind::Image => "image",
             Kind::Button => "button",
+            Kind::Grid => "grid",
         }
     }
 }
@@ -78,6 +88,13 @@ impl ColorRef {
     }
 }
 
+/// A grid's size in cells.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GridSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {
     pub kind: Kind,
@@ -91,6 +108,8 @@ pub struct Element {
     /// The event name a click sends, when the element is clickable.
     pub on_click: Option<String>,
     pub children: Vec<Element>,
+    /// The grid this element opens, set only for `Kind::Grid`.
+    pub grid: Option<GridSize>,
 }
 
 /// A description that parsed, and the colour names in it that nobody knows.
@@ -146,6 +165,12 @@ fn element(
         .ok_or_else(|| Refusal::Malformed("an element needs a kind".to_owned()))?;
     let kind = Kind::parse(kind_name).ok_or_else(|| Refusal::UnknownKind(kind_name.to_owned()))?;
 
+    if kind == Kind::Grid && depth > 0 {
+        return Err(Refusal::Malformed(
+            "a grid is the root element; it cannot sit inside a box".to_owned(),
+        ));
+    }
+
     let style = match object.get("style") {
         None => Vec::new(),
         Some(Value::String(text)) => {
@@ -187,6 +212,33 @@ fn element(
         _ => {}
     }
 
+    let grid = if kind == Kind::Grid {
+        if on_click.is_some() {
+            return Err(Refusal::Malformed(
+                "a grid has no on_click; it receives input as a whole".to_owned(),
+            ));
+        }
+        if text.is_some() || svg.is_some() {
+            return Err(Refusal::Malformed(
+                "a grid has no text or svg; its cells arrive as rows".to_owned(),
+            ));
+        }
+        let dimension = |key: &str, max: u16| -> Result<u16, Refusal> {
+            object
+                .get(key)
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| (1..=max).contains(value))
+                .ok_or_else(|| Refusal::Malformed(format!("a grid needs {key} from 1 to {max}")))
+        };
+        Some(GridSize {
+            cols: dimension("cols", crate::surface::grid::MAX_COLS)?,
+            rows: dimension("rows", crate::surface::grid::MAX_ROWS)?,
+        })
+    } else {
+        None
+    };
+
     let children = match object.get("children") {
         None => Vec::new(),
         Some(Value::Array(items)) if matches!(kind, Kind::Box | Kind::List) => items
@@ -216,6 +268,7 @@ fn element(
         svg,
         on_click,
         children,
+        grid,
     })
 }
 
@@ -391,6 +444,52 @@ mod tests {
                 .resolve(&registry, crate::tokens::Role::Text),
             crate::tokens::unpack(crate::tokens::DEFAULT_FOREGROUND)
         );
+    }
+
+    #[test]
+    fn a_grid_is_a_root_with_a_size_and_nothing_inside() {
+        let grid = parsed(
+            json!({ "version": 1, "root": { "kind": "grid", "cols": 80, "rows": 24, "style": "p_1", "bg": "terminal.background" } }),
+        );
+        assert_eq!(grid.description.root.kind, Kind::Grid);
+        assert_eq!(
+            grid.description.grid(),
+            Some(GridSize { cols: 80, rows: 24 })
+        );
+        // A grid root's style and bg are kept, not dropped for being a grid:
+        // they dress the wrapper the cell box sits in.
+        assert_eq!(grid.description.root.style, vec!["p_1"]);
+        assert_eq!(
+            grid.description.root.background,
+            Some(ColorRef::Token("terminal.background".into()))
+        );
+
+        let no_grid = parsed(json!({ "version": 1, "root": { "kind": "box" } }));
+        assert_eq!(no_grid.description.grid(), None);
+
+        for (root, needle) in [
+            (json!({ "kind": "grid", "rows": 24 }), "cols"),
+            (json!({ "kind": "grid", "cols": 0, "rows": 24 }), "cols"),
+            (json!({ "kind": "grid", "cols": 80, "rows": 5000 }), "rows"),
+            (
+                json!({ "kind": "grid", "cols": 80, "rows": 24, "children": [] }),
+                "children",
+            ),
+            (
+                json!({ "kind": "grid", "cols": 80, "rows": 24, "on_click": "x" }),
+                "on_click",
+            ),
+            (
+                json!({ "kind": "box", "children": [{ "kind": "grid", "cols": 8, "rows": 2 }] }),
+                "root",
+            ),
+        ] {
+            let refusal = refused(json!({ "version": 1, "root": root }));
+            assert!(
+                matches!(&refusal, Refusal::Malformed(why) if why.contains(needle)),
+                "{refusal:?} should mention {needle}"
+            );
+        }
     }
 
     #[test]

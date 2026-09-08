@@ -133,15 +133,11 @@ impl Workspace {
         let reload_sender = reload_tx.clone();
 
         let (surface_tx, surface_rx) = async_channel::bounded::<SurfaceRequest>(64);
-        // The observation key when observation is on, so a session's one
-        // secret opens both lines; a key of its own otherwise, so turning off
-        // the read line does not turn off native UI.
-        let surface_key = match endpoint.as_ref() {
-            Some(endpoint) => Some(endpoint.key()),
-            None => crate::observation::endpoint::ObservationKey::generate()
-                .ok()
-                .map(Arc::new),
-        };
+        // Its own key, never observation's: a program handed only the
+        // observation credentials can read every pane but draw in none.
+        let surface_key = crate::observation::endpoint::ObservationKey::generate()
+            .ok()
+            .map(Arc::new);
         let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_tx).ok());
 
         // Published before the settings, so a pane rendering on the first
@@ -462,9 +458,13 @@ impl Workspace {
                     view.update(cx, |view, cx| view.update_surface(id, description, cx));
                 }
             }
-            SurfaceRequest::Focus { pane, .. } => {
+            SurfaceRequest::Focus { id, pane, target } => {
                 if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.focus_terminal(window, cx));
+                    view.update(cx, |view, cx| {
+                        if let Err(refusal) = view.focus_target(target, window, cx) {
+                            view.refuse_on(id, &refusal);
+                        }
+                    });
                 }
             }
             SurfaceRequest::Close { id, pane } | SurfaceRequest::Closed { id, pane } => {
@@ -472,11 +472,20 @@ impl Workspace {
                     view.update(cx, |view, cx| view.close_surface(id, window, cx));
                 }
             }
-            SurfaceRequest::FocusTerminal { pane, reply } => {
-                let answer = self
-                    .terminal(pane)
-                    .map(|view| view.update(cx, |view, cx| view.focus_terminal(window, cx)));
+            SurfaceRequest::FocusPane {
+                pane,
+                target,
+                reply,
+            } => {
+                let answer = self.terminal(pane).and_then(|view| {
+                    view.update(cx, |view, cx| view.focus_target(target, window, cx))
+                });
                 let _ = reply.send(answer);
+            }
+            SurfaceRequest::Grid { id, pane, message } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| view.grid_operations(id, message, cx));
+                }
             }
             SurfaceRequest::RegisterToken {
                 name,
@@ -872,6 +881,9 @@ fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -
     }
     if current.grid != next.grid {
         outcome.live.push("grid");
+    }
+    if current.highlights != next.highlights {
+        outcome.live.push("highlights");
     }
     if current.cursor != next.cursor {
         outcome.live.push("cursor");
@@ -1936,6 +1948,18 @@ mod tests {
         grid.grid.padding = 24.0;
         let outcome = classify(&current, &grid);
         assert_eq!(outcome.live, vec!["grid"]);
+        assert!(outcome.next_session.is_empty());
+
+        let mut highlights = current.clone();
+        highlights.highlights.groups.push((
+            "Comment".to_owned(),
+            crate::config::HighlightStyle {
+                italic: Some(true),
+                ..Default::default()
+            },
+        ));
+        let outcome = classify(&current, &highlights);
+        assert_eq!(outcome.live, vec!["highlights"]);
         assert!(outcome.next_session.is_empty());
 
         let mut shell = current.clone();

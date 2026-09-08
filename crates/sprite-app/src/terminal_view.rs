@@ -20,16 +20,18 @@ use sprite_term::{
     ShutdownHandle, SnapshotBundle, TerminalCommand, TerminalSession, TerminalSize, WheelEvent,
 };
 
+use crate::config::Highlights;
 use crate::grid::{
     PositionedCell, ScrollAccumulator, cell_at, content_area, grid_origin, lay_out_row,
 };
 use crate::grid_paint::{RowPass, pack, terminal_font};
 use crate::input::gpui_key_event;
 use crate::surface::channel::{
-    Open, Position, SurfaceConnection, event_blur, event_closed, event_focus, event_input,
-    event_refused, event_resize, event_warning,
+    FocusTarget, Open, Position, SurfaceConnection, event_blur, event_closed, event_focus,
+    event_grid_resize, event_input, event_refused, event_resize, event_warning,
 };
-use crate::surface::description::{self, Description};
+use crate::surface::description::{self, Description, Element};
+use crate::surface::grid::{GridSurface, parse_ops};
 use crate::surface::host::SurfaceHost;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
@@ -64,10 +66,23 @@ const STATUS: u32 = 0xf0a0a0;
 /// Half a blink. The rate every terminal has used since the VT100.
 const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 
+/// What a Surface draws: an element tree replaced whole on `update`, or a
+/// grid mutated by operations.
+pub(crate) enum Body {
+    Elements(Description),
+    Grid {
+        grid: GridSurface,
+        /// The description's root element, kept for the `style` and `bg` it
+        /// may carry: a grid's wrapper is styled from them exactly as an
+        /// element root's box is.
+        root: Element,
+    },
+}
+
 /// A Surface this pane is drawing, and the connection that owns it.
 pub(crate) struct HostedSurface {
     id: SurfaceId,
-    description: Description,
+    body: Body,
     connection: Arc<SurfaceConnection>,
     focus: FocusHandle,
     /// A dock's requested width in logical pixels; unused elsewhere.
@@ -626,11 +641,18 @@ impl TerminalView {
     /// blinking, so a program that stops the blink cannot leave the cursor
     /// hidden.
     fn tick_blink(&mut self, cx: &mut Context<Self>) {
-        let blinking = self
+        let terminal_blinks = self
             .bundle
             .as_ref()
             .is_some_and(|bundle| bundle.render.cursor.blinking && bundle.render.cursor.visible);
-        if !blinking {
+        // A grid Surface draws its cursor from this same phase, and a fill
+        // grid hides the terminal behind it, so a grid asking for a blink is
+        // reason enough for the pane to keep one.
+        let grid_blinks = self.surfaces.iter().any(|surface| match &surface.body {
+            Body::Grid { grid, .. } => grid.cursor_blinks(),
+            Body::Elements(_) => false,
+        });
+        if !(terminal_blinks || grid_blinks) {
             if !self.blink_on {
                 self.blink_on = true;
                 cx.notify();
@@ -974,6 +996,9 @@ impl TerminalView {
         }
         self.line_height = settings.font.line_height;
         self.padding = settings.grid.padding;
+        // The theme may have restyled a highlight group; every grid lays its
+        // rows out again on its next frame.
+        self.refresh_grid_surfaces();
         // Unconditional: the family may have changed under the same size, and
         // re-measuring a cell costs one text layout.
         self.set_font_size(settings.font.size, window, cx);
@@ -1018,11 +1043,39 @@ impl TerminalView {
         self.font_size = px(size);
         self.cell_height = px(crate::config::Font::cell_height(size, self.line_height));
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
+        // A new cell size changes how many columns and rows fit the same
+        // pixels, which is all `surface_element` compares before it stays
+        // quiet; without this a grid keeps the cell count of the old font.
+        self.refresh_grid_surfaces();
         // Forces `synchronise_size` to recompute rather than compare against a
         // grid measured with the old cell.
         self.size = None;
         self.synchronise_size(window);
         cx.notify();
+    }
+
+    /// Makes every hosted grid Surface lay its rows out again and hear its
+    /// size again on the next frame. Idempotent, so the callers that reach it
+    /// both ways cost nothing extra.
+    fn refresh_grid_surfaces(&mut self) {
+        for surface in self.surfaces.iter_mut() {
+            if let Body::Grid { grid, .. } = &mut surface.body {
+                grid.invalidate();
+                surface.told_size = None;
+            }
+        }
+    }
+
+    /// What a grid Surface borrows from this pane to draw like its terminal.
+    fn grid_metrics(&self) -> crate::surface::render::GridMetrics {
+        crate::surface::render::GridMetrics {
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            font_family: self.font_family.clone(),
+            font_size: self.font_size,
+            defaults: self.default_colors(),
+            blink_on: self.blink_on,
+        }
     }
 
     /// The docks' widths at this pane size: what each asked for, but never more
@@ -1061,9 +1114,17 @@ impl TerminalView {
             Position::Overlay => window.focused(cx),
             Position::Fill | Position::Dock => None,
         };
+        let warnings = parsed.warnings;
+        let body = match parsed.description.grid() {
+            Some(size) => Body::Grid {
+                grid: GridSurface::new(size.cols, size.rows),
+                root: parsed.description.root,
+            },
+            None => Body::Elements(parsed.description),
+        };
         let hosted = HostedSurface {
             id,
-            description: parsed.description,
+            body,
             connection: Arc::clone(&connection),
             focus: focus.clone(),
             size: open.size,
@@ -1072,7 +1133,7 @@ impl TerminalView {
             _focus_events: [on_focus, on_blur],
         };
         self.surfaces.place(open.position, open.side, hosted)?;
-        for warning in parsed.warnings {
+        for warning in warnings {
             connection.send(&event_warning(&warning));
         }
         if open.focus {
@@ -1097,9 +1158,15 @@ impl TerminalView {
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
             return;
         };
+        if matches!(surface.body, Body::Grid { .. }) {
+            surface.connection.send(&event_refused(
+                &Refusal::Malformed("a grid Surface takes rows, not an update".to_owned()).reason(),
+            ));
+            return;
+        }
         match parsed {
             Ok(parsed) => {
-                surface.description = parsed.description;
+                surface.body = Body::Elements(parsed.description);
                 for warning in parsed.warnings {
                     surface.connection.send(&event_warning(&warning));
                 }
@@ -1111,10 +1178,61 @@ impl TerminalView {
         }
     }
 
-    /// Hands the keyboard to the terminal.
-    pub(crate) fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
+    /// Sends a refusal on a hosted Surface's connection, if the Surface is
+    /// still here; a bad message never removes a Surface.
+    pub(crate) fn refuse_on(&mut self, id: SurfaceId, refusal: &Refusal) {
+        if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
+            surface.connection.send(&event_refused(&refusal.reason()));
+        }
+    }
+
+    /// Applies a grid operation, or a batch of them, to a grid Surface. The
+    /// first bad operation is refused on the connection; what came before it
+    /// stands, and the Surface is never removed for a bad message.
+    pub(crate) fn grid_operations(
+        &mut self,
+        id: SurfaceId,
+        message: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let Body::Grid { grid, .. } = &mut surface.body else {
+            surface.connection.send(&event_refused(
+                &Refusal::Malformed("this Surface is not a grid".to_owned()).reason(),
+            ));
+            return;
+        };
+        let outcome = parse_ops(&message).and_then(|ops| grid.apply_all(ops));
+        if let Err(refusal) = outcome {
+            surface.connection.send(&event_refused(&refusal.reason()));
+        }
         cx.notify();
+    }
+
+    /// Hands the keyboard where a `focus` message says: to the terminal, or
+    /// to another Surface this pane hosts. Replaces `focus_terminal`.
+    pub(crate) fn focus_target(
+        &mut self,
+        target: FocusTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Refusal> {
+        let handle = match target {
+            FocusTarget::Terminal => self.focus.clone(),
+            FocusTarget::Surface(other) => self
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == other)
+                .map(|surface| surface.focus.clone())
+                .ok_or_else(|| {
+                    Refusal::Malformed(format!("no Surface {} in this pane", other.0))
+                })?,
+        };
+        window.focus(&handle);
+        cx.notify();
+        Ok(())
     }
 
     /// Removes a Surface and returns its space to the grid. Always answers
@@ -1168,14 +1286,14 @@ impl TerminalView {
         &mut self,
         allocated: Size<Pixels>,
         registry: &TokenRegistry,
+        metrics: &crate::surface::render::GridMetrics,
+        highlights: &Highlights,
         cx: &mut Context<Self>,
     ) -> SurfaceLayers {
         let (left_width, right_width) = self.dock_widths(allocated);
-        let fill = self
-            .surfaces
-            .fill
-            .as_mut()
-            .map(|surface| Self::surface_element(surface, allocated, registry, cx, true));
+        let fill = self.surfaces.fill.as_mut().map(|surface| {
+            Self::surface_element(surface, allocated, registry, metrics, highlights, cx, true)
+        });
         let left = self.surfaces.left.as_mut().map(|surface| {
             let strip = Size {
                 width: px(left_width),
@@ -1187,7 +1305,9 @@ impl TerminalView {
                 .left(px(0.0))
                 .w(strip.width)
                 .h_full()
-                .child(Self::surface_element(surface, strip, registry, cx, true))
+                .child(Self::surface_element(
+                    surface, strip, registry, metrics, highlights, cx, true,
+                ))
                 .into_any_element()
         });
         let right = self.surfaces.right.as_mut().map(|surface| {
@@ -1201,7 +1321,9 @@ impl TerminalView {
                 .right(px(0.0))
                 .w(strip.width)
                 .h_full()
-                .child(Self::surface_element(surface, strip, registry, cx, true))
+                .child(Self::surface_element(
+                    surface, strip, registry, metrics, highlights, cx, true,
+                ))
                 .into_any_element()
         });
         // Each overlay is centred in its own full-pane layer, so later ones
@@ -1218,7 +1340,7 @@ impl TerminalView {
                     .items_center()
                     .justify_center()
                     .child(Self::surface_element(
-                        surface, allocated, registry, cx, false,
+                        surface, allocated, registry, metrics, highlights, cx, false,
                     ))
                     .into_any_element()
             })
@@ -1241,6 +1363,8 @@ impl TerminalView {
         surface: &mut HostedSurface,
         size: Size<Pixels>,
         registry: &TokenRegistry,
+        metrics: &crate::surface::render::GridMetrics,
+        highlights: &Highlights,
         cx: &mut Context<Self>,
         fills: bool,
     ) -> AnyElement {
@@ -1250,19 +1374,39 @@ impl TerminalView {
         );
         if surface.told_size != Some(told) {
             surface.told_size = Some(told);
-            surface.connection.send(&event_resize(told.0, told.1));
+            let event = match &surface.body {
+                Body::Grid { .. } => {
+                    let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
+                    event_grid_resize(told.0, told.1, cols, rows)
+                }
+                Body::Elements(_) => event_resize(told.0, told.1),
+            };
+            surface.connection.send(&event);
         }
-        let body = crate::surface::render::render(
-            &surface.description,
-            surface.id,
-            registry,
-            &surface.connection,
-        );
+        let body = match &mut surface.body {
+            Body::Elements(description) => crate::surface::render::render(
+                description,
+                surface.id,
+                registry,
+                &surface.connection,
+            ),
+            Body::Grid { grid, .. } => {
+                crate::surface::render::render_grid(grid, highlights, metrics)
+            }
+        };
         let keys = Arc::clone(&surface.connection);
         let focus = surface.focus.clone();
         let mut wrapper = div();
         if fills {
             wrapper = wrapper.size_full();
+        }
+        // A grid root's style and bg belong to the wrapper, which is the box
+        // that owns the whole space the Surface was given: they show in the
+        // slack between the cell box and its edge. The cell box keeps the
+        // grid's own default colours, which come from the program's
+        // `defaults`, not from the description.
+        if let Body::Grid { root, .. } = &surface.body {
+            wrapper = crate::surface::render::apply_described_style(wrapper, root, registry);
         }
         wrapper
             .overflow_hidden()
@@ -1462,7 +1606,13 @@ impl Render for TerminalView {
             SurfaceLayers::default()
         } else {
             let registry = cx.global::<TokenRegistry>().clone();
-            self.surface_layers(allocated, &registry, cx)
+            let metrics = self.grid_metrics();
+            let highlights = cx
+                .global::<crate::config::ActiveSettings>()
+                .0
+                .highlights
+                .clone();
+            self.surface_layers(allocated, &registry, &metrics, &highlights, cx)
         };
 
         // Everything the terminal draws lives inside the grid box, which is

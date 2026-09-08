@@ -285,11 +285,6 @@ impl Endpoint {
         self.key.to_hex()
     }
 
-    /// The key itself, for a second endpoint of this window that shares it.
-    pub(crate) fn key(&self) -> Arc<ObservationKey> {
-        Arc::clone(&self.key)
-    }
-
     /// What one pane's session needs to talk to this endpoint.
     ///
     /// A session learns the socket, the key, and **its own** identity. It is

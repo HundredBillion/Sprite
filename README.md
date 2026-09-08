@@ -255,9 +255,23 @@ holds the Surface open, prints each click, keystroke, resize, and focus
 change as one JSON line, sends each further document on standard input as a
 replacement, and closes the Surface when standard input closes. A Surface
 takes the keyboard when it opens; the program hands it back with
-`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. The same key that protects
-reading protects drawing. Reading and drawing travel on separate sockets, and
-the observation socket cannot draw.
+`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Reading and drawing travel
+on separate sockets with separate keys: nothing that holds only the
+observation credentials can draw.
+
+An editor draws differently: it opens a *grid* Surface (`{"kind":"grid",
+"cols":80,"rows":24}`) and streams cells with highlight ids — `rows`,
+`highlights`, `cursor`, `scroll`, and friends, alone or in a `batch` that
+lands in one frame — mirroring Neovim's own redraw stream so an adapter keeps
+no state of its own. The grid is painted by the terminal's painter with the
+pane's font and cell size, and the theme styles it by highlight-group name:
+
+```toml
+[highlights]
+"Comment" = { color = "#6c7086", italic = true }
+"Keyword" = { color = "#cba6f7", bold = true }
+"DiagnosticUnderlineError" = { underline = "curly", color = "#f38ba8" }
+```
 
 ## Platform
 
