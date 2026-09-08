@@ -255,9 +255,9 @@ holds the Surface open, prints each click, keystroke, resize, and focus
 change as one JSON line, sends each further document on standard input as a
 replacement, and closes the Surface when standard input closes. A Surface
 takes the keyboard when it opens; the program hands it back with
-`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. The same key that protects
-reading protects drawing. Reading and drawing travel on separate sockets with
-separate keys: nothing that holds only the observation credentials can draw.
+`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Reading and drawing travel
+on separate sockets with separate keys: nothing that holds only the
+observation credentials can draw.
 
 ## Platform
 
