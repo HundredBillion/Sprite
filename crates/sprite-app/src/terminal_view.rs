@@ -1033,7 +1033,6 @@ impl TerminalView {
 
     /// Opens a Surface, or says why not. Focus moves only here, never on an
     /// update: a dock refreshing itself steals nothing.
-    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
     pub(crate) fn open_surface(
         &mut self,
         id: SurfaceId,
@@ -1087,7 +1086,6 @@ impl TerminalView {
     /// Replaces a Surface's whole description. A description that does not
     /// parse is refused on the connection and the previous one stands, so a
     /// bad update never blanks a plugin.
-    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
     pub(crate) fn update_surface(
         &mut self,
         id: SurfaceId,
@@ -1113,7 +1111,6 @@ impl TerminalView {
     }
 
     /// Hands the keyboard to the terminal.
-    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
     pub(crate) fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
         cx.notify();
@@ -1121,7 +1118,6 @@ impl TerminalView {
 
     /// Removes a Surface and returns its space to the grid. `announce` is
     /// false when the connection is already gone and nobody is listening.
-    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
     pub(crate) fn close_surface(
         &mut self,
         id: SurfaceId,
@@ -1154,7 +1150,6 @@ impl TerminalView {
 
     /// Terminal → Surfaces in opening order → terminal: the safety net for a
     /// program that forgets to hand the keyboard back.
-    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
     pub(crate) fn cycle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut order = vec![self.focus.clone()];
         order.extend(self.surfaces.iter().map(|surface| surface.focus.clone()));
