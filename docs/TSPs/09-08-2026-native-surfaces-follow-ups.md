@@ -45,7 +45,8 @@ whole-branch review and the two before it queued the items here.
 
 ## Decisions this TSP makes
 
-Confirmed in the grilling session; the recommendation is listed first.
+Confirmed by David in the grilling session on 2026-09-08, all ten as
+recommended.
 
 1. **`terminal_view.rs` splits into a parent and five child modules by
    concern** (`geometry`, `theme`, `input`, `surfaces`, `render`), kept as
