@@ -67,8 +67,8 @@ channel first.
 
 ## Decisions this TSP makes that the PRD left open
 
-Recorded here so the grilling session can confirm or change them before
-execution.
+Recorded here and confirmed one by one in the grilling session on
+2026-09-08; each stands as written.
 
 1. **Two TSPs, not one.** Element Surfaces here; the grid widget, `tree`,
    `rows`, and highlight styling in TSP 3. Each produces working software.
