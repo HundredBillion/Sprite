@@ -271,6 +271,24 @@ Neovim's own `grid_line`. No element ids, no patch semantics. Id-addressed
 patching is the named escalation if a real plugin's tree ever outgrows
 whole-replace; a few hundred nodes do not.
 
+**The `sprite` binary is the reference client.** Sprite is already a client of
+its own window: `sprite panes snapshot` and `sprite config reload` find the
+socket from the environment, authenticate, and print the answer
+(`observation/client.rs`, `run_snapshot`, `run_config_reload`) — the
+glossary's Observation Client. Surfaces get the same treatment.
+`sprite surface open --dock left < description.json` holds the connection,
+prints each event as one JSON line on stdout, reads `update`s from stdin, and
+closes the Surface when stdin closes; `sprite surface focus` hands the keyboard
+back; `sprite token register` adds a token. Every language then has a client
+for free — a shell pipes it, Lua drives it through `vim.fn.jobstart`, Python
+through `subprocess` — and the finish-line script is a few lines rather than a
+`socat` contortion. The CLI is the reference and the script's tool, not the
+only path: `sprite.nvim`'s adapter may speak the socket directly for
+keystroke-rate grid streaming. Requiring every client to speak the socket
+itself was rejected because each would reimplement framing and authentication
+before drawing a box; a separate client-library crate was rejected as a second
+artifact to version before the first client exists.
+
 **Two levels, delivered in order, the cheap one first.** Sprite *already
 holds* a structured grid of every terminal program's screen — that is what
 the terminal is. **Level 0** applies the theme to that existing grid: font,
@@ -348,6 +366,11 @@ styling or Surfaces.
   **`observation/` is
   not modified**; its read-only-by-construction grammar and tests are
   untouched.
+- **Surface Client (`cli.rs`, beside `observation/client.rs`):** `sprite
+  surface open|update|close|focus` and `sprite token register`, mirroring
+  `sprite panes snapshot`: socket and key from the environment, events as
+  JSON lines on stdout, updates from stdin, the Surface closed when stdin
+  closes.
 - **`TerminalView` (`terminal_view.rs`):** hosts surfaces by position — at
   most one fill, one dock per side (left or right), and stacked overlays.
   *Fill* renders the surface instead of the grid and forwards
@@ -407,7 +430,7 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    `fmt`, `clippy -D warnings`, and the `--locked --offline` build pass.
    Plain `sprite` with no surface open behaves as before, byte for byte.
 3. **End to end, by hand, with a script.** From a shell in a Sprite pane, a
-   script opens a *dock* surface describing a docked Surface: a title, a list of
+   script pipes a description into `sprite surface open --dock left`: a title, a list of
    three rows each with an SVG icon and a label, styled with utility tokens
    and colours referenced by token name. The Surface appears beside the
    terminal; `tput cols` in the shell reports the narrower width. The Surface has
