@@ -1600,17 +1600,22 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    /// A private directory for one test's sockets, removed with it.
+    /// A private directory of this test's own, removed when it is dropped.
+    /// Named as short as the observation tests name theirs, because it sits
+    /// inside `$TMPDIR`, which on macOS is already ~48 bytes, and what is left
+    /// has to hold a socket name.
     struct Scratch(PathBuf);
+
+    fn scratch_name(pid: u32, ordinal: u64) -> String {
+        format!("ss-{pid:x}-{ordinal:x}")
+    }
 
     impl Scratch {
         fn new() -> Self {
-            let unique = format!(
-                "sprite-surface-{}-{}",
-                std::process::id(),
-                ObservationKey::generate().expect("random").to_hex()
-            );
-            let path = std::env::temp_dir().join(unique);
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let ordinal = NEXT.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir().join(scratch_name(std::process::id(), ordinal));
+            let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("scratch");
             Self(path)
         }
@@ -1862,6 +1867,21 @@ mod tests {
     }
 
     #[test]
+    fn the_surface_socket_leaves_room_for_a_macos_tmpdir() {
+        /// `sun_path` on macOS, less its NUL terminator.
+        const MACOS_SUN_PATH: usize = 103;
+        /// `/var/folders/<2>/<~30>/T`, as `temp_dir` reports it.
+        const MACOS_TMPDIR: usize = 48;
+        let widest = scratch_name(u32::MAX, 0xFFFF);
+        let on_macos = MACOS_TMPDIR + 1 + widest.len() + 1 + SOCKET_NAME_BYTES;
+        assert!(
+            on_macos <= MACOS_SUN_PATH,
+            "the widest scratch name ({widest}) gives a {on_macos}-byte socket path \
+             inside a macOS $TMPDIR, over its {MACOS_SUN_PATH}-byte limit"
+        );
+    }
+
+    #[test]
     fn closing_the_endpoint_removes_the_socket() {
         let scratch = Scratch::new();
         let (mut endpoint, _rx) = endpoint(&scratch);
@@ -1966,6 +1986,13 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_DOCK_SIZE: f32 = 240.0;
 pub const MIN_DOCK_SIZE: f32 = 64.0;
 pub const MAX_DOCK_SIZE: f32 = 4096.0;
+
+/// Hex digits in a socket file name. With the `.surface.sock` suffix this is
+/// as wide as the observation socket's name, which is measured against a
+/// macOS `$TMPDIR` in the tests below; a longer name would not fit there.
+const SOCKET_HEX: usize = 16;
+/// The width of `<SOCKET_HEX hex>.surface.sock`.
+const SOCKET_NAME_BYTES: usize = SOCKET_HEX + ".surface.sock".len();
 
 const NOT_ANSWERING: &str = "this window is no longer answering";
 const NO_ANSWER: &str = "this window did not answer in time";
@@ -2139,7 +2166,7 @@ impl SurfaceEndpoint {
         // Named at random and not from the key, as the observation socket is,
         // so learning the path teaches nothing about the key.
         let mut name = ObservationKey::generate()?.to_hex();
-        name.truncate(24);
+        name.truncate(SOCKET_HEX);
         let socket = directory.join(format!("{name}.surface.sock"));
         let length = socket.as_os_str().len();
         if length > MAX_SOCKET_PATH {
@@ -2560,13 +2587,24 @@ pub use surface::channel::{
 - [ ] **Step 6: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline surface::channel::`
-Expected: all eight pass.
+Expected: all nine pass.
 
 Run: `cargo test -p sprite-app --locked --offline observation::`
 Expected: unchanged, all pass.
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
+
+**Amendments made during execution (2026-09-08).** Two defects in the code
+above were found and fixed while executing this task; the committed code is
+the reference, and this note records the difference. (1) `SurfaceConnection`
+gates `send` until the connection thread has written the `opened` line (an
+`establish`/`abandon` pair on a condition variable), because the window can
+send an event the moment it accepts an `open`, and without the gate that event
+could reach the client before its `opened` reply. (2) In the tests, dropping
+`stream` alone did not close the connection, since the `BufReader` held a
+clone of the socket; both are dropped where the tests want the server to see
+EOF.
 
 - [ ] **Step 7: Commit**
 
