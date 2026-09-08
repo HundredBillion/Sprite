@@ -63,7 +63,11 @@ branch `native-surfaces-2` at `39d473c`, which is what `master` holds once PR
 
 ## Decisions this TSP makes that the PRD left open
 
-For confirmation in the grilling session.
+Confirmed by David in the grilling session on 2026-09-08, all ten as
+recommended. Decision 6 was confirmed in a wider form than first written: the
+one-shot `focus` (a fresh connection carrying `pane`) accepts the same
+`target` as a Surface's own connection, so `sprite surface focus 7` works
+from a shell; Task 4 carries that.
 
 1. **The painter learns underline and strikethrough now.** `grid_paint.rs`
    passes `None` for both today, so a terminal program's underlines are lost.
@@ -88,7 +92,11 @@ For confirmation in the grilling session.
 5. **`tree` is deferred.** No plugin exists yet that needs it, and a plugin
    can build a tree from boxes; a kind is added when a real plugin needs it.
 6. **`focus` may target a Surface id in the same pane**, completing TSP 2's
-   decision 6: `{"type":"focus","target":7}`; `"terminal"` still works.
+   decision 6: `{"type":"focus","target":7}` on a Surface's connection, or
+   `{"type":"focus","pane":9,"target":7}` as a one-shot; `"terminal"` still
+   works, an unhosted id is refused `malformed: no Surface <id> in this
+   pane`, and any other `target` value is refused `malformed` (today a
+   one-shot's `target` is not checked at all).
 7. **The `resize` event carries `cols` and `rows` for a grid Surface**, so
    an adapter can call `nvim_ui_try_resize` without knowing cell metrics.
 8. **A grid Surface draws through `GridPaint` unchanged in shape**, by
@@ -117,7 +125,7 @@ For confirmation in the grilling session.
 | `crates/sprite-app/src/surface/grid.rs` (new) | `GridSurface` state, operation parsing (`Op`), application, layout into `PositionedCell` rows, cursor. Pure; tested without GPUI. |
 | `crates/sprite-app/src/surface/description.rs` | `Kind::Grid` with `cols`/`rows`, root-only. |
 | `crates/sprite-app/src/surface/channel.rs` | Operation messages → `SurfaceRequest::Grid`; `focus` target; `event_grid_resize`. |
-| `crates/sprite-app/src/terminal_view.rs` | `Body::{Elements, Grid}` on `HostedSurface`; grid rendering with the pane's cell metrics; operations; `focus_surface`; resize with cell counts. |
+| `crates/sprite-app/src/terminal_view.rs` | `Body::{Elements, Grid}` on `HostedSurface`; grid rendering with the pane's cell metrics; operations; `focus_target`; resize with cell counts. |
 | `crates/sprite-app/src/observation/endpoint.rs` | `Endpoint::key()` removed (decision 10). |
 | `scripts/surface-grid-demo.sh` (new), `README.md`, `docs/PRDs/09-07-2026-native-surfaces.md` | The second verification script; docs. |
 
@@ -1624,6 +1632,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Modify: `crates/sprite-app/src/terminal_view.rs` (`HostedSurface` ~67;
   `open_surface` ~1035; `update_surface` ~1087; `focus_terminal`; new
   methods; `surface_element` ~1240 — the body branch only)
+- Modify: `crates/sprite-app/src/cli.rs` (`Invocation::SurfaceFocus` ~30;
+  help ~108; `surface focus` parsing ~198; test ~664),
+  `crates/sprite-app/src/main.rs` (~46), `crates/sprite-app/src/surface/
+  client.rs` (`run_surface_focus` ~203)
 
 **Interfaces:**
 - Consumes: `grid::{GridSurface, Op, parse_ops, is_op, MAX_COLS, MAX_ROWS}`
@@ -1635,16 +1647,19 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
     is a grid).
   - `channel::FocusTarget { Terminal, Surface(SurfaceId) }`;
     `SurfaceRequest::Focus { id, pane, target: FocusTarget }` (the variant
-    gains `target`); new `SurfaceRequest::Grid { id, pane, message: Value }`.
+    gains `target`); `SurfaceRequest::FocusTerminal { pane, reply }` becomes
+    `SurfaceRequest::FocusPane { pane, target: FocusTarget, reply }`; new
+    `SurfaceRequest::Grid { id, pane, message: Value }`.
+  - `cli::Invocation::SurfaceFocus(Option<u64>)`; `client::run_surface_focus(
+    target: Option<u64>, out, errors) -> Exit`.
   - `channel::event_grid_resize(width: u32, height: u32, cols: u16, rows:
     u16) -> String` → `{"type":"resize","width":…,"height":…,"cols":…,"rows":…}`.
   - On `TerminalView`: `pub(crate) enum Body { Elements(Description),
     Grid(GridSurface) }` as `HostedSurface.body` (replacing `description`);
     `pub(crate) fn grid_operations(&mut self, id: SurfaceId, message: Value,
-    cx)`; `pub(crate) fn focus_surface(&mut self, id: SurfaceId, target:
-    FocusTarget, window, cx)` (replacing `focus_terminal`'s role for
-    connection-borne `focus`; `focus_terminal` stays for the one-shot
-    command).
+    cx)`; `pub(crate) fn focus_target(&mut self, target: FocusTarget,
+    window, cx) -> Result<(), Refusal>` (replacing `focus_terminal`; both
+    the connection-borne `focus` and the one-shot command call it).
 
 The rules, in one place. A description whose root is
 `{"kind":"grid","cols":80,"rows":24,"style":"…","bg":"…"}` opens a grid
@@ -1656,7 +1671,11 @@ Surface is refused `malformed: this Surface is not a grid`. Refusals on the
 connection never remove the Surface. A `focus` message's `target` is absent
 or `"terminal"` for the terminal, or a Surface id (a number) for another
 Surface in the same pane; an id this pane does not host is refused
-`malformed: no Surface <id> in this pane`.
+`malformed: no Surface <id> in this pane`, and any other value is refused
+`malformed: a focus target is "terminal" or a Surface id`. The one-shot
+`focus` (a fresh connection whose message carries `pane`) takes the same
+`target` with the same refusals and replies `focused` on success; `sprite
+surface focus` takes an optional Surface id and sends it as `target`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1749,7 +1768,52 @@ In `channel.rs`'s tests, add to the fake-window harness style used by
         let refused = line(&mut reader);
         assert!(refused["reason"].as_str().expect("reason").contains("target"));
     }
+
+    #[test]
+    fn a_one_shot_focus_can_name_a_surface() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (seen_tx, seen_rx) = mpsc::channel::<FocusTarget>();
+        let _window = window(rx, move |request| match request {
+            SurfaceRequest::FocusPane { target, reply, .. } => {
+                seen_tx.send(target).expect("seen");
+                let answer = match target {
+                    FocusTarget::Surface(SurfaceId(7)) => Ok(()),
+                    FocusTarget::Surface(other) => {
+                        Err(Refusal::Malformed(format!("no Surface {} in this pane", other.0)))
+                    }
+                    FocusTarget::Terminal => Ok(()),
+                };
+                reply.send(answer).expect("reply");
+                true
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), json!({ "type": "focus", "pane": 9, "target": 7 })).expect("write");
+        assert_eq!(seen_rx.recv().expect("seen"), FocusTarget::Surface(SurfaceId(7)));
+        assert_eq!(line(&mut reader), json!({ "type": "focused" }));
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), json!({ "type": "focus", "pane": 9, "target": 8 })).expect("write");
+        assert_eq!(seen_rx.recv().expect("seen"), FocusTarget::Surface(SurfaceId(8)));
+        assert_eq!(line(&mut reader), json!({ "type": "refused", "reason": "malformed: no Surface 8 in this pane" }));
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), json!({ "type": "focus", "pane": 9, "target": "blob" })).expect("write");
+        assert_eq!(line(&mut reader)["reason"], "malformed: a focus target is \"terminal\" or a Surface id");
+    }
 ```
+
+In `cli.rs`'s tests, replace `assert_eq!(parsed(&["surface", "focus"]),
+Invocation::SurfaceFocus);` with:
+
+```rust
+        assert_eq!(parsed(&["surface", "focus"]), Invocation::SurfaceFocus(None));
+        assert_eq!(parsed(&["surface", "focus", "7"]), Invocation::SurfaceFocus(Some(7)));
+        assert!(matches!(parse(&["surface", "focus", "blob"]), Err(_)));
+```
+
+(use whatever the existing tests there call the parse-to-`Result` helper,
+if `parse` is not its name).
 
 and add `event_grid_resize(240, 812, 30, 40)` to the list in
 `every_event_is_one_json_line_with_a_type`, with:
@@ -1875,28 +1939,13 @@ pub enum FocusTarget {
   arm before the catch-all:
 
 ```rust
-            Some("focus") => {
-                let target = match message.get("target") {
-                    None => FocusTarget::Terminal,
-                    Some(Value::String(name)) if name == "terminal" => FocusTarget::Terminal,
-                    Some(Value::Number(number)) => match number.as_u64() {
-                        Some(id) => FocusTarget::Surface(SurfaceId(id)),
-                        None => {
-                            let _ = handle.send(&event_refused(
-                                &Refusal::Malformed("a focus target is \"terminal\" or a Surface id".to_owned()).reason(),
-                            ));
-                            continue;
-                        }
-                    },
-                    Some(_) => {
-                        let _ = handle.send(&event_refused(
-                            &Refusal::Malformed("a focus target is \"terminal\" or a Surface id".to_owned()).reason(),
-                        ));
-                        continue;
-                    }
-                };
-                SurfaceRequest::Focus { id, pane, target }
-            }
+            Some("focus") => match focus_target(&message) {
+                Ok(target) => SurfaceRequest::Focus { id, pane, target },
+                Err(refusal) => {
+                    let _ = handle.send(&event_refused(&refusal.reason()));
+                    continue;
+                }
+            },
             Some(kind) if crate::surface::grid::is_op(kind) => {
                 SurfaceRequest::Grid { id, pane, message: message.clone() }
             }
@@ -1904,6 +1953,41 @@ pub enum FocusTarget {
 
   and change the catch-all's text to `"a message is update, focus, close, or
   a grid operation, not {}"`.
+
+- Add beside `pane_of`:
+
+```rust
+/// Where a `focus` message points: absent or `"terminal"` for the pane's
+/// terminal, a number for another Surface the pane hosts.
+fn focus_target(message: &Value) -> Result<FocusTarget, Refusal> {
+    match message.get("target") {
+        None => Ok(FocusTarget::Terminal),
+        Some(Value::String(name)) if name == "terminal" => Ok(FocusTarget::Terminal),
+        Some(Value::Number(number)) if number.as_u64().is_some() => {
+            Ok(FocusTarget::Surface(SurfaceId(number.as_u64().expect("checked"))))
+        }
+        Some(_) => Err(Refusal::Malformed(
+            "a focus target is \"terminal\" or a Surface id".to_owned(),
+        )),
+    }
+}
+```
+
+- Rename `SurfaceRequest::FocusTerminal { pane, reply }` to `FocusPane {
+  pane, target: FocusTarget, reply }` and change the first-message
+  `Some("focus")` arm in `serve` to:
+
+```rust
+        Some("focus") => one_shot(&mut stream, requests, event_focused(), |reply| {
+            let pane = pane_of(&message)?;
+            let target = focus_target(&message)?;
+            Ok(SurfaceRequest::FocusPane { pane, target, reply })
+        }),
+```
+
+  Existing tests that match `SurfaceRequest::FocusTerminal { pane, reply }`
+  match `FocusPane { pane, reply, .. }` instead; the one that checks the
+  client's one-shot message still sees `"target": "terminal"`.
 
 - Add the builder beside `event_resize`:
 
@@ -1955,6 +2039,14 @@ pub(crate) enum Body {
 - Add after `update_surface`:
 
 ```rust
+    /// Sends a refusal on a hosted Surface's connection, if the Surface is
+    /// still here; a bad message never removes a Surface.
+    pub(crate) fn refuse_on(&mut self, id: SurfaceId, refusal: &Refusal) {
+        if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
+            surface.connection.send(&event_refused(&refusal.reason()));
+        }
+    }
+
     /// Applies a grid operation, or a batch of them, to a grid Surface. The
     /// first bad operation is refused on the connection; what came before it
     /// stands, and the Surface is never removed for a bad message.
@@ -1980,37 +2072,32 @@ pub(crate) enum Body {
         cx.notify();
     }
 
-    /// Hands the keyboard where a Surface's `focus` message says: to the
-    /// terminal, or to another Surface this pane hosts.
-    pub(crate) fn focus_surface(
+    /// Hands the keyboard where a `focus` message says: to the terminal, or
+    /// to another Surface this pane hosts. Replaces `focus_terminal`.
+    pub(crate) fn focus_target(
         &mut self,
-        id: SurfaceId,
         target: FocusTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        match target {
-            FocusTarget::Terminal => window.focus(&self.focus),
-            FocusTarget::Surface(other) => {
-                let Some(handle) = self
-                    .surfaces
-                    .iter()
-                    .find(|surface| surface.id == other)
-                    .map(|surface| surface.focus.clone())
-                else {
-                    if let Some(asking) = self.surfaces.get_mut(|surface| surface.id == id) {
-                        asking.connection.send(&event_refused(
-                            &Refusal::Malformed(format!("no Surface {} in this pane", other.0)).reason(),
-                        ));
-                    }
-                    return;
-                };
-                window.focus(&handle);
-            }
-        }
+    ) -> Result<(), Refusal> {
+        let handle = match target {
+            FocusTarget::Terminal => self.focus.clone(),
+            FocusTarget::Surface(other) => self
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == other)
+                .map(|surface| surface.focus.clone())
+                .ok_or_else(|| {
+                    Refusal::Malformed(format!("no Surface {} in this pane", other.0))
+                })?,
+        };
+        window.focus(&handle);
         cx.notify();
+        Ok(())
     }
 ```
+
+  and delete `focus_terminal`.
 
 - In `surface_element`, the body is built with `render::render(&surface.description, …)`; change it to branch on the body, drawing nothing for a grid until Task 5:
 
@@ -2025,10 +2112,25 @@ pub(crate) enum Body {
         };
 ```
 
-- In `workspace.rs` `serve_surface_request`, change the `Focus` arm to call
-  `view.focus_surface(id, target, window, cx)` and add:
+- In `workspace.rs` `serve_surface_request`, replace the `Focus` and
+  `FocusTerminal` arms and add the `Grid` arm:
 
 ```rust
+            SurfaceRequest::Focus { id, pane, target } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| {
+                        if let Err(refusal) = view.focus_target(target, window, cx) {
+                            view.refuse_on(id, &refusal);
+                        }
+                    });
+                }
+            }
+            SurfaceRequest::FocusPane { pane, target, reply } => {
+                let answer = self
+                    .terminal(pane)
+                    .and_then(|view| view.update(cx, |view, cx| view.focus_target(target, window, cx)));
+                let _ = reply.send(answer);
+            }
             SurfaceRequest::Grid { id, pane, message } => {
                 if let Ok(view) = self.terminal(pane) {
                     view.update(cx, |view, cx| view.grid_operations(id, message, cx));
@@ -2036,10 +2138,46 @@ pub(crate) enum Body {
             }
 ```
 
+- In `cli.rs`: `Invocation::SurfaceFocus` becomes `SurfaceFocus(Option<u64>)`;
+  the `surface focus` arm parses one optional argument:
+
+```rust
+            Some("focus") => match arguments.next() {
+                None => Ok(Invocation::SurfaceFocus(None)),
+                Some(id) => match id.to_string_lossy().parse::<u64>() {
+                    Ok(id) => Ok(Invocation::SurfaceFocus(Some(id))),
+                    Err(_) => Err(UsageError(format!(
+                        "surface focus takes a Surface id, not {}",
+                        id.to_string_lossy()
+                    ))),
+                },
+            },
+```
+
+  and the help line becomes `sprite surface focus [ID]    hand the keyboard
+  to this pane's terminal, or to Surface ID`. In `main.rs`, the arm becomes
+  `Ok(Invocation::SurfaceFocus(target)) => { … run_surface_focus(target,
+  &mut out, &mut errors) … }`. In `client.rs`:
+
+```rust
+pub fn run_surface_focus(target: Option<u64>, out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
+    let credentials = match credentials(errors) {
+        Ok(credentials) => credentials,
+        Err(exit) => return exit,
+    };
+    let target = match target {
+        Some(id) => json!(id),
+        None => json!("terminal"),
+    };
+    let message = json!({ "type": "focus", "pane": credentials.pane, "target": target });
+    one_exchange(&credentials, &message, "focused", out, errors)
+}
+```
+
 - [ ] **Step 6: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
-Expected: all pass, including the three new tests.
+Expected: all pass, including the four new tests.
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
@@ -2525,6 +2663,6 @@ developers, Evidence — steps 4 and 5 above).
   Task 4.
 - **`tree`**: deferred (decision 5); recorded in the PRD status.
 - **Type consistency**: `GridSize`, `GridSurface`, `Op`, `FocusTarget`,
-  `Body`, `GridMetrics`, `render_grid`, `grid_operations`, `focus_surface`,
+  `Body`, `GridMetrics`, `render_grid`, `grid_operations`, `focus_target`,
   `event_grid_resize`, `Highlights::get`, `HighlightStyle` are named the
   same in every task that uses them.
