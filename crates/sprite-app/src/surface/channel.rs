@@ -21,7 +21,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -129,13 +129,24 @@ pub struct Open {
     pub description: Value,
 }
 
-/// The stream a [`SurfaceConnection`] writes to, plus whether the connection
-/// has been established yet. Both live behind the one lock, so "write
-/// `opened`" and "flip to established" happen as a single step no other
-/// writer can land in the middle of.
+/// The stream a [`SurfaceConnection`] writes to, plus whatever a program has
+/// sent before the connection thread answered the open. All of it lives
+/// behind the one lock, so nothing here ever waits on anything else that
+/// might be waiting on it.
 struct Wire {
     stream: UnixStream,
-    established: bool,
+    /// Set once, by [`establish`](SurfaceConnection::establish) or
+    /// [`abandon`](SurfaceConnection::abandon): `opened` has been answered
+    /// one way or the other, so `send` no longer needs to queue.
+    ready: bool,
+    /// Set by [`abandon`](SurfaceConnection::abandon): the open was refused
+    /// or never answered, so every `send` from here on reports the client
+    /// gone rather than queuing forever.
+    dead: bool,
+    /// Lines a program sent before `ready`, in the order they arrived.
+    /// `establish` drains this onto the wire, after `opened` and before
+    /// returning — a program does not wait for that to happen.
+    queued: Vec<String>,
 }
 
 /// The window's end of one Surface's connection: the only way events reach
@@ -143,16 +154,16 @@ struct Wire {
 /// listeners, and the view all hold one — cloning shares the same lock and
 /// the same underlying socket, it does not open a second one.
 ///
-/// `send` will not put a byte on the wire before the connection's first
-/// line, `opened`, has gone out: the two are otherwise written by different
-/// threads (the connection thread answers the open; the window sends events
-/// once it has accepted), and without this gate they race for the socket —
-/// on this platform, consistently in the window's favour, so a program could
-/// see its own first event before the confirmation that let it happen.
+/// A program may accept an `open` and send its first event in the same
+/// breath, before the reply that accepted it has even reached the connection
+/// thread — GPUI does not block a caller on a socket write. So `send` never
+/// waits: before `opened` has gone out, it queues the line and returns
+/// `true` immediately; [`establish`](Self::establish) writes `opened`, then
+/// the queue, in order, so nothing a program sent ever arrives ahead of the
+/// confirmation that let it.
 #[derive(Clone)]
 pub struct SurfaceConnection {
     wire: Arc<Mutex<Wire>>,
-    established: Arc<Condvar>,
 }
 
 impl SurfaceConnection {
@@ -162,55 +173,59 @@ impl SurfaceConnection {
         Ok(Self {
             wire: Arc::new(Mutex::new(Wire {
                 stream,
-                established: false,
+                ready: false,
+                dead: false,
+                queued: Vec::new(),
             })),
-            established: Arc::new(Condvar::new()),
         })
     }
 
-    /// Sends one event line. `false` means the client is gone; the reading
-    /// thread notices the same and reports the Surface closed.
-    ///
-    /// Blocks until [`establish`](Self::establish) or
-    /// [`abandon`](Self::abandon) has been called, so an eager window that
-    /// sends before replying still cannot get ahead of `opened`.
+    /// Sends one event line, or queues it if `opened` has not gone out yet.
+    /// `false` means the client is gone — refused, timed out, or the
+    /// connection has already closed — and nothing was queued or written.
     pub fn send(&self, line: &str) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
         };
-        while !wire.established {
-            wire = match self.established.wait(wire) {
-                Ok(wire) => wire,
-                Err(_) => return false,
-            };
+        if wire.dead {
+            return false;
+        }
+        if !wire.ready {
+            wire.queued.push(line.to_owned());
+            return true;
         }
         writeln!(wire.stream, "{line}")
             .and_then(|_| wire.stream.flush())
             .is_ok()
     }
 
-    /// Writes the connection's first line and releases every `send` waiting
-    /// behind it. Called once, by the connection thread that decided to
-    /// accept the Surface — never by the program.
+    /// Writes the connection's first line, then every line a program queued
+    /// before it, in the order they arrived. Called once, by the connection
+    /// thread that decided to accept the Surface — never by the program.
     fn establish(&self, line: &str) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
         };
-        let sent = writeln!(wire.stream, "{line}")
+        let mut ok = writeln!(wire.stream, "{line}")
             .and_then(|_| wire.stream.flush())
             .is_ok();
-        wire.established = true;
-        self.established.notify_all();
-        sent
+        for queued in std::mem::take(&mut wire.queued) {
+            ok &= writeln!(wire.stream, "{queued}")
+                .and_then(|_| wire.stream.flush())
+                .is_ok();
+        }
+        wire.ready = true;
+        ok
     }
 
-    /// Releases every `send` waiting behind a connection that was refused or
-    /// never answered, so a program cannot wait forever on a Surface that
-    /// was never opened.
+    /// Marks the connection dead and drops anything a program queued: the
+    /// open was refused or never answered, so nothing it sent was ever going
+    /// to reach the wire, and a later `send` must say so rather than queue
+    /// forever.
     fn abandon(&self) {
         if let Ok(mut wire) = self.wire.lock() {
-            wire.established = true;
-            self.established.notify_all();
+            wire.dead = true;
+            wire.queued.clear();
         }
     }
 }
@@ -478,10 +493,12 @@ fn serve_surface(
     let Ok(connection) = SurfaceConnection::new(&stream) else {
         return;
     };
-    // Kept on this thread so it can write `opened` after `connection` itself
-    // has moved into the request below — the clone is a shared handle on the
-    // same lock and the same socket, not a second one.
-    let established = connection.clone();
+    // Kept on this thread for as long as the connection lives: `connection`
+    // itself moves into the request below, to the window, and every byte
+    // this thread writes afterward — `opened`, and every refusal once the
+    // Surface is open — has to go through the same lock the window's events
+    // do, or the two race for the socket exactly as they used to.
+    let handle = connection.clone();
     let id = SurfaceId(NEXT_SURFACE.fetch_add(1, Ordering::SeqCst));
     let (reply, answer) = std::sync::mpsc::sync_channel(1);
     if requests
@@ -494,21 +511,21 @@ fn serve_surface(
         })
         .is_err()
     {
-        established.abandon();
+        handle.abandon();
         refuse(&mut stream, NOT_ANSWERING);
         return;
     }
     match answer.recv_timeout(REPLY_TIMEOUT) {
         Ok(Ok(())) => {
-            let _ = established.establish(&event_opened(id));
+            let _ = handle.establish(&event_opened(id));
         }
         Ok(Err(refusal)) => {
-            established.abandon();
+            handle.abandon();
             refuse(&mut stream, &refusal.reason());
             return;
         }
         Err(_) => {
-            established.abandon();
+            handle.abandon();
             refuse(&mut stream, NO_ANSWER);
             return;
         }
@@ -523,11 +540,9 @@ fn serve_surface(
         let message: Value = match serde_json::from_str(line.trim()) {
             Ok(message) => message,
             Err(error) => {
-                let _ = writeln!(
-                    stream,
-                    "{}",
-                    event_refused(&Refusal::Malformed(error.to_string()).reason())
-                );
+                let _ = handle.send(&event_refused(
+                    &Refusal::Malformed(error.to_string()).reason(),
+                ));
                 continue;
             }
         };
@@ -539,13 +554,9 @@ fn serve_surface(
                     description: description.clone(),
                 },
                 None => {
-                    let _ = writeln!(
-                        stream,
-                        "{}",
-                        event_refused(
-                            &Refusal::Malformed("update needs a description".to_owned()).reason()
-                        )
-                    );
+                    let _ = handle.send(&event_refused(
+                        &Refusal::Malformed("update needs a description".to_owned()).reason(),
+                    ));
                     continue;
                 }
             },
@@ -557,17 +568,13 @@ fn serve_surface(
                 return;
             }
             other => {
-                let _ = writeln!(
-                    stream,
-                    "{}",
-                    event_refused(
-                        &Refusal::Malformed(format!(
-                            "a message is update, focus, or close, not {}",
-                            other.unwrap_or("nothing")
-                        ))
-                        .reason()
-                    )
-                );
+                let _ = handle.send(&event_refused(
+                    &Refusal::Malformed(format!(
+                        "a message is update, focus, or close, not {}",
+                        other.unwrap_or("nothing")
+                    ))
+                    .reason(),
+                ));
                 continue;
             }
         };
@@ -697,8 +704,9 @@ fn register_request(message: &Value, reply: Reply) -> Result<SurfaceRequest, Ref
     })
 }
 
-// Events, one JSON line each. `json!` writes object keys in sorted order,
-// which is why `type` is last in the text and first in the reader's mind.
+// Events, one JSON line each. `json!` in this workspace writes object keys
+// in source order, not sorted, so each literal puts `"type"` first: a reader
+// can tell what a line is without scanning the rest of it.
 
 pub fn event_opened(id: SurfaceId) -> String {
     json!({ "type": "opened", "surface": id.0 }).to_string()
@@ -750,7 +758,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
 
@@ -921,6 +929,64 @@ mod tests {
         drop(stream);
         drop(reader);
         assert_eq!(seen_rx.recv().expect("seen"), "closed");
+    }
+
+    #[test]
+    fn an_event_sent_before_the_open_is_answered_follows_opened_on_the_wire() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let _window = window(rx, |request| match request {
+            SurfaceRequest::Open {
+                connection, reply, ..
+            } => {
+                // Sent before the reply that will let the connection thread
+                // write `opened` — GPUI does not block this call on a
+                // socket, so `send` must not either.
+                assert!(connection.send(&event_focus()));
+                reply.send(Ok(())).expect("reply");
+                true
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
+        assert_eq!(line(&mut reader)["type"], "opened");
+        assert_eq!(line(&mut reader), json!({ "type": "focus" }));
+    }
+
+    #[test]
+    fn a_send_after_a_refused_open_reports_the_client_gone() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (connection_tx, connection_rx) = mpsc::channel::<SurfaceConnection>();
+        let _window = window(rx, move |request| match request {
+            SurfaceRequest::Open {
+                connection, reply, ..
+            } => {
+                connection_tx.send(connection).expect("send connection");
+                reply.send(Err(Refusal::PositionOccupied)).expect("reply");
+                true
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
+        assert_eq!(line(&mut reader)["type"], "refused");
+
+        let connection = connection_rx.recv().expect("connection");
+        // `abandon` runs on the connection thread once it reads this reply,
+        // which races the assertion below; poll instead of assuming it has
+        // already happened by the time this test thread gets here.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if !connection.send(&event_focus()) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "abandon never ran");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
