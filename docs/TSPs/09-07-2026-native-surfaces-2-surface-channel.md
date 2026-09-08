@@ -2627,8 +2627,6 @@ constants are `#[cfg(test)]`; a malformed later input document makes `sprite
 surface open` exit 2; the README says "the observation socket cannot draw"
 rather than the stronger claim key sharing (decision 3) does not support.
 
-EOF.
-
 - [ ] **Step 7: Commit**
 
 ```bash
