@@ -151,7 +151,7 @@ hosting and workspace → key → docs, gate, by-hand, PR.
   `paint_glyph` here and, unchanged, by grid Surfaces (Task 5) since they
   paint through the same `GridPaint`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `grid_paint.rs`'s `mod tests`, after `inverse_and_invisible_together_collapse_onto_the_original_foreground`:
 
@@ -224,12 +224,12 @@ In `grid_paint.rs`'s `mod tests`, after `inverse_and_invisible_together_collapse
 
 `unpack` is `crate::tokens::unpack`; import it in the test module.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline grid_paint::`
 Expected: compile error — `decorations` is not defined.
 
-- [ ] **Step 3: Write `decorations` and use it**
+- [x] **Step 3: Write `decorations` and use it**
 
 Above `impl GridPaint` (after `terminal_font`), add:
 
@@ -304,7 +304,7 @@ strikethrough: None,`, replace those two fields:
 (Keep whatever the surrounding code calls the text and the run; only the two
 fields and the `decorations` call are new.)
 
-- [ ] **Step 4: Run the tests and the gate**
+- [x] **Step 4: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline grid_paint::`
 Expected: all pass, including the four new tests.
@@ -312,7 +312,7 @@ Expected: all pass, including the four new tests.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 5: Look, once**
+- [x] **Step 5: Look, once**
 
 Run `cargo run -p sprite-app --locked --offline` and in the pane:
 
@@ -323,7 +323,7 @@ printf '\e[4munderlined\e[0m \e[4:3mcurly\e[0m \e[9mstruck\e[0m \e[58;2;255;0;0m
 Expected: the first word underlined straight, the second wavy, the third
 struck through, the fourth underlined in red. Close the window.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sprite-app/src/grid_paint.rs
