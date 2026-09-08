@@ -148,7 +148,7 @@ This task moves code. It adds no behaviour and changes no signature. The
 line numbers below are those of `366417d`; read the file once first, because
 the ranges are the map.
 
-- [ ] **Step 1: Record the baseline**
+- [x] **Step 1: Record the baseline**
 
 ```bash
 cargo test -p sprite-app --locked --offline 2>&1 | grep 'test result' | head -1
@@ -159,7 +159,7 @@ Write both numbers down; Step 6 compares against them. Expected today:
 `370 passed` for the lib binary (or whatever `master` reports) and one
 function count.
 
-- [ ] **Step 2: Create the child modules and declare them**
+- [x] **Step 2: Create the child modules and declare them**
 
 At the top of `terminal_view.rs`, directly after the module doc comment
 (lines 1–5) and before the `use` block, add:
@@ -186,7 +186,7 @@ paths. Example for `geometry.rs`:
 use super::*;
 ```
 
-- [ ] **Step 3: Move each concern**
+- [x] **Step 3: Move each concern**
 
 Cut these ranges from `terminal_view.rs` and paste them into the named file,
 in this order. A method moved out of `impl TerminalView` goes into a new
@@ -221,7 +221,7 @@ Visibility that the move forces, named so nobody guesses: `Body`,
 `surface_layers`, `surface_element` become `pub(super) fn` on
 `TerminalView`. Nothing becomes `pub` or `pub(crate)` that was not already.
 
-- [ ] **Step 4: Trim the imports**
+- [x] **Step 4: Trim the imports**
 
 Run `cargo build -p sprite-app --locked --offline` and let the compiler name
 every unused import in the parent and every missing one in a child. Move
@@ -230,12 +230,12 @@ to carry everything: the parent's `use` block should shrink, and each child
 should import what it uses by name. (`use super::*;` stays only for the
 `TerminalView` type and the parent's remaining items.)
 
-- [ ] **Step 5: Run the gate**
+- [x] **Step 5: Run the gate**
 
 Run: `cargo fmt --all && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings && cargo test -p sprite-app --locked --offline`
 Expected: clean; the lib binary reports the same `passed` count as Step 1.
 
-- [ ] **Step 6: Prove it was a move**
+- [x] **Step 6: Prove it was a move**
 
 ```bash
 git diff --stat
@@ -249,7 +249,7 @@ shows as a move, and the only plain additions are `mod`, `use`, doc-comment,
 and visibility lines. Paste the three outputs into the report and say what
 the moved-colour view showed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sprite-app/src/terminal_view.rs crates/sprite-app/src/terminal_view/
