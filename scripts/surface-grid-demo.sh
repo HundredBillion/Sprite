@@ -12,7 +12,7 @@ highlights='{"type":"highlights","define":{"1":{"fg":"#6c7086","italic":true},"2
 row() { # row hl text
     printf '{"row":%s,"cells":[' "$1"
     first=1
-    printf '%s' "$3" | fold -w 1 | while IFS= read -r ch; do
+    printf '%s\n' "$3" | fold -w 1 | while IFS= read -r ch; do
         [ "$first" = 1 ] || printf ','
         first=0
         printf '["%s",%s]' "$ch" "$2"
