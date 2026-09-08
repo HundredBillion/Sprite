@@ -168,12 +168,10 @@ fn identity_environment() -> Vec<(OsString, OsString)> {
         entries.push((OsString::from("TERMINFO_DIRS"), value));
     }
 
-    // Advertised, not injected. Automatic loading differs per shell and each
-    // mechanism can break a user's configuration if it is wrong: zsh needs a
-    // generated ZDOTDIR that re-sources the real one, bash has no clean
-    // interactive hook at all, and getting either wrong leaves someone without
-    // their shell. Sprite exports the location and leaves the last step to a
-    // deliberate, per-shell implementation.
+    // Advertised here, and put at the front of PATH below when it names a
+    // present directory: a distribution drops its launcher there and the
+    // shell inside Sprite finds it first, on every platform, without touching
+    // a system bin.
     if let Some(directory) = integration_directory() {
         entries.push((
             OsString::from(INTEGRATION_DIR_VAR),
@@ -181,9 +179,7 @@ fn identity_environment() -> Vec<(OsString, OsString)> {
         ));
     }
 
-    if let Some(path) = executable_directory()
-        .and_then(|directory| prepend_path(&directory, env::var_os("PATH").as_deref()))
-    {
+    if let Some(path) = prepend_path(&path_front(), env::var_os("PATH").as_deref()) {
         entries.push((OsString::from("PATH"), path));
     }
 
@@ -245,21 +241,36 @@ fn executable_directory() -> Option<PathBuf> {
     Some(env::current_exe().ok()?.parent()?.to_path_buf())
 }
 
-/// Puts `directory` first in a PATH value.
-///
-/// Built with `split_paths`/`join_paths` rather than a literal separator, so a
-/// path containing the platform separator cannot corrupt the result.
-fn prepend_path(directory: &Path, current: Option<&OsStr>) -> Option<OsString> {
+/// Puts `directories` at the front of PATH, in order, and drops them from
+/// wherever else they appeared: a duplicate left behind would shadow nothing
+/// and mislead anyone reading the variable.
+fn prepend_path(directories: &[PathBuf], current: Option<&OsStr>) -> Option<OsString> {
+    if directories.is_empty() {
+        return None;
+    }
     let existing: Vec<PathBuf> = current
         .map(|value| env::split_paths(value).collect())
         .unwrap_or_default();
 
-    let mut entries = Vec::with_capacity(existing.len() + 1);
-    entries.push(directory.to_path_buf());
-    // Keeping a duplicate would leave the old position shadowing nothing.
-    entries.extend(existing.into_iter().filter(|entry| entry != directory));
+    let mut entries: Vec<PathBuf> = directories.to_vec();
+    entries.extend(
+        existing
+            .into_iter()
+            .filter(|entry| !directories.contains(entry)),
+    );
 
     env::join_paths(entries).ok()
+}
+
+/// What goes ahead of the inherited PATH: the shell-integration directory, so
+/// a distribution's launcher is found before the program it wraps, then
+/// Sprite's own, so `sprite` itself resolves inside a pane. Either may be
+/// absent; an absent integration directory is simply not there.
+fn path_front() -> Vec<PathBuf> {
+    integration_directory()
+        .into_iter()
+        .chain(executable_directory())
+        .collect()
 }
 
 #[cfg(test)]
@@ -335,8 +346,12 @@ mod tests {
 
     #[test]
     fn the_executable_directory_becomes_the_first_path_entry() {
-        let directory = Path::new("/opt/sprite/bin");
-        let joined = prepend_path(directory, Some(OsStr::new("/usr/bin:/bin"))).expect("join");
+        let directory = PathBuf::from("/opt/sprite/bin");
+        let joined = prepend_path(
+            std::slice::from_ref(&directory),
+            Some(OsStr::new("/usr/bin:/bin")),
+        )
+        .expect("join");
 
         let entries: Vec<PathBuf> = env::split_paths(&joined).collect();
         assert_eq!(entries[0], directory);
@@ -346,8 +361,8 @@ mod tests {
 
     #[test]
     fn an_existing_entry_moves_to_the_front_rather_than_duplicating() {
-        let directory = Path::new("/usr/bin");
-        let joined = prepend_path(directory, Some(OsStr::new("/bin:/usr/bin"))).expect("join");
+        let directory = PathBuf::from("/usr/bin");
+        let joined = prepend_path(&[directory], Some(OsStr::new("/bin:/usr/bin"))).expect("join");
 
         let entries: Vec<PathBuf> = env::split_paths(&joined).collect();
         assert_eq!(
@@ -358,11 +373,27 @@ mod tests {
 
     #[test]
     fn an_absent_path_still_yields_the_executable_directory() {
-        let directory = Path::new("/opt/sprite/bin");
-        let joined = prepend_path(directory, None).expect("join");
+        let directory = PathBuf::from("/opt/sprite/bin");
+        let joined = prepend_path(std::slice::from_ref(&directory), None).expect("join");
 
         let entries: Vec<PathBuf> = env::split_paths(&joined).collect();
-        assert_eq!(entries, vec![directory.to_path_buf()]);
+        assert_eq!(entries, vec![directory]);
+    }
+
+    #[test]
+    fn an_integration_directory_goes_ahead_of_sprite_s_own_and_nothing_goes_ahead_of_nothing() {
+        let integration = PathBuf::from("/opt/sprite-nvim/bin");
+        let own = PathBuf::from("/opt/sprite/bin");
+        let joined = prepend_path(
+            &[integration.clone(), own.clone()],
+            Some(OsStr::new("/opt/sprite/bin:/usr/bin")),
+        )
+        .expect("join");
+
+        let entries: Vec<PathBuf> = env::split_paths(&joined).collect();
+        assert_eq!(entries, vec![integration, own, PathBuf::from("/usr/bin")]);
+
+        assert_eq!(prepend_path(&[], Some(OsStr::new("/usr/bin"))), None);
     }
 
     #[test]
