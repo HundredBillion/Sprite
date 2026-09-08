@@ -118,6 +118,14 @@ impl Side {
     }
 }
 
+/// Where a `focus` message sends the keyboard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FocusTarget {
+    Terminal,
+    /// Another Surface in the same pane, by the id its `opened` reported.
+    Surface(SurfaceId),
+}
+
 /// What an `open` asked for. The description is still JSON here: it is parsed
 /// on the GPUI thread, where the token registry lives.
 #[derive(Clone, Debug, PartialEq)]
@@ -265,14 +273,31 @@ pub enum SurfaceRequest {
         pane: PaneId,
         description: Value,
     },
-    /// The program hands the keyboard back to the terminal.
-    Focus { id: SurfaceId, pane: PaneId },
+    /// The program names where the keyboard goes: the terminal, or another
+    /// Surface in the same pane.
+    Focus {
+        id: SurfaceId,
+        pane: PaneId,
+        target: FocusTarget,
+    },
     /// The program asked to close; the window answers `closed` on the way out.
     Close { id: SurfaceId, pane: PaneId },
     /// The connection dropped; nothing is left to answer.
     Closed { id: SurfaceId, pane: PaneId },
     /// A one-shot request from a process that holds no Surface.
-    FocusTerminal { pane: PaneId, reply: Reply },
+    FocusPane {
+        pane: PaneId,
+        target: FocusTarget,
+        reply: Reply,
+    },
+    /// A grid operation, or a batch of them, for a grid Surface. Kept as JSON
+    /// here for the same reason a description is: the grid, its highlight
+    /// table, and the theme all live on the GPUI thread.
+    Grid {
+        id: SurfaceId,
+        pane: PaneId,
+        message: Value,
+    },
     RegisterToken {
         name: String,
         default: Rgb,
@@ -471,7 +496,12 @@ fn converse(
         Some("open") => serve_surface(stream, reader, &message, requests),
         Some("focus") => one_shot(&mut stream, requests, event_focused(), |reply| {
             let pane = pane_of(&message)?;
-            Ok(SurfaceRequest::FocusTerminal { pane, reply })
+            let target = focus_target(&message)?;
+            Ok(SurfaceRequest::FocusPane {
+                pane,
+                target,
+                reply,
+            })
         }),
         Some("token") => one_shot(&mut stream, requests, event_registered(), |reply| {
             register_request(&message, reply)
@@ -575,7 +605,18 @@ fn serve_surface(
                     continue;
                 }
             },
-            Some("focus") => SurfaceRequest::Focus { id, pane },
+            Some("focus") => match focus_target(&message) {
+                Ok(target) => SurfaceRequest::Focus { id, pane, target },
+                Err(refusal) => {
+                    let _ = handle.send(&event_refused(&refusal.reason()));
+                    continue;
+                }
+            },
+            Some(kind) if crate::surface::grid::is_op(kind) => SurfaceRequest::Grid {
+                id,
+                pane,
+                message: message.clone(),
+            },
             Some("close") => {
                 // The window answers `closed` through the connection and drops
                 // its end; this thread has nothing more to read.
@@ -585,7 +626,7 @@ fn serve_surface(
             other => {
                 let _ = handle.send(&event_refused(
                     &Refusal::Malformed(format!(
-                        "a message is update, focus, or close, not {}",
+                        "a message is update, focus, close, or a grid operation, not {}",
                         other.unwrap_or("nothing")
                     ))
                     .reason(),
@@ -640,6 +681,21 @@ fn pane_of(message: &Value) -> Result<PaneId, Refusal> {
         .and_then(Value::as_u64)
         .map(PaneId)
         .ok_or_else(|| Refusal::Malformed("a pane id is needed".to_owned()))
+}
+
+/// Where a `focus` message points: absent or `"terminal"` for the pane's
+/// terminal, a number for another Surface the pane hosts.
+fn focus_target(message: &Value) -> Result<FocusTarget, Refusal> {
+    match message.get("target") {
+        None => Ok(FocusTarget::Terminal),
+        Some(Value::String(name)) if name == "terminal" => Ok(FocusTarget::Terminal),
+        Some(Value::Number(number)) if number.as_u64().is_some() => Ok(FocusTarget::Surface(
+            SurfaceId(number.as_u64().expect("checked")),
+        )),
+        Some(_) => Err(Refusal::Malformed(
+            "a focus target is \"terminal\" or a Surface id".to_owned(),
+        )),
+    }
 }
 
 fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
@@ -745,6 +801,16 @@ pub fn event_input(keystroke: &gpui::Keystroke) -> String {
 
 pub fn event_resize(width: u32, height: u32) -> String {
     json!({ "type": "resize", "width": width, "height": height }).to_string()
+}
+
+/// A grid Surface's size in cells as well as pixels, so an editor's adapter
+/// can resize its grid without knowing the pane's cell metrics. Sent by the
+/// grid painter, which lands separately; reached only by this module's own
+/// tests until then.
+#[allow(dead_code)]
+pub fn event_grid_resize(width: u32, height: u32, cols: u16, rows: u16) -> String {
+    json!({ "type": "resize", "width": width, "height": height, "cols": cols, "rows": rows })
+        .to_string()
 }
 
 pub fn event_click(name: &str) -> String {
@@ -1125,7 +1191,7 @@ mod tests {
                 reply.send(Ok(())).expect("reply");
                 true
             }
-            SurfaceRequest::FocusTerminal { pane, reply } => {
+            SurfaceRequest::FocusPane { pane, reply, .. } => {
                 assert_eq!(pane, PaneId(9));
                 reply.send(Err(Refusal::UnknownPane)).expect("reply");
                 true
@@ -1234,6 +1300,137 @@ mod tests {
     }
 
     #[test]
+    fn a_grid_operation_reaches_the_window_as_one_request() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (seen_tx, seen_rx) = mpsc::channel::<Value>();
+        let _window = window(rx, move |request| match request {
+            SurfaceRequest::Open { reply, .. } => {
+                reply.send(Ok(())).expect("reply");
+                true
+            }
+            SurfaceRequest::Grid { message, .. } => {
+                seen_tx.send(message).expect("seen");
+                true
+            }
+            SurfaceRequest::Closed { .. } => false,
+            other => panic!("unexpected {other:?}"),
+        });
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("write");
+        assert_eq!(line(&mut reader)["type"], "opened");
+        let rows = json!({ "type": "rows", "rows": [{ "row": 0, "cells": [["a", 1]] }] });
+        writeln!(stream, "{rows}").expect("write");
+        assert_eq!(seen_rx.recv().expect("seen"), rows);
+        let batch = json!({ "type": "batch", "ops": [{ "type": "clear" }] });
+        writeln!(stream, "{batch}").expect("write");
+        assert_eq!(seen_rx.recv().expect("seen"), batch);
+    }
+
+    #[test]
+    fn a_focus_message_names_its_target() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (seen_tx, seen_rx) = mpsc::channel::<FocusTarget>();
+        let _window = window(rx, move |request| match request {
+            SurfaceRequest::Open { reply, .. } => {
+                reply.send(Ok(())).expect("reply");
+                true
+            }
+            SurfaceRequest::Focus { target, .. } => {
+                seen_tx.send(target).expect("seen");
+                true
+            }
+            SurfaceRequest::Closed { .. } => false,
+            other => panic!("unexpected {other:?}"),
+        });
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("write");
+        assert_eq!(line(&mut reader)["type"], "opened");
+        writeln!(stream, r#"{{"type":"focus"}}"#).expect("write");
+        assert_eq!(seen_rx.recv().expect("seen"), FocusTarget::Terminal);
+        writeln!(stream, r#"{{"type":"focus","target":"terminal"}}"#).expect("write");
+        assert_eq!(seen_rx.recv().expect("seen"), FocusTarget::Terminal);
+        writeln!(stream, r#"{{"type":"focus","target":7}}"#).expect("write");
+        assert_eq!(
+            seen_rx.recv().expect("seen"),
+            FocusTarget::Surface(SurfaceId(7))
+        );
+        writeln!(stream, r#"{{"type":"focus","target":"blob"}}"#).expect("write");
+        let refused = line(&mut reader);
+        assert!(
+            refused["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("target")
+        );
+    }
+
+    #[test]
+    fn a_one_shot_focus_can_name_a_surface() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (seen_tx, seen_rx) = mpsc::channel::<FocusTarget>();
+        let _window = window(rx, move |request| match request {
+            SurfaceRequest::FocusPane { target, reply, .. } => {
+                seen_tx.send(target).expect("seen");
+                let answer = match target {
+                    FocusTarget::Surface(SurfaceId(7)) => Ok(()),
+                    FocusTarget::Surface(other) => Err(Refusal::Malformed(format!(
+                        "no Surface {} in this pane",
+                        other.0
+                    ))),
+                    FocusTarget::Terminal => Ok(()),
+                };
+                reply.send(answer).expect("reply");
+                true
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(
+            stream,
+            "{} {}",
+            endpoint.key_hex(),
+            json!({ "type": "focus", "pane": 9, "target": 7 })
+        )
+        .expect("write");
+        assert_eq!(
+            seen_rx.recv().expect("seen"),
+            FocusTarget::Surface(SurfaceId(7))
+        );
+        assert_eq!(line(&mut reader), json!({ "type": "focused" }));
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(
+            stream,
+            "{} {}",
+            endpoint.key_hex(),
+            json!({ "type": "focus", "pane": 9, "target": 8 })
+        )
+        .expect("write");
+        assert_eq!(
+            seen_rx.recv().expect("seen"),
+            FocusTarget::Surface(SurfaceId(8))
+        );
+        assert_eq!(
+            line(&mut reader),
+            json!({ "type": "refused", "reason": "malformed: no Surface 8 in this pane" })
+        );
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(
+            stream,
+            "{} {}",
+            endpoint.key_hex(),
+            json!({ "type": "focus", "pane": 9, "target": "blob" })
+        )
+        .expect("write");
+        assert_eq!(
+            line(&mut reader)["reason"],
+            "malformed: a focus target is \"terminal\" or a Surface id"
+        );
+    }
+
+    #[test]
     fn every_event_is_one_json_line_with_a_type() {
         for event in [
             event_opened(SurfaceId(7)),
@@ -1241,6 +1438,7 @@ mod tests {
             event_registered(),
             event_focused(),
             event_resize(240, 812),
+            event_grid_resize(240, 812, 30, 40),
             event_click("row-1"),
             event_focus(),
             event_blur(),
@@ -1262,6 +1460,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&event_click("row-1")).expect("json"),
             json!({"name":"row-1","type":"event"})
+        );
+        assert_eq!(
+            event_grid_resize(240, 812, 30, 40),
+            r#"{"type":"resize","width":240,"height":812,"cols":30,"rows":40}"#
         );
     }
 }

@@ -26,10 +26,11 @@ use crate::grid::{
 use crate::grid_paint::{RowPass, pack, terminal_font};
 use crate::input::gpui_key_event;
 use crate::surface::channel::{
-    Open, Position, SurfaceConnection, event_blur, event_closed, event_focus, event_input,
-    event_refused, event_resize, event_warning,
+    FocusTarget, Open, Position, SurfaceConnection, event_blur, event_closed, event_focus,
+    event_input, event_refused, event_resize, event_warning,
 };
 use crate::surface::description::{self, Description};
+use crate::surface::grid::{GridSurface, parse_ops};
 use crate::surface::host::SurfaceHost;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
@@ -64,10 +65,17 @@ const STATUS: u32 = 0xf0a0a0;
 /// Half a blink. The rate every terminal has used since the VT100.
 const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 
+/// What a Surface draws: an element tree replaced whole on `update`, or a
+/// grid mutated by operations.
+pub(crate) enum Body {
+    Elements(Description),
+    Grid(GridSurface),
+}
+
 /// A Surface this pane is drawing, and the connection that owns it.
 pub(crate) struct HostedSurface {
     id: SurfaceId,
-    description: Description,
+    body: Body,
     connection: Arc<SurfaceConnection>,
     focus: FocusHandle,
     /// A dock's requested width in logical pixels; unused elsewhere.
@@ -1061,9 +1069,14 @@ impl TerminalView {
             Position::Overlay => window.focused(cx),
             Position::Fill | Position::Dock => None,
         };
+        let warnings = parsed.warnings;
+        let body = match parsed.description.grid() {
+            Some(size) => Body::Grid(GridSurface::new(size.cols, size.rows)),
+            None => Body::Elements(parsed.description),
+        };
         let hosted = HostedSurface {
             id,
-            description: parsed.description,
+            body,
             connection: Arc::clone(&connection),
             focus: focus.clone(),
             size: open.size,
@@ -1072,7 +1085,7 @@ impl TerminalView {
             _focus_events: [on_focus, on_blur],
         };
         self.surfaces.place(open.position, open.side, hosted)?;
-        for warning in parsed.warnings {
+        for warning in warnings {
             connection.send(&event_warning(&warning));
         }
         if open.focus {
@@ -1097,9 +1110,15 @@ impl TerminalView {
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
             return;
         };
+        if matches!(surface.body, Body::Grid(_)) {
+            surface.connection.send(&event_refused(
+                &Refusal::Malformed("a grid Surface takes rows, not an update".to_owned()).reason(),
+            ));
+            return;
+        }
         match parsed {
             Ok(parsed) => {
-                surface.description = parsed.description;
+                surface.body = Body::Elements(parsed.description);
                 for warning in parsed.warnings {
                     surface.connection.send(&event_warning(&warning));
                 }
@@ -1111,10 +1130,61 @@ impl TerminalView {
         }
     }
 
-    /// Hands the keyboard to the terminal.
-    pub(crate) fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
+    /// Sends a refusal on a hosted Surface's connection, if the Surface is
+    /// still here; a bad message never removes a Surface.
+    pub(crate) fn refuse_on(&mut self, id: SurfaceId, refusal: &Refusal) {
+        if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
+            surface.connection.send(&event_refused(&refusal.reason()));
+        }
+    }
+
+    /// Applies a grid operation, or a batch of them, to a grid Surface. The
+    /// first bad operation is refused on the connection; what came before it
+    /// stands, and the Surface is never removed for a bad message.
+    pub(crate) fn grid_operations(
+        &mut self,
+        id: SurfaceId,
+        message: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let Body::Grid(grid) = &mut surface.body else {
+            surface.connection.send(&event_refused(
+                &Refusal::Malformed("this Surface is not a grid".to_owned()).reason(),
+            ));
+            return;
+        };
+        let outcome = parse_ops(&message).and_then(|ops| grid.apply_all(ops));
+        if let Err(refusal) = outcome {
+            surface.connection.send(&event_refused(&refusal.reason()));
+        }
         cx.notify();
+    }
+
+    /// Hands the keyboard where a `focus` message says: to the terminal, or
+    /// to another Surface this pane hosts. Replaces `focus_terminal`.
+    pub(crate) fn focus_target(
+        &mut self,
+        target: FocusTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Refusal> {
+        let handle = match target {
+            FocusTarget::Terminal => self.focus.clone(),
+            FocusTarget::Surface(other) => self
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == other)
+                .map(|surface| surface.focus.clone())
+                .ok_or_else(|| {
+                    Refusal::Malformed(format!("no Surface {} in this pane", other.0))
+                })?,
+        };
+        window.focus(&handle);
+        cx.notify();
+        Ok(())
     }
 
     /// Removes a Surface and returns its space to the grid. Always answers
@@ -1252,12 +1322,17 @@ impl TerminalView {
             surface.told_size = Some(told);
             surface.connection.send(&event_resize(told.0, told.1));
         }
-        let body = crate::surface::render::render(
-            &surface.description,
-            surface.id,
-            registry,
-            &surface.connection,
-        );
+        let body = match &surface.body {
+            Body::Elements(description) => crate::surface::render::render(
+                description,
+                surface.id,
+                registry,
+                &surface.connection,
+            ),
+            // Painted in the next change; a grid draws its background only
+            // until then.
+            Body::Grid(_) => div().size_full().into_any_element(),
+        };
         let keys = Arc::clone(&surface.connection);
         let focus = surface.focus.clone();
         let mut wrapper = div();

@@ -462,9 +462,13 @@ impl Workspace {
                     view.update(cx, |view, cx| view.update_surface(id, description, cx));
                 }
             }
-            SurfaceRequest::Focus { pane, .. } => {
+            SurfaceRequest::Focus { id, pane, target } => {
                 if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.focus_terminal(window, cx));
+                    view.update(cx, |view, cx| {
+                        if let Err(refusal) = view.focus_target(target, window, cx) {
+                            view.refuse_on(id, &refusal);
+                        }
+                    });
                 }
             }
             SurfaceRequest::Close { id, pane } | SurfaceRequest::Closed { id, pane } => {
@@ -472,11 +476,20 @@ impl Workspace {
                     view.update(cx, |view, cx| view.close_surface(id, window, cx));
                 }
             }
-            SurfaceRequest::FocusTerminal { pane, reply } => {
-                let answer = self
-                    .terminal(pane)
-                    .map(|view| view.update(cx, |view, cx| view.focus_terminal(window, cx)));
+            SurfaceRequest::FocusPane {
+                pane,
+                target,
+                reply,
+            } => {
+                let answer = self.terminal(pane).and_then(|view| {
+                    view.update(cx, |view, cx| view.focus_target(target, window, cx))
+                });
                 let _ = reply.send(answer);
+            }
+            SurfaceRequest::Grid { id, pane, message } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| view.grid_operations(id, message, cx));
+                }
             }
             SurfaceRequest::RegisterToken {
                 name,

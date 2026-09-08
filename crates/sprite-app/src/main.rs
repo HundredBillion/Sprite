@@ -43,10 +43,10 @@ fn main() -> ExitCode {
                 run_surface_open(&args, std::io::stdin(), std::io::stdout(), &mut errors) as u8,
             )
         }
-        Ok(Invocation::SurfaceFocus) => {
+        Ok(Invocation::SurfaceFocus(target)) => {
             let mut out = std::io::stdout().lock();
             let mut errors = std::io::stderr().lock();
-            ExitCode::from(run_surface_focus(&mut out, &mut errors) as u8)
+            ExitCode::from(run_surface_focus(target, &mut out, &mut errors) as u8)
         }
         Ok(Invocation::TokenRegister(args)) => {
             let mut out = std::io::stdout().lock();

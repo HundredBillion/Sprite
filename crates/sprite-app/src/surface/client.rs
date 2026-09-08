@@ -200,12 +200,16 @@ pub fn run_surface_open(
     if bad_input { Exit::Usage } else { Exit::Ok }
 }
 
-pub fn run_surface_focus(out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
+pub fn run_surface_focus(target: Option<u64>, out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
     let credentials = match credentials(errors) {
         Ok(credentials) => credentials,
         Err(exit) => return exit,
     };
-    let message = json!({ "type": "focus", "pane": credentials.pane, "target": "terminal" });
+    let target = match target {
+        Some(id) => json!(id),
+        None => json!("terminal"),
+    };
+    let message = json!({ "type": "focus", "pane": credentials.pane, "target": target });
     one_exchange(&credentials, &message, "focused", out, errors)
 }
 

@@ -378,6 +378,9 @@ fn blank() -> Cell {
     }
 }
 
+// The accessors below feed the grid painter, which lands separately; until
+// then they are reached only by this module's own tests.
+#[allow(dead_code)]
 impl GridSurface {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
@@ -624,6 +627,9 @@ impl GridSurface {
     }
 }
 
+/// Feeds `style_for`, which is itself reached only by this module's tests
+/// until the grid painter lands.
+#[allow(dead_code)]
 fn apply_theme(attrs: &mut Attrs, style: &HighlightStyle) {
     if let Some(color) = style.color {
         attrs.fg = Some(color);
