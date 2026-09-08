@@ -758,8 +758,10 @@ Result (2026-09-07, commit 7ccacfc, macOS): passed. Driven against a scratch
 `htop`, which is not installed. Rows in `nvim`, `top`, and the shell grew
 taller and the grid moved in from every edge on the first reload; the tight
 reload put the first column against the pane edge; the plain reload restored
-the pre-TSP look. The reload reply names `font` and `colors` but not `grid`,
-though the padding applied.
+the pre-TSP look. The reload reply did not name `grid` because the change
+classifier had no arm for it; the whole-branch review caught this and the
+arm was added, so a grid-only reload now reports `grid` instead of `nothing
+changed`.
 
 - [ ] **Step 4: Finish the branch**
 

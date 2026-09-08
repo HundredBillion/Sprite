@@ -386,9 +386,9 @@ styling or Surfaces.
   keybinding cycles focus. When a surface's connection closes, its space
   returns to the grid. The `sprite-pane` interface from
   PR #27 is what a hosted surface presents to the pane.
-- **Level 0 (`grid_paint.rs`, `config.rs`):** theme-driven font, line height,
-  cell padding, and token-remapped colours applied to the existing terminal
-  grid.
+- **Level 0 (`config.rs`, `grid.rs`, `terminal_view.rs`):** theme-driven font,
+  line height, and cell padding applied to the existing terminal grid;
+  token-remapped colours arrive with the token registry in the next TSP.
 - **`shell.rs` (`crates/sprite-term`):** prepend `SPRITE_SHELL_INTEGRATION_DIR`
   to the child's PATH when it names a present directory.
 - **Docs:** the two amendments above.

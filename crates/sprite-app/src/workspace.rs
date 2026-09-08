@@ -720,6 +720,9 @@ fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -
     if current.colors != next.colors {
         outcome.live.push("colors");
     }
+    if current.grid != next.grid {
+        outcome.live.push("grid");
+    }
     if current.cursor != next.cursor {
         outcome.live.push("cursor");
     }
@@ -1761,6 +1764,12 @@ mod tests {
         fonts.font.size = 20.0;
         let outcome = classify(&current, &fonts);
         assert_eq!(outcome.live, vec!["font"]);
+        assert!(outcome.next_session.is_empty());
+
+        let mut grid = current.clone();
+        grid.grid.padding = 24.0;
+        let outcome = classify(&current, &grid);
+        assert_eq!(outcome.live, vec!["grid"]);
         assert!(outcome.next_session.is_empty());
 
         let mut shell = current.clone();
