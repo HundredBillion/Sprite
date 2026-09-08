@@ -3132,15 +3132,13 @@ the one in `failed` ~line 395), directly after `observation,` (or the
             surfaces: SurfaceHost::default(),
 ```
 
-**Room for docks.** In `synchronise_size`, the function begins by taking
-`self.allocated` as `available`. Change its opening so the docks are
-subtracted first — the rest of the function is unchanged and keeps using
-`available`:
+**Room for docks.** In `synchronise_size`, the function begins with
+`let available = self.allocated.unwrap_or_else(|| window.viewport_size());`.
+Replace that one line with the lines below so the docks are subtracted first —
+the rest of the function is unchanged and keeps using `available`:
 
 ```rust
-        let Some(allocated) = self.allocated else {
-            return;
-        };
+        let allocated = self.allocated.unwrap_or_else(|| window.viewport_size());
         // Docks take their strips first; the grid gets what is left, and the
         // PTY learns the narrower size exactly as it would on a window resize.
         let (left, right) = self.dock_widths(allocated);
