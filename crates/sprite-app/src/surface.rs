@@ -3,6 +3,7 @@
 
 pub mod channel;
 pub mod description;
+pub mod host;
 pub mod render;
 pub mod style;
 

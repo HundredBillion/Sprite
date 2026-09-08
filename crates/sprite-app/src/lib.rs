@@ -15,8 +15,6 @@ mod input;
 mod observation;
 mod pane_registry;
 mod pane_tree;
-// Consumed by the Surface Channel, which follows.
-#[allow(dead_code)]
 mod surface;
 mod tabs;
 mod terminal_events;

@@ -10,10 +10,10 @@ use gpui::prelude::*;
 use std::ops::Range;
 
 use gpui::{
-    Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    Focusable, ImageSource, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, Size, Task, TextRun,
-    UTF16Selection, Window, canvas, div, img, point, px, rgb,
+    AnyElement, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler,
+    FocusHandle, Focusable, ImageSource, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, Size, Task,
+    TextRun, UTF16Selection, Window, canvas, div, img, point, px, rgb,
 };
 use sprite_term::{
     CellPosition, KeyAction, MouseAction, MouseEvent, Rgb, SelectionMode, SessionConfig,
@@ -25,6 +25,14 @@ use crate::grid::{
 };
 use crate::grid_paint::{RowPass, pack, terminal_font};
 use crate::input::gpui_key_event;
+use crate::surface::channel::{
+    Open, Position, SurfaceConnection, event_blur, event_closed, event_focus, event_input,
+    event_refused, event_resize, event_warning,
+};
+use crate::surface::description::{self, Description};
+use crate::surface::host::SurfaceHost;
+use crate::surface::{Refusal, SurfaceId};
+use crate::tokens::TokenRegistry;
 use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FOREGROUND};
 
 /// The largest grid Terminal Core will accept, mirrored here so the view never
@@ -55,6 +63,44 @@ const STATUS: u32 = 0xf0a0a0;
 
 /// Half a blink. The rate every terminal has used since the VT100.
 const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
+
+/// A Surface this pane is drawing, and the connection that owns it.
+pub(crate) struct HostedSurface {
+    id: SurfaceId,
+    description: Description,
+    connection: Arc<SurfaceConnection>,
+    focus: FocusHandle,
+    /// A dock's requested width in logical pixels; unused elsewhere.
+    size: f32,
+    /// The last size the program was told, so an unchanged layout sends nothing.
+    told_size: Option<(u32, u32)>,
+    /// For an overlay: who had the keyboard before it opened, to give it back.
+    previous_focus: Option<FocusHandle>,
+    /// Keeps the focus and blur listeners alive for as long as the Surface.
+    _focus_events: [gpui::Subscription; 2],
+}
+
+/// The Surfaces of one frame, already built, in the layers they paint.
+struct SurfaceLayers {
+    fill: Option<AnyElement>,
+    left: Option<AnyElement>,
+    right: Option<AnyElement>,
+    overlays: Vec<AnyElement>,
+}
+
+/// The grid's room once docks have taken their strips, and how far right the
+/// grid moves to clear the left one.
+fn grid_room(allocated: Size<Pixels>, left: f32, right: f32) -> (Size<Pixels>, Pixels) {
+    let width = allocated.width - px(left + right);
+    let width = if width < px(0.0) { px(0.0) } else { width };
+    (
+        Size {
+            width,
+            height: allocated.height,
+        },
+        px(left),
+    )
+}
 
 pub struct TerminalView {
     /// The pane's terminal, or `None` for a view that never started one.
@@ -92,6 +138,8 @@ pub struct TerminalView {
     size: Option<TerminalSize>,
     /// How this pane is reached by observation, if the window has an endpoint.
     observation: Option<crate::observation::panes::PaneLink>,
+    /// What programs have asked this pane to draw beside or over its grid.
+    surfaces: SurfaceHost<HostedSurface>,
     /// The pixels this pane has been given.
     ///
     /// A pane is not the window: once a tab holds several, sizing the grid from
@@ -321,6 +369,7 @@ impl TerminalView {
         Self {
             session: Some(session),
             observation,
+            surfaces: SurfaceHost::default(),
             font_size,
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
@@ -382,6 +431,7 @@ impl TerminalView {
             session: None,
             // A view that never started a session has nothing to observe.
             observation: None,
+            surfaces: SurfaceHost::default(),
             font_size: px(crate::config::Font::DEFAULT_SIZE),
             bundle: None,
             textures: crate::graphics_cache::GraphicsCache::default(),
@@ -530,7 +580,11 @@ impl TerminalView {
     /// Recomputes the grid for the current layout and sends a resize only when
     /// it actually changed.
     fn synchronise_size(&mut self, window: &Window) {
-        let available = self.allocated.unwrap_or_else(|| window.viewport_size());
+        let allocated = self.allocated.unwrap_or_else(|| window.viewport_size());
+        // Docks take their strips first; the grid gets what is left, and the
+        // PTY learns the narrower size exactly as it would on a window resize.
+        let (left, right) = self.dock_widths(allocated);
+        let (available, shift) = grid_room(allocated, left, right);
         let Some(size) = grid_size(
             content_area(available, self.padding),
             self.cell_width,
@@ -550,6 +604,7 @@ impl TerminalView {
             self.cell_height,
             self.padding,
         );
+        self.origin.x += shift;
 
         if self.size == Some(size) {
             return;
@@ -969,6 +1024,274 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// The docks' widths at this pane size: what each asked for, but never more
+    /// than half the pane, so two docks always leave a grid between them.
+    fn dock_widths(&self, allocated: Size<Pixels>) -> (f32, f32) {
+        let half = f32::from(allocated.width) / 2.0;
+        self.surfaces.dock_widths(|surface| surface.size.min(half))
+    }
+
+    /// Opens a Surface, or says why not. Focus moves only here, never on an
+    /// update: a dock refreshing itself steals nothing.
+    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
+    pub(crate) fn open_surface(
+        &mut self,
+        id: SurfaceId,
+        open: Open,
+        connection: SurfaceConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Refusal> {
+        let parsed = description::parse(&open.description, cx.global::<TokenRegistry>())?;
+        let connection = Arc::new(connection);
+        let focus = cx.focus_handle();
+        let on_focus = cx.on_focus(&focus, window, {
+            let connection = Arc::clone(&connection);
+            move |_view, _window, _cx| {
+                connection.send(&event_focus());
+            }
+        });
+        let on_blur = cx.on_blur(&focus, window, {
+            let connection = Arc::clone(&connection);
+            move |_view, _window, _cx| {
+                connection.send(&event_blur());
+            }
+        });
+        let previous_focus = match open.position {
+            Position::Overlay => window.focused(cx),
+            Position::Fill | Position::Dock => None,
+        };
+        let hosted = HostedSurface {
+            id,
+            description: parsed.description,
+            connection: Arc::clone(&connection),
+            focus: focus.clone(),
+            size: open.size,
+            told_size: None,
+            previous_focus,
+            _focus_events: [on_focus, on_blur],
+        };
+        self.surfaces.place(open.position, open.side, hosted)?;
+        for warning in parsed.warnings {
+            connection.send(&event_warning(&warning));
+        }
+        if open.focus {
+            window.focus(&focus);
+        }
+        // A dock changes the grid's room; the next frame re-measures it.
+        self.size = None;
+        cx.notify();
+        Ok(())
+    }
+
+    /// Replaces a Surface's whole description. A description that does not
+    /// parse is refused on the connection and the previous one stands, so a
+    /// bad update never blanks a plugin.
+    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
+    pub(crate) fn update_surface(
+        &mut self,
+        id: SurfaceId,
+        document: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let parsed = description::parse(&document, cx.global::<TokenRegistry>());
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        match parsed {
+            Ok(parsed) => {
+                surface.description = parsed.description;
+                for warning in parsed.warnings {
+                    surface.connection.send(&event_warning(&warning));
+                }
+                cx.notify();
+            }
+            Err(refusal) => {
+                surface.connection.send(&event_refused(&refusal.reason()));
+            }
+        }
+    }
+
+    /// Hands the keyboard to the terminal.
+    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
+    pub(crate) fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Removes a Surface and returns its space to the grid. `announce` is
+    /// false when the connection is already gone and nobody is listening.
+    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
+    pub(crate) fn close_surface(
+        &mut self,
+        id: SurfaceId,
+        announce: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((surface, position)) = self.surfaces.take(|surface| surface.id == id) else {
+            return;
+        };
+        if announce {
+            surface.connection.send(&event_closed());
+        }
+        if surface.focus.is_focused(window) {
+            // An overlay gives the keyboard back to whoever had it. Anything
+            // else — or a previous holder that has since closed — falls back to
+            // the terminal, which is always there.
+            let previous = match position {
+                Position::Overlay => surface.previous_focus.filter(|handle| {
+                    *handle == self.focus
+                        || self.surfaces.iter().any(|other| other.focus == *handle)
+                }),
+                Position::Fill | Position::Dock => None,
+            };
+            window.focus(&previous.unwrap_or_else(|| self.focus.clone()));
+        }
+        self.size = None;
+        cx.notify();
+    }
+
+    /// Terminal → Surfaces in opening order → terminal: the safety net for a
+    /// program that forgets to hand the keyboard back.
+    #[allow(dead_code)] // Called by the workspace's surface request loop, which follows.
+    pub(crate) fn cycle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut order = vec![self.focus.clone()];
+        order.extend(self.surfaces.iter().map(|surface| surface.focus.clone()));
+        let current = order
+            .iter()
+            .position(|handle| handle.is_focused(window))
+            .unwrap_or(0);
+        window.focus(&order[(current + 1) % order.len()]);
+        cx.notify();
+    }
+
+    /// Every hosted Surface as an element in its layer, each told its size if
+    /// that changed since the last frame.
+    fn surface_layers(
+        &mut self,
+        allocated: Size<Pixels>,
+        registry: &TokenRegistry,
+        cx: &mut Context<Self>,
+    ) -> SurfaceLayers {
+        let (left_width, right_width) = self.dock_widths(allocated);
+        let fill = self
+            .surfaces
+            .fill
+            .as_mut()
+            .map(|surface| Self::surface_element(surface, allocated, registry, cx));
+        let left = self.surfaces.left.as_mut().map(|surface| {
+            let strip = Size {
+                width: px(left_width),
+                height: allocated.height,
+            };
+            div()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .w(strip.width)
+                .h_full()
+                .child(Self::surface_element(surface, strip, registry, cx))
+                .into_any_element()
+        });
+        let right = self.surfaces.right.as_mut().map(|surface| {
+            let strip = Size {
+                width: px(right_width),
+                height: allocated.height,
+            };
+            div()
+                .absolute()
+                .top(px(0.0))
+                .right(px(0.0))
+                .w(strip.width)
+                .h_full()
+                .child(Self::surface_element(surface, strip, registry, cx))
+                .into_any_element()
+        });
+        // Each overlay is centred in its own full-pane layer, so later ones
+        // paint over earlier ones instead of sitting beside them.
+        let overlays = self
+            .surfaces
+            .overlays
+            .iter_mut()
+            .map(|surface| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Self::surface_element(surface, allocated, registry, cx))
+                    .into_any_element()
+            })
+            .collect();
+        SurfaceLayers {
+            fill,
+            left,
+            right,
+            overlays,
+        }
+    }
+
+    /// One Surface as an element: its drawing, wrapped in the box that owns
+    /// its keyboard and mouse.
+    fn surface_element(
+        surface: &mut HostedSurface,
+        size: Size<Pixels>,
+        registry: &TokenRegistry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let told = (
+            f32::from(size.width).round() as u32,
+            f32::from(size.height).round() as u32,
+        );
+        if surface.told_size != Some(told) {
+            surface.told_size = Some(told);
+            surface.connection.send(&event_resize(told.0, told.1));
+        }
+        let body = crate::surface::render::render(
+            &surface.description,
+            surface.id,
+            registry,
+            &surface.connection,
+        );
+        let keys = Arc::clone(&surface.connection);
+        let focus = surface.focus.clone();
+        div()
+            .size_full()
+            .overflow_hidden()
+            .track_focus(&surface.focus)
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _window, cx| {
+                // Workspace chords were claimed on capture before this ran. The
+                // terminal's own shortcuts still work with a Surface focused;
+                // every other key is the program's, and is claimed here so the
+                // terminal's handler below does not also type it.
+                if let Some(shortcut) = application_shortcut(&event.keystroke) {
+                    view.perform(shortcut, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                keys.send(&event_input(&event.keystroke));
+                cx.stop_propagation();
+            }))
+            // Clicking a Surface focuses it and is not also a click on the
+            // terminal underneath.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_view, _event: &MouseDownEvent, window, cx| {
+                    window.focus(&focus);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(
+                cx.listener(|_view, _event: &ScrollWheelEvent, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
     /// Builds textures for the images this generation shows, and lets go of the
     /// rest.
     ///
@@ -1126,6 +1449,75 @@ impl Render for TerminalView {
             (build(RowPass::Whole, rows), None)
         };
 
+        let registry = cx.global::<TokenRegistry>().clone();
+        let allocated = self.allocated.unwrap_or_default();
+        let layers = self.surface_layers(allocated, &registry, cx);
+
+        // Everything the terminal draws lives inside the grid box, which is
+        // inset from the pane by the padding. Row and cell offsets are
+        // measured from its corner, so nothing below here knows the padding
+        // exists.
+        let grid_box = div()
+            .absolute()
+            .left(origin.x)
+            .top(origin.y)
+            .map(|element| match extent {
+                Some(extent) => element.w(extent.width).h(extent.height),
+                None => element.size_full(),
+            })
+            .overflow_hidden()
+            .children(below_background)
+            .child(background_grid)
+            .children(below_text)
+            .children(text_grid)
+            .children(above_text)
+            // Composition is drawn at the cursor and nowhere else. It is
+            // view state: the terminal has not been told anything about
+            // it.
+            .children(preedit.map(|text| {
+                div()
+                    .absolute()
+                    .top(px(
+                        f32::from(cursor.map_or(0, |c| c.row)) * f32::from(cell_height)
+                    ))
+                    .left(px(
+                        f32::from(cursor.map_or(0, |c| c.column)) * f32::from(cell_width)
+                    ))
+                    .h(cell_height)
+                    .bg(rgb(pack(default_fg)))
+                    .text_color(rgb(pack(default_bg)))
+                    .underline()
+                    .child(SharedString::from(text))
+            }))
+            // Installs the input handler during paint, which is the only
+            // point GPUI accepts one. `canvas` exists to reach paint
+            // from a `div`, and it sits inside the grid box so the
+            // bounds it reports are the grid's own — which is where an
+            // input method should place its window, and what mouse
+            // positions are measured against.
+            .child(canvas(
+                move |bounds, _window, cx| {
+                    entity_for_bounds.update(cx, |view, _cx| {
+                        view.content_origin = Some(bounds.origin);
+                    });
+                },
+                move |bounds, (), window, cx| {
+                    window.handle_input(
+                        &focus_for_input,
+                        ElementInputHandler::new(bounds, entity_for_input),
+                        cx,
+                    );
+                },
+            ))
+            .children(status.map(|status| {
+                div()
+                    .absolute()
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .text_color(rgb(STATUS))
+                    .child(status)
+            }));
+
         div()
             .relative()
             .size_full()
@@ -1272,72 +1664,13 @@ impl Render for TerminalView {
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);
                 view.send(TerminalCommand::Key(key));
             }))
-            // Everything the terminal draws lives inside the grid box, which
-            // is inset from the pane by the padding. Row and cell offsets are
-            // measured from its corner, so nothing below here knows the
-            // padding exists.
-            .child(
-                div()
-                    .absolute()
-                    .left(origin.x)
-                    .top(origin.y)
-                    .map(|element| match extent {
-                        Some(extent) => element.w(extent.width).h(extent.height),
-                        None => element.size_full(),
-                    })
-                    .overflow_hidden()
-                    .children(below_background)
-                    .child(background_grid)
-                    .children(below_text)
-                    .children(text_grid)
-                    .children(above_text)
-                    // Composition is drawn at the cursor and nowhere else. It is
-                    // view state: the terminal has not been told anything about
-                    // it.
-                    .children(preedit.map(|text| {
-                        div()
-                            .absolute()
-                            .top(px(
-                                f32::from(cursor.map_or(0, |c| c.row)) * f32::from(cell_height)
-                            ))
-                            .left(px(
-                                f32::from(cursor.map_or(0, |c| c.column)) * f32::from(cell_width)
-                            ))
-                            .h(cell_height)
-                            .bg(rgb(pack(default_fg)))
-                            .text_color(rgb(pack(default_bg)))
-                            .underline()
-                            .child(SharedString::from(text))
-                    }))
-                    // Installs the input handler during paint, which is the only
-                    // point GPUI accepts one. `canvas` exists to reach paint
-                    // from a `div`, and it sits inside the grid box so the
-                    // bounds it reports are the grid's own — which is where an
-                    // input method should place its window, and what mouse
-                    // positions are measured against.
-                    .child(canvas(
-                        move |bounds, _window, cx| {
-                            entity_for_bounds.update(cx, |view, _cx| {
-                                view.content_origin = Some(bounds.origin);
-                            });
-                        },
-                        move |bounds, (), window, cx| {
-                            window.handle_input(
-                                &focus_for_input,
-                                ElementInputHandler::new(bounds, entity_for_input),
-                                cx,
-                            );
-                        },
-                    ))
-                    .children(status.map(|status| {
-                        div()
-                            .absolute()
-                            .bottom(px(0.0))
-                            .left(px(0.0))
-                            .text_color(rgb(STATUS))
-                            .child(status)
-                    })),
-            )
+            // A fill takes the grid box's place; docks and overlays paint
+            // above whatever is there.
+            .children(layers.fill.is_none().then_some(grid_box))
+            .children(layers.fill)
+            .children(layers.left)
+            .children(layers.right)
+            .children(layers.overlays)
     }
 }
 
@@ -1545,5 +1878,20 @@ mod tests {
         let first = grid_size(content(960.0, 640.0), px(8.0), px(16.0), 2.0).expect("grid");
         let second = grid_size(content(960.0, 640.0), px(8.0), px(16.0), 2.0).expect("grid");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn docks_take_their_strips_and_the_grid_moves_right() {
+        let (room, shift) = grid_room(gpui::size(px(800.0), px(600.0)), 240.0, 0.0);
+        assert_eq!(room, gpui::size(px(560.0), px(600.0)));
+        assert_eq!(shift, px(240.0));
+
+        let (room, shift) = grid_room(gpui::size(px(800.0), px(600.0)), 100.0, 300.0);
+        assert_eq!(room, gpui::size(px(400.0), px(600.0)));
+        assert_eq!(shift, px(100.0));
+
+        // Two absurd docks cannot push the grid below nothing.
+        let (room, _) = grid_room(gpui::size(px(800.0), px(600.0)), 500.0, 500.0);
+        assert_eq!(room.width, px(0.0));
     }
 }

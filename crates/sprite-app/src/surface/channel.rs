@@ -64,6 +64,7 @@ const NO_ANSWER: &str = "this window did not answer in time";
 /// macOS `$TMPDIR` in the tests below; a longer name would not fit there.
 const SOCKET_HEX: usize = 16;
 /// The width of `<SOCKET_HEX hex>.surface.sock`.
+#[allow(dead_code)] // Measured only by the macOS path-length test below.
 const SOCKET_NAME_BYTES: usize = SOCKET_HEX + ".surface.sock".len();
 
 /// Where in its pane a Surface sits.
