@@ -133,15 +133,11 @@ impl Workspace {
         let reload_sender = reload_tx.clone();
 
         let (surface_tx, surface_rx) = async_channel::bounded::<SurfaceRequest>(64);
-        // The observation key when observation is on, so a session's one
-        // secret opens both lines; a key of its own otherwise, so turning off
-        // the read line does not turn off native UI.
-        let surface_key = match endpoint.as_ref() {
-            Some(endpoint) => Some(endpoint.key()),
-            None => crate::observation::endpoint::ObservationKey::generate()
-                .ok()
-                .map(Arc::new),
-        };
+        // Its own key, never observation's: a program handed only the
+        // observation credentials can read every pane but draw in none.
+        let surface_key = crate::observation::endpoint::ObservationKey::generate()
+            .ok()
+            .map(Arc::new);
         let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_tx).ok());
 
         // Published before the settings, so a pane rendering on the first
