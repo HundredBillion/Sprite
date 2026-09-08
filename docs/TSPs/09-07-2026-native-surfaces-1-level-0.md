@@ -36,9 +36,10 @@ crate's existing inline `#[cfg(test)] mod tests` with `parsed(text)` and
 - Plain `sprite` is unchanged: with no configuration, the line height is
   `(size * 8 / 7).round()` and the padding is 8 logical pixels, as today.
 - Absent or invalid configuration produces defaults plus a complaint, never
-  an error (`config.rs` module doc). A new key follows the `font.size`
-  idiom exactly: a number is clamped into range with a complaint if it was
-  outside; a non-number keeps the default with a complaint.
+  an error (`config.rs` module doc). Every numeric key is read through one
+  helper, `read_clamped` (Task 1), which carries the `font.size` idiom: a
+  number is clamped into range with a complaint if it was outside; a
+  non-number keeps the default with a complaint. No parse block is copied.
 - Sprite's `Cargo.toml` names no editor (dependency invariant); this TSP
   touches no manifest.
 - Test names are descriptive sentences in snake_case, as the surrounding
@@ -67,6 +68,11 @@ crate's existing inline `#[cfg(test)] mod tests` with `parsed(text)` and
   - `Font::cell_height(size: f32, line_height: f32) -> f32` —
     `(size * line_height).round()`. **Replaces** `Font::line_height(size)`,
     which is removed; the name `line_height` now means the ratio field.
+  - `read_clamped(section: &toml::Value, setting: &str, range:
+    RangeInclusive<f32>, clamp: impl Fn(f32) -> f32, complaints: &mut
+    Complaints) -> Option<f32>` — private to `config.rs`; `setting` is the
+    dotted name shown in complaints (`"font.size"`), whose last segment is
+    the TOML key. Task 2 calls it for `grid.padding`.
   - `TerminalView` gains a private field `line_height: f32`.
 
 - [ ] **Step 1: Write the failing tests in `config.rs`**
@@ -196,34 +202,83 @@ impl Default for Font {
 }
 ```
 
-In `parse_candidate`, inside `if let Some(section) = document.get("font") {`,
-directly after the `if let Some(value) = section.get("size") { … }` block
-(so before the block's closing brace), add:
+Add a helper directly above `fn wrong_type` (~line 361). It becomes the one
+home for the number-reading idiom that `font.size` has used inline until now:
 
 ```rust
-            if let Some(value) = section.get("line_height") {
-                match value
-                    .as_float()
-                    .or_else(|| value.as_integer().map(|v| v as f64))
-                {
-                    Some(ratio) => {
-                        let asked = ratio as f32;
-                        let clamped = Font::clamp_line_height(asked);
-                        if (clamped - asked).abs() > f32::EPSILON {
-                            complaints.0.push(format!(
-                                "font.line_height {asked} is outside {}..={}; using {clamped}",
-                                Font::MIN_LINE_HEIGHT,
-                                Font::MAX_LINE_HEIGHT
-                            ));
-                        }
-                        settings.font.line_height = clamped;
-                    }
-                    None => complaints.0.push(
-                        "font.line_height must be a number; keeping the default".to_owned(),
-                    ),
-                }
+/// Reads a numeric setting and clamps it into range, saying so.
+///
+/// Every number setting shares this shape: an integer is a number too (TOML
+/// tells them apart and a person should not have to); a value outside
+/// `range` is clamped with a complaint naming the range; a non-number keeps
+/// the default with a complaint. `None` means unset or unusable — either way
+/// the caller leaves its default alone. `setting` is the dotted name shown
+/// in complaints, such as `"font.size"`, whose last segment is the TOML key.
+fn read_clamped(
+    section: &toml::Value,
+    setting: &str,
+    range: std::ops::RangeInclusive<f32>,
+    clamp: impl Fn(f32) -> f32,
+    complaints: &mut Complaints,
+) -> Option<f32> {
+    let key = setting.rsplit_once('.').map_or(setting, |(_, key)| key);
+    let value = section.get(key)?;
+    match value
+        .as_float()
+        .or_else(|| value.as_integer().map(|v| v as f64))
+    {
+        Some(number) => {
+            let asked = number as f32;
+            let clamped = clamp(asked);
+            if (clamped - asked).abs() > f32::EPSILON {
+                complaints.0.push(format!(
+                    "{setting} {asked} is outside {}..={}; using {clamped}",
+                    range.start(),
+                    range.end()
+                ));
+            }
+            Some(clamped)
+        }
+        None => {
+            complaints
+                .0
+                .push(format!("{setting} must be a number; keeping the default"));
+            None
+        }
+    }
+}
+```
+
+In `parse_candidate`, inside `if let Some(section) = document.get("font") {`,
+replace the whole `if let Some(value) = section.get("size") { … }` block
+(~lines 451–471, through the `}` that closes that `if let`) with these two
+calls, so `size` and `line_height` share the helper:
+
+```rust
+            if let Some(size) = read_clamped(
+                section,
+                "font.size",
+                Font::MIN_SIZE..=Font::MAX_SIZE,
+                Font::clamp_size,
+                &mut complaints,
+            ) {
+                settings.font.size = size;
+            }
+            if let Some(ratio) = read_clamped(
+                section,
+                "font.line_height",
+                Font::MIN_LINE_HEIGHT..=Font::MAX_LINE_HEIGHT,
+                Font::clamp_line_height,
+                &mut complaints,
+            ) {
+                settings.font.line_height = ratio;
             }
 ```
+
+The existing `font.size` complaints keep their exact wording — `"font.size
+400 is outside 6..=72; using 72"` and `"font.size must be a number; keeping
+the default"` — so `an_unusable_font_size_is_clamped_and_reported` passes
+unchanged.
 
 In `to_toml`, directly after `out.push_str(&format!("size = {}\n", self.font.size));`:
 
@@ -328,7 +383,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   `apply_settings`)
 
 **Interfaces:**
-- Consumes: `Font::cell_height` from Task 1 (unchanged here).
+- Consumes: `read_clamped(section, setting, range, clamp, &mut complaints)
+  -> Option<f32>` from Task 1; `Font::cell_height` from Task 1 (unchanged
+  here).
 - Produces:
   - `Grid { padding: f32 }` on `Settings` as `pub grid: Grid`, with
     `Grid::DEFAULT_PADDING: f32 = crate::grid::PANE_PADDING` (8.0),
@@ -508,33 +565,25 @@ and to `Settings::default()` (after `cursor: Cursor::default(),`):
 ```
 
 In `parse_candidate`, directly after the whole `if let Some(section) =
-document.get("font") { … }` block, add:
+document.get("font") { … }` block, add — through the Task 1 helper, so the
+idiom is not copied:
 
 ```rust
         if let Some(section) = document.get("grid")
-            && let Some(value) = section.get("padding")
+            && let Some(padding) = read_clamped(
+                section,
+                "grid.padding",
+                0.0..=Grid::MAX_PADDING,
+                Grid::clamp_padding,
+                &mut complaints,
+            )
         {
-            match value
-                .as_float()
-                .or_else(|| value.as_integer().map(|v| v as f64))
-            {
-                Some(padding) => {
-                    let asked = padding as f32;
-                    let clamped = Grid::clamp_padding(asked);
-                    if (clamped - asked).abs() > f32::EPSILON {
-                        complaints.0.push(format!(
-                            "grid.padding {asked} is outside 0..={}; using {clamped}",
-                            Grid::MAX_PADDING
-                        ));
-                    }
-                    settings.grid.padding = clamped;
-                }
-                None => complaints
-                    .0
-                    .push("grid.padding must be a number; keeping the default".to_owned()),
-            }
+            settings.grid.padding = padding;
         }
 ```
+
+The complaint reads `"grid.padding 500 is outside 0..=64; using 64"`, which
+is what `a_grid_padding_is_read_and_clamped` asserts on (`"outside"`).
 
 In `to_toml`, directly after the `line_height` line added in Task 1 (and
 before `out.push_str("\n[colors]\n");`):
