@@ -5,11 +5,6 @@
 //! never need to know about each other, which is why a plugin can ship a
 //! colour the theme has never heard of and still be restyled later.
 
-// A program registering a token and code resolving one by name are the
-// callers this registry is built for; neither exists in this crate yet, so
-// most of the interface is unreachable until they land.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use sprite_term::Rgb;
@@ -86,6 +81,9 @@ pub struct Registered {
 }
 
 /// What a registration did.
+// No caller registers a token yet; a program does that once it can open a
+// Surface.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Registration {
     New,
@@ -96,6 +94,9 @@ pub enum Registration {
 
 /// A name registered again with a different default. The first stands, so no
 /// colour depends on which program started first.
+// No caller registers a token yet; a program does that once it can open a
+// Surface.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenConflict {
     pub name: String,
@@ -155,6 +156,9 @@ impl TokenRegistry {
         }
     }
 
+    // No caller registers a token yet; a program does that once it can open
+    // a Surface.
+    #[allow(dead_code)]
     pub fn register(
         &mut self,
         name: &str,
