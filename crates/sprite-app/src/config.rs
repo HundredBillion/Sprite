@@ -490,6 +490,21 @@ fn style_name(style: sprite_term::CursorStyle) -> &'static str {
     }
 }
 
+/// A value inside `range`, or `default` when it is not a number at all. The
+/// one place Sprite decides what a numeric setting becomes when it cannot be
+/// used as given, whether it arrived from a file or from a keystroke.
+pub(crate) fn clamp_or_default(
+    value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+) -> f32 {
+    if value.is_nan() {
+        default
+    } else {
+        value.clamp(*range.start(), *range.end())
+    }
+}
+
 /// Reads a numeric setting and clamps it into range, saying so.
 ///
 /// Every number setting shares this shape: an integer is a number too (TOML
@@ -515,11 +530,7 @@ fn read_clamped(
     {
         Some(number) => {
             let asked = number as f32;
-            let clamped = if asked.is_nan() {
-                default
-            } else {
-                asked.clamp(*range.start(), *range.end())
-            };
+            let clamped = clamp_or_default(asked, range.clone(), default);
             if asked.is_nan() || (clamped - asked).abs() > f32::EPSILON {
                 // TOML spells not-a-number `nan`; `{asked}` would print `NaN`,
                 // which the complaint's `contains("nan")` check would miss.
@@ -1132,6 +1143,14 @@ mod tests {
             Font::DEFAULT_SIZE
         );
         assert!(complaints("[font]\nsize = \"large\"\n")[0].contains("must be a number"));
+    }
+
+    #[test]
+    fn clamp_or_default_holds_a_value_in_range_and_replaces_nan() {
+        assert_eq!(clamp_or_default(10.0, 6.0..=72.0, 14.0), 10.0);
+        assert_eq!(clamp_or_default(2.0, 6.0..=72.0, 14.0), 6.0);
+        assert_eq!(clamp_or_default(100.0, 6.0..=72.0, 14.0), 72.0);
+        assert_eq!(clamp_or_default(f32::NAN, 6.0..=72.0, 14.0), 14.0);
     }
 
     #[test]
