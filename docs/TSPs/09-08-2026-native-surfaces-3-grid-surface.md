@@ -380,7 +380,7 @@ Keys inside an entry: `color`, `bg` (each `#rrggbb`), `bold`, `italic`
 kind names). Unknown keys are complained about and ignored. A name may hold
 dots, so names are quoted when printed.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `config.rs`'s `mod tests`:
 
@@ -453,13 +453,13 @@ In `workspace.rs`'s `changes_are_sorted_by_when_they_can_apply`, after the
         assert!(outcome.next_session.is_empty());
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline highlight`
 Expected: compile error — `Settings` has no field `highlights`;
 `HighlightStyle`/`Highlights` undefined.
 
-- [ ] **Step 3: Add the types and the setting**
+- [x] **Step 3: Add the types and the setting**
 
 In `config.rs`, after `Colors` (~line 161), add:
 
@@ -640,7 +640,7 @@ In `workspace.rs` `classify`, after the `grid` arm:
     }
 ```
 
-- [ ] **Step 4: Run the tests and the gate**
+- [x] **Step 4: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including the two new config tests, the extended
@@ -649,7 +649,7 @@ round-trip, and the extended `classify` test.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/sprite-app/src/config.rs crates/sprite-app/src/workspace.rs
