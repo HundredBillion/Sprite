@@ -12,8 +12,8 @@
 use gpui::{Pixels, Point, Size, px, size};
 use sprite_term::{CellStyle, CellWidth, RenderRow, TerminalSize};
 
-/// The gap Sprite keeps between the grid and every edge of its pane, in logical
-/// pixels.
+/// The default gap Sprite keeps between the grid and every edge of its pane, in
+/// logical pixels; `[grid] padding` changes it.
 ///
 /// A terminal that starts its first column on the window's own border reads as
 /// clipped rather than as full: the prompt sits against the frame with nowhere
@@ -323,8 +323,8 @@ mod scroll_tests {
 /// Never below one pixel in either direction: a pane too small to hold the
 /// padding still reports something a grid can be measured against, and
 /// `grid_size` refuses it there rather than here.
-pub(crate) fn content_area(available: Size<Pixels>) -> Size<Pixels> {
-    let inset = |extent: Pixels| px((f32::from(extent) - 2.0 * PANE_PADDING).max(1.0));
+pub(crate) fn content_area(available: Size<Pixels>, padding: f32) -> Size<Pixels> {
+    let inset = |extent: Pixels| px((f32::from(extent) - 2.0 * padding).max(1.0));
     size(inset(available.width), inset(available.height))
 }
 
@@ -339,6 +339,7 @@ pub(crate) fn grid_origin(
     grid: TerminalSize,
     cell_width: Pixels,
     cell_height: Pixels,
+    padding: f32,
 ) -> Point<Pixels> {
     let centre = |extent: Pixels, cells: u16, cell: Pixels| {
         let used = f32::from(cells) * f32::from(cell);
@@ -346,7 +347,7 @@ pub(crate) fn grid_origin(
         px(if spare.is_finite() {
             (spare / 2.0).max(0.0)
         } else {
-            PANE_PADDING
+            padding
         })
     };
 
@@ -405,7 +406,7 @@ mod padding_tests {
 
     #[test]
     fn the_content_area_is_the_pane_less_the_padding_on_both_sides() {
-        let area = content_area(size(px(800.0), px(600.0)));
+        let area = content_area(size(px(800.0), px(600.0)), PANE_PADDING);
         assert_eq!(area.width, px(800.0 - 2.0 * PANE_PADDING));
         assert_eq!(area.height, px(600.0 - 2.0 * PANE_PADDING));
     }
@@ -414,7 +415,7 @@ mod padding_tests {
     /// the grid that refuses to fit, not the arithmetic that goes negative.
     #[test]
     fn a_pane_smaller_than_its_padding_still_has_a_positive_area() {
-        let area = content_area(size(px(4.0), px(2.0)));
+        let area = content_area(size(px(4.0), px(2.0)), PANE_PADDING);
         assert!(area.width > px(0.0) && area.height > px(0.0));
     }
 
@@ -425,7 +426,7 @@ mod padding_tests {
         let available = size(px(800.0), px(608.0));
         // 784 logical pixels of content is 98 columns of 8, and 592 is 37 rows
         // of 16 — both exact, so the whole gap is the padding itself.
-        let origin = grid_origin(available, grid(98, 37), px(8.0), px(16.0));
+        let origin = grid_origin(available, grid(98, 37), px(8.0), px(16.0), PANE_PADDING);
 
         assert_eq!(origin.x, px(PANE_PADDING));
         let right = f32::from(available.width) - f32::from(origin.x) - 98.0 * 8.0;
@@ -440,7 +441,7 @@ mod padding_tests {
     fn rounding_leftover_is_added_to_the_padding_not_dropped_at_one_edge() {
         // 810 - 16 = 794 of content, which is 99 columns of 8 with 2 spare.
         let available = size(px(810.0), px(600.0));
-        let origin = grid_origin(available, grid(99, 37), px(8.0), px(16.0));
+        let origin = grid_origin(available, grid(99, 37), px(8.0), px(16.0), PANE_PADDING);
 
         assert_eq!(origin.x, px(PANE_PADDING + 1.0));
         let right = f32::from(available.width) - f32::from(origin.x) - 99.0 * 8.0;
@@ -451,7 +452,13 @@ mod padding_tests {
     /// negative origin would put its first column off screen.
     #[test]
     fn a_grid_wider_than_its_pane_starts_at_the_edge_rather_than_before_it() {
-        let origin = grid_origin(size(px(100.0), px(100.0)), grid(80, 24), px(8.0), px(16.0));
+        let origin = grid_origin(
+            size(px(100.0), px(100.0)),
+            grid(80, 24),
+            px(8.0),
+            px(16.0),
+            PANE_PADDING,
+        );
         assert_eq!(origin.x, px(0.0));
         assert_eq!(origin.y, px(0.0));
     }
@@ -463,9 +470,30 @@ mod padding_tests {
             grid(80, 24),
             px(8.0),
             px(16.0),
+            PANE_PADDING,
         );
         assert_eq!(origin.x, px(PANE_PADDING));
         assert_eq!(origin.y, px(PANE_PADDING));
+    }
+
+    /// The padding is a setting now; a larger one leaves less room for the
+    /// grid and pushes its origin in by the same amount on every side.
+    #[test]
+    fn a_configured_padding_changes_the_content_area_and_the_origin() {
+        let area = content_area(size(px(800.0), px(600.0)), 20.0);
+        assert_eq!(area.width, px(800.0 - 40.0));
+        assert_eq!(area.height, px(600.0 - 40.0));
+
+        // 760 of content is 95 columns of 8; 560 is 35 rows of 16 — exact.
+        let origin = grid_origin(
+            size(px(800.0), px(600.0)),
+            grid(95, 35),
+            px(8.0),
+            px(16.0),
+            20.0,
+        );
+        assert_eq!(origin.x, px(20.0));
+        assert_eq!(origin.y, px(20.0));
     }
 }
 

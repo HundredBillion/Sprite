@@ -23,6 +23,7 @@ pub struct Settings {
     pub font: Font,
     pub colors: Colors,
     pub cursor: Cursor,
+    pub grid: Grid,
     pub shell: sprite_term::ShellPreference,
     pub scrollback: Scrollback,
 }
@@ -183,6 +184,39 @@ impl Cursor {
     }
 }
 
+/// The grid's surroundings: what is not a cell.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grid {
+    /// Logical pixels between the grid and every edge of its pane.
+    ///
+    /// The smallest gap; the leftover from rounding the pane down to whole
+    /// cells is added to it. Zero is allowed: some people want every pixel.
+    pub padding: f32,
+}
+
+impl Grid {
+    /// The value Sprite always used, kept as the single source of truth.
+    pub const DEFAULT_PADDING: f32 = crate::grid::PANE_PADDING;
+    /// More than this and a small pane has no grid left.
+    pub const MAX_PADDING: f32 = 64.0;
+
+    /// A padding clamped into the usable range.
+    pub fn clamp_padding(padding: f32) -> f32 {
+        if padding.is_nan() {
+            return Self::DEFAULT_PADDING;
+        }
+        padding.clamp(0.0, Self::MAX_PADDING)
+    }
+}
+
+impl Default for Grid {
+    fn default() -> Self {
+        Self {
+            padding: Self::DEFAULT_PADDING,
+        }
+    }
+}
+
 /// How much output a pane remembers.
 ///
 /// Bytes, not lines, because that is what libghostty actually measures — its
@@ -242,6 +276,7 @@ impl Default for Settings {
             font: Font::default(),
             colors: Colors::default(),
             cursor: Cursor::default(),
+            grid: Grid::default(),
             shell: sprite_term::ShellPreference::default(),
             scrollback: Scrollback::default(),
             graphics: Graphics::default(),
@@ -277,6 +312,9 @@ impl Settings {
         }
         out.push_str(&format!("size = {}\n", self.font.size));
         out.push_str(&format!("line_height = {}\n", self.font.line_height));
+
+        out.push_str("\n[grid]\n");
+        out.push_str(&format!("padding = {}\n", self.grid.padding));
 
         out.push_str("\n[colors]\n");
         for (name, color) in [
@@ -528,6 +566,18 @@ impl Settings {
             ) {
                 settings.font.line_height = ratio;
             }
+        }
+
+        if let Some(section) = document.get("grid")
+            && let Some(padding) = read_clamped(
+                section,
+                "grid.padding",
+                0.0..=Grid::MAX_PADDING,
+                Grid::clamp_padding,
+                &mut complaints,
+            )
+        {
+            settings.grid.padding = padding;
         }
 
         if let Some(section) = document.get("graphics") {
@@ -947,6 +997,35 @@ mod tests {
         );
     }
 
+    /// The gap around the grid is a setting; it is clamped so a typo cannot
+    /// push the grid out of its own pane, and a nonsense value keeps the default.
+    #[test]
+    fn a_grid_padding_is_read_and_clamped() {
+        assert_eq!(parsed("[grid]\npadding = 12\n").grid.padding, 12.0);
+        assert_eq!(parsed("[grid]\npadding = 2.5\n").grid.padding, 2.5);
+        assert_eq!(parsed("[grid]\npadding = 0\n").grid.padding, 0.0);
+
+        assert_eq!(parsed("[grid]\npadding = -4\n").grid.padding, 0.0);
+        assert_eq!(
+            parsed("[grid]\npadding = 500\n").grid.padding,
+            Grid::MAX_PADDING
+        );
+        assert!(complaints("[grid]\npadding = 500\n")[0].contains("outside"));
+
+        assert_eq!(
+            parsed("[grid]\npadding = \"wide\"\n").grid.padding,
+            Grid::DEFAULT_PADDING
+        );
+        assert!(complaints("[grid]\npadding = \"wide\"\n")[0].contains("must be a number"));
+
+        assert_eq!(Settings::default().grid.padding, Grid::DEFAULT_PADDING);
+        assert_eq!(
+            Grid::DEFAULT_PADDING,
+            8.0,
+            "the default is the constant Sprite always used"
+        );
+    }
+
     #[test]
     fn colours_are_read_in_hex() {
         let settings = parsed(
@@ -1194,7 +1273,8 @@ mod tests {
                     [colors.palette]\n1 = \"#00ff00\"\n\
                     [cursor]\nstyle = \"underline\"\nblink = true\n\
                     [shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\"]\n\
-                    [scrollback]\nbytes = 4096\n";
+                    [scrollback]\nbytes = 4096\n\
+                    [grid]\npadding = 12\n";
         let settings = parsed(text);
 
         let printed = settings.to_toml();
