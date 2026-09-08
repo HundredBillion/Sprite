@@ -160,7 +160,17 @@ positions *within a pane*: **fill** (it replaces the grid view — the editing
 area), **dock** (it takes a strip beside the terminal, which is resized and
 told so through the PTY, as on any window resize), or **overlay** (it floats
 above). Inside the surface, Taffy flex does the work through GPUI, as in
-Zed. Nothing about tabs, splits, or dividers changes.
+Zed. Nothing about tabs, splits, or dividers changes. How many, and where:
+at most **one fill**; at most **one dock per side**, a dock's `open` naming
+its side — **left or right** in this project, top and bottom deferred until a
+plugin wants one; **overlays stack**, last opened on top. A second `open` for
+an occupied fill or dock side is refused with its own reason, `position
+occupied`, so the program can take the other side or fall back. A dock is an
+internal split of the pane's own rectangle, not a tree Divider, so it never
+creates, ends, or reorders a pane. Unlimited docks sharing a side were
+rejected as a layout engine inside the strip; one Surface per pane was
+rejected because `svgtree.nvim` and `scm.nvim` are both docks and must
+coexist.
 
 **Transport: a second endpoint beside observation — the Surface Channel.**
 Every child already receives `SPRITE_PANE` (`observation/endpoint.rs:308`),
@@ -307,15 +317,17 @@ styling or Surfaces.
   socket path exported to children as `SPRITE_SURFACE_SOCKET`, sharing the
   observation key, runtime directory, and authentication code. Its own
   newline-delimited-JSON grammar: `open { pane, position: fill|dock|overlay,
-  focus, version }`, `update`, `close`, `focus`, `token register`, and the
+  side, focus, version }`, `update`, `close`, `focus`, `token register`, and the
   event direction (`input`, `resize`, `event`, `focus`, `blur`) on the same
   long-lived connection. Refusals
   are distinct: unknown pane, pane not a terminal, unsupported version,
-  malformed description, unknown element kind or token. **`observation/` is
+  malformed description, unknown element kind or token, position occupied.
+  **`observation/` is
   not modified**; its read-only-by-construction grammar and tests are
   untouched.
-- **`TerminalView` (`terminal_view.rs`):** hosts zero or more surfaces by
-  position. *Fill* renders the surface instead of the grid and forwards
+- **`TerminalView` (`terminal_view.rs`):** hosts surfaces by position — at
+  most one fill, one dock per side (left or right), and stacked overlays.
+  *Fill* renders the surface instead of the grid and forwards
   focus, size, and input. *Dock* splits the pane's rectangle, renders both,
   and resizes the PTY. *Overlay* paints above. A surface takes focus when it
   opens unless its `open` said `focus: false`; a `focus` request moves it; an
@@ -358,7 +370,9 @@ not exist yet, and program-agnosticism is demonstrated rather than claimed.
    connection closes. A surface opened with the default takes focus; one
    opened with `focus: false` leaves it where it was; `update` never moves
    focus; a `focus` request moves it; an overlay closing returns focus to
-   the previous holder; `focus` and `blur` events are delivered. Level 0 changes a cell's drawn colour when the theme
+   the previous holder; `focus` and `blur` events are delivered. Two docks on
+   different sides coexist; a second dock on an occupied side, or a second
+   fill, is refused as `position occupied`; overlays stack in open order. Level 0 changes a cell's drawn colour when the theme
    remaps its token. `shell.rs` prepends a present integration directory and
    ignores an absent one. The observation grammar's own tests pass without
    change, and `observation/request.rs` still constructs no mutating variant.
