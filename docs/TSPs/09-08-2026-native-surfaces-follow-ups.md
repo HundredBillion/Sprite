@@ -1049,7 +1049,7 @@ git commit -m "Keep releases and secondary clicks on the Surface that got the pr
 
 **Interfaces:** none new.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `endpoint.rs`'s tests, after `a_new_endpoint_clears_dead_sockets_but_not_live_ones`:
 
@@ -1080,13 +1080,13 @@ In `endpoint.rs`'s tests, after `a_new_endpoint_clears_dead_sockets_but_not_live
 (If `Scratch` exposes its directory under another name than `path()`, use
 that; the existing tests show it.)
 
-- [ ] **Step 2: Run it to see it fail**
+- [x] **Step 2: Run it to see it fail**
 
 Run: `cargo test -p sprite-app --locked --offline the_sweep_keeps`
 Expected: FAIL on `odd.exists()` (connecting to a regular file errors, and
 today any error removes the file).
 
-- [ ] **Step 3: Remove only on refusal**
+- [x] **Step 3: Remove only on refusal**
 
 Replace the connect check in `sweep_dead_sockets` (455–460):
 
@@ -1115,7 +1115,7 @@ Expected: `loop-done` with no `failed` lines. If the flake still appears,
 record the failing assertion verbatim in the report and stop; the cause is
 then not the sweep, and the task is still complete.
 
-- [ ] **Step 4: README**
+- [x] **Step 4: README**
 
 At 58–63, after the sentence ending `declared untrusted in the payload.`,
 add:
@@ -1137,7 +1137,7 @@ directory, so an `href` that points at a file resolves to nothing; embed
 what the picture needs.
 ```
 
-- [ ] **Step 5: Gate and commit**
+- [x] **Step 5: Gate and commit**
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings && cargo test -p sprite-app --locked --offline`
 Expected: clean.
