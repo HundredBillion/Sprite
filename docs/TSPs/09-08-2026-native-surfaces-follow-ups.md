@@ -993,7 +993,7 @@ never saw the press of, and its `on_key_up` reaches the child. There is no
 GPUI harness in this crate, so this task is proven by hand in Task 7; the
 change is four handlers with the same shape as the existing ones.
 
-- [ ] **Step 1: Add the handlers**
+- [x] **Step 1: Add the handlers**
 
 After the existing `.on_scroll_wheel(…)` on the wrapper:
 
@@ -1028,7 +1028,7 @@ Add `KeyUpEvent` and `MouseUpEvent` to the file's `gpui::{…}` import if
 they are not there (they are used by the terminal's own handlers in
 `render.rs`, so the names are right for gpui 0.2.2).
 
-- [ ] **Step 2: Gate and commit**
+- [x] **Step 2: Gate and commit**
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings && cargo test -p sprite-app --locked --offline`
 Expected: clean.
