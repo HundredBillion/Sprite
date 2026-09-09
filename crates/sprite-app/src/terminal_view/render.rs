@@ -38,7 +38,7 @@ pub(super) const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from
 /// browser would: an outer box the size of the visible result, clipping an
 /// inner image that is scaled up and shifted so the wanted region lands inside
 /// it.
-pub(super) fn placement_element(
+fn placement_element(
     placement: &sprite_term::Placement,
     texture: Arc<gpui::RenderImage>,
     image_width: u32,
@@ -374,9 +374,9 @@ impl Render for TerminalView {
             // different colour below its last row than inside it.
             .bg(rgb(pack(default_bg)))
             .text_color(rgb(pack(default_fg)))
-            .font_family(self.font_family.clone())
-            .text_size(self.font_size)
-            .line_height(self.cell_height)
+            .font_family(metrics.font_family.clone())
+            .text_size(metrics.font_size)
+            .line_height(metrics.cell_height)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
                 // Application shortcuts are resolved first and explicitly. Only
