@@ -747,7 +747,7 @@ git commit -m "Let the connection thread refuse, time out, and stop on its own"
   `Highlights::from_groups(groups: Vec<(String, HighlightStyle)>) -> Self`.
   `Description::grid()` and `refresh_grid_surfaces` no longer exist.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `grid.rs`:
 
@@ -821,7 +821,7 @@ exists; otherwise `from_groups` is the helper, see Step 6.)
     }
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test -p sprite-app --locked --offline relinking a_grid_root_refuses from_groups an_empty_highlights strikethrough_alone`
 Expected: `from_groups` does not compile; the grid-root test fails (style is
@@ -829,7 +829,7 @@ accepted); the relink test fails on `row[0]` (id 1 still styled as Comment);
 the strikethrough and empty-print tests pass already (they lock behaviour in
 and are kept).
 
-- [ ] **Step 3: Relinked names, refused style, no `grid()` accessor**
+- [x] **Step 3: Relinked names, refused style, no `grid()` accessor**
 
 `grid.rs` `Op::Highlights` (473–477):
 
@@ -861,7 +861,7 @@ the exclusions). Delete `Description::grid()` (32–37); its one caller in
 `terminal_view/surfaces.rs` `open_surface` reads `parsed.description.root.grid`
 directly; the two tests at 456 and 468 read `.description.root.grid`.
 
-- [ ] **Step 4: The last event sent, and grids invalidated once**
+- [x] **Step 4: The last event sent, and grids invalidated once**
 
 `terminal_view/surfaces.rs`: `HostedSurface.told_size: Option<(u32, u32)>`
 becomes
@@ -906,7 +906,7 @@ layout does not depend on the font, and the resize event text does).
 `Body::Grid` refusal, so a grid Surface is refused without paying for a
 parse.
 
-- [ ] **Step 5: One blink timer, both constructors**
+- [x] **Step 5: One blink timer, both constructors**
 
 In `terminal_view.rs`, cut the `blink_task` spawn from `new` (367–372 with
 its comment 363–366) into:
@@ -931,7 +931,7 @@ its comment 363–366) into:
 order if the task must be created before the struct literal); `failed`
 replaces `_blink: Task::ready(())` with `_blink: Self::spawn_blink(cx)`.
 
-- [ ] **Step 6: `Highlights::from_groups` and one `GridMetrics`**
+- [x] **Step 6: `Highlights::from_groups` and one `GridMetrics`**
 
 `config.rs`, in `impl Highlights` before `get`:
 
@@ -959,7 +959,7 @@ layer block that already calls `grid_metrics()` reuses `metrics` instead of
 calling it again. `cursor`, `cursor_color`, `palette`, and `pass` stay the
 terminal's own.
 
-- [ ] **Step 7: Run the tests and the gate**
+- [x] **Step 7: Run the tests and the gate**
 
 Run: `cargo test -p sprite-app --locked --offline`
 Expected: all pass, including the five new tests and the changed
@@ -968,7 +968,7 @@ description test.
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/sprite-app/src
