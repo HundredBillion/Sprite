@@ -452,12 +452,14 @@ pub(crate) fn sweep_dead_sockets(directory: &Path) {
         if path.extension().is_none_or(|extension| extension != "sock") {
             continue;
         }
-        // Connecting is the test, and only a refusal is proof: a listener that
-        // is gone refuses, a window that is alive accepts and is not disturbed
-        // by a connection that is immediately dropped. Any other error — a
-        // machine out of descriptors, a file that is not a socket — proves
-        // nothing, and a live window's socket is worth more than a tidy
-        // directory.
+        // Connecting is the test, and a refusal is the strongest evidence
+        // available rather than proof: a listener that is gone refuses, but so
+        // does a live listener whose accept backlog is full — something a
+        // window that accepts and drops connections never lets happen in
+        // practice. A window that is alive accepts, and is not disturbed by a
+        // connection that is immediately dropped. Any other error — a machine
+        // out of descriptors, a file that is not a socket — proves nothing, and
+        // a live window's socket is worth more than a tidy directory.
         if let Err(error) = UnixStream::connect(&path)
             && error.kind() == std::io::ErrorKind::ConnectionRefused
         {
@@ -932,6 +934,27 @@ mod tests {
         assert!(UnixStream::connect(&captured_path).is_err());
     }
 
+    /// Sweeps until the socket at `expected_gone` is gone, or the bound is hit.
+    ///
+    /// One sweep is not always enough on macOS under load: a connect to a
+    /// listener dropped a moment earlier can still *succeed*, before the
+    /// listening socket is fully torn down, returning a socket with no peer
+    /// that reads end-of-stream at once. The sweep then honestly finds nothing
+    /// that refused and leaves the file alone. A connect a millisecond later is
+    /// refused, so sweeping again clears it.
+    ///
+    /// The bound stays well under the 128-deep listen backlog on purpose: a
+    /// live listener whose backlog is full also refuses, and a sweep that saw
+    /// that would delete a socket still in use.
+    fn sweep_until_gone(directory: &Path, expected_gone: &Path) {
+        for _ in 0..32 {
+            if !expected_gone.exists() {
+                return;
+            }
+            sweep_dead_sockets(directory);
+        }
+    }
+
     /// A window killed rather than closed leaves its socket behind. The next
     /// window clears it — without disturbing a window that is still running.
     #[test]
@@ -952,6 +975,7 @@ mod tests {
         assert!(abandoned.exists());
 
         let (next, _) = endpoint_in(&scratch);
+        sweep_until_gone(&directory, &abandoned);
 
         assert!(!abandoned.exists(), "the dead socket was cleared");
         assert!(live_path.exists(), "the live one was left alone");
@@ -979,7 +1003,7 @@ mod tests {
         let dead = directory.join("dead.sock");
         drop(UnixListener::bind(&dead).expect("bind"));
 
-        sweep_dead_sockets(&directory);
+        sweep_until_gone(&directory, &dead);
 
         assert!(odd.exists(), "a file that did not refuse is left alone");
         assert!(!dead.exists(), "a socket that refused is removed");
