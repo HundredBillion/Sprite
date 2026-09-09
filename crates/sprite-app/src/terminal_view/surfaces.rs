@@ -29,9 +29,10 @@ pub(super) enum Body {
     Elements(Description),
     Grid {
         grid: GridSurface,
-        /// The description's root element, kept for the `style` and `bg` it
-        /// may carry: a grid's wrapper is styled from them exactly as an
-        /// element root's box is.
+        /// The description's root element, kept for the `bg` and `color` it
+        /// may carry: a grid's wrapper takes its colours from them, the way an
+        /// element root's box does. A grid root refuses `style` and `border`,
+        /// so those never arrive here.
         root: Element,
     },
 }
@@ -374,11 +375,11 @@ impl TerminalView {
         if fills {
             wrapper = wrapper.size_full();
         }
-        // A grid root's style and bg belong to the wrapper, which is the box
-        // that owns the whole space the Surface was given: they show in the
-        // slack between the cell box and its edge. The cell box keeps the
-        // grid's own default colours, which come from the program's
-        // `defaults`, not from the description.
+        // A grid root's colours belong to the wrapper, which is the box that
+        // owns the whole space the Surface was given: they show in the slack
+        // between the cell box and its edge. The cell box keeps the grid's own
+        // default colours, which come from the program's `defaults`, not from
+        // the description.
         if let Body::Grid { root, .. } = &surface.body {
             wrapper = crate::surface::render::apply_described_style(wrapper, root, registry);
         }

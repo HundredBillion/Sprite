@@ -218,10 +218,12 @@ fn element(
         }
         // A grid's wrapper is sized and placed by the pane, so a utility token
         // meant for a box would be read and then ignored; its colours are not,
-        // and they arrive as `bg` and `color`.
-        if !style.is_empty() {
+        // and they arrive as `bg` and `color`. A border colour is refused for
+        // the same reason it would not show: the width comes from a style
+        // token, so without one there is no edge for the colour to paint.
+        if !style.is_empty() || border.is_some() {
             return Err(Refusal::Malformed(
-                "a grid root takes bg and color, not style".to_owned(),
+                "a grid root takes bg and color, not style or border".to_owned(),
             ));
         }
         let dimension = |key: &str, max: u16| -> Result<u16, Refusal> {
@@ -499,7 +501,15 @@ mod tests {
         );
         assert_eq!(
             refusal.reason(),
-            "malformed: a grid root takes bg and color, not style"
+            "malformed: a grid root takes bg and color, not style or border"
+        );
+        let refusal = refused(
+            json!({ "version": 1, "root": { "kind": "grid", "cols": 8, "rows": 2, "border": "terminal.foreground" } }),
+        );
+        assert_eq!(
+            refusal.reason(),
+            "malformed: a grid root takes bg and color, not style or border",
+            "a border colour with no width to paint is refused too"
         );
         let grid = parsed(
             json!({ "version": 1, "root": { "kind": "grid", "cols": 8, "rows": 2, "bg": "terminal.background", "color": "terminal.foreground" } }),
