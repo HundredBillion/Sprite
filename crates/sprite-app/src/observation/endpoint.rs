@@ -452,10 +452,15 @@ pub(crate) fn sweep_dead_sockets(directory: &Path) {
         if path.extension().is_none_or(|extension| extension != "sock") {
             continue;
         }
-        // Connecting is the test: a listener that is gone cannot answer, and a
-        // window that is alive is not disturbed by a connection that is
-        // immediately dropped.
-        if UnixStream::connect(&path).is_err() {
+        // Connecting is the test, and only a refusal is proof: a listener that
+        // is gone refuses, a window that is alive accepts and is not disturbed
+        // by a connection that is immediately dropped. Any other error — a
+        // machine out of descriptors, a file that is not a socket — proves
+        // nothing, and a live window's socket is worth more than a tidy
+        // directory.
+        if let Err(error) = UnixStream::connect(&path)
+            && error.kind() == std::io::ErrorKind::ConnectionRefused
+        {
             let _ = fs::remove_file(&path);
         }
     }
@@ -956,6 +961,28 @@ mod tests {
             "and still works"
         );
         assert!(next.socket_path().exists());
+    }
+
+    /// Only a refused connection proves nobody is listening. Any other error a
+    /// loaded machine can return leaves the file alone: a stale file costs
+    /// nothing, a removed live socket costs a window its observation.
+    #[test]
+    fn the_sweep_keeps_a_socket_it_could_not_prove_dead() {
+        let scratch = Scratch::new();
+        let directory = scratch.path().join("sockets");
+        fs::create_dir_all(&directory).expect("dir");
+        // A regular file with the socket suffix: connecting fails, but not
+        // with "refused", so the sweep must not touch it.
+        let odd = directory.join("not-a-socket.sock");
+        fs::write(&odd, b"").expect("write");
+        // A socket nobody listens on any more: refused, so removed.
+        let dead = directory.join("dead.sock");
+        drop(UnixListener::bind(&dead).expect("bind"));
+
+        sweep_dead_sockets(&directory);
+
+        assert!(odd.exists(), "a file that did not refuse is left alone");
+        assert!(!dead.exists(), "a socket that refused is removed");
     }
 
     #[test]
