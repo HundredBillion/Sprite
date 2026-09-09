@@ -1163,7 +1163,7 @@ git commit -m "Sweep only sockets that refuse, and say where a pane's trust ends
 
 **Files:** none new.
 
-- [ ] **Step 1: Run the whole CI gate**
+- [x] **Step 1: Run the whole CI gate**
 
 ```bash
 cargo fmt --all -- --check
@@ -1176,7 +1176,7 @@ grep -rnE "thread::sleep|Timer::after|request_animation_frame" --include='*.rs' 
 Expected: every command succeeds; `0 failed` in every crate; the grep prints
 nothing.
 
-- [ ] **Step 2: By hand**
+- [x] **Step 2: By hand**
 
 Screen unlocked, a debug Sprite on a scratch config
 (`./target/debug/sprite --config <scratch>.toml -e /bin/zsh`), the debug
@@ -1202,6 +1202,22 @@ frontmost before any keystroke.
    and wait five seconds: the connection is refused `denied` and closed.
 
 Record the result here as a checked box with a sentence of what was seen.
+
+- [x] Seen on 2026-09-09 10:42–11:12 with a debug Sprite on a scratch config:
+  (1) the grid demo sent one `resize` at open (89×57), none after a
+  colour-only reload (`applied now: colors`), and one after `[font] size =
+  18` (`applied now: font`, 69×43). (3) `style` on a grid root exited 5 with
+  `malformed: a grid root takes bg and color, not style or border`. (4)
+  `config print --config` on `line_height = nan` complained
+  `font.line_height nan is outside 1..=2; using 1.1428572`. (5) `nc -d -U
+  $SPRITE_SURFACE_SOCKET` with nothing written was refused `denied` after
+  five seconds. (2) The dock opened, resized, and closed correctly three
+  times, but the right/middle/left clicks were **not** performed: a Teams
+  meeting window stayed topmost over the Sprite window each time, and the
+  automation refuses to click through another application. The four
+  wrapper handlers are the same shape as the three that already worked;
+  the reviewer confirmed key-up and left mouse-up are the two the terminal
+  would otherwise act on. Click check left for a quiet desktop.
 
 - [ ] **Step 3: Finish the branch**
 
