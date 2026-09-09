@@ -64,9 +64,9 @@ declared untrusted in the payload.
 
 The trust boundary is the pane's process tree. Anything you run in a pane
 inherits that pane's keys from its environment, so it can read what the
-window shows and draw in its own pane; nothing outside the window's process
-trees holds a key, and the keys are never written anywhere a later process
-could find them.
+window shows and draw into any pane of that window; nothing outside the
+window's process trees holds a key, and the keys are never written anywhere a
+later process could find them.
 
 **Warp** shares the premise and is more open than it is usually given credit
 for: the client is on GitHub under AGPL v3, and the account is optional. The
