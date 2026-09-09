@@ -69,13 +69,19 @@ recommended.
    Grid` carries `ops: Vec<Op>`, not JSON; a malformed message is refused
    without a round trip to the window, a 16 MiB batch is walked off the UI
    thread, and the `message.clone()` disappears. Applying still happens on
-   the GPUI thread, in one `update`, so one frame per batch holds.
+   the GPUI thread, in one `update`, so one frame per batch holds. One
+   consequence: a malformed grid operation sent to an element Surface is now
+   refused for being malformed, where before it was refused for the Surface
+   not being a grid; both strings are unchanged, only which one a client
+   sees when both apply.
 5. **The per-cell `String` and the per-frame `positioned_rows().to_vec()`
    are left alone until measured.** The target is 80×24 to 300×100 grids;
    the reviewer who raised it judged it acceptable there. A profile on a real
    adapter decides, not a guess.
-6. **A grid root refuses `style`** (`malformed: a grid root takes bg and
-   color, not style`), keeping `bg` and `color`. Spacing tokens on the
+6. **A grid root refuses `style` and `border`** (`malformed: a grid root
+   takes bg and color, not style or border`), keeping `bg` and `color`; a
+   border colour without the width tokens `style` would carry drew nothing,
+   so accepting it was a silent no-op. Spacing tokens on the
    wrapper made `cells_that_fit` tell the program one more column than the
    padded box holds; a grid's geometry is its cells, so the wrapper has no
    layout of its own to describe.
@@ -96,8 +102,9 @@ recommended.
 10. **The README says where the trust boundary is and what SVG `href` does:**
     anything running in a pane inherits that pane's keys from its
     environment, so a program you run in a pane can read what that window
-    shows and draw in that pane, and nothing outside the window's process
-    trees can; an SVG is rendered from the bytes given with no resource
+    shows and draw into any pane of that window (the Surface key is per
+    window and the pane id comes from the client's environment), and nothing
+    outside the window's process trees can; an SVG is rendered from the bytes given with no resource
     directory, so an `href` to a file resolves to nothing.
 
 ---
@@ -778,7 +785,7 @@ exists; otherwise `from_groups` is the helper, see Step 6.)
     #[test]
     fn a_grid_root_refuses_style_but_keeps_bg_and_color() {
         let refused = parsed(json!({ "version": 1, "root": { "kind": "grid", "cols": 8, "rows": 2, "style": "p_1" } })).expect_err("refused");
-        assert_eq!(refused.reason(), "malformed: a grid root takes bg and color, not style");
+        assert_eq!(refused.reason(), "malformed: a grid root takes bg and color, not style or border");
         let grid = parsed(json!({ "version": 1, "root": { "kind": "grid", "cols": 8, "rows": 2, "bg": "terminal.background", "color": "terminal.foreground" } })).expect("parses");
         assert!(grid.description.root.background.is_some());
         assert!(grid.description.root.color.is_some());
@@ -848,9 +855,9 @@ and are kept).
 read and children/text/svg/on_click are refused, add the same shape:
 
 ```rust
-            if !style.is_empty() {
+            if !style.is_empty() || border.is_some() {
                 return Err(Refusal::Malformed(
-                    "a grid root takes bg and color, not style".to_owned(),
+                    "a grid root takes bg and color, not style or border".to_owned(),
                 ));
             }
 ```
@@ -1062,9 +1069,11 @@ In `endpoint.rs`'s tests, after `a_new_endpoint_clears_dead_sockets_but_not_live
         let scratch = Scratch::new();
         let directory = scratch.path().join("sockets");
         fs::create_dir_all(&directory).expect("dir");
-        // A regular file with the socket suffix: connecting fails, but not
-        // with "refused", so the sweep must not touch it.
-        let odd = directory.join("not-a-socket.sock");
+        // A socket path too long for the socket layer to address: connecting
+        // fails before any syscall, on every platform, and not with "refused",
+        // so the sweep must not touch it. (A regular file is not a portable
+        // stand-in: Linux refuses it, macOS says it is not a socket.)
+        let odd = directory.join(format!("{}.sock", "x".repeat(120)));
         fs::write(&odd, b"").expect("write");
         // A socket nobody listens on any more: refused, so removed.
         let dead = directory.join("dead.sock");
@@ -1083,8 +1092,8 @@ that; the existing tests show it.)
 - [x] **Step 2: Run it to see it fail**
 
 Run: `cargo test -p sprite-app --locked --offline the_sweep_keeps`
-Expected: FAIL on `odd.exists()` (connecting to a regular file errors, and
-today any error removes the file).
+Expected: FAIL on `odd.exists()` (connecting to an unaddressable path errors,
+and today any error removes the file).
 
 - [x] **Step 3: Remove only on refusal**
 
@@ -1094,9 +1103,9 @@ Replace the connect check in `sweep_dead_sockets` (455–460):
         // Connecting is the test, and only a refusal is proof: a listener that
         // is gone refuses, a window that is alive accepts and is not disturbed
         // by a connection that is immediately dropped. Any other error — a
-        // machine out of descriptors, a file that is not a socket — proves
-        // nothing, and a live window's socket is worth more than a tidy
-        // directory.
+        // machine out of descriptors, a path the socket layer cannot address
+        // — proves nothing, and a live window's socket is worth more than a
+        // tidy directory.
         if let Err(error) = UnixStream::connect(&path)
             && error.kind() == std::io::ErrorKind::ConnectionRefused
         {
@@ -1123,7 +1132,8 @@ add:
 ```markdown
 The trust boundary is the pane's process tree. Anything you run in a pane
 inherits that pane's keys from its environment, so it can read what the
-window shows and draw in its own pane; nothing outside the window's process
+window shows and draw into any pane of that window; nothing outside the
+window's process
 trees holds a key, and the keys are never written anywhere a later process
 could find them.
 ```
@@ -1184,7 +1194,7 @@ frontmost before any keystroke.
    report would print). Left-click a row and release: the click event
    prints once and the terminal copies nothing.
 3. `printf '{"version":1,"root":{"kind":"grid","cols":8,"rows":2,"style":"p_1"}}' | sprite surface open --fill`
-   exits 5 with `malformed: a grid root takes bg and color, not style`.
+   exits 5 with `malformed: a grid root takes bg and color, not style or border`.
 4. In a config with `line_height = nan`, `sprite config print` complains
    about `font.line_height nan` and prints the default.
 5. `nc -U <the surface socket>` (or `sprite surface open` with stdin held
@@ -1202,6 +1212,28 @@ change and close the gaps the grid work left"; the body follows
 developers, Evidence from steps 1 and 2).
 
 ---
+
+**Amendments after the whole-branch review (2026-09-09).** Task 6's "odd"
+case was a regular file named `.sock`, which macOS reports as not a socket
+but Linux refuses outright, so the test would have failed the Arch CI job;
+the case is now a path too long for the socket layer, which fails before any
+syscall on every platform, and the production comment names only portable
+non-refusals. The README's trust sentence said a program can draw "in its
+own pane"; the key is per window and the pane id comes from the client's
+environment, so it now says "into any pane of that window" (Decision 10).
+A grid root now refuses `border` alongside `style` (Decision 6), and two
+comments that still described `style` dressing the wrapper were corrected.
+Also taken before merge: `Render::render` reads font and cell values from the
+`GridMetrics` it built; `Highlights::groups` is private, so `from_groups` is
+the one way to build a theme; a relink drops ids left with no names; the
+unreachable arm in `apply_all` is explained; `placement_element` is private.
+Recorded for later: same-user processes sit inside the trust boundary the
+README draws (any process running as you can read a pane's environment);
+child modules repeat some imports the glob already brings; the client's
+`send_line` allocates a `String` per document; `render.rs` at 522 lines with
+the input listeners inside `Render::render`; no direct `adjust_font` test;
+the handshake timeout is per read, so a stall rather than slowness ends a
+handshake.
 
 ## Self-review against the source reviews
 
