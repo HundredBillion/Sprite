@@ -482,9 +482,9 @@ impl Workspace {
                 });
                 let _ = reply.send(answer);
             }
-            SurfaceRequest::Grid { id, pane, message } => {
+            SurfaceRequest::Grid { id, pane, ops } => {
                 if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.grid_operations(id, message, cx));
+                    view.update(cx, |view, cx| view.grid_operations(id, ops, cx));
                 }
             }
             SurfaceRequest::RegisterToken {
@@ -701,7 +701,14 @@ impl Workspace {
     /// its cell and tells its child the new grid, which is why this resizes
     /// rather than merely redraws.
     fn adjust_font(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let wanted = crate::config::Font::clamp_size(self.settings.font.size + delta);
+        // A keystroke has no complaints channel, so the size is simply held
+        // inside the readable range; a file setting goes through the same
+        // rule and says so when it had to.
+        let wanted = crate::config::clamp_or_default(
+            self.settings.font.size + delta,
+            crate::config::Font::MIN_SIZE..=crate::config::Font::MAX_SIZE,
+            crate::config::Font::DEFAULT_SIZE,
+        );
         self.apply_font_size(wanted, cx);
     }
 
@@ -1951,13 +1958,13 @@ mod tests {
         assert!(outcome.next_session.is_empty());
 
         let mut highlights = current.clone();
-        highlights.highlights.groups.push((
+        highlights.highlights = crate::config::Highlights::from_groups(vec![(
             "Comment".to_owned(),
             crate::config::HighlightStyle {
                 italic: Some(true),
                 ..Default::default()
             },
-        ));
+        )]);
         let outcome = classify(&current, &highlights);
         assert_eq!(outcome.live, vec!["highlights"]);
         assert!(outcome.next_session.is_empty());

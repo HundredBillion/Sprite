@@ -1188,6 +1188,16 @@ mod tests {
     }
 
     #[test]
+    fn strikethrough_alone_asks_for_no_underline() {
+        let style = decorated(UnderlineStyle::None, true);
+        let (underline, strikethrough) =
+            decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(16.0));
+        assert!(underline.is_none());
+        let strikethrough = strikethrough.expect("a strikethrough");
+        assert_eq!(strikethrough.thickness, px(1.0));
+    }
+
+    #[test]
     fn decoration_thickness_scales_with_the_row_and_never_vanishes() {
         let style = decorated(UnderlineStyle::Single, true);
         let (underline, strikethrough) =

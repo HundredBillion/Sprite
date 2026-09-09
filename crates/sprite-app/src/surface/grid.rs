@@ -427,10 +427,19 @@ impl GridSurface {
     }
 
     /// Applies operations in order and stops at the first bad one, which is
-    /// refused; the ones before it stand, as a terminal's would.
+    /// refused; the ones before it stand, as a terminal's would. Inside a
+    /// batch of several, the refusal names the operation's index so a client
+    /// can tell which ones stood.
     pub fn apply_all(&mut self, ops: Vec<Op>) -> Result<(), Refusal> {
-        for op in ops {
-            self.apply(op)?;
+        let several = ops.len() > 1;
+        for (index, op) in ops.into_iter().enumerate() {
+            self.apply(op).map_err(|refusal| match (several, refusal) {
+                (true, Refusal::Malformed(why)) => Refusal::Malformed(format!("op {index}: {why}")),
+                // Unreachable in practice: `apply` only ever refuses with
+                // `Malformed`. Kept so a future refusal kind passes through
+                // rather than needing this match widened.
+                (_, other) => other,
+            })?;
         }
         Ok(())
     }
@@ -471,11 +480,18 @@ impl GridSurface {
                     self.attrs.insert(id, attrs);
                 }
                 for (name, id) in groups {
-                    let names = self.groups.entry(id).or_default();
-                    if !names.contains(&name) {
-                        names.push(name);
+                    // A relink moves the name: an editor that now maps `Comment`
+                    // to another attr id no longer means the old one by it.
+                    for names in self.groups.values_mut() {
+                        names.retain(|known| known != &name);
                     }
+                    self.groups.entry(id).or_default().push(name);
                 }
+                // An id the last relink emptied is dropped rather than kept
+                // with no names: `style_for` would look it up and find nothing
+                // to apply, and the entry would outlive the only reason it
+                // existed.
+                self.groups.retain(|_, names| !names.is_empty());
             }
             Op::Defaults(defaults) => {
                 if defaults.fg.is_some() {
@@ -670,6 +686,17 @@ impl GridSurface {
             self.defaults.bg.unwrap_or(fallback.1),
         )
     }
+
+    /// The attr ids that currently have at least one group name, sorted.
+    ///
+    /// Test-only, and deliberately not part of the type's interface: nothing
+    /// that draws needs the id list, only the names behind one id.
+    #[cfg(test)]
+    fn group_ids(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.groups.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
 }
 
 /// Lays a theme's highlight-group override over a program's attrs.
@@ -705,6 +732,26 @@ mod tests {
 
     fn refused(message: serde_json::Value) -> Refusal {
         parse_ops(&message).expect_err("invalid operations")
+    }
+
+    #[test]
+    fn a_refusal_inside_a_batch_names_the_operation_that_failed() {
+        let mut grid = GridSurface::new(4, 2);
+        let ops = parse_ops(&json!({ "type": "batch", "ops": [
+            { "type": "clear" },
+            { "type": "cursor", "row": 7, "col": 0 },
+        ] }))
+        .expect("parses");
+        let refused = grid.apply_all(ops).expect_err("row 7 is outside");
+        assert!(
+            refused.reason().starts_with("malformed: op 1: "),
+            "{}",
+            refused.reason()
+        );
+        // A bare operation is refused without a prefix.
+        let ops = parse_ops(&json!({ "type": "cursor", "row": 7, "col": 0 })).expect("parses");
+        let refused = grid.apply_all(ops).expect_err("row 7 is outside");
+        assert!(!refused.reason().contains("op "), "{}", refused.reason());
     }
 
     fn text_of(row: &[PositionedCell]) -> String {
@@ -826,18 +873,16 @@ mod tests {
         assert!(plain[0][1].style.inverse);
         assert!(plain[0][1].style.strikethrough);
 
-        let theme = Highlights {
-            groups: vec![(
-                "Comment".to_owned(),
-                HighlightStyle {
-                    color: Some(unpack(0x00ff00)),
-                    bold: Some(true),
-                    italic: Some(false),
-                    underline: Some(UnderlineStyle::None),
-                    background: None,
-                },
-            )],
-        };
+        let theme = Highlights::from_groups(vec![(
+            "Comment".to_owned(),
+            HighlightStyle {
+                color: Some(unpack(0x00ff00)),
+                bold: Some(true),
+                italic: Some(false),
+                underline: Some(UnderlineStyle::None),
+                background: None,
+            },
+        )]);
         grid.invalidate();
         let themed = grid.positioned_rows(&theme);
         assert_eq!(
@@ -879,10 +924,8 @@ mod tests {
 
         // A theme that names only the first of the two still reaches the cell.
         grid.invalidate();
-        let styled = grid.positioned_rows(&Highlights {
-            groups: vec![comment.clone()],
-        })[0][0]
-            .style;
+        let styled =
+            grid.positioned_rows(&Highlights::from_groups(vec![comment.clone()]))[0][0].style;
         assert_eq!(styled.foreground, SnapshotColor::Rgb(unpack(0x00ff00)));
         assert!(styled.bold);
         assert!(
@@ -893,16 +936,67 @@ mod tests {
         // With both named, the later name wins the field they both set and
         // leaves the earlier one's other fields alone.
         grid.invalidate();
-        let styled = grid.positioned_rows(&Highlights {
-            groups: vec![lua, comment],
-        })[0][0]
-            .style;
+        let styled = grid.positioned_rows(&Highlights::from_groups(vec![lua, comment]))[0][0].style;
         assert_eq!(
             styled.foreground,
             SnapshotColor::Rgb(unpack(0x0000ff)),
             "@comment.lua was received second"
         );
         assert!(styled.bold, "and Comment's bold, which it does not set");
+    }
+
+    #[test]
+    fn relinking_a_group_moves_its_name_to_the_new_id() {
+        let mut grid = GridSurface::new(2, 1);
+        let theme = Highlights::from_groups(vec![(
+            "Comment".to_owned(),
+            HighlightStyle {
+                color: Some(Rgb {
+                    r: 0xff,
+                    g: 0,
+                    b: 0,
+                }),
+                ..Default::default()
+            },
+        )]);
+        grid.apply_all(
+            parse_ops(
+                &json!({ "type": "highlights", "define": { "1": {}, "2": {} }, "groups": { "Comment": 1 } }),
+            )
+            .expect("parses"),
+        )
+        .expect("applies");
+        grid.apply_all(
+            parse_ops(&json!({ "type": "highlights", "groups": { "Comment": 2 } }))
+                .expect("parses"),
+        )
+        .expect("applies");
+        assert_eq!(
+            grid.group_ids(),
+            vec![2],
+            "id 1 kept no names, so it is not kept either"
+        );
+        grid.apply_all(
+            parse_ops(
+                &json!({ "type": "rows", "rows": [{ "row": 0, "cells": [["a", 1], ["b", 2]] }] }),
+            )
+            .expect("parses"),
+        )
+        .expect("applies");
+        let row = &grid.positioned_rows(&theme)[0];
+        assert_eq!(
+            row[0].style.foreground,
+            SnapshotColor::Default,
+            "id 1 is no longer Comment"
+        );
+        assert_eq!(
+            row[1].style.foreground,
+            SnapshotColor::Rgb(Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0
+            })
+        );
     }
 
     #[test]

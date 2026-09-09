@@ -48,7 +48,17 @@ pub const MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 /// Surfaces are long-lived, so this caps how many a window hosts at once.
 const MAX_CONNECTIONS: usize = 64;
 /// A client that will not accept an event for this long is treated as gone.
+/// Short under test so the dead-write test finishes in well under a second.
+#[cfg(not(test))]
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+/// A client that connects and sends no first line for this long has its
+/// thread taken back; the connection is refused as any bad handshake is.
+#[cfg(not(test))]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
 /// How long a connection waits for the window to answer a request.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -220,6 +230,8 @@ impl SurfaceConnection {
     /// Writes the connection's first line, then every line a program queued
     /// before it, in the order they arrived. Called once, by the connection
     /// thread that decided to accept the Surface — never by the program.
+    /// Stops at the first failed write and marks the wire dead, as `send`
+    /// does: a client that is gone is not written to a thousand more times.
     fn establish(&self, line: &str) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
@@ -228,12 +240,24 @@ impl SurfaceConnection {
             .and_then(|_| wire.stream.flush())
             .is_ok();
         for queued in std::mem::take(&mut wire.queued) {
-            ok &= writeln!(wire.stream, "{queued}")
+            if !ok {
+                break;
+            }
+            ok = writeln!(wire.stream, "{queued}")
                 .and_then(|_| wire.stream.flush())
                 .is_ok();
         }
         wire.ready = true;
+        if !ok {
+            wire.dead = true;
+            let _ = wire.stream.shutdown(Shutdown::Both);
+        }
         ok
+    }
+
+    #[cfg(test)]
+    fn is_dead(&self) -> bool {
+        self.wire.lock().map(|wire| wire.dead).unwrap_or(true)
     }
 
     /// Marks the connection dead and drops anything a program queued: the
@@ -290,13 +314,14 @@ pub enum SurfaceRequest {
         target: FocusTarget,
         reply: Reply,
     },
-    /// A grid operation, or a batch of them, for a grid Surface. Kept as JSON
-    /// here for the same reason a description is: the grid, its highlight
-    /// table, and the theme all live on the GPUI thread.
+    /// A grid operation, or a batch of them, already parsed: the connection
+    /// thread refuses a malformed message itself, and the window only applies.
+    /// Applying stays on the GPUI thread, where the grid, its highlight table,
+    /// and the theme live.
     Grid {
         id: SurfaceId,
         pane: PaneId,
-        message: Value,
+        ops: Vec<crate::surface::grid::Op>,
     },
     RegisterToken {
         name: String,
@@ -464,6 +489,10 @@ fn converse(
     let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
         return;
     };
+    // Only the handshake is timed: once a Surface is open its program may be
+    // silent for hours, and the read must block. A failure to set the
+    // timeout is not worth refusing over; the read simply blocks as before.
+    let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
     let mut line = String::new();
     if (&mut reader)
         .take(MAX_MESSAGE_BYTES)
@@ -481,6 +510,7 @@ fn converse(
         refuse(&mut stream, &Refusal::Denied.reason());
         return;
     }
+    let _ = stream.set_read_timeout(None);
 
     let message: Value = match serde_json::from_str(body) {
         Ok(message) => message,
@@ -585,10 +615,12 @@ fn serve_surface(
         let message: Value = match serde_json::from_str(line.trim()) {
             Ok(message) => message,
             Err(error) => {
-                let _ = handle.send(&event_refused(
+                if handle.send(&event_refused(
                     &Refusal::Malformed(error.to_string()).reason(),
-                ));
-                continue;
+                )) {
+                    continue;
+                }
+                break;
             }
         };
         let request = match message.get("type").and_then(Value::as_str) {
@@ -599,24 +631,34 @@ fn serve_surface(
                     description: description.clone(),
                 },
                 None => {
-                    let _ = handle.send(&event_refused(
+                    if handle.send(&event_refused(
                         &Refusal::Malformed("update needs a description".to_owned()).reason(),
-                    ));
-                    continue;
+                    )) {
+                        continue;
+                    }
+                    break;
                 }
             },
             Some("focus") => match focus_target(&message) {
                 Ok(target) => SurfaceRequest::Focus { id, pane, target },
                 Err(refusal) => {
-                    let _ = handle.send(&event_refused(&refusal.reason()));
-                    continue;
+                    if handle.send(&event_refused(&refusal.reason())) {
+                        continue;
+                    }
+                    break;
                 }
             },
-            Some(kind) if crate::surface::grid::is_op(kind) => SurfaceRequest::Grid {
-                id,
-                pane,
-                message: message.clone(),
-            },
+            Some(kind) if crate::surface::grid::is_op(kind) => {
+                match crate::surface::grid::parse_ops(&message) {
+                    Ok(ops) => SurfaceRequest::Grid { id, pane, ops },
+                    Err(refusal) => {
+                        if handle.send(&event_refused(&refusal.reason())) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
             Some("close") => {
                 // The window answers `closed` through the connection and drops
                 // its end; this thread has nothing more to read.
@@ -624,14 +666,16 @@ fn serve_surface(
                 return;
             }
             other => {
-                let _ = handle.send(&event_refused(
+                if handle.send(&event_refused(
                     &Refusal::Malformed(format!(
                         "a message is update, focus, close, or a grid operation, not {}",
                         other.unwrap_or("nothing")
                     ))
                     .reason(),
-                ));
-                continue;
+                )) {
+                    continue;
+                }
+                break;
             }
         };
         if requests.send_blocking(request).is_err() {
@@ -1027,28 +1071,66 @@ mod tests {
         assert_eq!(line(&mut reader), json!({ "type": "focus" }));
     }
 
+    /// A client that stops reading fills the socket; the write that hits the
+    /// timeout marks the connection dead, and every send after it returns at
+    /// once instead of waiting the timeout again.
     #[test]
-    fn a_failed_write_marks_the_connection_dead() {
+    fn a_failed_write_marks_the_connection_dead_and_later_sends_return_at_once() {
         let (here, there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         assert!(connection.establish(&event_opened(SurfaceId(1))));
-        drop(there);
-
+        // `there` is kept open and never read, so writes block until the
+        // socket buffer is full and the write timeout fires.
+        let line = "x".repeat(64 * 1024);
         let mut failed = false;
-        for _ in 0..64 {
-            if !connection.send(&event_focus()) {
+        for _ in 0..1024 {
+            if !connection.send(&line) {
                 failed = true;
                 break;
             }
         }
-        assert!(failed, "send never reported the connection dead");
+        assert!(
+            failed,
+            "a peer that never reads must eventually fail a send"
+        );
+        assert!(connection.is_dead());
 
         let start = Instant::now();
         assert!(!connection.send(&event_focus()));
         assert!(
-            start.elapsed() < Duration::from_millis(100),
-            "a send after the connection is marked dead should not wait on the write timeout"
+            start.elapsed() < WRITE_TIMEOUT / 2,
+            "a send after the connection is marked dead must not wait on the write timeout"
         );
+        drop(there);
+    }
+
+    /// A program that connects and says nothing must not hold a connection
+    /// thread forever.
+    #[test]
+    fn a_silent_handshake_is_refused_after_the_timeout() {
+        let scratch = Scratch::new();
+        let (endpoint, _rx) = endpoint(&scratch);
+        let (_stream, mut reader) = connect(&endpoint);
+        let start = Instant::now();
+        let refused = line(&mut reader);
+        assert_eq!(refused["type"], "refused");
+        assert_eq!(refused["reason"], "denied");
+        assert!(start.elapsed() >= HANDSHAKE_TIMEOUT);
+    }
+
+    /// `establish` stops writing at the first failure and marks the wire dead,
+    /// so a queue of a thousand lines to a gone client costs one write.
+    #[test]
+    fn establish_stops_at_the_first_failed_write() {
+        let (here, there) = UnixStream::pair().expect("pair");
+        let connection = SurfaceConnection::new(&here).expect("connection");
+        for _ in 0..4 {
+            assert!(connection.send(&event_focus()));
+        }
+        drop(there);
+        assert!(!connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.is_dead());
+        assert!(!connection.send(&event_focus()));
     }
 
     #[test]
@@ -1300,14 +1382,14 @@ mod tests {
     fn a_grid_operation_reaches_the_window_as_one_request() {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
-        let (seen_tx, seen_rx) = mpsc::channel::<Value>();
+        let (seen_tx, seen_rx) = mpsc::channel::<usize>();
         let _window = window(rx, move |request| match request {
             SurfaceRequest::Open { reply, .. } => {
                 reply.send(Ok(())).expect("reply");
                 true
             }
-            SurfaceRequest::Grid { message, .. } => {
-                seen_tx.send(message).expect("seen");
+            SurfaceRequest::Grid { ops, .. } => {
+                seen_tx.send(ops.len()).expect("seen");
                 true
             }
             SurfaceRequest::Closed { .. } => false,
@@ -1318,10 +1400,27 @@ mod tests {
         assert_eq!(line(&mut reader)["type"], "opened");
         let rows = json!({ "type": "rows", "rows": [{ "row": 0, "cells": [["a", 1]] }] });
         writeln!(stream, "{rows}").expect("write");
-        assert_eq!(seen_rx.recv().expect("seen"), rows);
+        assert_eq!(seen_rx.recv().expect("seen"), 1);
         let batch = json!({ "type": "batch", "ops": [{ "type": "clear" }] });
         writeln!(stream, "{batch}").expect("write");
-        assert_eq!(seen_rx.recv().expect("seen"), batch);
+        assert_eq!(seen_rx.recv().expect("seen"), 1);
+
+        // A malformed operation is parsed and refused on the connection
+        // thread, so the window is never asked to apply it.
+        writeln!(stream, r#"{{"type":"cursor","row":"x"}}"#).expect("write");
+        let refused = line(&mut reader);
+        assert_eq!(refused["type"], "refused");
+        assert!(
+            refused["reason"]
+                .as_str()
+                .expect("reason")
+                .starts_with("malformed:"),
+            "{refused}"
+        );
+        assert!(
+            seen_rx.try_recv().is_err(),
+            "a malformed operation reached the window"
+        );
     }
 
     #[test]

@@ -62,6 +62,12 @@ spawn, kill and write to panes. Sprite's arrives as versioned JSON, from a
 grammar with no write in it, over a socket keyed per window, with the content
 declared untrusted in the payload.
 
+The trust boundary is the pane's process tree. Anything you run in a pane
+inherits that pane's keys from its environment, so it can read what the
+window shows and draw into any pane of that window; nothing outside the
+window's process trees holds a key, and the keys are never written anywhere a
+later process could find them.
+
 **Warp** shares the premise and is more open than it is usually given credit
 for: the client is on GitHub under AGPL v3, and the account is optional. The
 difference is what the product is. Warp is an agentic development environment —
@@ -258,6 +264,10 @@ takes the keyboard when it opens; the program hands it back with
 `{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Reading and drawing travel
 on separate sockets with separate keys: nothing that holds only the
 observation credentials can draw.
+
+An `image` element's SVG is rendered from the bytes given, with no resource
+directory, so an `href` that points at a file resolves to nothing; embed
+what the picture needs.
 
 An editor draws differently: it opens a *grid* Surface (`{"kind":"grid",
 "cols":80,"rows":24}`) and streams cells with highlight ids — `rows`,

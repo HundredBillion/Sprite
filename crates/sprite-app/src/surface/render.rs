@@ -25,7 +25,7 @@ pub(crate) fn render(
     description: &Description,
     surface: SurfaceId,
     registry: &TokenRegistry,
-    connection: &Arc<SurfaceConnection>,
+    connection: &SurfaceConnection,
 ) -> AnyElement {
     let mut next = 0u64;
     element(&description.root, surface, registry, connection, &mut next)
@@ -133,7 +133,7 @@ fn element(
     node: &Element,
     surface: SurfaceId,
     registry: &TokenRegistry,
-    connection: &Arc<SurfaceConnection>,
+    connection: &SurfaceConnection,
     next: &mut u64,
 ) -> AnyElement {
     // Numbered in tree order, so a clickable element's identity is stable for
@@ -169,7 +169,7 @@ fn element(
         None => boxed.into_any_element(),
         Some(name) => {
             let name = name.clone();
-            let connection = Arc::clone(connection);
+            let connection = connection.clone();
             boxed
                 .id(ElementId::NamedInteger(
                     SharedString::from(format!("surface-{}", surface.0)),
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn every_kind_becomes_an_element_without_a_window() {
         let (ours, _theirs) = UnixStream::pair().expect("socket pair");
-        let connection = Arc::new(SurfaceConnection::new(&ours).expect("connection"));
+        let connection = SurfaceConnection::new(&ours).expect("connection");
         let registry = TokenRegistry::new(&Colors::default());
         let parsed = description::parse(
             &json!({
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grid_roots_style_and_bg_dress_its_wrapper_exactly_as_a_box_roots_do() {
+    fn a_grid_roots_colours_dress_its_wrapper_exactly_as_a_box_roots_do() {
         let registry = TokenRegistry::new(&Colors::default());
         let style_of = |root: serde_json::Value| {
             let parsed = description::parse(&json!({ "version": 1, "root": root }), &registry)
@@ -233,10 +233,12 @@ mod tests {
             dressed.style().clone()
         };
 
+        // No `style` here: a grid root refuses utility tokens, because the
+        // pane sizes and places its wrapper. Its colours are all it dresses
+        // the wrapper with, and those go through the same styler a box uses.
         let dress = |kind: serde_json::Value| {
             let mut root = kind;
             let object = root.as_object_mut().expect("an object");
-            object.insert("style".into(), json!("p_2"));
             object.insert("bg".into(), json!("terminal.background"));
             object.insert("color".into(), json!("#c0caf5"));
             root

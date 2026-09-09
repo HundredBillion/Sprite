@@ -80,22 +80,6 @@ impl Font {
     pub const MIN_LINE_HEIGHT: f32 = 1.0;
     pub const MAX_LINE_HEIGHT: f32 = 2.0;
 
-    /// A size clamped into the usable range.
-    pub fn clamp_size(size: f32) -> f32 {
-        if size.is_nan() {
-            return Self::DEFAULT_SIZE;
-        }
-        size.clamp(Self::MIN_SIZE, Self::MAX_SIZE)
-    }
-
-    /// A line-height ratio clamped into the usable range.
-    pub fn clamp_line_height(ratio: f32) -> f32 {
-        if ratio.is_nan() {
-            return Self::DEFAULT_LINE_HEIGHT;
-        }
-        ratio.clamp(Self::MIN_LINE_HEIGHT, Self::MAX_LINE_HEIGHT)
-    }
-
     /// The height of one row for a size and a ratio, in whole pixels.
     ///
     /// Terminals need a fixed ratio rather than the font's own metrics, because
@@ -180,11 +164,20 @@ pub struct HighlightStyle {
 /// each cell belongs to, so no selector language is needed here.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Highlights {
-    /// Sorted by name, so file order is not meaning.
-    pub groups: Vec<(String, HighlightStyle)>,
+    /// Sorted by name, so file order is not meaning. Private because the sort
+    /// is the invariant `get` binary-searches on, and only
+    /// [`Highlights::from_groups`] establishes it.
+    groups: Vec<(String, HighlightStyle)>,
 }
 
 impl Highlights {
+    /// Sorted by name on the way in, which is what lets `get` binary-search;
+    /// build one this way rather than pushing onto `groups`.
+    pub fn from_groups(mut groups: Vec<(String, HighlightStyle)>) -> Self {
+        groups.sort_by(|a, b| a.0.cmp(&b.0));
+        Self { groups }
+    }
+
     pub fn get(&self, name: &str) -> Option<&HighlightStyle> {
         self.groups
             .binary_search_by(|(candidate, _)| candidate.as_str().cmp(name))
@@ -247,18 +240,17 @@ pub struct Grid {
 }
 
 impl Grid {
-    /// The value Sprite always used, kept as the single source of truth.
-    pub const DEFAULT_PADDING: f32 = crate::grid::PANE_PADDING;
+    /// The default gap between the grid and every edge of its pane, in
+    /// logical pixels; `[grid] padding` changes it.
+    ///
+    /// A terminal that starts its first column on the window's own border
+    /// reads as clipped rather than as full: the prompt sits against the frame
+    /// with nowhere for a descender or a box-drawing glyph to go. This is the
+    /// smallest gap; the leftover from rounding the pane down to whole cells
+    /// is added to it.
+    pub const DEFAULT_PADDING: f32 = 8.0;
     /// More than this and a small pane has no grid left.
     pub const MAX_PADDING: f32 = 64.0;
-
-    /// A padding clamped into the usable range.
-    pub fn clamp_padding(padding: f32) -> f32 {
-        if padding.is_nan() {
-            return Self::DEFAULT_PADDING;
-        }
-        padding.clamp(0.0, Self::MAX_PADDING)
-    }
 }
 
 impl Default for Grid {
@@ -507,19 +499,36 @@ fn style_name(style: sprite_term::CursorStyle) -> &'static str {
     }
 }
 
+/// A value inside `range`, or `default` when it is not a number at all. The
+/// one place Sprite decides what a numeric setting becomes when it cannot be
+/// used as given, whether it arrived from a file or from a keystroke.
+pub(crate) fn clamp_or_default(
+    value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+) -> f32 {
+    if value.is_nan() {
+        default
+    } else {
+        value.clamp(*range.start(), *range.end())
+    }
+}
+
 /// Reads a numeric setting and clamps it into range, saying so.
 ///
 /// Every number setting shares this shape: an integer is a number too (TOML
 /// tells them apart and a person should not have to); a value outside
-/// `range` is clamped with a complaint naming the range; a non-number keeps
-/// the default with a complaint. `None` means unset or unusable — either way
-/// the caller leaves its default alone. `setting` is the dotted name shown
-/// in complaints, such as `"font.size"`, whose last segment is the TOML key.
+/// `range` is clamped with a complaint naming the range; `nan` cannot be
+/// clamped, so it keeps `default` with the same complaint; a non-number
+/// keeps the default with a complaint. `None` means unset or unusable —
+/// either way the caller leaves its default alone. `setting` is the dotted
+/// name shown in complaints, such as `"font.size"`, whose last segment is
+/// the TOML key.
 fn read_clamped(
     section: &toml::Value,
     setting: &str,
     range: std::ops::RangeInclusive<f32>,
-    clamp: impl Fn(f32) -> f32,
+    default: f32,
     complaints: &mut Complaints,
 ) -> Option<f32> {
     let key = setting.rsplit_once('.').map_or(setting, |(_, key)| key);
@@ -530,8 +539,15 @@ fn read_clamped(
     {
         Some(number) => {
             let asked = number as f32;
-            let clamped = clamp(asked);
-            if (clamped - asked).abs() > f32::EPSILON {
+            let clamped = clamp_or_default(asked, range.clone(), default);
+            if asked.is_nan() || (clamped - asked).abs() > f32::EPSILON {
+                // TOML spells not-a-number `nan`; `{asked}` would print `NaN`,
+                // which the complaint's `contains("nan")` check would miss.
+                let asked = if asked.is_nan() {
+                    "nan".to_owned()
+                } else {
+                    asked.to_string()
+                };
                 complaints.0.push(format!(
                     "{setting} {asked} is outside {}..={}; using {clamped}",
                     range.start(),
@@ -652,7 +668,7 @@ impl Settings {
                 section,
                 "font.size",
                 Font::MIN_SIZE..=Font::MAX_SIZE,
-                Font::clamp_size,
+                Font::DEFAULT_SIZE,
                 &mut complaints,
             ) {
                 settings.font.size = size;
@@ -661,7 +677,7 @@ impl Settings {
                 section,
                 "font.line_height",
                 Font::MIN_LINE_HEIGHT..=Font::MAX_LINE_HEIGHT,
-                Font::clamp_line_height,
+                Font::DEFAULT_LINE_HEIGHT,
                 &mut complaints,
             ) {
                 settings.font.line_height = ratio;
@@ -673,7 +689,7 @@ impl Settings {
                 section,
                 "grid.padding",
                 0.0..=Grid::MAX_PADDING,
-                Grid::clamp_padding,
+                Grid::DEFAULT_PADDING,
                 &mut complaints,
             )
         {
@@ -793,8 +809,9 @@ impl Settings {
 
         match document.get("highlights") {
             None => {}
-            Some(toml::Value::Table(groups)) => {
-                for (name, entry) in groups {
+            Some(toml::Value::Table(table)) => {
+                let mut groups = Vec::new();
+                for (name, entry) in table {
                     let Some(fields) = entry.as_table() else {
                         complaints.0.extend(wrong_type(
                             Some(entry),
@@ -842,12 +859,11 @@ impl Settings {
                             _ => complaints.0.push(format!("{setting} is not a highlight setting; ignoring it")),
                         }
                     }
-                    settings.highlights.groups.push((name.clone(), style));
+                    groups.push((name.clone(), style));
                 }
-                // Sorted by name, so the order a file happens to be written in
-                // does not change what Sprite does with it, and so lookups can
-                // binary-search.
-                settings.highlights.groups.sort_by(|a, b| a.0.cmp(&b.0));
+                // Sorted on the way in, so the order a file happens to be
+                // written in does not change what Sprite does with it.
+                settings.highlights = Highlights::from_groups(groups);
             }
             other => complaints.0.extend(wrong_type(
                 other,
@@ -1139,6 +1155,14 @@ mod tests {
     }
 
     #[test]
+    fn clamp_or_default_holds_a_value_in_range_and_replaces_nan() {
+        assert_eq!(clamp_or_default(10.0, 6.0..=72.0, 14.0), 10.0);
+        assert_eq!(clamp_or_default(2.0, 6.0..=72.0, 14.0), 6.0);
+        assert_eq!(clamp_or_default(100.0, 6.0..=72.0, 14.0), 72.0);
+        assert_eq!(clamp_or_default(f32::NAN, 6.0..=72.0, 14.0), 14.0);
+    }
+
+    #[test]
     fn a_nonsense_family_falls_back_rather_than_refusing_to_start() {
         assert_eq!(parsed("[font]\nfamily = \"\"\n").font.family, None);
         assert!(complaints("[font]\nfamily = \"\"\n")[0].contains("empty"));
@@ -1181,6 +1205,13 @@ mod tests {
         );
         assert!(complaints("[font]\nline_height = \"tall\"\n")[0].contains("must be a number"));
 
+        // TOML spells not-a-number `nan`; it can neither be clamped nor used.
+        assert_eq!(
+            parsed("[font]\nline_height = nan\n").font.line_height,
+            Font::DEFAULT_LINE_HEIGHT
+        );
+        assert!(complaints("[font]\nline_height = nan\n")[0].contains("nan"));
+
         assert_eq!(
             Settings::default().font.line_height,
             Font::DEFAULT_LINE_HEIGHT
@@ -1207,6 +1238,12 @@ mod tests {
             Grid::DEFAULT_PADDING
         );
         assert!(complaints("[grid]\npadding = \"wide\"\n")[0].contains("must be a number"));
+
+        assert_eq!(
+            parsed("[grid]\npadding = nan\n").grid.padding,
+            Grid::DEFAULT_PADDING
+        );
+        assert!(complaints("[grid]\npadding = nan\n")[0].contains("nan"));
 
         assert_eq!(Settings::default().grid.padding, Grid::DEFAULT_PADDING);
         assert_eq!(
@@ -1340,6 +1377,33 @@ mod tests {
             complaints[0].contains("highlights must be"),
             "{complaints:?}"
         );
+    }
+
+    #[test]
+    fn from_groups_sorts_so_lookups_can_binary_search() {
+        let highlights = Highlights::from_groups(vec![
+            ("Keyword".to_owned(), HighlightStyle::default()),
+            (
+                "Comment".to_owned(),
+                HighlightStyle {
+                    italic: Some(true),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert_eq!(highlights.groups[0].0, "Comment");
+        assert_eq!(
+            highlights.get("Comment").and_then(|style| style.italic),
+            Some(true)
+        );
+        assert!(highlights.get("Keyword").is_some());
+    }
+
+    #[test]
+    fn an_empty_highlights_table_prints_as_a_comment_line() {
+        let printed = Settings::default().to_toml();
+        assert!(printed.contains("# no highlight groups are styled\n"));
+        assert!(!printed.contains("[highlights]"));
     }
 
     #[test]
