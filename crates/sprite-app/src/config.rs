@@ -164,8 +164,10 @@ pub struct HighlightStyle {
 /// each cell belongs to, so no selector language is needed here.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Highlights {
-    /// Sorted by name, so file order is not meaning.
-    pub groups: Vec<(String, HighlightStyle)>,
+    /// Sorted by name, so file order is not meaning. Private because the sort
+    /// is the invariant `get` binary-searches on, and only
+    /// [`Highlights::from_groups`] establishes it.
+    groups: Vec<(String, HighlightStyle)>,
 }
 
 impl Highlights {
