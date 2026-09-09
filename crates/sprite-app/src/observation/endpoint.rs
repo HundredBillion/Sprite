@@ -458,8 +458,9 @@ pub(crate) fn sweep_dead_sockets(directory: &Path) {
         // window that accepts and drops connections never lets happen in
         // practice. A window that is alive accepts, and is not disturbed by a
         // connection that is immediately dropped. Any other error — a machine
-        // out of descriptors, a file that is not a socket — proves nothing, and
-        // a live window's socket is worth more than a tidy directory.
+        // out of descriptors, a path the socket layer cannot address — proves
+        // nothing, and a live window's socket is worth more than a tidy
+        // directory.
         if let Err(error) = UnixStream::connect(&path)
             && error.kind() == std::io::ErrorKind::ConnectionRefused
         {
@@ -995,9 +996,14 @@ mod tests {
         let scratch = Scratch::new();
         let directory = scratch.path().join("sockets");
         fs::create_dir_all(&directory).expect("dir");
-        // A regular file with the socket suffix: connecting fails, but not
-        // with "refused", so the sweep must not touch it.
-        let odd = directory.join("not-a-socket.sock");
+        // A `.sock` name too long for a socket address: connecting fails
+        // before any syscall with "path must be shorter than SUN_LEN", so it
+        // is not a refusal and the sweep must not touch it. A name is used
+        // rather than a regular file because "not a socket" is not a portable
+        // non-refusal — Linux's connect reports refused for a regular file,
+        // macOS reports not-a-socket — whereas the length check is Rust's own,
+        // ahead of the kernel, and identical on both.
+        let odd = directory.join(format!("{}.sock", "x".repeat(120)));
         fs::write(&odd, b"").expect("write");
         // A socket nobody listens on any more: refused, so removed.
         let dead = directory.join("dead.sock");
