@@ -29,13 +29,6 @@ pub struct Description {
     pub root: Element,
 }
 
-impl Description {
-    /// The grid this description opens, when its root is one.
-    pub fn grid(&self) -> Option<GridSize> {
-        self.root.grid
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
     Box,
@@ -221,6 +214,14 @@ fn element(
         if text.is_some() || svg.is_some() {
             return Err(Refusal::Malformed(
                 "a grid has no text or svg; its cells arrive as rows".to_owned(),
+            ));
+        }
+        // A grid's wrapper is sized and placed by the pane, so a utility token
+        // meant for a box would be read and then ignored; its colours are not,
+        // and they arrive as `bg` and `color`.
+        if !style.is_empty() {
+            return Err(Refusal::Malformed(
+                "a grid root takes bg and color, not style".to_owned(),
             ));
         }
         let dimension = |key: &str, max: u16| -> Result<u16, Refusal> {
@@ -449,23 +450,22 @@ mod tests {
     #[test]
     fn a_grid_is_a_root_with_a_size_and_nothing_inside() {
         let grid = parsed(
-            json!({ "version": 1, "root": { "kind": "grid", "cols": 80, "rows": 24, "style": "p_1", "bg": "terminal.background" } }),
+            json!({ "version": 1, "root": { "kind": "grid", "cols": 80, "rows": 24, "bg": "terminal.background" } }),
         );
         assert_eq!(grid.description.root.kind, Kind::Grid);
         assert_eq!(
-            grid.description.grid(),
+            grid.description.root.grid,
             Some(GridSize { cols: 80, rows: 24 })
         );
-        // A grid root's style and bg are kept, not dropped for being a grid:
-        // they dress the wrapper the cell box sits in.
-        assert_eq!(grid.description.root.style, vec!["p_1"]);
+        // A grid root's bg is kept, not dropped for being a grid: it dresses
+        // the wrapper the cell box sits in.
         assert_eq!(
             grid.description.root.background,
             Some(ColorRef::Token("terminal.background".into()))
         );
 
         let no_grid = parsed(json!({ "version": 1, "root": { "kind": "box" } }));
-        assert_eq!(no_grid.description.grid(), None);
+        assert_eq!(no_grid.description.root.grid, None);
 
         for (root, needle) in [
             (json!({ "kind": "grid", "rows": 24 }), "cols"),
@@ -490,6 +490,22 @@ mod tests {
                 "{refusal:?} should mention {needle}"
             );
         }
+    }
+
+    #[test]
+    fn a_grid_root_refuses_style_but_keeps_bg_and_color() {
+        let refusal = refused(
+            json!({ "version": 1, "root": { "kind": "grid", "cols": 8, "rows": 2, "style": "p_1" } }),
+        );
+        assert_eq!(
+            refusal.reason(),
+            "malformed: a grid root takes bg and color, not style"
+        );
+        let grid = parsed(
+            json!({ "version": 1, "root": { "kind": "grid", "cols": 8, "rows": 2, "bg": "terminal.background", "color": "terminal.foreground" } }),
+        );
+        assert!(grid.description.root.background.is_some());
+        assert!(grid.description.root.color.is_some());
     }
 
     #[test]

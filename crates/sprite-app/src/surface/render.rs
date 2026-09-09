@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grid_roots_style_and_bg_dress_its_wrapper_exactly_as_a_box_roots_do() {
+    fn a_grid_roots_colours_dress_its_wrapper_exactly_as_a_box_roots_do() {
         let registry = TokenRegistry::new(&Colors::default());
         let style_of = |root: serde_json::Value| {
             let parsed = description::parse(&json!({ "version": 1, "root": root }), &registry)
@@ -233,10 +233,12 @@ mod tests {
             dressed.style().clone()
         };
 
+        // No `style` here: a grid root refuses utility tokens, because the
+        // pane sizes and places its wrapper. Its colours are all it dresses
+        // the wrapper with, and those go through the same styler a box uses.
         let dress = |kind: serde_json::Value| {
             let mut root = kind;
             let object = root.as_object_mut().expect("an object");
-            object.insert("style".into(), json!("p_2"));
             object.insert("bg".into(), json!("terminal.background"));
             object.insert("color".into(), json!("#c0caf5"));
             root

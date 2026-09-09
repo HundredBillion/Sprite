@@ -134,9 +134,7 @@ impl TerminalView {
         }
         self.line_height = settings.font.line_height;
         self.padding = settings.grid.padding;
-        // The theme may have restyled a highlight group; every grid lays its
-        // rows out again on its next frame.
-        self.refresh_grid_surfaces();
+        self.invalidate_grids();
         // Unconditional: the family may have changed under the same size, and
         // re-measuring a cell costs one text layout.
         self.set_font_size(settings.font.size, window, cx);
@@ -181,10 +179,6 @@ impl TerminalView {
         self.font_size = px(size);
         self.cell_height = px(crate::config::Font::cell_height(size, self.line_height));
         self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
-        // A new cell size changes how many columns and rows fit the same
-        // pixels, which is all `surface_element` compares before it stays
-        // quiet; without this a grid keeps the cell count of the old font.
-        self.refresh_grid_surfaces();
         // Forces `synchronise_size` to recompute rather than compare against a
         // grid measured with the old cell.
         self.size = None;
@@ -192,14 +186,13 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Makes every hosted grid Surface lay its rows out again and hear its
-    /// size again on the next frame. Idempotent, so the callers that reach it
+    /// The theme may have restyled a highlight group; every grid lays its rows
+    /// out again on its next frame. Idempotent, so the callers that reach it
     /// both ways cost nothing extra.
-    pub(super) fn refresh_grid_surfaces(&mut self) {
+    pub(super) fn invalidate_grids(&mut self) {
         for surface in self.surfaces.iter_mut() {
             if let Body::Grid { grid, .. } = &mut surface.body {
                 grid.invalidate();
-                surface.told_size = None;
             }
         }
     }

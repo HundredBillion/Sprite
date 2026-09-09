@@ -477,10 +477,12 @@ impl GridSurface {
                     self.attrs.insert(id, attrs);
                 }
                 for (name, id) in groups {
-                    let names = self.groups.entry(id).or_default();
-                    if !names.contains(&name) {
-                        names.push(name);
+                    // A relink moves the name: an editor that now maps `Comment`
+                    // to another attr id no longer means the old one by it.
+                    for names in self.groups.values_mut() {
+                        names.retain(|known| known != &name);
                     }
+                    self.groups.entry(id).or_default().push(name);
                 }
             }
             Op::Defaults(defaults) => {
@@ -929,6 +931,55 @@ mod tests {
             "@comment.lua was received second"
         );
         assert!(styled.bold, "and Comment's bold, which it does not set");
+    }
+
+    #[test]
+    fn relinking_a_group_moves_its_name_to_the_new_id() {
+        let mut grid = GridSurface::new(2, 1);
+        let theme = Highlights::from_groups(vec![(
+            "Comment".to_owned(),
+            HighlightStyle {
+                color: Some(Rgb {
+                    r: 0xff,
+                    g: 0,
+                    b: 0,
+                }),
+                ..Default::default()
+            },
+        )]);
+        grid.apply_all(
+            parse_ops(
+                &json!({ "type": "highlights", "define": { "1": {}, "2": {} }, "groups": { "Comment": 1 } }),
+            )
+            .expect("parses"),
+        )
+        .expect("applies");
+        grid.apply_all(
+            parse_ops(&json!({ "type": "highlights", "groups": { "Comment": 2 } }))
+                .expect("parses"),
+        )
+        .expect("applies");
+        grid.apply_all(
+            parse_ops(
+                &json!({ "type": "rows", "rows": [{ "row": 0, "cells": [["a", 1], ["b", 2]] }] }),
+            )
+            .expect("parses"),
+        )
+        .expect("applies");
+        let row = &grid.positioned_rows(&theme)[0];
+        assert_eq!(
+            row[0].style.foreground,
+            SnapshotColor::Default,
+            "id 1 is no longer Comment"
+        );
+        assert_eq!(
+            row[1].style.foreground,
+            SnapshotColor::Rgb(Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0
+            })
+        );
     }
 
     #[test]

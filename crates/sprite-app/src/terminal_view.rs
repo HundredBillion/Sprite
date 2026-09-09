@@ -273,19 +273,6 @@ impl TerminalView {
             }
         });
 
-        // One timer per pane, running whether or not the cursor blinks: it wakes
-        // twice a second, notices a steady cursor, and does nothing. Starting
-        // and stopping it as programs change the cursor would be more moving
-        // parts for less than a millisecond of work.
-        let blink_task = cx.spawn(async move |view, cx| {
-            loop {
-                cx.background_executor().timer(BLINK_INTERVAL).await;
-                if view.update(cx, |view, cx| view.tick_blink(cx)).is_err() {
-                    return;
-                }
-            }
-        });
-
         // A reload publishes a new `ActiveSettings`; this is how it reaches a
         // pane. Registered here so a pane created after a reload observes the
         // next one too, having been constructed from the current one.
@@ -328,9 +315,26 @@ impl TerminalView {
             blink_on: true,
             _events: event_task,
             _snapshots: snapshot_task,
-            _blink: blink_task,
+            _blink: Self::spawn_blink(cx),
             _settings: settings_subscription,
         }
+    }
+
+    /// One timer per pane, running whether or not anything blinks: it wakes
+    /// twice a second, notices a steady cursor, and does nothing. A failed
+    /// pane has one too, because a grid Surface hosted in it may blink.
+    ///
+    /// Starting and stopping it as programs change the cursor would be more
+    /// moving parts for less than a millisecond of work.
+    fn spawn_blink(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                if view.update(cx, |view, cx| view.tick_blink(cx)).is_err() {
+                    return;
+                }
+            }
+        })
     }
 
     /// A view that shows why it could not start.
@@ -390,7 +394,7 @@ impl TerminalView {
             blink_on: true,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
-            _blink: Task::ready(()),
+            _blink: Self::spawn_blink(cx),
             _settings: settings_subscription,
         }
     }

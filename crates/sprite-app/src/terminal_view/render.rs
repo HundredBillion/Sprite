@@ -209,16 +209,20 @@ impl Render for TerminalView {
         self.synchronise_size(window);
 
         let rows = self.laid_out_rows();
-        let (default_fg, default_bg) = self.default_colors();
-        let cell_width = self.cell_width;
-        let cell_height = self.cell_height;
+        // The one place the pane's cell, font and colours are read for a frame:
+        // the terminal's own rows and any hosted grid draw from the same values,
+        // so a grid cannot end up a font behind the text beside it.
+        let metrics = self.grid_metrics();
+        let (default_fg, default_bg) = metrics.defaults;
+        let cell_width = metrics.cell_width;
+        let cell_height = metrics.cell_height;
         // A blinking cursor is simply absent for half of each blink, which is
         // the whole of what blinking is; a steady one ignores the phase.
         let cursor = self
             .bundle
             .as_ref()
             .map(|bundle| bundle.render.cursor)
-            .filter(|cursor| self.blink_on || !cursor.blinking);
+            .filter(|cursor| metrics.blink_on || !cursor.blinking);
         let cursor_color = self
             .bundle
             .as_ref()
@@ -256,8 +260,6 @@ impl Render for TerminalView {
             .as_ref()
             .map(|bundle| std::sync::Arc::new(*bundle.render.palette.clone()));
 
-        let font_family = self.font_family.clone();
-        let font_size = self.font_size;
         let build = |pass: RowPass, rows: Vec<Vec<PositionedCell>>| {
             crate::grid_paint::GridPaint::new(crate::grid_paint::GridPaintSpec {
                 rows,
@@ -269,8 +271,8 @@ impl Render for TerminalView {
                 palette: palette.clone(),
                 cell_width,
                 cell_height,
-                font_family: font_family.clone(),
-                font_size,
+                font_family: metrics.font_family.clone(),
+                font_size: metrics.font_size,
             })
         };
         // One element for the whole grid rather than one per cell: see
@@ -291,7 +293,6 @@ impl Render for TerminalView {
             SurfaceLayers::default()
         } else {
             let registry = cx.global::<TokenRegistry>().clone();
-            let metrics = self.grid_metrics();
             let highlights = cx
                 .global::<crate::config::ActiveSettings>()
                 .0

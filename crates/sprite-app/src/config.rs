@@ -169,6 +169,13 @@ pub struct Highlights {
 }
 
 impl Highlights {
+    /// Sorted by name on the way in, which is what lets `get` binary-search;
+    /// build one this way rather than pushing onto `groups`.
+    pub fn from_groups(mut groups: Vec<(String, HighlightStyle)>) -> Self {
+        groups.sort_by(|a, b| a.0.cmp(&b.0));
+        Self { groups }
+    }
+
     pub fn get(&self, name: &str) -> Option<&HighlightStyle> {
         self.groups
             .binary_search_by(|(candidate, _)| candidate.as_str().cmp(name))
@@ -800,8 +807,9 @@ impl Settings {
 
         match document.get("highlights") {
             None => {}
-            Some(toml::Value::Table(groups)) => {
-                for (name, entry) in groups {
+            Some(toml::Value::Table(table)) => {
+                let mut groups = Vec::new();
+                for (name, entry) in table {
                     let Some(fields) = entry.as_table() else {
                         complaints.0.extend(wrong_type(
                             Some(entry),
@@ -849,12 +857,11 @@ impl Settings {
                             _ => complaints.0.push(format!("{setting} is not a highlight setting; ignoring it")),
                         }
                     }
-                    settings.highlights.groups.push((name.clone(), style));
+                    groups.push((name.clone(), style));
                 }
-                // Sorted by name, so the order a file happens to be written in
-                // does not change what Sprite does with it, and so lookups can
-                // binary-search.
-                settings.highlights.groups.sort_by(|a, b| a.0.cmp(&b.0));
+                // Sorted on the way in, so the order a file happens to be
+                // written in does not change what Sprite does with it.
+                settings.highlights = Highlights::from_groups(groups);
             }
             other => complaints.0.extend(wrong_type(
                 other,
@@ -1368,6 +1375,33 @@ mod tests {
             complaints[0].contains("highlights must be"),
             "{complaints:?}"
         );
+    }
+
+    #[test]
+    fn from_groups_sorts_so_lookups_can_binary_search() {
+        let highlights = Highlights::from_groups(vec![
+            ("Keyword".to_owned(), HighlightStyle::default()),
+            (
+                "Comment".to_owned(),
+                HighlightStyle {
+                    italic: Some(true),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert_eq!(highlights.groups[0].0, "Comment");
+        assert_eq!(
+            highlights.get("Comment").and_then(|style| style.italic),
+            Some(true)
+        );
+        assert!(highlights.get("Keyword").is_some());
+    }
+
+    #[test]
+    fn an_empty_highlights_table_prints_as_a_comment_line() {
+        let printed = Settings::default().to_toml();
+        assert!(printed.contains("# no highlight groups are styled\n"));
+        assert!(!printed.contains("[highlights]"));
     }
 
     #[test]

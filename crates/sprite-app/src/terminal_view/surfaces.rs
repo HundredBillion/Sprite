@@ -44,8 +44,10 @@ pub(super) struct HostedSurface {
     focus: FocusHandle,
     /// A dock's requested width in logical pixels; unused elsewhere.
     pub(super) size: f32,
-    /// The last size the program was told, so an unchanged layout sends nothing.
-    pub(super) told_size: Option<(u32, u32)>,
+    /// The last `resize` event this Surface was sent, so the next frame sends
+    /// one only when the text would differ: a font change changes the cell
+    /// count in it, a colour-only reload changes nothing.
+    pub(super) told: Option<String>,
     /// For an overlay: who had the keyboard before it opened, to give it back.
     previous_focus: Option<FocusHandle>,
     /// Keeps the focus and blur listeners alive for as long as the Surface.
@@ -91,7 +93,7 @@ impl TerminalView {
             Position::Fill | Position::Dock => None,
         };
         let warnings = parsed.warnings;
-        let body = match parsed.description.grid() {
+        let body = match parsed.description.root.grid {
             Some(size) => Body::Grid {
                 grid: GridSurface::new(size.cols, size.rows),
                 root: parsed.description.root,
@@ -104,7 +106,7 @@ impl TerminalView {
             connection: connection.clone(),
             focus: focus.clone(),
             size: open.size,
-            told_size: None,
+            told: None,
             previous_focus,
             _focus_events: [on_focus, on_blur],
         };
@@ -130,7 +132,6 @@ impl TerminalView {
         document: serde_json::Value,
         cx: &mut Context<Self>,
     ) {
-        let parsed = description::parse(&document, cx.global::<TokenRegistry>());
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
             return;
         };
@@ -140,6 +141,9 @@ impl TerminalView {
             ));
             return;
         }
+        // Parsed only once the Surface is known to take a description, so a
+        // grid's refusal costs nothing.
+        let parsed = description::parse(&document, cx.global::<TokenRegistry>());
         match parsed {
             Ok(parsed) => {
                 surface.body = Body::Elements(parsed.description);
@@ -342,16 +346,16 @@ impl TerminalView {
             f32::from(size.width).round() as u32,
             f32::from(size.height).round() as u32,
         );
-        if surface.told_size != Some(told) {
-            surface.told_size = Some(told);
-            let event = match &surface.body {
-                Body::Grid { .. } => {
-                    let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
-                    event_grid_resize(told.0, told.1, cols, rows)
-                }
-                Body::Elements(_) => event_resize(told.0, told.1),
-            };
+        let event = match &surface.body {
+            Body::Grid { .. } => {
+                let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
+                event_grid_resize(told.0, told.1, cols, rows)
+            }
+            Body::Elements(_) => event_resize(told.0, told.1),
+        };
+        if surface.told.as_deref() != Some(event.as_str()) {
             surface.connection.send(&event);
+            surface.told = Some(event);
         }
         let body = match &mut surface.body {
             Body::Elements(description) => crate::surface::render::render(

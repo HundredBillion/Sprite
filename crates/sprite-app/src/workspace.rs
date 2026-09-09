@@ -1958,13 +1958,13 @@ mod tests {
         assert!(outcome.next_session.is_empty());
 
         let mut highlights = current.clone();
-        highlights.highlights.groups.push((
+        highlights.highlights = crate::config::Highlights::from_groups(vec![(
             "Comment".to_owned(),
             crate::config::HighlightStyle {
                 italic: Some(true),
                 ..Default::default()
             },
-        ));
+        )]);
         let outcome = classify(&current, &highlights);
         assert_eq!(outcome.live, vec!["highlights"]);
         assert!(outcome.next_session.is_empty());
