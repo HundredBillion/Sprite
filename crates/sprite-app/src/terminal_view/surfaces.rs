@@ -9,8 +9,8 @@ use super::*;
 use gpui::prelude::*;
 
 use gpui::{
-    AnyElement, Context, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
-    ScrollWheelEvent, Size, Window, div, px,
+    AnyElement, Context, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    MouseUpEvent, Pixels, ScrollWheelEvent, Size, Window, div, px,
 };
 
 use crate::config::Highlights;
@@ -409,6 +409,30 @@ impl TerminalView {
             )
             .on_scroll_wheel(
                 cx.listener(|_view, _event: &ScrollWheelEvent, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            // A release belongs to whoever saw the press. The terminal's own
+            // handlers below would copy a selection or send a key-up the
+            // child never saw the key-down of.
+            .on_key_up(cx.listener(|_view, _event: &KeyUpEvent, _window, cx| {
+                cx.stop_propagation();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_view, _event: &MouseUpEvent, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_view, _event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|_view, _event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                 }),
             )
