@@ -100,12 +100,12 @@ recommended.
    a missed dead socket costs a stale file, a removed live one costs a window
    its observation. This is the likely cause of the parallel-load flake.
 10. **The README says where the trust boundary is and what SVG `href` does:**
-    anything running in a pane inherits that pane's keys from its
-    environment, so a program you run in a pane can read what that window
-    shows and draw into any pane of that window (the Surface key is per
-    window and the pane id comes from the client's environment), and nothing
-    outside the window's process trees can; an SVG is rendered from the bytes given with no resource
-    directory, so an `href` to a file resolves to nothing.
+    anything running in a pane inherits that pane's keys from its environment,
+    so a program you run in a pane can read what that window shows and draw
+    into any pane of that window (the Surface key is per window and the pane
+    id comes from the client's environment), and nothing outside the window's
+    process trees can; an SVG is rendered from the bytes given with no
+    resource directory, so an `href` to a file resolves to nothing.
 
 ---
 
