@@ -265,6 +265,19 @@ takes the keyboard when it opens; the program hands it back with
 on separate sockets with separate keys: nothing that holds only the
 observation credentials can draw.
 
+What a Surface hears is what a terminal program hears. A key press arrives
+with the text it typed (`{"type":"input","key":"shift-1","text":"!"}`), so a
+program reads `text` for what the person typed and `key` for which key it
+was; a dead-key sequence or an input-method conversion arrives as text with
+no key once it is committed; and the paste shortcut delivers the clipboard
+as `{"type":"paste","text":"..."}` to the Surface, never to the shell
+underneath. With a Surface focused, the copy shortcut does nothing, since
+a Surface has no terminal selection to copy from. A grid Surface also
+hears the mouse in cells —
+`{"type":"mouse","button":"left","action":"press","modifiers":"S","row":3,"col":17}`
+— for every press, drag, release, and wheel turn, so an editor behind it can
+place its cursor and scroll.
+
 An `image` element's SVG is rendered from the bytes given, with no resource
 directory, so an `href` that points at a file resolves to nothing; embed
 what the picture needs.
