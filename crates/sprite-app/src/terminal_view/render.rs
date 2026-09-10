@@ -298,7 +298,16 @@ impl Render for TerminalView {
                 .0
                 .highlights
                 .clone();
-            self.surface_layers(allocated, &registry, &metrics, &highlights, cx)
+            let focused = window.focused(cx);
+            self.surface_layers(
+                allocated,
+                &registry,
+                &metrics,
+                &highlights,
+                focused.as_ref(),
+                preedit.as_deref(),
+                cx,
+            )
         };
 
         // Everything the terminal draws lives inside the grid box, which is

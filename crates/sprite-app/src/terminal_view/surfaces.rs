@@ -55,6 +55,17 @@ pub(super) struct HostedSurface {
     _focus_events: [gpui::Subscription; 2],
 }
 
+impl HostedSurface {
+    pub(super) fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
+    /// The connection that receives this Surface's input.
+    pub(super) fn connection(&self) -> &SurfaceConnection {
+        &self.connection
+    }
+}
+
 /// The Surfaces of one frame, already built, in the layers they paint.
 #[derive(Default)]
 pub(super) struct SurfaceLayers {
@@ -255,19 +266,36 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// The Surface holding the keyboard, if one does; `None` means the
+    /// terminal does. Only one focus handle is focused at a time, so the
+    /// first match is the only one.
+    pub(super) fn focused_surface(&self, window: &Window) -> Option<&HostedSurface> {
+        self.surfaces
+            .iter()
+            .find(|surface| surface.is_focused(window))
+    }
+
     /// Every hosted Surface as an element in its layer, each told its size if
     /// that changed since the last frame.
+    // `focused` and `preedit` widen this past clippy's default threshold; a
+    // parameter object would only hide that every argument here is already
+    // borrowed from the one frame `render` builds, not bundled state.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn surface_layers(
         &mut self,
         allocated: Size<Pixels>,
         registry: &TokenRegistry,
         metrics: &crate::surface::render::GridMetrics,
         highlights: &Highlights,
+        focused: Option<&FocusHandle>,
+        preedit: Option<&str>,
         cx: &mut Context<Self>,
     ) -> SurfaceLayers {
         let (left_width, right_width) = self.dock_widths(allocated);
         let fill = self.surfaces.fill.as_mut().map(|surface| {
-            Self::surface_element(surface, allocated, registry, metrics, highlights, cx, true)
+            Self::surface_element(
+                surface, allocated, registry, metrics, highlights, focused, preedit, cx, true,
+            )
         });
         let left = self.surfaces.left.as_mut().map(|surface| {
             let strip = Size {
@@ -281,7 +309,7 @@ impl TerminalView {
                 .w(strip.width)
                 .h_full()
                 .child(Self::surface_element(
-                    surface, strip, registry, metrics, highlights, cx, true,
+                    surface, strip, registry, metrics, highlights, focused, preedit, cx, true,
                 ))
                 .into_any_element()
         });
@@ -297,7 +325,7 @@ impl TerminalView {
                 .w(strip.width)
                 .h_full()
                 .child(Self::surface_element(
-                    surface, strip, registry, metrics, highlights, cx, true,
+                    surface, strip, registry, metrics, highlights, focused, preedit, cx, true,
                 ))
                 .into_any_element()
         });
@@ -315,7 +343,8 @@ impl TerminalView {
                     .items_center()
                     .justify_center()
                     .child(Self::surface_element(
-                        surface, allocated, registry, metrics, highlights, cx, false,
+                        surface, allocated, registry, metrics, highlights, focused, preedit, cx,
+                        false,
                     ))
                     .into_any_element()
             })
@@ -334,12 +363,15 @@ impl TerminalView {
     /// passes `false` so its wrapper is exactly its body's size, rather than
     /// filling — and so capturing every click and scroll over — the whole
     /// centring layer around it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn surface_element(
         surface: &mut HostedSurface,
         size: Size<Pixels>,
         registry: &TokenRegistry,
         metrics: &crate::surface::render::GridMetrics,
         highlights: &Highlights,
+        focused: Option<&FocusHandle>,
+        preedit: Option<&str>,
         cx: &mut Context<Self>,
         fills: bool,
     ) -> AnyElement {
@@ -369,6 +401,47 @@ impl TerminalView {
                 crate::surface::render::render_grid(grid, highlights, metrics)
             }
         };
+        // A composition belongs to whoever holds the keyboard. A grid shows
+        // it at its cursor, as the terminal shows its own; an element Surface
+        // has no cursor and shows nothing until the commit.
+        let holds_keyboard = focused == Some(&surface.focus);
+        let composition = match (&surface.body, preedit) {
+            (Body::Grid { grid, .. }, Some(text)) if holds_keyboard => {
+                let cursor = grid.cursor_snapshot();
+                let (default_fg, default_bg) = grid.default_colors(metrics.defaults);
+                Some(
+                    div()
+                        .absolute()
+                        .top(px(f32::from(cursor.row) * f32::from(metrics.cell_height)))
+                        .left(px(f32::from(cursor.column) * f32::from(metrics.cell_width)))
+                        .h(metrics.cell_height)
+                        .bg(gpui::rgb(crate::grid_paint::pack(default_fg)))
+                        .text_color(gpui::rgb(crate::grid_paint::pack(default_bg)))
+                        .underline()
+                        .child(gpui::SharedString::from(text.to_owned())),
+                )
+            }
+            _ => None,
+        };
+        // Installs the view's input handler for this Surface's focus during
+        // paint, the only point GPUI accepts one; the view routes a commit
+        // to whichever focus is held. `canvas` reaches paint from a `div`,
+        // and its bounds are the Surface's own, which is where the candidate
+        // window belongs.
+        let focus_for_input = surface.focus.clone();
+        let entity_for_input = cx.entity();
+        let input_handler = gpui::canvas(
+            |_bounds, _window, _cx| {},
+            move |bounds, (), window, cx| {
+                window.handle_input(
+                    &focus_for_input,
+                    gpui::ElementInputHandler::new(bounds, entity_for_input),
+                    cx,
+                );
+            },
+        )
+        .absolute()
+        .inset_0();
         let keys = surface.connection.clone();
         let focus = surface.focus.clone();
         let mut wrapper = div();
@@ -454,7 +527,10 @@ impl TerminalView {
                     cx.stop_propagation();
                 }),
             )
+            .relative()
             .child(body)
+            .children(composition)
+            .child(input_handler)
             .into_any_element()
     }
 }

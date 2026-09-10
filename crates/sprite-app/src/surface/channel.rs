@@ -863,6 +863,12 @@ pub fn event_paste(text: &str) -> String {
     json!({ "type": "paste", "text": text }).to_string()
 }
 
+/// Text an input method committed while a Surface held the keyboard: a dead
+/// key sequence or a conversion. No `key`, because no single key produced it.
+pub fn event_text(text: &str) -> String {
+    json!({ "type": "input", "text": text }).to_string()
+}
+
 pub fn event_resize(width: u32, height: u32) -> String {
     json!({ "type": "resize", "width": width, "height": height }).to_string()
 }
@@ -1634,5 +1640,12 @@ mod tests {
             serde_json::from_str::<Value>(&event).expect("json"),
             json!({"type":"paste","text":"ls -la\n<b>"})
         );
+    }
+
+    #[test]
+    fn a_committed_composition_is_text_without_a_key() {
+        let value: Value = serde_json::from_str(&event_text("é")).expect("json");
+        assert_eq!(value, json!({"type":"input","text":"é"}));
+        assert!(value.get("key").is_none());
     }
 }
