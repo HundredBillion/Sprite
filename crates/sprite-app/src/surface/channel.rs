@@ -1603,10 +1603,12 @@ mod tests {
             let value: Value = serde_json::from_str(&event).expect("json");
             assert!(value["type"].is_string(), "{event}");
         }
-        // `json!` in this workspace preserves source order (`indexmap` is
-        // pulled in transitively), rather than the sorted order a default
-        // build gives, so the two checks compare parsed values rather than
-        // exact text.
+        // `json!` in this workspace preserves source order, because the
+        // workspace asks `serde_json` for `preserve_order`: the order is
+        // Sprite's own guarantee, so an exact-text check below is legitimate
+        // and not a hostage to some other crate's feature list. The two
+        // checks that follow compare parsed values anyway, since what they
+        // are about is the shape rather than the order.
         assert_eq!(
             serde_json::from_str::<Value>(&event_opened(SurfaceId(7))).expect("json"),
             json!({"surface":7,"type":"opened"})
