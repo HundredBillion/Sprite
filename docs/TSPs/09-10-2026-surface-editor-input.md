@@ -25,7 +25,7 @@
 
 ## File Structure
 
-- `crates/sprite-app/src/surface/channel.rs` — event writers. Gains `text` on `event_input`, and `event_text`, `event_paste`, `event_mouse`, `neovim_modifiers`. Tests beside the existing `events_are_one_json_line_each` test.
+- `crates/sprite-app/src/surface/channel.rs` — event writers. Gains `text` on `event_input`, and `event_text`, `event_paste`, `event_mouse`, `neovim_modifiers`. Tests beside the existing `every_event_is_one_json_line_with_a_type` test.
 - `crates/sprite-app/src/surface/render.rs` — `grid_cell_under` (a pointer position to a clamped grid cell, wrapping `grid::cell_at`) and `wheel_turns` (accumulated rows to a direction and a count). Tests in its existing `mod tests`.
 - `crates/sprite-app/src/terminal_view/surfaces.rs` — the wrapper: key path with text and composition guard, paste routing, input-handler installation per Surface, preedit at a grid cursor, mouse and wheel handlers for grids, per-Surface `origin` and wheel accumulators on `HostedSurface`.
 - `crates/sprite-app/src/terminal_view/input.rs` — `replace_text_in_range` and `bounds_for_range` route to the focused Surface when one holds the keyboard.
@@ -57,9 +57,9 @@ Decisions made here so the executor does not re-decide them:
 - Consumes: `gpui::Keystroke { key, key_char: Option<String>, modifiers }`; `application_shortcut(&Keystroke) -> Option<Shortcut>` with `Shortcut::{Copy, Paste}` from `terminal_view/input.rs`; `SurfaceConnection::send(&str)`; `cx.read_from_clipboard()` on `Context<TerminalView>`.
 - Produces: `pub fn event_input(keystroke: &gpui::Keystroke) -> String` now emitting `text` when `key_char` is `Some` and non-empty; `pub fn event_paste(text: &str) -> String` emitting `{"type":"paste","text":T}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
-In `crates/sprite-app/src/surface/channel.rs`, inside `mod tests`, after `events_are_one_json_line_each`:
+In `crates/sprite-app/src/surface/channel.rs`, inside `mod tests`, after `every_event_is_one_json_line_with_a_type`:
 
 ```rust
     fn keystroke(key: &str, key_char: Option<&str>, modifiers: gpui::Modifiers) -> gpui::Keystroke {
@@ -109,12 +109,12 @@ In `crates/sprite-app/src/surface/channel.rs`, inside `mod tests`, after `events
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline -- surface::channel::tests::a_key_that_produced a_paste_is_one_line`
 Expected: compile error, `cannot find function event_paste`.
 
-- [ ] **Step 3: Write the event writers**
+- [x] **Step 3: Write the event writers**
 
 Replace `event_input` in `crates/sprite-app/src/surface/channel.rs`:
 
@@ -140,12 +140,12 @@ pub fn event_paste(text: &str) -> String {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p sprite-app --locked --offline -- surface::channel::tests`
 Expected: all channel tests PASS, including the three new ones.
 
-- [ ] **Step 5: Route the wrapper's shortcuts and keep the existing key path**
+- [x] **Step 5: Route the wrapper's shortcuts and keep the existing key path**
 
 In `crates/sprite-app/src/terminal_view/surfaces.rs`, replace the `on_key_down` listener in `surface_element` (currently lines 388-401):
 
@@ -190,12 +190,12 @@ use super::input::{Shortcut, application_shortcut};
 
 and `event_paste` to the `crate::surface::channel` import list. `view` is now used, so drop the leading underscore if the closure had one.
 
-- [ ] **Step 6: Build, lint, and run the whole crate's tests**
+- [x] **Step 6: Build, lint, and run the whole crate's tests**
 
 Run: `cargo clippy -p sprite-app --all-targets --locked --offline -- -D warnings && cargo test -p sprite-app --locked --offline`
 Expected: no warnings; all tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/channel.rs crates/sprite-app/src/terminal_view/surfaces.rs
