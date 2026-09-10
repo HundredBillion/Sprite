@@ -9,8 +9,9 @@ use super::*;
 use gpui::prelude::*;
 
 use gpui::{
-    AnyElement, Context, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, ScrollWheelEvent, Size, Window, div, px,
+    AnyElement, Context, ElementInputHandler, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, ScrollWheelEvent, SharedString, Size, Window, canvas,
+    div, px, rgb,
 };
 
 use crate::config::Highlights;
@@ -363,6 +364,9 @@ impl TerminalView {
     /// passes `false` so its wrapper is exactly its body's size, rather than
     /// filling — and so capturing every click and scroll over — the whole
     /// centring layer around it.
+    // `focused` and `preedit` widen this past clippy's default threshold; a
+    // parameter object would only hide that every argument here is already
+    // borrowed from the one frame `render` builds, not bundled state.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn surface_element(
         surface: &mut HostedSurface,
@@ -415,10 +419,10 @@ impl TerminalView {
                         .top(px(f32::from(cursor.row) * f32::from(metrics.cell_height)))
                         .left(px(f32::from(cursor.column) * f32::from(metrics.cell_width)))
                         .h(metrics.cell_height)
-                        .bg(gpui::rgb(crate::grid_paint::pack(default_fg)))
-                        .text_color(gpui::rgb(crate::grid_paint::pack(default_bg)))
+                        .bg(rgb(crate::grid_paint::pack(default_fg)))
+                        .text_color(rgb(crate::grid_paint::pack(default_bg)))
                         .underline()
-                        .child(gpui::SharedString::from(text.to_owned())),
+                        .child(SharedString::from(text.to_owned())),
                 )
             }
             _ => None,
@@ -430,12 +434,12 @@ impl TerminalView {
         // window belongs.
         let focus_for_input = surface.focus.clone();
         let entity_for_input = cx.entity();
-        let input_handler = gpui::canvas(
+        let input_handler = canvas(
             |_bounds, _window, _cx| {},
             move |bounds, (), window, cx| {
                 window.handle_input(
                     &focus_for_input,
-                    gpui::ElementInputHandler::new(bounds, entity_for_input),
+                    ElementInputHandler::new(bounds, entity_for_input),
                     cx,
                 );
             },

@@ -229,6 +229,13 @@ impl Render for TerminalView {
             .and_then(|bundle| bundle.render.cursor_color);
         let status = self.status.clone();
         let preedit = self.preedit.clone();
+        // The terminal draws its own composition only when the terminal holds
+        // the keyboard: a focused Surface either draws its own (a grid) or
+        // must show nothing until the commit (an element), so showing it here
+        // too would either duplicate it or show it where it does not belong.
+        let terminal_preedit = preedit
+            .clone()
+            .filter(|_| self.focused_surface(window).is_none());
         let focus_for_input = self.focus.clone();
         let entity_for_input = cx.entity();
         let entity_for_bounds = cx.entity();
@@ -331,7 +338,7 @@ impl Render for TerminalView {
             // Composition is drawn at the cursor and nowhere else. It is
             // view state: the terminal has not been told anything about
             // it.
-            .children(preedit.map(|text| {
+            .children(terminal_preedit.map(|text| {
                 div()
                     .absolute()
                     .top(px(

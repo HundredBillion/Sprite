@@ -1644,7 +1644,9 @@ mod tests {
 
     #[test]
     fn a_committed_composition_is_text_without_a_key() {
-        let value: Value = serde_json::from_str(&event_text("é")).expect("json");
+        let event = event_text("é");
+        assert!(!event.contains('\n'), "{event}");
+        let value: Value = serde_json::from_str(&event).expect("json");
         assert_eq!(value, json!({"type":"input","text":"é"}));
         assert!(value.get("key").is_none());
     }
