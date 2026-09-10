@@ -869,6 +869,38 @@ pub fn event_text(text: &str) -> String {
     json!({ "type": "input", "text": text }).to_string()
 }
 
+/// The pointer on a grid Surface, in cells. `button` is `left`, `right`,
+/// `middle`, or `wheel`; `action` is `press`, `drag`, or `release` for a
+/// button and `up`, `down`, `left`, or `right` for the wheel. Written in the
+/// order a reader scans: what, where.
+pub fn event_mouse(button: &str, action: &str, modifiers: &str, row: u16, col: u16) -> String {
+    json!({
+        "type": "mouse", "button": button, "action": action,
+        "modifiers": modifiers, "row": row, "col": col,
+    })
+    .to_string()
+}
+
+/// Modifiers as Neovim's `nvim_input_mouse` spells them: one letter each,
+/// joined by dashes, in Neovim's own order. `D` is the platform key, which
+/// Neovim calls "command" on a Mac and "super" elsewhere.
+pub fn neovim_modifiers(modifiers: &gpui::Modifiers) -> String {
+    let mut letters = Vec::with_capacity(4);
+    if modifiers.control {
+        letters.push("C");
+    }
+    if modifiers.shift {
+        letters.push("S");
+    }
+    if modifiers.alt {
+        letters.push("A");
+    }
+    if modifiers.platform {
+        letters.push("D");
+    }
+    letters.join("-")
+}
+
 pub fn event_resize(width: u32, height: u32) -> String {
     json!({ "type": "resize", "width": width, "height": height }).to_string()
 }
@@ -1649,5 +1681,31 @@ mod tests {
         let value: Value = serde_json::from_str(&event).expect("json");
         assert_eq!(value, json!({"type":"input","text":"é"}));
         assert!(value.get("key").is_none());
+    }
+
+    #[test]
+    fn a_mouse_event_names_button_action_modifiers_and_cell() {
+        assert_eq!(
+            event_mouse("left", "press", "C-S", 3, 17),
+            r#"{"type":"mouse","button":"left","action":"press","modifiers":"C-S","row":3,"col":17}"#
+        );
+    }
+
+    #[test]
+    fn modifiers_are_spelled_as_neovim_spells_them() {
+        let all = gpui::Modifiers {
+            control: true,
+            alt: true,
+            shift: true,
+            platform: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(neovim_modifiers(&all), "C-S-A-D");
+        assert_eq!(neovim_modifiers(&gpui::Modifiers::default()), "");
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(neovim_modifiers(&shift), "S");
     }
 }

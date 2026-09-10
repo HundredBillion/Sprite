@@ -10,14 +10,15 @@ use gpui::prelude::*;
 
 use gpui::{
     AnyElement, Context, ElementInputHandler, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, ScrollWheelEvent, SharedString, Size, Window, canvas,
-    div, px, rgb,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, SharedString, Size,
+    Window, canvas, div, px, rgb,
 };
 
 use crate::config::Highlights;
 use crate::surface::channel::{
     FocusTarget, Open, Position, SurfaceConnection, event_blur, event_closed, event_focus,
-    event_grid_resize, event_input, event_paste, event_refused, event_resize, event_warning,
+    event_grid_resize, event_input, event_mouse, event_paste, event_refused, event_resize,
+    event_warning, neovim_modifiers,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -54,6 +55,14 @@ pub(super) struct HostedSurface {
     previous_focus: Option<FocusHandle>,
     /// Keeps the focus and blur listeners alive for as long as the Surface.
     _focus_events: [gpui::Subscription; 2],
+    /// Where this Surface's box landed in window coordinates, learned during
+    /// paint: mouse positions arrive in window coordinates, and only the laid
+    /// out element knows where it is. `None` until the first paint.
+    origin: Option<gpui::Point<Pixels>>,
+    /// Sub-cell wheel remainders, one per axis, so a trackpad's pixel deltas
+    /// become whole cells exactly as they do for the terminal.
+    wheel_rows: crate::grid::ScrollAccumulator,
+    wheel_cols: crate::grid::ScrollAccumulator,
 }
 
 impl HostedSurface {
@@ -122,6 +131,9 @@ impl TerminalView {
             told: None,
             previous_focus,
             _focus_events: [on_focus, on_blur],
+            origin: None,
+            wheel_rows: crate::grid::ScrollAccumulator::default(),
+            wheel_cols: crate::grid::ScrollAccumulator::default(),
         };
         self.surfaces.place(open.position, open.side, hosted)?;
         for warning in warnings {
@@ -134,6 +146,72 @@ impl TerminalView {
         self.size = None;
         cx.notify();
         Ok(())
+    }
+
+    /// Reports the pointer on a grid Surface, in cells. Nothing is sent for
+    /// an element Surface, whose buttons report by name, or before the box
+    /// has been painted and so has no origin.
+    fn report_grid_mouse(
+        &mut self,
+        id: SurfaceId,
+        position: gpui::Point<Pixels>,
+        button: &str,
+        action: &str,
+        modifiers: &gpui::Modifiers,
+    ) {
+        let metrics = self.grid_metrics();
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let (Body::Grid { grid, .. }, Some(origin)) = (&surface.body, surface.origin) else {
+            return;
+        };
+        let Some((row, col)) = crate::surface::render::grid_cell_under(
+            position,
+            origin,
+            &metrics,
+            grid.cols(),
+            grid.rows(),
+        ) else {
+            return;
+        };
+        surface.connection.send(&event_mouse(
+            button,
+            action,
+            &neovim_modifiers(modifiers),
+            row,
+            col,
+        ));
+    }
+
+    /// Turns a wheel gesture on a grid Surface into `mouse` events, one per
+    /// whole cell on each axis.
+    fn report_grid_wheel(&mut self, id: SurfaceId, event: &ScrollWheelEvent) {
+        let metrics = self.grid_metrics();
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        if !matches!(surface.body, Body::Grid { .. }) {
+            return;
+        }
+        let (dx, dy) = match event.delta {
+            gpui::ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
+            gpui::ScrollDelta::Lines(delta) => (
+                delta.x * f32::from(metrics.cell_width),
+                delta.y * f32::from(metrics.cell_height),
+            ),
+        };
+        let rows = surface.wheel_rows.accumulate(dy, metrics.cell_height);
+        let cols = surface.wheel_cols.accumulate(dx, metrics.cell_width);
+        let turns = [
+            crate::surface::render::wheel_turns(rows, "up", "down"),
+            crate::surface::render::wheel_turns(cols, "left", "right"),
+        ];
+        for (direction, count) in turns.into_iter().flatten() {
+            for _ in 0..count {
+                self.report_grid_mouse(id, event.position, "wheel", direction, &event.modifiers);
+            }
+        }
     }
 
     /// Replaces a Surface's whole description. A description that does not
@@ -435,7 +513,17 @@ impl TerminalView {
         let focus_for_input = surface.focus.clone();
         let entity_for_input = cx.entity();
         let input_handler = canvas(
-            |_bounds, _window, _cx| {},
+            {
+                let entity_for_bounds = cx.entity();
+                let id = surface.id;
+                move |bounds, _window, cx| {
+                    entity_for_bounds.update(cx, |view, _cx| {
+                        if let Some(surface) = view.surfaces.get_mut(|surface| surface.id == id) {
+                            surface.origin = Some(bounds.origin);
+                        }
+                    });
+                }
+            },
             move |bounds, (), window, cx| {
                 window.handle_input(
                     &focus_for_input,
@@ -448,6 +536,7 @@ impl TerminalView {
         .inset_0();
         let keys = surface.connection.clone();
         let focus = surface.focus.clone();
+        let id = surface.id;
         let mut wrapper = div();
         if fills {
             wrapper = wrapper.size_full();
@@ -493,41 +582,87 @@ impl TerminalView {
                 keys.send(&event_input(&event.keystroke));
                 cx.stop_propagation();
             }))
-            // Clicking a Surface focuses it and is not also a click on the
-            // terminal underneath.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |_view, _event: &MouseDownEvent, window, cx| {
-                    window.focus(&focus);
-                    cx.stop_propagation();
-                }),
-            )
-            .on_scroll_wheel(
-                cx.listener(|_view, _event: &ScrollWheelEvent, _window, cx| {
-                    cx.stop_propagation();
-                }),
-            )
             // A release belongs to whoever saw the press. The terminal's own
             // handlers below would copy a selection or send a key-up the
             // child never saw the key-down of.
             .on_key_up(cx.listener(|_view, _event: &KeyUpEvent, _window, cx| {
                 cx.stop_propagation();
             }))
-            .on_mouse_up(
+            // Clicking a Surface focuses it and is not also a click on the
+            // terminal underneath. A grid also hears where: every press,
+            // drag, release, and wheel turn is reported in cells, so an
+            // editor behind it can place its cursor and scroll. An element
+            // Surface reports clicks by button name instead, in `render`.
+            .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_view, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    window.focus(&focus);
+                    view.report_grid_mouse(id, event.position, "left", "press", &event.modifiers);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|_view, _event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                    view.report_grid_mouse(id, event.position, "right", "press", &event.modifiers);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(|_view, _event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                    view.report_grid_mouse(id, event.position, "middle", "press", &event.modifiers);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
+                    let button = match event.pressed_button {
+                        Some(MouseButton::Left) => "left",
+                        Some(MouseButton::Right) => "right",
+                        Some(MouseButton::Middle) => "middle",
+                        _ => return,
+                    };
+                    view.report_grid_mouse(id, event.position, button, "drag", &event.modifiers);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                    view.report_grid_mouse(id, event.position, "left", "release", &event.modifiers);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                    view.report_grid_mouse(
+                        id,
+                        event.position,
+                        "right",
+                        "release",
+                        &event.modifiers,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                    view.report_grid_mouse(
+                        id,
+                        event.position,
+                        "middle",
+                        "release",
+                        &event.modifiers,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(
+                cx.listener(move |view, event: &ScrollWheelEvent, _window, cx| {
+                    view.report_grid_wheel(id, event);
                     cx.stop_propagation();
                 }),
             )
