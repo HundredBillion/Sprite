@@ -216,7 +216,7 @@ git commit -m "Carry the typed text on Surface key events and paste into the foc
 - Consumes: `TerminalView::preedit: Option<String>`; `TerminalView::focus: FocusHandle`; `HostedSurface { focus: FocusHandle, connection: SurfaceConnection, body: Body }`; `SurfaceHost::iter()` / `iter_mut()`; `GridSurface::cursor_snapshot() -> CursorSnapshot { row, column, .. }`; `gpui::ElementInputHandler::new(bounds, entity)`; `window.handle_input(&focus, handler, cx)`; `crate::grid_paint::pack`.
 - Produces: `pub fn event_text(text: &str) -> String` emitting `{"type":"input","text":T}`; `HostedSurface::is_focused(&self, window: &Window) -> bool`; `TerminalView::focused_surface(&self, window: &Window) -> Option<&HostedSurface>`; `surface_layers(.., focused: Option<&FocusHandle>, preedit: Option<&str>, ..)` and `surface_element(.., focused, preedit, ..)` with those two new parameters after `highlights`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/sprite-app/src/surface/channel.rs` `mod tests`:
 
@@ -229,12 +229,12 @@ In `crates/sprite-app/src/surface/channel.rs` `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p sprite-app --locked --offline -- a_committed_composition_is_text_without_a_key`
 Expected: compile error, `cannot find function event_text`.
 
-- [ ] **Step 3: Write the event writer**
+- [x] **Step 3: Write the event writer**
 
 After `event_paste` in `channel.rs`:
 
@@ -246,12 +246,12 @@ pub fn event_text(text: &str) -> String {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cargo test -p sprite-app --locked --offline -- a_committed_composition_is_text_without_a_key`
 Expected: PASS.
 
-- [ ] **Step 5: Let the view find the Surface that holds the keyboard**
+- [x] **Step 5: Let the view find the Surface that holds the keyboard**
 
 In `crates/sprite-app/src/terminal_view/surfaces.rs`, add to `impl HostedSurface` (create the block after the struct if none exists):
 
@@ -279,7 +279,7 @@ and to `impl TerminalView` in the same file:
     }
 ```
 
-- [ ] **Step 6: Route a commit and the candidate window to the focused Surface**
+- [x] **Step 6: Route a commit and the candidate window to the focused Surface**
 
 In `crates/sprite-app/src/terminal_view/input.rs`, replace `replace_text_in_range`:
 
@@ -354,7 +354,7 @@ use super::surfaces::Body;
 use crate::surface::channel::event_text;
 ```
 
-- [ ] **Step 7: Install the input handler on each Surface and draw a grid's preedit**
+- [x] **Step 7: Install the input handler on each Surface and draw a grid's preedit**
 
 In `crates/sprite-app/src/terminal_view/surfaces.rs`:
 
@@ -446,7 +446,7 @@ Then at the end of the builder chain, replace `.child(body)` with:
             .child(input_handler)
 ```
 
-- [ ] **Step 8: Pass the focused handle and the preedit from the view's render**
+- [x] **Step 8: Pass the focused handle and the preedit from the view's render**
 
 In `crates/sprite-app/src/terminal_view/render.rs`, find the `surface_layers(` call and add the two arguments. `preedit` is already cloned into a local near line 231; use it, and read the focused handle once:
 
@@ -465,12 +465,12 @@ In `crates/sprite-app/src/terminal_view/render.rs`, find the `surface_layers(` c
 
 Keep whatever the existing call passes for `allocated`, `registry`, `highlights`; only the two new arguments are added, in the positions the signature above gives them. If `preedit` is moved into the terminal's own preedit element later in the function, clone it before this call or take `as_deref()` from a clone.
 
-- [ ] **Step 9: Build, lint, and test**
+- [x] **Step 9: Build, lint, and test**
 
 Run: `cargo clippy -p sprite-app --all-targets --locked --offline -- -D warnings && cargo test -p sprite-app --locked --offline`
 Expected: no warnings; all tests PASS.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/channel.rs crates/sprite-app/src/terminal_view/input.rs crates/sprite-app/src/terminal_view/surfaces.rs crates/sprite-app/src/terminal_view/render.rs
