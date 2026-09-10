@@ -31,7 +31,7 @@
 - `crates/sprite-app/src/terminal_view/input.rs` — `replace_text_in_range` and `bounds_for_range` route to the focused Surface when one holds the keyboard.
 - `crates/sprite-app/src/terminal_view/render.rs` — passes the focused handle and the preedit into `surface_layers`.
 - `README.md` — "Drawing in a pane from a program" gains the three inputs.
-- `scripts/surface-grid-demo.sh` — unchanged; the by-hand proof reuses it as a dock with events teed to a file.
+- `scripts/surface-input-demo.sh` — new; the by-hand proof opens a grid Surface as a dock with it and tees the events to a file. `scripts/surface-grid-demo.sh` is unchanged and was the model for it.
 
 Decisions made here so the executor does not re-decide them:
 
@@ -942,3 +942,47 @@ git commit -m "Document what a Surface hears and add a demo that shows it"
 **Placeholders.** None; every code step shows the code.
 
 **Type consistency.** `event_input`, `event_paste`, `event_text`, `event_mouse`, `neovim_modifiers` in `channel.rs`; `grid_cell_under(position, origin, &GridMetrics, cols, rows) -> Option<(u16, u16)>` and `wheel_turns(rows, &'static str, &'static str) -> Option<(&'static str, u32)>` in `surface/render.rs`; `HostedSurface::{is_focused, connection}` and the `origin`, `wheel_rows`, `wheel_cols` fields; `TerminalView::{focused_surface, report_grid_mouse, report_grid_wheel}`; `surface_layers`/`surface_element` take `focused: Option<&FocusHandle>, preedit: Option<&str>` after `highlights`, and Task 3's `report_grid_wheel` reads `metrics.cell_width`/`cell_height` from `GridMetrics`. Task 2 uses `grid.default_colors(metrics.defaults)`, which exists at `grid.rs:683`.
+
+---
+
+## Amendments
+
+**2026-09-10, after the whole-branch review.** Reviewing the finished branch
+turned up one broken thing and three worth fixing before merge, all of them
+fixed on top of the four tasks.
+
+The composition path could not run at all. The Surface wrapper stopped every
+key it heard, and on macOS an input method is only ever given a key the
+application let go of, so a dead key or a letter typed in a Japanese or Chinese
+input mode arrived as an ordinary key event and nothing was ever marked. The
+wrapper now lets an ordinary key propagate, the way the terminal's own handler
+always has, and the terminal's key-down and key-up handlers return early unless
+the terminal itself holds the keyboard, so nothing is typed into the child that
+a Surface owns. Shortcuts and keys during a composition are still stopped. One
+limit stays, and the terminal has always lived with it: the key that *begins* a
+composition is still reported as a key event with no `text`, because the
+application is given any key that was expected to type something. Every key
+after it goes to the input method first, as the Global Constraint says.
+
+The mouse was heard by where the pointer was rather than by where the gesture
+began. A terminal selection dragged across a dock was reported to that dock as
+a drag it never pressed, and a drag that started in a dock and left it stopped
+being heard at the edge and never ended with a release. Each Surface now
+records the button of the press it saw, reports a drag or a release only for
+that button, and lets a gesture it did not start pass through untouched, so a
+selection carries on across a dock as it did before. A release outside the box
+reaches the Surface at the edge cell the position clamps to. Movement outside
+the box stays unreported, because GPUI delivers a move only while the pointer
+is over the element.
+
+The `"type"`-first guarantee rested on a feature gpui happened to enable; the
+workspace now asks `serde_json` for `preserve_order` itself, with no change to
+`Cargo.lock`. The rest were small: the one-line event roster now names the
+three new events, the wrapper binds the Surface id once, the README paragraph
+is rewrapped at the file's own 80 columns and its Keys table names the copy and
+paste shortcuts, and the demo script passes its rows through printf's argument
+rather than its format string.
+
+The by-hand proof in Task 4 Step 3 is still to run, and now has more to show:
+the composition checks are only meaningful after the key fix, and the drag that
+leaves a dock and the drag that crosses one are both worth watching.
