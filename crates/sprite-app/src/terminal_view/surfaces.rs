@@ -574,17 +574,33 @@ impl TerminalView {
                 }
                 // While a composition is in progress the input method owns the
                 // keyboard; what reaches here belongs to that composition and
-                // arrives as text when it is committed.
+                // arrives as text when it is committed. By this point the
+                // input method has already declined the key, so stopping it
+                // here takes nothing away from it.
                 if view.preedit.is_some() {
                     cx.stop_propagation();
                     return;
                 }
+                // An ordinary key is reported and then let go, exactly as the
+                // terminal's own handler lets it go. On macOS the input method
+                // hears only a key the application did not claim, so stopping
+                // here would make a composition impossible to begin: the dead
+                // key and every letter of a conversion would arrive as plain
+                // key events and nothing would ever be marked. Nothing types
+                // it twice, because the terminal's own key handlers type only
+                // while the terminal holds the keyboard, and a commit that is
+                // not part of a composition is ignored.
+                //
+                // One limit remains, the same one the terminal lives with: the
+                // key that *begins* a composition still arrives here first,
+                // because the application is given any key that was expected
+                // to type something. It is reported as a key event with no
+                // `text`; every key after it goes to the input method first.
                 keys.send(&event_input(&event.keystroke));
-                cx.stop_propagation();
             }))
-            // A release belongs to whoever saw the press. The terminal's own
-            // handlers below would copy a selection or send a key-up the
-            // child never saw the key-down of.
+            // A release belongs to whoever saw the press: the child never saw
+            // this key-down. Belt and braces now that the terminal's own
+            // key-up handler also checks who holds the keyboard, and cheap.
             .on_key_up(cx.listener(|_view, _event: &KeyUpEvent, _window, cx| {
                 cx.stop_propagation();
             }))

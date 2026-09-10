@@ -394,7 +394,16 @@ impl Render for TerminalView {
             .text_size(metrics.font_size)
             .line_height(metrics.cell_height)
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                // The terminal types only what it holds the keyboard for. A
+                // focused Surface lets an ordinary key propagate so the input
+                // method can see it, and this handler is below that Surface in
+                // the tree: without this gate the child would also be typed
+                // what the Surface owns.
+                if !view.focus.is_focused(window) {
+                    return;
+                }
+
                 // Application shortcuts are resolved first and explicitly. Only
                 // what they do not claim reaches the terminal, so a binding can
                 // never also be typed into the child.
@@ -524,7 +533,13 @@ impl Render for TerminalView {
                     control: event.modifiers.control,
                 }));
             }))
-            .on_key_up(cx.listener(|view, event: &KeyUpEvent, _window, _cx| {
+            .on_key_up(cx.listener(|view, event: &KeyUpEvent, window, _cx| {
+                // A release belongs to whoever saw the press: with a Surface
+                // focused the child never saw the key-down, so it must not be
+                // sent the key-up either.
+                if !view.focus.is_focused(window) {
+                    return;
+                }
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);
                 view.send(TerminalCommand::Key(key));
             }))
