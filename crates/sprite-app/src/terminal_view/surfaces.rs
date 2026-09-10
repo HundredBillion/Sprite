@@ -3,7 +3,7 @@
 //! change one. A child of `terminal_view` because a Surface takes room from the
 //! grid and can hold the keyboard, so hosting one is the view's business.
 
-use super::input::application_shortcut;
+use super::input::{Shortcut, application_shortcut};
 use super::*;
 
 use gpui::prelude::*;
@@ -16,7 +16,7 @@ use gpui::{
 use crate::config::Highlights;
 use crate::surface::channel::{
     FocusTarget, Open, Position, SurfaceConnection, event_blur, event_closed, event_focus,
-    event_grid_resize, event_input, event_refused, event_resize, event_warning,
+    event_grid_resize, event_input, event_paste, event_refused, event_resize, event_warning,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -388,11 +388,28 @@ impl TerminalView {
             .track_focus(&surface.focus)
             .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _window, cx| {
                 // Workspace chords were claimed on capture before this ran. The
-                // terminal's own shortcuts still work with a Surface focused;
-                // every other key is the program's, and is claimed here so the
-                // terminal's handler below does not also type it.
+                // terminal's own shortcuts are still recognised with a Surface
+                // focused, but they act on the Surface: a paste goes to the
+                // program that holds the keyboard, never to the pty, whose
+                // reader is the shell that will run after that program exits;
+                // and a Surface has no terminal selection to copy.
                 if let Some(shortcut) = application_shortcut(&event.keystroke) {
-                    view.perform(shortcut, cx);
+                    if shortcut == Shortcut::Paste {
+                        let text = cx
+                            .read_from_clipboard()
+                            .and_then(|item| item.text())
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            keys.send(&event_paste(&text));
+                        }
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                // While a composition is in progress the input method owns the
+                // keyboard; what reaches here belongs to that composition and
+                // arrives as text when it is committed.
+                if view.preedit.is_some() {
                     cx.stop_propagation();
                     return;
                 }

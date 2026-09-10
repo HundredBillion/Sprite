@@ -839,8 +839,28 @@ pub fn event_focused() -> String {
     json!({ "type": "focused" }).to_string()
 }
 
+/// A key press on a Surface. `text` is what the press typed, with the
+/// keyboard layout applied — `!` for shift-1 on a US layout — and is absent
+/// for a press that typed nothing, such as `ctrl-a` or `escape`. A program
+/// that wants what the person typed reads `text`; one that wants the key
+/// reads `key`. A committed composition arrives through `event_text`.
 pub fn event_input(keystroke: &gpui::Keystroke) -> String {
-    json!({ "type": "input", "key": keystroke.unparse() }).to_string()
+    match keystroke
+        .key_char
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        Some(text) => json!({ "type": "input", "key": keystroke.unparse(), "text": text }),
+        None => json!({ "type": "input", "key": keystroke.unparse() }),
+    }
+    .to_string()
+}
+
+/// The clipboard, pasted while a Surface held the keyboard. Sent to the
+/// Surface rather than written to the pty, whose reader — the shell — would
+/// otherwise receive it after the program that owned the Surface exited.
+pub fn event_paste(text: &str) -> String {
+    json!({ "type": "paste", "text": text }).to_string()
 }
 
 pub fn event_resize(width: u32, height: u32) -> String {
@@ -1560,6 +1580,59 @@ mod tests {
         assert_eq!(
             event_grid_resize(240, 812, 30, 40),
             r#"{"type":"resize","width":240,"height":812,"cols":30,"rows":40}"#
+        );
+    }
+
+    fn keystroke(key: &str, key_char: Option<&str>, modifiers: gpui::Modifiers) -> gpui::Keystroke {
+        gpui::Keystroke {
+            modifiers,
+            key: key.to_owned(),
+            key_char: key_char.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_key_that_produced_text_carries_it() {
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&event_input(&keystroke("1", Some("!"), shift)))
+                .expect("json"),
+            json!({"type":"input","key":"shift-1","text":"!"})
+        );
+    }
+
+    #[test]
+    fn a_key_that_produced_no_text_carries_none() {
+        let control = gpui::Modifiers {
+            control: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&event_input(&keystroke("a", None, control)))
+                .expect("json"),
+            json!({"type":"input","key":"ctrl-a"})
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&event_input(&keystroke(
+                "escape",
+                Some(""),
+                gpui::Modifiers::default()
+            )))
+            .expect("json"),
+            json!({"type":"input","key":"escape"})
+        );
+    }
+
+    #[test]
+    fn a_paste_is_one_line_with_its_text() {
+        let event = event_paste("ls -la\n<b>");
+        assert!(!event.contains('\n'), "{event}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&event).expect("json"),
+            json!({"type":"paste","text":"ls -la\n<b>"})
         );
     }
 }
