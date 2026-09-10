@@ -490,7 +490,7 @@ git commit -m "Deliver composed text to the Surface that holds the keyboard"
 - Consumes: `crate::grid::cell_at(position, origin, cell_width, cell_height, TerminalSize) -> Option<CellPosition>`; `crate::grid::ScrollAccumulator::{default, accumulate(delta_pixels: f32, cell_height: Pixels) -> i32}` (negative rows mean toward history, which is the wheel turning up); `GridSurface::{cols(), rows()}`; GPUI `MouseDownEvent`, `MouseMoveEvent { position, pressed_button: Option<MouseButton>, modifiers }`, `MouseUpEvent`, `ScrollWheelEvent { position, delta: ScrollDelta::{Pixels(Point<Pixels>), Lines(Point<f32>)}, modifiers }`.
 - Produces: `pub fn event_mouse(button: &str, action: &str, modifiers: &str, row: u16, col: u16) -> String`; `pub fn neovim_modifiers(modifiers: &gpui::Modifiers) -> String`; `pub(crate) fn grid_cell_under(position, origin, metrics: &GridMetrics, cols: u16, rows: u16) -> Option<(u16, u16)>` returning `(row, col)`; `pub(crate) fn wheel_turns(rows: i32, up: &'static str, down: &'static str) -> Option<(&'static str, u32)>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/sprite-app/src/surface/channel.rs` `mod tests`:
 
@@ -569,12 +569,12 @@ In `crates/sprite-app/src/surface/render.rs` `mod tests`:
 
 If `mod tests` in `render.rs` lacks `use gpui::px;` or `use sprite_term::Rgb;`, add them inside the module; check `Rgb`'s field names against `sprite_term` (`grep -n 'pub struct Rgb' -A 4 crates/sprite-term/src/lib.rs`) and adjust the literal if they differ.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p sprite-app --locked --offline -- a_mouse_event_names modifiers_are_spelled a_pointer_inside a_pointer_outside a_grid_with_no_cell wheel_turns_name`
 Expected: compile errors, `cannot find function event_mouse`, `neovim_modifiers`, `grid_cell_under`, `wheel_turns`.
 
-- [ ] **Step 3: Write the pure functions**
+- [x] **Step 3: Write the pure functions**
 
 In `crates/sprite-app/src/surface/channel.rs`, after `event_text`:
 
@@ -651,12 +651,12 @@ pub(crate) fn wheel_turns(
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p sprite-app --locked --offline -- surface::channel::tests surface::render::tests`
 Expected: PASS.
 
-- [ ] **Step 5: Give a hosted Surface an origin and wheel accumulators**
+- [x] **Step 5: Give a hosted Surface an origin and wheel accumulators**
 
 In `crates/sprite-app/src/terminal_view/surfaces.rs`, add fields to `HostedSurface`:
 
@@ -749,7 +749,7 @@ Add a method to `impl TerminalView` in the same file that turns a pointer event 
 
 Add `event_mouse` and `neovim_modifiers` to the `crate::surface::channel` import list, and `MouseMoveEvent` to the `gpui` import list.
 
-- [ ] **Step 6: Record the origin and wire the handlers in the wrapper**
+- [x] **Step 6: Record the origin and wire the handlers in the wrapper**
 
 In `surface_element`, extend the `canvas` from Task 2 so its prepaint records the origin. Replace `|_bounds, _window, _cx| {},` with:
 
@@ -836,12 +836,12 @@ Then replace the wrapper's mouse listeners. Today the chain has a left `on_mouse
 
 Keep the existing `on_key_up` listener that stops propagation. `on_mouse_move` fires for movement over the wrapper without a button too; the early `return` above sends nothing for those, and propagation continues so the terminal's own hover logic is unaffected.
 
-- [ ] **Step 7: Build, lint, and test**
+- [x] **Step 7: Build, lint, and test**
 
 Run: `cargo clippy -p sprite-app --all-targets --locked --offline -- -D warnings && cargo test -p sprite-app --locked --offline`
 Expected: no warnings; all tests PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/sprite-app/src/surface/channel.rs crates/sprite-app/src/surface/render.rs crates/sprite-app/src/terminal_view/surfaces.rs
