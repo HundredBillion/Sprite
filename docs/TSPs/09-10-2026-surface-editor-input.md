@@ -860,7 +860,7 @@ git commit -m "Report the mouse on a grid Surface in cells"
 - Consumes: the `sprite surface open --dock left` client, which prints every event line to standard output; the event shapes from Tasks 1–3.
 - Produces: nothing for later tasks.
 
-- [ ] **Step 1: Write the README paragraph**
+- [x] **Step 1: Write the README paragraph**
 
 In `README.md`, after the paragraph that ends "...nothing that holds only the observation credentials can draw." (line 266) and before the paragraph beginning "An `image` element's SVG", insert as its own paragraph:
 
@@ -877,7 +877,7 @@ underneath. A grid Surface also hears the mouse in cells —
 place its cursor and scroll.
 ```
 
-- [ ] **Step 2: Write the demo script**
+- [x] **Step 2: Write the demo script**
 
 Create `scripts/surface-input-demo.sh`:
 
@@ -921,12 +921,12 @@ Then, following the by-hand rules recorded in memory (screen unlocked, the Sprit
 
 Record every expected line as seen or not seen. If the shell wrapper approach cannot type (a chat or meeting window is frontmost), stop and record which steps were not performed rather than typing anyway.
 
-- [ ] **Step 4: Run the full CI gate locally**
+- [x] **Step 4: Run the full CI gate locally**
 
 Run: `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings && cargo test --workspace --locked --offline`
 Expected: clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md scripts/surface-input-demo.sh
