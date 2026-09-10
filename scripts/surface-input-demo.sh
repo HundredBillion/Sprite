@@ -10,8 +10,10 @@ set -eu
 log=${1:-/dev/null}
 description='{"version":1,"root":{"kind":"grid","cols":40,"rows":12}}'
 
+rows='{"type":"rows","rows":[{"row":0,"cells":[["t",0],["y",0],["p",0],["e",0],[" ",0],["h",0],["e",0],["r",0],["e",0]]}]}'
+
 {
     printf '%s\n' "$description"
-    printf '{"type":"rows","rows":[{"row":0,"cells":[["t",0],["y",0],["p",0],["e",0],[" ",0],["h",0],["e",0],["r",0],["e",0]]}]}\n'
+    printf '%s\n' "$rows"
     sleep 30
 } | sprite surface open --dock left --size 320 | tee "$log"

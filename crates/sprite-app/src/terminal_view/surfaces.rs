@@ -560,12 +560,12 @@ impl TerminalView {
         // to whichever focus is held. `canvas` reaches paint from a `div`,
         // and its bounds are the Surface's own, which is where the candidate
         // window belongs.
+        let id = surface.id;
         let focus_for_input = surface.focus.clone();
         let entity_for_input = cx.entity();
         let input_handler = canvas(
             {
                 let entity_for_bounds = cx.entity();
-                let id = surface.id;
                 move |bounds, _window, cx| {
                     entity_for_bounds.update(cx, |view, _cx| {
                         if let Some(surface) = view.surfaces.get_mut(|surface| surface.id == id) {
@@ -586,7 +586,6 @@ impl TerminalView {
         .inset_0();
         let keys = surface.connection.clone();
         let focus = surface.focus.clone();
-        let id = surface.id;
         let mut wrapper = div();
         if fills {
             wrapper = wrapper.size_full();
