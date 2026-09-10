@@ -691,7 +691,17 @@ impl TerminalView {
                         Some(MouseButton::Left) => "left",
                         Some(MouseButton::Right) => "right",
                         Some(MouseButton::Middle) => "middle",
-                        _ => return,
+                        _ => {
+                            // No button held means every button is up, even if
+                            // this Surface never heard the release (Cmd-Tab
+                            // mid-drag): forget the stale press so a later
+                            // gesture through here isn't mistaken for it.
+                            if let Some(surface) = view.surfaces.get_mut(|surface| surface.id == id)
+                            {
+                                surface.pressed = None;
+                            }
+                            return;
+                        }
                     };
                     if view.report_grid_gesture(
                         id,
