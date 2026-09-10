@@ -59,6 +59,12 @@ pub(super) struct HostedSurface {
     /// paint: mouse positions arrive in window coordinates, and only the laid
     /// out element knows where it is. `None` until the first paint.
     origin: Option<gpui::Point<Pixels>>,
+    /// The button of a press this Surface itself saw, until its release: a
+    /// drag or a release is reported only to the Surface the gesture started
+    /// on, the way the terminal anchors its own drag on the press it saw.
+    /// A selection dragged out of the terminal and across a dock therefore
+    /// tells the dock nothing.
+    pressed: Option<&'static str>,
     /// Sub-cell wheel remainders, one per axis, so a trackpad's pixel deltas
     /// become whole cells exactly as they do for the terminal.
     wheel_rows: crate::grid::ScrollAccumulator,
@@ -132,6 +138,7 @@ impl TerminalView {
             previous_focus,
             _focus_events: [on_focus, on_blur],
             origin: None,
+            pressed: None,
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
         };
@@ -182,6 +189,49 @@ impl TerminalView {
             row,
             col,
         ));
+    }
+
+    /// Reports a press and remembers the button, so the drag and the release
+    /// that follow can be told from a gesture this Surface never saw. The
+    /// record is kept for an element Surface too, whose press is not reported
+    /// but whose wrapper still swallows the whole gesture.
+    fn report_grid_press(
+        &mut self,
+        id: SurfaceId,
+        position: gpui::Point<Pixels>,
+        button: &'static str,
+        modifiers: &gpui::Modifiers,
+    ) {
+        if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
+            surface.pressed = Some(button);
+        }
+        self.report_grid_mouse(id, position, button, "press", modifiers);
+    }
+
+    /// Reports a drag or a release to the Surface that saw the press, clearing
+    /// the record on a release. `false` means this Surface saw no press of
+    /// that button — the gesture belongs to the terminal underneath, which
+    /// must keep hearing it, so the caller lets the event through instead of
+    /// stopping it.
+    fn report_grid_gesture(
+        &mut self,
+        id: SurfaceId,
+        position: gpui::Point<Pixels>,
+        button: &'static str,
+        action: &'static str,
+        modifiers: &gpui::Modifiers,
+    ) -> bool {
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return false;
+        };
+        if surface.pressed != Some(button) {
+            return false;
+        }
+        if action == "release" {
+            surface.pressed = None;
+        }
+        self.report_grid_mouse(id, position, button, action, modifiers);
+        true
     }
 
     /// Turns a wheel gesture on a grid Surface into `mouse` events, one per
@@ -606,31 +656,36 @@ impl TerminalView {
             }))
             // Clicking a Surface focuses it and is not also a click on the
             // terminal underneath. A grid also hears where: every press,
-            // drag, release, and wheel turn is reported in cells, so an
-            // editor behind it can place its cursor and scroll. An element
-            // Surface reports clicks by button name instead, in `render`.
+            // drag, release, and wheel turn of a gesture that started on it
+            // is reported in cells, so an editor behind it can place its
+            // cursor and scroll. An element Surface reports clicks by button
+            // name instead, in `render`.
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                     window.focus(&focus);
-                    view.report_grid_mouse(id, event.position, "left", "press", &event.modifiers);
+                    view.report_grid_press(id, event.position, "left", &event.modifiers);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
-                    view.report_grid_mouse(id, event.position, "right", "press", &event.modifiers);
+                    view.report_grid_press(id, event.position, "right", &event.modifiers);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
-                    view.report_grid_mouse(id, event.position, "middle", "press", &event.modifiers);
+                    view.report_grid_press(id, event.position, "middle", &event.modifiers);
                     cx.stop_propagation();
                 }),
             )
+            // A drag or a release over this Surface that belongs to a press
+            // it never saw — a terminal selection dragged across a dock — is
+            // neither reported nor stopped, so the selection carries on
+            // underneath exactly as it did before Surfaces heard the mouse.
             .on_mouse_move(
                 cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
                     let button = match event.pressed_button {
@@ -639,41 +694,105 @@ impl TerminalView {
                         Some(MouseButton::Middle) => "middle",
                         _ => return,
                     };
-                    view.report_grid_mouse(id, event.position, button, "drag", &event.modifiers);
-                    cx.stop_propagation();
+                    if view.report_grid_gesture(
+                        id,
+                        event.position,
+                        button,
+                        "drag",
+                        &event.modifiers,
+                    ) {
+                        cx.stop_propagation();
+                    }
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
-                    view.report_grid_mouse(id, event.position, "left", "release", &event.modifiers);
-                    cx.stop_propagation();
+                    if view.report_grid_gesture(
+                        id,
+                        event.position,
+                        "left",
+                        "release",
+                        &event.modifiers,
+                    ) {
+                        cx.stop_propagation();
+                    }
                 }),
             )
             .on_mouse_up(
                 MouseButton::Right,
                 cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
-                    view.report_grid_mouse(
+                    if view.report_grid_gesture(
                         id,
                         event.position,
                         "right",
                         "release",
                         &event.modifiers,
-                    );
-                    cx.stop_propagation();
+                    ) {
+                        cx.stop_propagation();
+                    }
                 }),
             )
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
-                    view.report_grid_mouse(
+                    if view.report_grid_gesture(
                         id,
                         event.position,
                         "middle",
                         "release",
                         &event.modifiers,
-                    );
-                    cx.stop_propagation();
+                    ) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            // A gesture that leaves the box still ends with a release, at the
+            // edge cell the position clamps to, and the terminal is stopped
+            // from taking that release for a press it never saw. The movement
+            // in between is not reported: GPUI delivers a move only while the
+            // pointer is over the element, so a drag outside the box is silent
+            // until it ends.
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                    if view.report_grid_gesture(
+                        id,
+                        event.position,
+                        "left",
+                        "release",
+                        &event.modifiers,
+                    ) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
+                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                    if view.report_grid_gesture(
+                        id,
+                        event.position,
+                        "right",
+                        "release",
+                        &event.modifiers,
+                    ) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                    if view.report_grid_gesture(
+                        id,
+                        event.position,
+                        "middle",
+                        "release",
+                        &event.modifiers,
+                    ) {
+                        cx.stop_propagation();
+                    }
                 }),
             )
             .on_scroll_wheel(

@@ -68,8 +68,10 @@ pub(crate) fn cells_that_fit(size: Size<Pixels>, metrics: &GridMetrics) -> (u16,
 }
 
 /// The grid cell under a window position, as `(row, col)`, clamped to the
-/// grid so a drag that leaves the box keeps addressing its edge cell. `None`
-/// only when the metric has no cell to measure with.
+/// grid so a position outside the box still addresses its nearest edge cell —
+/// which is what the slack around the cells does for a click, and what the
+/// release that ends a drag outside the box reports. `None` only when the
+/// metric has no cell to measure with.
 pub(crate) fn grid_cell_under(
     position: gpui::Point<Pixels>,
     origin: gpui::Point<Pixels>,
