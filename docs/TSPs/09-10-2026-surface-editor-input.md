@@ -40,6 +40,10 @@ Decisions made here so the executor does not re-decide them:
 - The preedit stays a single `Option<String>` on the view: only one thing holds the keyboard, so only one composition exists.
 - Grid mouse arithmetic reuses `crate::grid::cell_at` through a `TerminalSize` built from the grid's `cols()`/`rows()`; the pixel fields it also carries are set to zero and unused by `cell_at`.
 - Wheel rows come from `crate::grid::ScrollAccumulator`, one per axis per Surface, so a trackpad's pixel deltas become whole cells exactly as they do for the terminal.
+- A Surface paste is never held. Terminal Core holds a multi-line paste when the child has not enabled bracketed paste, because a shell would run each line; a Surface receives the paste as one JSON string that nothing runs, and the adapter hands it to `nvim_paste`, which inserts and never executes. Confirmed by the project owner on 2026-09-10 (grilling question 1).
+- The alt key is spelled `A` in mouse modifier strings. Neovim accepts `A` or `M` for a key press and the same letters for `nvim_input_mouse`; one spelling is chosen and tested.
+- Only a left press focuses a Surface, as today. A right or middle press on a grid is reported with its cell and changes nothing about who holds the keyboard.
+- Pointer movement without a button held is not reported (the PRD lists `mousemoveevent` support under Later).
 
 ---
 
