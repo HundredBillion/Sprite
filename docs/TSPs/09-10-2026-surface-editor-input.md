@@ -921,6 +921,20 @@ Then, following the by-hand rules recorded in memory (screen unlocked, the Sprit
 
 Record every expected line as seen or not seen. If the shell wrapper approach cannot type (a chat or meeting window is frontmost), stop and record which steps were not performed rather than typing anyway.
 
+**By-hand result (2026-09-11, debug build at f56b12f, 40x12 grid docked left in a debug Sprite, US keyboard).** Every check that synthetic input can drive passed, read from the Surface's own event stream:
+- **No double typing (C1 negative space):** `abc` produced exactly three `{"type":"input","key":..,"text":..}` lines and no key-less duplicate.
+- **Keys with no text:** Escape, Up, Backspace each arrived as one key line with no `text`.
+- **Produced text:** shift-1 gave `{"type":"input","key":"!","text":"!"}`.
+- **Copy does nothing:** Ctrl+Shift+C with the dock focused emitted no event and left the clipboard unchanged.
+- **Paste:** Ctrl+Shift+V gave one `{"type":"paste","text":"pasted"}`.
+- **Mouse:** press/drag/release report the right button and a rising column; the modifier string is `""` plain and `S` shift-held.
+- **Drag leaving the box:** drags clamp at the right edge and the gesture ends with one `release` at col 39 (the grid's last of 40); nothing is reported past the edge (the `on_mouse_up_out` fix).
+- **Drag entering the box:** a gesture that began in the terminal and crossed the dock produced no mouse lines at all (the `pressed` record).
+- **Wheel:** three notches down gave three `wheel`/`down`; up gave three `wheel`/`up`.
+- **Slack click:** a press in the top-left corner reported row 0, col 0, no refusal.
+
+**Not provable by automation:** composition (dead keys and input methods, checks 3-6). Synthetic option-e does not drive the macOS input source's dead-key machinery; the same dead key typed into the terminal pane by synthetic event also produced no accent, which shows the limit is the input method, not the code. Composition rests on the unit tests (`a_committed_composition_is_text_without_a_key`, the preedit routing), the whole-branch review's source-level reasoning, and one human keypress (option-e then e in a focused dock) whenever convenient. The C1 negative-space check that would fail if the composition wiring were wrong, "plain typing is not doubled", passed.
+
 - [x] **Step 4: Run the full CI gate locally**
 
 Run: `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked --offline -- -D warnings && cargo test --workspace --locked --offline`
