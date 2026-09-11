@@ -10,7 +10,9 @@ use std::ops::Range;
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window, point, px};
 use sprite_term::{CellPosition, MouseAction, MouseEvent, TerminalCommand};
 
+use super::surfaces::Body;
 use crate::grid::cell_at;
+use crate::surface::channel::event_text;
 
 /// A selection being dragged out with the pointer down.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,17 +174,28 @@ impl EntityInputHandler for TerminalView {
     /// commits, and the key path has already encoded those against live
     /// terminal state. Committing them again would type every character twice.
     /// A commit is therefore only honoured when it concludes a composition,
-    /// which is the case `preedit` identifies.
+    /// which is the case `preedit` identifies. It goes to whoever holds the
+    /// keyboard: a Surface, as a text event, or the terminal.
     fn replace_text_in_range(
         &mut self,
         _range: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let was_composing = self.preedit.take().is_some();
         if was_composing && !text.is_empty() {
-            self.send(TerminalCommand::CommitText(text.to_owned()));
+            // Computed before the match so the borrow of `self` from
+            // `focused_surface` ends before `self.send` needs `&mut self`.
+            let target = self
+                .focused_surface(window)
+                .map(|surface| surface.connection().clone());
+            match target {
+                Some(connection) => {
+                    connection.send(&event_text(text));
+                }
+                None => self.send(TerminalCommand::CommitText(text.to_owned())),
+            }
         }
         cx.notify();
     }
@@ -204,19 +217,34 @@ impl EntityInputHandler for TerminalView {
         cx.notify();
     }
 
-    /// Where the candidate window should appear: the cursor's cell.
+    /// Where the candidate window should appear: the cursor's cell. For a
+    /// grid Surface that is the grid's cursor inside the Surface's own box;
+    /// for an element Surface, which has no cursor, its top-left cell; for
+    /// the terminal, its cursor.
     fn bounds_for_range(
         &mut self,
         _range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let cursor = self.bundle.as_ref()?.render.cursor;
+        let (row, column) = match self.focused_surface(window) {
+            Some(surface) => match &surface.body {
+                Body::Grid { grid, .. } => {
+                    let cursor = grid.cursor_snapshot();
+                    (cursor.row, cursor.column)
+                }
+                Body::Elements(_) => (0, 0),
+            },
+            None => {
+                let cursor = self.bundle.as_ref()?.render.cursor;
+                (cursor.row, cursor.column)
+            }
+        };
         Some(Bounds {
             origin: point(
-                element_bounds.origin.x + px(f32::from(cursor.column) * f32::from(self.cell_width)),
-                element_bounds.origin.y + px(f32::from(cursor.row) * f32::from(self.cell_height)),
+                element_bounds.origin.x + px(f32::from(column) * f32::from(self.cell_width)),
+                element_bounds.origin.y + px(f32::from(row) * f32::from(self.cell_height)),
             ),
             size: gpui::size(self.cell_width, self.cell_height),
         })

@@ -20,7 +20,10 @@ gpui = { version = "=0.2.2", default-features = false }
 libghostty-vt = { version = "=0.2.1", default-features = false, features = [
     "kitty-graphics",
 ] }
-serde_json = { version = "=1.0.151" }
+# `preserve_order` is Sprite's own choice, not a side effect of what gpui
+# happens to enable: the Surface Channel promises `"type"` first on every
+# event line, so a `json!` object must print in the order it was written.
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
 toml = { version = "=0.8.23", default-features = false, features = ["parse"] }
 png = { version = "=0.18.1", default-features = false }
 # Only the pixel buffer types, to hand GPUI a texture. No codecs: Sprite

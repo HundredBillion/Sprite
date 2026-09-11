@@ -67,6 +67,49 @@ pub(crate) fn cells_that_fit(size: Size<Pixels>, metrics: &GridMetrics) -> (u16,
     )
 }
 
+/// The grid cell under a window position, as `(row, col)`, clamped to the
+/// grid so a position outside the box still addresses its nearest edge cell —
+/// which is what the slack around the cells does for a click, and what the
+/// release that ends a drag outside the box reports. `None` only when the
+/// metric has no cell to measure with.
+pub(crate) fn grid_cell_under(
+    position: gpui::Point<Pixels>,
+    origin: gpui::Point<Pixels>,
+    metrics: &GridMetrics,
+    cols: u16,
+    rows: u16,
+) -> Option<(u16, u16)> {
+    let size = sprite_term::TerminalSize {
+        rows,
+        cols,
+        cell_width_px: 0,
+        cell_height_px: 0,
+    };
+    crate::grid::cell_at(
+        position,
+        origin,
+        metrics.cell_width,
+        metrics.cell_height,
+        size,
+    )
+    .map(|cell| (cell.row, cell.column))
+}
+
+/// Whole rows from a wheel accumulator as a direction and a count: negative
+/// rows are the wheel turning toward the start, which the accumulator spells
+/// as toward history. `None` for no whole row yet.
+pub(crate) fn wheel_turns(
+    rows: i32,
+    toward_start: &'static str,
+    toward_end: &'static str,
+) -> Option<(&'static str, u32)> {
+    match rows.signum() {
+        -1 => Some((toward_start, rows.unsigned_abs())),
+        1 => Some((toward_end, rows.unsigned_abs())),
+        _ => None,
+    }
+}
+
 /// A grid Surface as an element: the terminal's own painter over the grid's
 /// rows, inside a box exactly the grid's size so the painter, which fills its
 /// parent, lands cell-for-cell.
@@ -342,5 +385,59 @@ mod tests {
         // As for element Surfaces: the tree is rebuilt every frame and needs no
         // window to build; only painting does.
         let _element = render_grid(&mut grid, &crate::config::Highlights::default(), &metrics);
+    }
+
+    fn metrics(cell_width: f32, cell_height: f32) -> GridMetrics {
+        GridMetrics {
+            cell_width: px(cell_width),
+            cell_height: px(cell_height),
+            font_family: "Menlo".into(),
+            font_size: px(14.0),
+            defaults: (
+                Rgb { r: 0, g: 0, b: 0 },
+                Rgb {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+            ),
+            blink_on: true,
+        }
+    }
+
+    #[test]
+    fn a_pointer_inside_the_grid_lands_in_its_cell() {
+        let origin = gpui::point(px(100.0), px(50.0));
+        let position = gpui::point(px(100.0 + 8.0 * 5.0 + 3.0), px(50.0 + 16.0 * 2.0 + 1.0));
+        assert_eq!(
+            grid_cell_under(position, origin, &metrics(8.0, 16.0), 80, 24),
+            Some((2, 5))
+        );
+    }
+
+    #[test]
+    fn a_pointer_outside_the_grid_is_clamped_to_its_edge() {
+        let origin = gpui::point(px(0.0), px(0.0));
+        let far = gpui::point(px(10_000.0), px(-40.0));
+        assert_eq!(
+            grid_cell_under(far, origin, &metrics(8.0, 16.0), 80, 24),
+            Some((0, 79))
+        );
+    }
+
+    #[test]
+    fn a_grid_with_no_cell_size_has_no_cell_under_the_pointer() {
+        let origin = gpui::point(px(0.0), px(0.0));
+        assert_eq!(
+            grid_cell_under(origin, origin, &metrics(0.0, 16.0), 80, 24),
+            None
+        );
+    }
+
+    #[test]
+    fn wheel_turns_name_a_direction_and_a_count() {
+        assert_eq!(wheel_turns(-3, "up", "down"), Some(("up", 3)));
+        assert_eq!(wheel_turns(2, "up", "down"), Some(("down", 2)));
+        assert_eq!(wheel_turns(0, "up", "down"), None);
     }
 }

@@ -229,6 +229,13 @@ impl Render for TerminalView {
             .and_then(|bundle| bundle.render.cursor_color);
         let status = self.status.clone();
         let preedit = self.preedit.clone();
+        // The terminal draws its own composition only when the terminal holds
+        // the keyboard: a focused Surface either draws its own (a grid) or
+        // must show nothing until the commit (an element), so showing it here
+        // too would either duplicate it or show it where it does not belong.
+        let terminal_preedit = preedit
+            .clone()
+            .filter(|_| self.focused_surface(window).is_none());
         let focus_for_input = self.focus.clone();
         let entity_for_input = cx.entity();
         let entity_for_bounds = cx.entity();
@@ -298,7 +305,16 @@ impl Render for TerminalView {
                 .0
                 .highlights
                 .clone();
-            self.surface_layers(allocated, &registry, &metrics, &highlights, cx)
+            let focused = window.focused(cx);
+            self.surface_layers(
+                allocated,
+                &registry,
+                &metrics,
+                &highlights,
+                focused.as_ref(),
+                preedit.as_deref(),
+                cx,
+            )
         };
 
         // Everything the terminal draws lives inside the grid box, which is
@@ -322,7 +338,7 @@ impl Render for TerminalView {
             // Composition is drawn at the cursor and nowhere else. It is
             // view state: the terminal has not been told anything about
             // it.
-            .children(preedit.map(|text| {
+            .children(terminal_preedit.map(|text| {
                 div()
                     .absolute()
                     .top(px(
@@ -378,7 +394,16 @@ impl Render for TerminalView {
             .text_size(metrics.font_size)
             .line_height(metrics.cell_height)
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                // The terminal types only what it holds the keyboard for. A
+                // focused Surface lets an ordinary key propagate so the input
+                // method can see it, and this handler is below that Surface in
+                // the tree: without this gate the child would also be typed
+                // what the Surface owns.
+                if !view.focus.is_focused(window) {
+                    return;
+                }
+
                 // Application shortcuts are resolved first and explicitly. Only
                 // what they do not claim reaches the terminal, so a binding can
                 // never also be typed into the child.
@@ -508,7 +533,13 @@ impl Render for TerminalView {
                     control: event.modifiers.control,
                 }));
             }))
-            .on_key_up(cx.listener(|view, event: &KeyUpEvent, _window, _cx| {
+            .on_key_up(cx.listener(|view, event: &KeyUpEvent, window, _cx| {
+                // A release belongs to whoever saw the press: with a Surface
+                // focused the child never saw the key-down, so it must not be
+                // sent the key-up either.
+                if !view.focus.is_focused(window) {
+                    return;
+                }
                 let key = gpui_key_event(&event.keystroke, KeyAction::Release);
                 view.send(TerminalCommand::Key(key));
             }))

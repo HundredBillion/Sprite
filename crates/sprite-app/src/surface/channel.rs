@@ -839,8 +839,66 @@ pub fn event_focused() -> String {
     json!({ "type": "focused" }).to_string()
 }
 
+/// A key press on a Surface. `text` is what the press typed, with the
+/// keyboard layout applied — `!` for shift-1 on a US layout — and is absent
+/// for a press that typed nothing, such as `ctrl-a` or `escape`. A program
+/// that wants what the person typed reads `text`; one that wants the key
+/// reads `key`. A committed composition arrives through `event_text`.
 pub fn event_input(keystroke: &gpui::Keystroke) -> String {
-    json!({ "type": "input", "key": keystroke.unparse() }).to_string()
+    match keystroke
+        .key_char
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        Some(text) => json!({ "type": "input", "key": keystroke.unparse(), "text": text }),
+        None => json!({ "type": "input", "key": keystroke.unparse() }),
+    }
+    .to_string()
+}
+
+/// The clipboard, pasted while a Surface held the keyboard. Sent to the
+/// Surface rather than written to the pty, whose reader — the shell — would
+/// otherwise receive it after the program that owned the Surface exited.
+pub fn event_paste(text: &str) -> String {
+    json!({ "type": "paste", "text": text }).to_string()
+}
+
+/// Text an input method committed while a Surface held the keyboard: a dead
+/// key sequence or a conversion. No `key`, because no single key produced it.
+pub fn event_text(text: &str) -> String {
+    json!({ "type": "input", "text": text }).to_string()
+}
+
+/// The pointer on a grid Surface, in cells. `button` is `left`, `right`,
+/// `middle`, or `wheel`; `action` is `press`, `drag`, or `release` for a
+/// button and `up`, `down`, `left`, or `right` for the wheel. Written in the
+/// order a reader scans: what, where.
+pub fn event_mouse(button: &str, action: &str, modifiers: &str, row: u16, col: u16) -> String {
+    json!({
+        "type": "mouse", "button": button, "action": action,
+        "modifiers": modifiers, "row": row, "col": col,
+    })
+    .to_string()
+}
+
+/// Modifiers as Neovim's `nvim_input_mouse` spells them: one letter each,
+/// joined by dashes, in Neovim's own order. `D` is the platform key, which
+/// Neovim calls "command" on a Mac and "super" elsewhere.
+pub fn neovim_modifiers(modifiers: &gpui::Modifiers) -> String {
+    let mut letters = Vec::with_capacity(4);
+    if modifiers.control {
+        letters.push("C");
+    }
+    if modifiers.shift {
+        letters.push("S");
+    }
+    if modifiers.alt {
+        letters.push("A");
+    }
+    if modifiers.platform {
+        letters.push("D");
+    }
+    letters.join("-")
 }
 
 pub fn event_resize(width: u32, height: u32) -> String {
@@ -1536,6 +1594,9 @@ mod tests {
             event_resize(240, 812),
             event_grid_resize(240, 812, 30, 40),
             event_click("row-1"),
+            event_paste("x"),
+            event_text("x"),
+            event_mouse("left", "press", "", 0, 0),
             event_focus(),
             event_blur(),
             event_warning("unknown token x; using terminal.foreground"),
@@ -1545,10 +1606,12 @@ mod tests {
             let value: Value = serde_json::from_str(&event).expect("json");
             assert!(value["type"].is_string(), "{event}");
         }
-        // `json!` in this workspace preserves source order (`indexmap` is
-        // pulled in transitively), rather than the sorted order a default
-        // build gives, so the two checks compare parsed values rather than
-        // exact text.
+        // `json!` in this workspace preserves source order, because the
+        // workspace asks `serde_json` for `preserve_order`: the order is
+        // Sprite's own guarantee, so an exact-text check below is legitimate
+        // and not a hostage to some other crate's feature list. The two
+        // checks that follow compare parsed values anyway, since what they
+        // are about is the shape rather than the order.
         assert_eq!(
             serde_json::from_str::<Value>(&event_opened(SurfaceId(7))).expect("json"),
             json!({"surface":7,"type":"opened"})
@@ -1561,5 +1624,93 @@ mod tests {
             event_grid_resize(240, 812, 30, 40),
             r#"{"type":"resize","width":240,"height":812,"cols":30,"rows":40}"#
         );
+    }
+
+    fn keystroke(key: &str, key_char: Option<&str>, modifiers: gpui::Modifiers) -> gpui::Keystroke {
+        gpui::Keystroke {
+            modifiers,
+            key: key.to_owned(),
+            key_char: key_char.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_key_that_produced_text_carries_it() {
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&event_input(&keystroke("1", Some("!"), shift)))
+                .expect("json"),
+            json!({"type":"input","key":"shift-1","text":"!"})
+        );
+    }
+
+    #[test]
+    fn a_key_that_produced_no_text_carries_none() {
+        let control = gpui::Modifiers {
+            control: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&event_input(&keystroke("a", None, control)))
+                .expect("json"),
+            json!({"type":"input","key":"ctrl-a"})
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&event_input(&keystroke(
+                "escape",
+                Some(""),
+                gpui::Modifiers::default()
+            )))
+            .expect("json"),
+            json!({"type":"input","key":"escape"})
+        );
+    }
+
+    #[test]
+    fn a_paste_is_one_line_with_its_text() {
+        let event = event_paste("ls -la\n<b>");
+        assert!(!event.contains('\n'), "{event}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&event).expect("json"),
+            json!({"type":"paste","text":"ls -la\n<b>"})
+        );
+    }
+
+    #[test]
+    fn a_committed_composition_is_text_without_a_key() {
+        let event = event_text("é");
+        assert!(!event.contains('\n'), "{event}");
+        let value: Value = serde_json::from_str(&event).expect("json");
+        assert_eq!(value, json!({"type":"input","text":"é"}));
+        assert!(value.get("key").is_none());
+    }
+
+    #[test]
+    fn a_mouse_event_names_button_action_modifiers_and_cell() {
+        assert_eq!(
+            event_mouse("left", "press", "C-S", 3, 17),
+            r#"{"type":"mouse","button":"left","action":"press","modifiers":"C-S","row":3,"col":17}"#
+        );
+    }
+
+    #[test]
+    fn modifiers_are_spelled_as_neovim_spells_them() {
+        let all = gpui::Modifiers {
+            control: true,
+            alt: true,
+            shift: true,
+            platform: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(neovim_modifiers(&all), "C-S-A-D");
+        assert_eq!(neovim_modifiers(&gpui::Modifiers::default()), "");
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..gpui::Modifiers::default()
+        };
+        assert_eq!(neovim_modifiers(&shift), "S");
     }
 }
