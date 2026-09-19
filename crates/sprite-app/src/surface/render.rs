@@ -1,10 +1,9 @@
 //! Draws a Surface Description: one GPUI element per described element,
-//! built fresh on every frame the way GPUI's own views are. An `update` that
-//! replaces the description therefore replaces the drawing, and nothing from
-//! the previous one survives — there are no element ids to patch and none to
-//! leak.
+//! built fresh on every frame the way GPUI's own views are. Decoded SVGs stay
+//! with the description so redraws reuse them and an update releases them.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{
     AnyElement, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
@@ -22,12 +21,25 @@ use crate::surface::style;
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
+#[derive(Default)]
+pub(crate) struct ElementImageCache {
+    images: BTreeMap<u64, Option<Arc<RenderImage>>>,
+}
+
+#[cfg(test)]
+impl ElementImageCache {
+    pub(crate) fn image_id(&self, index: u64) -> Option<gpui::ImageId> {
+        self.images.get(&index)?.as_ref().map(|image| image.id)
+    }
+}
+
 pub(crate) fn render(
     description: &Description,
     surface: SurfaceId,
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
     host: Option<Entity<TerminalView>>,
+    images: &mut ElementImageCache,
 ) -> AnyElement {
     let mut next = 0u64;
     element(
@@ -37,12 +49,32 @@ pub(crate) fn render(
         connection,
         &host,
         &mut next,
+        images,
     )
 }
 
 pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<RenderImage>> {
-    let tree =
-        resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).ok()?;
+    static FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    });
+    static OPTIONS: LazyLock<resvg::usvg::Options<'static>> = LazyLock::new(|| {
+        let select = resvg::usvg::FontResolver::default_font_selector();
+        resvg::usvg::Options {
+            font_resolver: resvg::usvg::FontResolver {
+                select_font: Box::new(move |font, db| {
+                    if db.is_empty() {
+                        *db = FONT_DB.clone();
+                    }
+                    select(font, db)
+                }),
+                select_fallback: resvg::usvg::FontResolver::default_fallback_selector(),
+            },
+            ..Default::default()
+        }
+    });
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &OPTIONS).ok()?;
     let size = tree.size();
     let scale = target_width.map_or(1.0, |target| target / size.width());
     let mut pixmap = resvg::tiny_skia::Pixmap::new(
@@ -218,6 +250,7 @@ fn element(
     connection: &SurfaceConnection,
     host: &Option<Entity<TerminalView>>,
     next: &mut u64,
+    images: &mut ElementImageCache,
 ) -> AnyElement {
     // Numbered in tree order, so a clickable element's identity is stable for
     // as long as the description keeps its shape.
@@ -225,8 +258,12 @@ fn element(
     *next += 1;
 
     if node.kind == Kind::Image {
-        if let Some(picture) = node.svg.as_deref().and_then(|svg| render_svg(svg, None)) {
-            return style::apply_all(img(picture), &node.style).into_any_element();
+        let picture = images
+            .images
+            .entry(index)
+            .or_insert_with(|| node.svg.as_deref().and_then(|svg| render_svg(svg, None)));
+        if let Some(picture) = picture {
+            return style::apply_all(img(picture.clone()), &node.style).into_any_element();
         }
         return div().into_any_element();
     }
@@ -245,7 +282,7 @@ fn element(
     let children: Vec<AnyElement> = node
         .children
         .iter()
-        .map(|child| element(child, surface, registry, connection, host, next))
+        .map(|child| element(child, surface, registry, connection, host, next, images))
         .collect();
     boxed = boxed.children(children);
 
@@ -287,6 +324,62 @@ mod tests {
     use crate::surface::description;
 
     #[test]
+    fn text_only_svg_renders_visible_pixels() {
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='40'><text x='4' y='29' font-family='sans-serif' font-size='28' fill='white'>Sprite</text></svg>";
+        let image = render_svg(svg, None).expect("SVG decodes");
+        assert!(
+            image
+                .as_bytes(0)
+                .unwrap()
+                .chunks_exact(4)
+                .any(|pixel| pixel[3] > 0)
+        );
+    }
+
+    #[test]
+    fn legacy_image_redraw_reuses_decode_and_new_cache_decodes_changed_svg() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let document = |color| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":format!("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>")}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let blue = document("blue");
+        let mut cache = ElementImageCache::default();
+        let _ = render(
+            &blue,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        let first = cache.images[&0].as_ref().unwrap().clone();
+        let _ = render(
+            &blue,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        assert!(Arc::ptr_eq(&first, cache.images[&0].as_ref().unwrap()));
+        let first_id = first.id;
+        drop(first);
+        let red = document("red");
+        cache = ElementImageCache::default();
+        let _ = render(&red, SurfaceId(1), &registry, &connection, None, &mut cache);
+        let second = cache.images[&0].as_ref().unwrap();
+        assert_eq!(&second.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
+        assert_ne!(second.id, first_id);
+    }
+
+    #[test]
     fn every_kind_becomes_an_element_without_a_window() {
         let (ours, _theirs) = UnixStream::pair().expect("socket pair");
         let connection = SurfaceConnection::new(&ours).expect("connection");
@@ -319,6 +412,7 @@ mod tests {
             &registry,
             &connection,
             None,
+            &mut ElementImageCache::default(),
         );
     }
 

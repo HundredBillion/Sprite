@@ -46,7 +46,7 @@ fn dragged_scroll_offset(total: f32, viewport: f32, pointer_y: f32, grab: f32) -
 }
 
 fn sync_image_cache(
-    cache: &mut Arc<BTreeMap<String, Arc<RenderImage>>>,
+    cache: &mut Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
     assets: &BTreeMap<String, String>,
     ids: impl IntoIterator<Item = String>,
     raster_width: f32,
@@ -62,9 +62,8 @@ fn sync_image_cache(
     for id in ids {
         if !images.contains_key(&id)
             && let Some(svg) = assets.get(&id)
-            && let Some(image) = render_svg(svg, Some(raster_width))
         {
-            images.insert(id, image);
+            images.insert(id, render_svg(svg, Some(raster_width)));
         }
     }
     if images.len() != cache.len() {
@@ -127,7 +126,7 @@ pub(super) struct VirtualListView {
     surface: SurfaceId,
     host: WeakEntity<TerminalView>,
     pub(super) scroll: UniformListScrollHandle,
-    images: Arc<BTreeMap<String, Arc<RenderImage>>>,
+    images: Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
     raster_width: f32,
     focused: bool,
     viewport: Option<Bounds<gpui::Pixels>>,
@@ -443,12 +442,18 @@ impl Render for VirtualListView {
                         let row = &rows[index];
                         let id = row.id.clone();
                         let is_selected = selected_id.as_deref() == Some(row.id.as_str());
-                        let icon = row.icon.as_ref().and_then(|name| images.get(name)).cloned();
+                        let icon = row
+                            .icon
+                            .as_ref()
+                            .and_then(|name| images.get(name))
+                            .cloned()
+                            .flatten();
                         let leading = row
                             .leading
                             .as_ref()
                             .and_then(|name| images.get(name))
-                            .cloned();
+                            .cloned()
+                            .flatten();
                         let mut line = div()
                             .id(ElementId::NamedInteger(
                                 SharedString::from(format!("surface-{}-row", surface.0)),
@@ -697,10 +702,10 @@ impl Render for VirtualListView {
 }
 
 fn images_for_header(
-    images: &Arc<BTreeMap<String, Arc<RenderImage>>>,
+    images: &Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
     id: Option<&str>,
 ) -> Option<Arc<RenderImage>> {
-    id.and_then(|id| images.get(id)).cloned()
+    id.and_then(|id| images.get(id)).cloned().flatten()
 }
 struct HeaderEvent {
     index: u64,
@@ -814,7 +819,7 @@ mod tests {
         );
         sync_image_cache(&mut cache, &assets, ["first".to_owned()], 2.0);
         let old_cache = cache.clone();
-        let old_image = cache["first"].clone();
+        let old_image = cache["first"].as_ref().unwrap().clone();
         sync_image_cache(&mut cache, &assets, ["first".to_owned()], 2.0);
         assert!(Arc::ptr_eq(&cache, &old_cache));
         assets.insert(
@@ -822,8 +827,18 @@ mod tests {
             "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>".to_owned(),
         );
         sync_image_cache(&mut cache, &assets, ["second".to_owned()], 2.0);
-        assert!(Arc::ptr_eq(&cache["first"], &old_image));
+        assert!(Arc::ptr_eq(cache["first"].as_ref().unwrap(), &old_image));
         assert_eq!(cache.len(), 2);
+    }
+    #[test]
+    fn invalid_visible_svg_is_cached_as_an_empty_slot() {
+        let mut cache = Arc::new(BTreeMap::new());
+        let assets = BTreeMap::from([("broken".to_owned(), "<svg invalid".to_owned())]);
+        sync_image_cache(&mut cache, &assets, ["broken".to_owned()], 32.0);
+        assert!(cache["broken"].is_none());
+        let first = cache.clone();
+        sync_image_cache(&mut cache, &assets, ["broken".to_owned()], 32.0);
+        assert!(Arc::ptr_eq(&first, &cache));
     }
     #[test]
     fn svg_cache_keeps_blue_red_and_alpha_channels_in_renderer_order() {

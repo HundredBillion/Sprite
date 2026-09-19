@@ -30,7 +30,10 @@ use crate::tokens::TokenRegistry;
 /// What a Surface draws: an element tree replaced whole on `update`, or a
 /// grid mutated by operations.
 pub(super) enum Body {
-    Elements(Description),
+    Elements {
+        description: Description,
+        images: crate::surface::render::ElementImageCache,
+    },
     Grid {
         grid: GridSurface,
         /// The description's root element, kept for the `bg` and `color` it
@@ -408,7 +411,10 @@ impl TerminalView {
                     view: cx.new(|_| VirtualListView::new(config, id, host)),
                 }
             }
-            None => Body::Elements(Description { root }),
+            None => Body::Elements {
+                description: Description { root },
+                images: Default::default(),
+            },
         };
         let hosted = HostedSurface {
             id,
@@ -600,7 +606,10 @@ impl TerminalView {
                     ));
                     return;
                 } else {
-                    surface.body = Body::Elements(parsed.description);
+                    surface.body = Body::Elements {
+                        description: parsed.description,
+                        images: Default::default(),
+                    };
                 }
                 for warning in parsed.warnings {
                     surface.connection.send(&event_warning(&warning));
@@ -981,19 +990,23 @@ impl TerminalView {
                 let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
                 event_grid_resize(told.0, told.1, cols, rows)
             }
-            Body::Elements(_) | Body::List { .. } => event_resize(told.0, told.1),
+            Body::Elements { .. } | Body::List { .. } => event_resize(told.0, told.1),
         };
         if surface.told.as_deref() != Some(event.as_str()) {
             surface.connection.send(&event);
             surface.told = Some(event);
         }
         let body = match &mut surface.body {
-            Body::Elements(description) => crate::surface::render::render(
+            Body::Elements {
+                description,
+                images,
+            } => crate::surface::render::render(
                 description,
                 surface.id,
                 registry,
                 &surface.connection,
                 Some(cx.entity()),
+                images,
             ),
             Body::Grid { grid, .. } => {
                 crate::surface::render::render_grid(grid, highlights, metrics)
@@ -1492,5 +1505,108 @@ mod tests {
         cx.cx.update(|_| {});
         assert!(weak_host.upgrade().is_none());
         assert!(list.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn legacy_svg_cache_follows_description_update_and_surface_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let document = |color| serde_json::json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":format!("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>")}});
+        host.update_in(cx, |view, window, cx| {
+            view.open_surface(
+                SurfaceId(2),
+                Open {
+                    position: Position::Fill,
+                    side: Side::Left,
+                    size: 0.0,
+                    focus: false,
+                    owner_pid: None,
+                    return_target: None,
+                    resizable: false,
+                    description: document("blue"),
+                },
+                connection,
+                window,
+                cx,
+            )
+            .unwrap();
+        });
+        let (first, again) = host.update(cx, |view, _| {
+            let surface = view.surfaces.fill.as_mut().unwrap();
+            let connection = surface.connection.clone();
+            let Body::Elements {
+                description,
+                images,
+            } = &mut surface.body
+            else {
+                panic!("expected elements")
+            };
+            let _ = crate::surface::render::render(
+                description,
+                SurfaceId(2),
+                &TokenRegistry::new(&settings.colors),
+                &connection,
+                None,
+                images,
+            );
+            let first = images.image_id(0).unwrap();
+            let _ = crate::surface::render::render(
+                description,
+                SurfaceId(2),
+                &TokenRegistry::new(&settings.colors),
+                &connection,
+                None,
+                images,
+            );
+            (first, images.image_id(0).unwrap())
+        });
+        assert_eq!(first, again);
+        host.update(cx, |view, cx| {
+            view.update_surface(SurfaceId(2), document("red"), cx);
+            let Body::Elements { images, .. } = &view.surfaces.fill.as_ref().unwrap().body else {
+                panic!("expected elements")
+            };
+            assert!(images.image_id(0).is_none());
+        });
+        let replacement = host.update(cx, |view, _| {
+            let surface = view.surfaces.fill.as_mut().unwrap();
+            let connection = surface.connection.clone();
+            let Body::Elements {
+                description,
+                images,
+            } = &mut surface.body
+            else {
+                panic!("expected elements")
+            };
+            let _ = crate::surface::render::render(
+                description,
+                SurfaceId(2),
+                &TokenRegistry::new(&settings.colors),
+                &connection,
+                None,
+                images,
+            );
+            images.image_id(0).unwrap()
+        });
+        assert_ne!(first, replacement);
+        host.update_in(cx, |view, window, cx| {
+            view.close_surface(SurfaceId(2), window, cx)
+        });
+        assert!(host.read_with(cx, |view, _| view.surfaces.fill.is_none()));
+        cx.update(|window, _| window.remove_window());
+        drop(host);
     }
 }
