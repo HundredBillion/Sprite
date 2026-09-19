@@ -844,7 +844,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1"],
+        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,

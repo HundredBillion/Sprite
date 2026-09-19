@@ -553,5 +553,7 @@ impl Render for TerminalView {
             .children(layers.left)
             .children(layers.right)
             .children(layers.overlays)
+            .children(layers.dock_edges)
+            .children(layers.dock_capture)
     }
 }

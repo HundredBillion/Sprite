@@ -9,17 +9,17 @@ use super::*;
 use gpui::prelude::*;
 
 use gpui::{
-    AnyElement, Context, ElementInputHandler, Entity, FocusHandle, KeyDownEvent, KeyUpEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent,
-    SharedString, Size, Window, canvas, div, px, rgb,
+    AnyElement, Context, CursorStyle, ElementInputHandler, Entity, FocusHandle, KeyDownEvent,
+    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollWheelEvent, SharedString, Size, Window, canvas, div, px, rgb,
 };
 
 use super::list_view::VirtualListView;
 use crate::config::Highlights;
 use crate::surface::channel::{
-    FocusTarget, Open, Position, ReturnTarget, SurfaceConnection, event_applied, event_blur,
-    event_closed, event_focus, event_grid_resize, event_input, event_mouse, event_paste,
-    event_refused, event_resize, event_warning, neovim_modifiers,
+    FocusTarget, Open, Position, ReturnTarget, Side, SurfaceConnection, event_applied, event_blur,
+    event_closed, event_dock_size, event_focus, event_grid_resize, event_input, event_mouse,
+    event_paste, event_refused, event_resize, event_warning, neovim_modifiers,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -78,8 +78,39 @@ pub(super) struct HostedSurface {
     wheel_cols: crate::grid::ScrollAccumulator,
     owner: Option<Owner>,
     registered_owner: Option<(u32, i32)>,
-    #[allow(dead_code)]
     resizable: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DockDrag {
+    id: SurfaceId,
+    side: Side,
+    start_x: f32,
+    start_width: f32,
+}
+
+fn dragged_width(start: f32, delta: f32, left: bool, limit: f32) -> f32 {
+    let wanted = start + if left { delta } else { -delta };
+    wanted.clamp(64.0_f32.min(limit), limit.min(4096.0).max(0.0))
+}
+
+#[cfg(test)]
+mod dock_drag_tests {
+    use super::dragged_width;
+
+    #[test]
+    fn either_edge_changes_width_in_its_own_direction() {
+        assert_eq!(dragged_width(300.0, 45.0, true, 800.0), 345.0);
+        assert_eq!(dragged_width(300.0, 45.0, false, 800.0), 255.0);
+    }
+
+    #[test]
+    fn dragged_width_respects_request_and_pane_bounds() {
+        assert_eq!(dragged_width(300.0, -500.0, true, 800.0), 64.0);
+        assert_eq!(dragged_width(300.0, 5000.0, true, 800.0), 800.0);
+        assert_eq!(dragged_width(300.0, 5000.0, true, 5000.0), 4096.0);
+        assert_eq!(dragged_width(300.0, -500.0, true, 40.0), 40.0);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +163,8 @@ pub(super) struct SurfaceLayers {
     pub(super) left: Option<AnyElement>,
     pub(super) right: Option<AnyElement>,
     pub(super) overlays: Vec<AnyElement>,
+    pub(super) dock_edges: Vec<AnyElement>,
+    pub(super) dock_capture: Option<AnyElement>,
 }
 
 fn eligible_owner_group(
@@ -156,6 +189,84 @@ fn eligible_owner_group(
 }
 
 impl TerminalView {
+    fn resize_dock(&mut self, id: SurfaceId, width: f32, cx: &mut Context<Self>) {
+        let Some(surface) = self
+            .surfaces
+            .get_mut(|surface| surface.id == id && surface.resizable)
+        else {
+            return;
+        };
+        if surface.size == width {
+            return;
+        }
+        let old_reported = surface.size.round() as u32;
+        surface.size = width;
+        let reported = width.round() as u32;
+        if reported != old_reported {
+            surface.connection.send(&event_dock_size(reported));
+        }
+        self.size = None;
+        cx.notify();
+    }
+
+    fn move_dock_drag(&mut self, x: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.dock_drag else {
+            return;
+        };
+        if !self.accept_surface_input(drag.id, window, cx) {
+            return;
+        }
+        let allocated = self.allocated.unwrap_or_else(|| window.viewport_size());
+        let limit = f32::from(allocated.width) / 2.0;
+        let width = dragged_width(
+            drag.start_width,
+            x - drag.start_x,
+            drag.side == Side::Left,
+            limit,
+        );
+        self.resize_dock(drag.id, width, cx);
+    }
+
+    fn dock_edge(
+        &self,
+        id: SurfaceId,
+        side: Side,
+        width: f32,
+        allocated: Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let x = if side == Side::Left {
+            width
+        } else {
+            f32::from(allocated.width) - width - 4.0
+        };
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(0.0))
+            .w(px(4.0))
+            .h_full()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    view.dock_drag = Some(DockDrag {
+                        id,
+                        side,
+                        start_x: f32::from(event.position.x),
+                        start_width: width,
+                    });
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn capability_owner_group(
         &self,
         owner_pid: u32,
@@ -630,6 +741,9 @@ impl TerminalView {
         let Some((surface, position)) = self.surfaces.take(|surface| surface.id == id) else {
             return;
         };
+        if self.dock_drag.is_some_and(|drag| drag.id == id) {
+            self.dock_drag = None;
+        }
         surface.connection.send(&event_closed());
         if surface.focus.is_focused(window) {
             // An overlay gives the keyboard back to whoever had it. Anything
@@ -711,6 +825,47 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> SurfaceLayers {
         let (left_width, right_width) = self.dock_widths(allocated);
+        let mut dock_edges = Vec::new();
+        if let Some(surface) = self
+            .surfaces
+            .left
+            .as_ref()
+            .filter(|surface| surface.resizable)
+        {
+            dock_edges.push(self.dock_edge(surface.id, Side::Left, left_width, allocated, cx));
+        }
+        if let Some(surface) = self
+            .surfaces
+            .right
+            .as_ref()
+            .filter(|surface| surface.resizable)
+        {
+            dock_edges.push(self.dock_edge(surface.id, Side::Right, right_width, allocated, cx));
+        }
+        let dock_capture = self.dock_drag.map(|_| {
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
+                    if event.dragging() {
+                        view.move_dock_drag(f32::from(event.position.x), window, cx);
+                    } else if view.dock_drag.take().is_some() {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
+                        view.dock_drag = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                    }),
+                )
+                .into_any_element()
+        });
         let fill = self.surfaces.fill.as_mut().map(|surface| {
             Self::surface_element(
                 surface, allocated, registry, metrics, highlights, focused, preedit, cx, true,
@@ -773,6 +928,8 @@ impl TerminalView {
             left,
             right,
             overlays,
+            dock_edges,
+            dock_capture,
         }
     }
 
