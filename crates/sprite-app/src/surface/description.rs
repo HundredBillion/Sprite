@@ -109,6 +109,12 @@ pub enum ListFontWeight {
     Bold,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuideVisibility {
+    Always,
+    Hover,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListColors {
     pub background: ColorRef,
@@ -119,8 +125,11 @@ pub struct ListColors {
     pub selected_foreground: ColorRef,
     pub focus: ColorRef,
     pub guide: ColorRef,
+    pub inactive_guide: ColorRef,
     pub border: ColorRef,
     pub scrollbar: ColorRef,
+    pub scrollbar_hover: ColorRef,
+    pub scrollbar_active: ColorRef,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,6 +141,13 @@ pub struct ListConfig {
     pub icon_gap: f32,
     pub left_padding: f32,
     pub right_padding: f32,
+    pub scrollbar_width: f32,
+    pub guide_visibility: GuideVisibility,
+    pub guide_opacity: f32,
+    pub inactive_guide_opacity: f32,
+    pub scrollbar_opacity: f32,
+    pub scrollbar_hover_opacity: f32,
+    pub scrollbar_active_opacity: f32,
     pub heading: Option<ListHeader>,
     pub section: Option<ListHeader>,
     pub colors: ListColors,
@@ -362,6 +378,42 @@ fn list_config(
         color_ref(colors, key, role, registry, warnings)?
             .ok_or_else(|| Refusal::Malformed(format!("virtual_list colors needs {key}")))
     };
+    let guide = color("guide", Role::Fill)?;
+    let scrollbar = color("scrollbar", Role::Fill)?;
+    let background = color("background", Role::Fill)?;
+    let foreground = color("foreground", Role::Text)?;
+    let hover = color("hover", Role::Fill)?;
+    let selected = color("selected", Role::Fill)?;
+    let inactive_selected = color("inactive_selected", Role::Fill)?;
+    let selected_foreground = color("selected_foreground", Role::Text)?;
+    let focus = color("focus", Role::Fill)?;
+    let border = color("border", Role::Fill)?;
+    drop(color);
+    let optional_color =
+        |key: &str, fallback: &ColorRef, warnings: &mut Vec<String>| -> Result<ColorRef, Refusal> {
+            Ok(color_ref(colors, key, Role::Fill, registry, warnings)?
+                .unwrap_or_else(|| fallback.clone()))
+        };
+    let inactive_guide = optional_color("inactive_guide", &guide, warnings)?;
+    let scrollbar_hover = optional_color("scrollbar_hover", &scrollbar, warnings)?;
+    let scrollbar_active = optional_color("scrollbar_active", &scrollbar, warnings)?;
+    let optional_metric = |key: &str, default: f32, min: f32, max: f32| -> Result<f32, Refusal> {
+        if object.contains_key(key) {
+            finite_field(object, key, min, max)
+        } else {
+            Ok(default)
+        }
+    };
+    let guide_visibility = match object.get("guide_visibility") {
+        None => GuideVisibility::Always,
+        Some(Value::String(value)) if value == "always" => GuideVisibility::Always,
+        Some(Value::String(value)) if value == "hover" => GuideVisibility::Hover,
+        _ => {
+            return Err(Refusal::Malformed(
+                "guide_visibility is always or hover".into(),
+            ));
+        }
+    };
     Ok(ListConfig {
         row_height: metric("row_height", 12.0, 128.0)?,
         font_size: metric("font_size", 6.0, 64.0)?,
@@ -372,19 +424,29 @@ fn list_config(
         icon_gap: metric("icon_gap", 0.0, 128.0)?,
         left_padding: metric("left_padding", 0.0, 128.0)?,
         right_padding: metric("right_padding", 0.0, 128.0)?,
+        scrollbar_width: optional_metric("scrollbar_width", 6.0, 4.0, 32.0)?,
+        guide_visibility,
+        guide_opacity: optional_metric("guide_opacity", 1.0, 0.0, 1.0)?,
+        inactive_guide_opacity: optional_metric("inactive_guide_opacity", 1.0, 0.0, 1.0)?,
+        scrollbar_opacity: optional_metric("scrollbar_opacity", 1.0, 0.0, 1.0)?,
+        scrollbar_hover_opacity: optional_metric("scrollbar_hover_opacity", 1.0, 0.0, 1.0)?,
+        scrollbar_active_opacity: optional_metric("scrollbar_active_opacity", 1.0, 0.0, 1.0)?,
         heading: list_header(object, "heading")?,
         section: list_header(object, "section")?,
         colors: ListColors {
-            background: color("background", Role::Fill)?,
-            foreground: color("foreground", Role::Text)?,
-            hover: color("hover", Role::Fill)?,
-            selected: color("selected", Role::Fill)?,
-            inactive_selected: color("inactive_selected", Role::Fill)?,
-            selected_foreground: color("selected_foreground", Role::Text)?,
-            focus: color("focus", Role::Fill)?,
-            guide: color("guide", Role::Fill)?,
-            border: color("border", Role::Fill)?,
-            scrollbar: color("scrollbar", Role::Fill)?,
+            background,
+            foreground,
+            hover,
+            selected,
+            inactive_selected,
+            selected_foreground,
+            focus,
+            guide,
+            inactive_guide,
+            border,
+            scrollbar,
+            scrollbar_hover,
+            scrollbar_active,
         },
     })
 }
@@ -698,6 +760,16 @@ mod tests {
             "colors":{"background":"terminal.background","foreground":"terminal.foreground","hover":"terminal.background","selected":"terminal.background","inactive_selected":"terminal.background","selected_foreground":"terminal.foreground","focus":"terminal.background","guide":"terminal.background","border":"terminal.background","scrollbar":"terminal.background"}}}));
         let config = list.description.root.list.expect("list config");
         assert_eq!(config.row_height, 22.0);
+        assert_eq!(config.scrollbar_width, 6.0);
+        assert_eq!(config.guide_visibility, GuideVisibility::Always);
+        assert_eq!(config.colors.scrollbar_hover, config.colors.scrollbar);
+        assert_eq!(config.colors.scrollbar_active, config.colors.scrollbar);
+        assert_eq!(config.colors.inactive_guide, config.colors.guide);
+        assert_eq!(config.scrollbar_opacity, 1.0);
+        let styled = shared.description.root.list.expect("styled list");
+        assert_eq!(styled.scrollbar_width, 10.0);
+        assert_eq!(styled.guide_visibility, GuideVisibility::Hover);
+        assert_eq!(styled.scrollbar_hover_opacity, 0.7);
         assert_eq!(
             config.section.expect("section").font_weight,
             Some(ListFontWeight::Bold)
@@ -716,6 +788,16 @@ mod tests {
                 refused(json!({"version":1,"root":root})),
                 Refusal::Malformed(_)
             ));
+        }
+        for (key, value) in [
+            ("scrollbar_width", json!(3)),
+            ("guide_visibility", json!("sometimes")),
+            ("scrollbar_hover_opacity", json!(1.1)),
+            ("inactive_guide_opacity", json!(-0.1)),
+        ] {
+            let mut description = fixture["description"].clone();
+            description["root"][key] = value;
+            assert!(matches!(refused(description), Refusal::Malformed(_)));
         }
     }
 

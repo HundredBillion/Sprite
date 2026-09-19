@@ -1,6 +1,6 @@
 //! The validated, renderer-independent state behind a virtual-list Surface.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -22,7 +22,13 @@ pub struct ListRow {
     pub indent: f32,
     pub icon: Option<String>,
     pub leading: Option<String>,
-    pub guides: Vec<f32>,
+    pub guides: Vec<ListGuide>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListGuide {
+    pub offset: f32,
+    pub id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +60,7 @@ pub struct ListModel {
     pub assets: BTreeMap<String, String>,
     pub scroll: Option<ScrollAnchor>,
     pub reveal: Option<String>,
+    pub active_guides: HashSet<String>,
     ids: HashMap<String, usize>,
     row_height: f32,
 }
@@ -68,6 +75,7 @@ impl Default for ListModel {
             assets: BTreeMap::new(),
             scroll: None,
             reveal: None,
+            active_guides: HashSet::new(),
             ids: HashMap::new(),
             row_height: 128.0,
         }
@@ -153,6 +161,13 @@ impl ListModel {
         self.selected = selected;
         self.scroll = scroll;
         self.reveal = None;
+        let surviving: HashSet<&str> = self
+            .rows
+            .iter()
+            .flat_map(|row| row.guides.iter().filter_map(|guide| guide.id.as_deref()))
+            .collect();
+        self.active_guides
+            .retain(|id| surviving.contains(id.as_str()));
         Ok(())
     }
 
@@ -167,6 +182,21 @@ impl ListModel {
         let mut status = self.status.clone();
         let mut scroll = self.scroll.clone();
         let mut reveal = self.reveal.clone();
+        let mut active_guides = self.active_guides.clone();
+        if let Some(value) = patch.get("active_guides") {
+            active_guides = parse_active_guides(value)?;
+            let available: HashSet<&str> = self
+                .rows
+                .iter()
+                .flat_map(|row| row.guides.iter().filter_map(|guide| guide.id.as_deref()))
+                .collect();
+            if active_guides
+                .iter()
+                .any(|id| !available.contains(id.as_str()))
+            {
+                return Err(malformed("active guide does not exist"));
+            }
+        }
         if let Some(value) = patch.get("selected") {
             selected = nullable_row(value, &self.ids, "selected")?;
         }
@@ -190,6 +220,7 @@ impl ListModel {
         self.status = status;
         self.scroll = scroll;
         self.reveal = reveal;
+        self.active_guides = active_guides;
         Ok(())
     }
 }
@@ -254,7 +285,7 @@ fn parse_rows(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
 fn parse_state(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
     let revision = revision(object)?;
     let mut patch = Map::new();
-    for key in ["selected", "status", "scroll", "reveal"] {
+    for key in ["selected", "status", "scroll", "reveal", "active_guides"] {
         if let Some(value) = object.get(key) {
             match key {
                 "selected" | "status" => {
@@ -269,6 +300,9 @@ fn parse_state(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
                 }
                 "reveal" => {
                     string_value(value, "reveal")?;
+                }
+                "active_guides" => {
+                    parse_active_guides(value)?;
                 }
                 _ => unreachable!(),
             }
@@ -309,7 +343,20 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
         .filter(|guides| guides.len() <= MAX_GUIDES)
         .ok_or_else(|| malformed(format!("guides has at most {MAX_GUIDES} offsets")))?
         .iter()
-        .map(|guide| finite(Some(guide), "guide", 0.0, MAX_OFFSET))
+        .map(|guide| match guide {
+            Value::Object(object) => {
+                let id = string(object, "id")?;
+                validate_row_string(&id, "guide id")?;
+                Ok(ListGuide {
+                    offset: finite(object.get("offset"), "guide", 0.0, MAX_OFFSET)?,
+                    id: Some(id),
+                })
+            }
+            _ => Ok(ListGuide {
+                offset: finite(Some(guide), "guide", 0.0, MAX_OFFSET)?,
+                id: None,
+            }),
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ListRow {
         id,
@@ -319,6 +366,25 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
         leading,
         guides,
     })
+}
+
+fn parse_active_guides(value: &Value) -> Result<HashSet<String>, Refusal> {
+    if value.is_null() {
+        return Ok(HashSet::new());
+    }
+    let values = value
+        .as_array()
+        .filter(|values| values.len() <= MAX_GUIDES)
+        .ok_or_else(|| malformed("active_guides has at most 64 ids"))?;
+    let mut ids = HashSet::new();
+    for value in values {
+        let id = string_value(value, "active guide id")?;
+        validate_row_string(&id, "active guide id")?;
+        if !ids.insert(id) {
+            return Err(malformed("duplicate active guide id"));
+        }
+    }
+    Ok(ids)
 }
 
 fn id_index(rows: &[ListRow]) -> Result<HashMap<String, usize>, Refusal> {
@@ -494,6 +560,55 @@ mod tests {
         let stale = serde_json::json!({"type":"list_state","revision":1,"selected":"new"});
         assert!(model.apply(parse_op(&stale).unwrap()).is_err());
         assert_eq!(model.selected, None);
+    }
+
+    #[test]
+    fn identified_guides_follow_state_and_surviving_rows() {
+        let mut model = ListModel::default();
+        let first = serde_json::json!({"type":"list_rows","revision":1,"selected":null,"rows":[
+            {"id":"a","text":"a","indent":0,"guides":[0,{"offset":8,"id":"group-a"}]},
+            {"id":"b","text":"b","indent":0,"guides":[{"offset":8,"id":"group-b"}]}]});
+        model.apply(parse_op(&first).unwrap()).unwrap();
+        model.apply(parse_op(&serde_json::json!({"type":"list_state","revision":1,"active_guides":["group-a","group-b"]})).unwrap()).unwrap();
+        assert_eq!(model.active_guides.len(), 2);
+        let replacement = serde_json::json!({"type":"list_rows","revision":2,"selected":null,"rows":[
+            {"id":"b","text":"b","indent":0,"guides":[{"offset":8,"id":"group-b"}]}]});
+        model.apply(parse_op(&replacement).unwrap()).unwrap();
+        assert_eq!(
+            model.active_guides.iter().cloned().collect::<Vec<_>>(),
+            ["group-b"]
+        );
+        let before = model.active_guides.clone();
+        assert!(model.apply(parse_op(&serde_json::json!({"type":"list_state","revision":2,"selected":"b","active_guides":["missing"]})).unwrap()).is_err());
+        assert_eq!(model.active_guides, before);
+        assert_eq!(model.selected, None);
+        for guides in [
+            serde_json::json!([{"offset":-1,"id":"group"}]),
+            serde_json::json!([{"offset":8,"id":""}]),
+            serde_json::json!([{"offset":8,"id":"group"},false]),
+        ] {
+            let bad = serde_json::json!({"type":"list_rows","revision":3,"selected":null,"rows":[{"id":"c","text":"c","indent":0,"guides":guides}]});
+            assert!(parse_op(&bad).is_err());
+            assert_eq!(model.revision, 2);
+        }
+        for ids in [
+            serde_json::json!(["group-b", "group-b"]),
+            serde_json::json!([7]),
+            serde_json::json!({"id":"group-b"}),
+        ] {
+            let bad = serde_json::json!({"type":"list_state","revision":2,"selected":null,"active_guides":ids});
+            assert!(parse_op(&bad).and_then(|op| model.apply(op)).is_err());
+            assert_eq!(model.active_guides, before);
+        }
+        model
+            .apply(
+                parse_op(
+                    &serde_json::json!({"type":"list_state","revision":2,"active_guides":null}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(model.active_guides.is_empty());
     }
 
     #[test]

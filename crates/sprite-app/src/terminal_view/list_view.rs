@@ -4,11 +4,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, Context, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ListSizingBehavior, MouseButton, ParentElement, Render, RenderImage, SharedString, Styled,
-    UniformListScrollHandle, WeakEntity, Window, canvas, div, img, px, rgb, uniform_list,
+    ListSizingBehavior, MouseButton, ParentElement, Render, RenderImage, SharedString,
+    StatefulInteractiveElement, Styled, UniformListScrollHandle, WeakEntity, Window, canvas, div,
+    img, px, rgb, uniform_list,
 };
 
 use crate::grid_paint::pack;
@@ -17,7 +17,7 @@ use crate::surface::SurfaceId;
 use crate::surface::channel::{
     event_list_action, event_list_click, event_list_scroll, neovim_modifiers,
 };
-use crate::surface::description::ListConfig;
+use crate::surface::description::{GuideVisibility, ListConfig};
 use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
 use crate::surface::render::render_svg;
 use crate::terminal_view::TerminalView;
@@ -132,6 +132,8 @@ pub(super) struct VirtualListView {
     viewport: Option<Bounds<gpui::Pixels>>,
     last_anchor: Option<(String, f32, u32)>,
     thumb_grab: Option<f32>,
+    list_hovered: bool,
+    thumb_hovered: bool,
 }
 
 impl VirtualListView {
@@ -152,6 +154,8 @@ impl VirtualListView {
             viewport: None,
             last_anchor: None,
             thumb_grab: None,
+            list_hovered: false,
+            thumb_hovered: false,
         }
     }
 
@@ -410,10 +414,25 @@ impl Render for VirtualListView {
             foreground
         };
         let hover = rgb(pack(colors.hover.resolve(registry, Role::Fill)));
-        let guide_color = rgb(pack(colors.guide.resolve(registry, Role::Fill)));
+        let mut guide_color = rgb(pack(colors.guide.resolve(registry, Role::Fill)));
+        guide_color.a = config.guide_opacity;
+        let mut inactive_guide_color =
+            rgb(pack(colors.inactive_guide.resolve(registry, Role::Fill)));
+        inactive_guide_color.a = config.inactive_guide_opacity;
         let border_color = rgb(pack(colors.border.resolve(registry, Role::Fill)));
         let focus_color = rgb(pack(colors.focus.resolve(registry, Role::Fill)));
-        let scrollbar_color = rgb(pack(colors.scrollbar.resolve(registry, Role::Fill)));
+        let (scrollbar_role, scrollbar_opacity) = if self.thumb_grab.is_some() {
+            (&colors.scrollbar_active, config.scrollbar_active_opacity)
+        } else if self.thumb_hovered {
+            (&colors.scrollbar_hover, config.scrollbar_hover_opacity)
+        } else {
+            (&colors.scrollbar, config.scrollbar_opacity)
+        };
+        let mut scrollbar_color = rgb(pack(scrollbar_role.resolve(registry, Role::Fill)));
+        scrollbar_color.a = scrollbar_opacity;
+        let active_guides = self.model.active_guides.clone();
+        let show_inactive_guides =
+            config.guide_visibility == GuideVisibility::Always || self.list_hovered;
         let rows = Arc::clone(&self.model.rows);
         let images = Arc::clone(&self.images);
         let selected_id = self.model.selected.clone();
@@ -483,14 +502,25 @@ impl Render for VirtualListView {
                             line = line.hover(|style| style.bg(hover));
                         }
                         for guide in &row.guides {
+                            let active = guide
+                                .id
+                                .as_ref()
+                                .is_some_and(|id| active_guides.contains(id));
+                            if !active && guide.id.is_some() && !show_inactive_guides {
+                                continue;
+                            }
                             line = line.child(
                                 div()
                                     .absolute()
-                                    .left(px(*guide + row_config.left_padding))
+                                    .left(px(guide.offset + row_config.left_padding))
                                     .top_0()
                                     .bottom_0()
                                     .w(px(1.0))
-                                    .bg(guide_color),
+                                    .bg(if active || guide.id.is_none() {
+                                        guide_color
+                                    } else {
+                                        inactive_guide_color
+                                    }),
                             );
                         }
                         if row.leading.is_some() {
@@ -626,11 +656,11 @@ impl Render for VirtualListView {
             .absolute()
             .right_0()
             .top(px(thumb_top))
-            .w(px(6.0))
+            .w(px(config.scrollbar_width))
             .h(px(thumb_height))
             .bg(scrollbar_color)
             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                entity.update(cx, |view, _| {
+                entity.update(cx, |view, cx| {
                     if let Some(bounds) = view.viewport {
                         let viewport = f32::from(bounds.size.height);
                         let total = view.model.rows.len() as f32 * view.config.row_height;
@@ -643,6 +673,7 @@ impl Render for VirtualListView {
                             (f32::from(event.position.y - bounds.origin.y) - top)
                                 .clamp(0.0, height),
                         );
+                        cx.notify();
                     }
                 });
                 cx.stop_propagation();
@@ -657,14 +688,25 @@ impl Render for VirtualListView {
         .top_0()
         .left_0()
         .size_full();
+        let hover_entity = cx.entity();
+        let thumb_hover_entity = cx.entity();
         root = root.child(
             div()
+                .id("virtual-list-viewport")
                 .relative()
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
                 .child(list)
                 .child(viewport_bounds)
+                .on_hover(move |hovered, _, cx| {
+                    hover_entity.update(cx, |view, cx| {
+                        if view.list_hovered != *hovered {
+                            view.list_hovered = *hovered;
+                            cx.notify();
+                        }
+                    });
+                })
                 .on_mouse_move(move |event, window, cx| {
                     if event.pressed_button == Some(MouseButton::Left) {
                         bounds_entity.update(cx, |view, cx| {
@@ -675,13 +717,28 @@ impl Render for VirtualListView {
                     }
                 })
                 .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                    release_entity.update(cx, |view, _| view.thumb_grab = None);
+                    release_entity.update(cx, |view, cx| {
+                        view.thumb_grab = None;
+                        cx.notify();
+                    });
                 })
                 .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-                    release_out_entity.update(cx, |view, _| view.thumb_grab = None);
+                    release_out_entity.update(cx, |view, cx| {
+                        view.thumb_grab = None;
+                        cx.notify();
+                    });
                 })
                 .child(if total > viewport && viewport > 0.0 {
-                    scrollbar.into_any_element()
+                    scrollbar
+                        .on_hover(move |hovered, _, cx| {
+                            thumb_hover_entity.update(cx, |view, cx| {
+                                if view.thumb_hovered != *hovered {
+                                    view.thumb_hovered = *hovered;
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .into_any_element()
                 } else {
                     div().into_any_element()
                 }),

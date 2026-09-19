@@ -94,6 +94,18 @@ section text, while its rows use 13px; the client supplies those values.
 Header actions emit `list_action` with the current revision and action string.
 An unknown or unloaded decorative header asset leaves its slot empty.
 
+Optional `scrollbar_width` is 4..32 logical pixels (default 6). Optional
+`guide_visibility` is `always` (default) or `hover`. In hover mode, inactive
+identified guides appear while the pointer is over the list viewport; active
+identified guides remain visible. Numeric guides retain their original always
+visible behavior. `colors.inactive_guide`, `colors.scrollbar_hover`, and
+`colors.scrollbar_active` are optional color references, defaulting to `guide`
+and `scrollbar` respectively. The matching optional `guide_opacity`,
+`inactive_guide_opacity`, `scrollbar_opacity`, `scrollbar_hover_opacity`, and
+`scrollbar_active_opacity` are finite values in 0..1, each defaulting to 1.
+Opacity composites over the actual row background. Dragging selects the active
+scrollbar role; pointer hover selects the hover role otherwise.
+
 Messages after `opened`, in order:
 
 ```json
@@ -118,10 +130,18 @@ ids, labels/ids at most 4096 UTF-8 bytes each, finite indent/guide offsets in
 bounded list of at most 64 x offsets; Sprite draws lines at those positions
 without interpreting them as a directory hierarchy. Validate the whole message
 before mutation. Refuse malformed updates while retaining the last valid model.
+Each guide may instead be an object `{ "offset":8, "id":"group" }`; its offset
+uses the same 0..16384 bound and its nonempty id has at most 4096 UTF-8 bytes.
+The 64-guide limit counts both forms. IDs represent client-owned visual groups.
 
 `list_state` changes selection, status text, or scroll without resending rows.
 Revision must match the current model; missing fields leave state unchanged,
 JSON null clears selection or status, and referenced row ids must exist.
+Optional `active_guides` is an array of at most 64 unique group IDs. Omission
+preserves the prior set; `[]` or null clears it. Every ID must be a valid
+nonempty string of at most 4096 UTF-8 bytes and occur in a current identified
+guide. Unknown IDs refuse the entire state update. Row replacement retains
+only active IDs still present in its new guides.
 `reveal` minimally scrolls its row into view. `scroll` restores an exact top row
 and intra-row pixel offset in `[0,row_height)`. Supplying both is refused. On
 structural replacement, preserve the existing top row identity and offset;
