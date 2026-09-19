@@ -18,7 +18,7 @@ use crate::surface::channel::{
     SurfaceConnection, event_list_action, event_list_click, event_list_scroll, neovim_modifiers,
 };
 use crate::surface::description::ListConfig;
-use crate::surface::list::{ListModel, ListOp};
+use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -59,7 +59,7 @@ pub(super) struct VirtualListView {
     surface: SurfaceId,
     host: Entity<TerminalView>,
     pub(super) scroll: UniformListScrollHandle,
-    images: BTreeMap<String, Arc<Image>>,
+    images: Arc<BTreeMap<String, Arc<Image>>>,
     focused: bool,
     viewport: Option<Bounds<gpui::Pixels>>,
     last_anchor: Option<(u64, usize, u32, u32)>,
@@ -79,7 +79,7 @@ impl VirtualListView {
             surface,
             host,
             scroll: UniformListScrollHandle::new(),
-            images: BTreeMap::new(),
+            images: Arc::new(BTreeMap::new()),
             focused: false,
             viewport: None,
             last_anchor: None,
@@ -87,28 +87,28 @@ impl VirtualListView {
     }
 
     pub(super) fn apply(&mut self, op: ListOp, cx: &mut Context<Self>) -> Result<(), Refusal> {
+        let assets = matches!(op, ListOp::Assets(_));
         self.model.apply(op)?;
-        self.images = self
-            .model
-            .assets
-            .iter()
-            .map(|(id, svg)| {
-                (
-                    id.clone(),
-                    Arc::new(Image::from_bytes(ImageFormat::Svg, svg.as_bytes().to_vec())),
-                )
-            })
-            .collect();
-        if let Some(anchor) = self.model.scroll.take() {
+        if assets {
+            let mut images = (*self.images).clone();
+            for (id, svg) in &self.model.assets {
+                images.entry(id.clone()).or_insert_with(|| {
+                    Arc::new(Image::from_bytes(ImageFormat::Svg, svg.as_bytes().to_vec()))
+                });
+            }
+            self.images = Arc::new(images);
+        }
+        if let Some(anchor) = self.model.scroll.as_ref() {
             if let Some(index) = self.model.index_of(&anchor.id) {
-                // GPUI can reveal rows but cannot restore a fractional item offset itself.
-                self.scroll
-                    .scroll_to_item_strict(index, gpui::ScrollStrategy::Top);
+                // Base handles use content pixels, so this preserves the row's fractional offset.
                 self.scroll
                     .0
                     .borrow_mut()
                     .base_handle
-                    .set_offset(gpui::point(px(0.0), px(-anchor.offset)));
+                    .set_offset(gpui::point(
+                        px(0.0),
+                        px(-(index as f32 * self.config.row_height + anchor.offset)),
+                    ));
             }
         } else if let Some(id) = self.model.reveal.take() {
             if let Some(index) = self.model.index_of(&id) {
@@ -130,7 +130,7 @@ impl VirtualListView {
         cx.notify();
     }
 
-    fn report_anchor(&mut self) {
+    fn report_anchor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let viewport = self
             .viewport
             .map_or(0.0, |bounds| f32::from(bounds.size.height));
@@ -147,21 +147,33 @@ impl VirtualListView {
         let anchor = (self.model.revision, index, intra.round() as u32, visible);
         if self.last_anchor != Some(anchor) {
             self.last_anchor = Some(anchor);
-            self.connection.send(&event_list_scroll(
-                self.model.revision,
-                &row.id,
-                intra,
-                visible,
-            ));
+            self.model.scroll = Some(ScrollAnchor {
+                id: row.id.clone(),
+                offset: intra,
+            });
+            let event = event_list_scroll(self.model.revision, &row.id, intra, visible);
+            self.host.update(cx, |view, cx| {
+                view.dispatch_surface_event(self.surface, &event, window, cx)
+            });
         }
     }
 
-    fn set_viewport(&mut self, bounds: Bounds<gpui::Pixels>) {
+    fn set_viewport(
+        &mut self,
+        bounds: Bounds<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.viewport = Some(bounds);
-        self.report_anchor();
+        self.report_anchor(window, cx);
     }
 
-    fn drag_thumb(&mut self, position_y: gpui::Pixels) {
+    fn drag_thumb(
+        &mut self,
+        position_y: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(bounds) = self.viewport else {
             return;
         };
@@ -176,12 +188,13 @@ impl VirtualListView {
             .borrow_mut()
             .base_handle
             .set_offset(gpui::point(px(0.0), px(-offset)));
-        self.report_anchor();
+        self.report_anchor(window, cx);
+        cx.notify();
     }
 }
 
 impl Render for VirtualListView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let registry = cx.global::<TokenRegistry>();
         let config = self.config.clone();
         let colors = &config.colors;
@@ -199,8 +212,10 @@ impl Render for VirtualListView {
             colors.selected_foreground.resolve(registry, Role::Text),
         ));
         let hover = rgb(pack(colors.hover.resolve(registry, Role::Fill)));
+        let guide_color = rgb(pack(colors.guide.resolve(registry, Role::Fill)));
+        let scrollbar_color = rgb(pack(colors.scrollbar.resolve(registry, Role::Fill)));
         let rows = Arc::clone(&self.model.rows);
-        let images = self.images.clone();
+        let images = Arc::clone(&self.images);
         let selected_id = self.model.selected.clone();
         let revision = self.model.revision;
         let host = self.host.clone();
@@ -209,7 +224,7 @@ impl Render for VirtualListView {
         let row_height = config.row_height;
         let row_config = config.clone();
         let list = uniform_list(
-            "virtual-list-rows",
+            ElementId::NamedInteger(SharedString::from("virtual-list-rows"), surface.0),
             rows.len(),
             move |range, _window, _cx| {
                 range
@@ -218,6 +233,11 @@ impl Render for VirtualListView {
                         let id = row.id.clone();
                         let is_selected = selected_id.as_deref() == Some(row.id.as_str());
                         let icon = row.icon.as_ref().and_then(|name| images.get(name)).cloned();
+                        let leading = row
+                            .leading
+                            .as_ref()
+                            .and_then(|name| images.get(name))
+                            .cloned();
                         let mut line = div()
                             .id(ElementId::NamedInteger(
                                 SharedString::from(format!("surface-{}-row", surface.0)),
@@ -225,6 +245,7 @@ impl Render for VirtualListView {
                             ))
                             .relative()
                             .flex()
+                            .w_full()
                             .items_center()
                             .h(px(row_height))
                             .px(px(row_config.left_padding))
@@ -248,8 +269,12 @@ impl Render for VirtualListView {
                                     .left(px(*guide + row_config.left_padding))
                                     .top_0()
                                     .bottom_0()
-                                    .w(px(1.0)),
+                                    .w(px(1.0))
+                                    .bg(guide_color),
                             );
+                        }
+                        if let Some(leading) = leading {
+                            line = line.child(img(leading).size(px(row_config.icon_size)));
                         }
                         if let Some(icon) = icon {
                             line = line.child(img(icon).size(px(row_config.icon_size)));
@@ -257,6 +282,7 @@ impl Render for VirtualListView {
                         let row_host = row_host.clone();
                         line.child(
                             div()
+                                .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .child(SharedString::from(row.text.clone())),
@@ -287,7 +313,7 @@ impl Render for VirtualListView {
         } else {
             0.0
         };
-        self.report_anchor();
+        self.report_anchor(window, cx);
         let mut root = div()
             .size_full()
             .flex()
@@ -333,18 +359,19 @@ impl Render for VirtualListView {
             .top(px(thumb_top))
             .w(px(6.0))
             .h(px(thumb_height))
-            .bg(rgb(pack(colors.scrollbar.resolve(registry, Role::Fill))))
-            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                entity.update(cx, |view, _| view.drag_thumb(event.position.y));
+            .bg(scrollbar_color)
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                entity.update(cx, |view, cx| view.drag_thumb(event.position.y, window, cx));
             })
-            .on_mouse_move(move |event, _window, cx| {
+            .on_mouse_move(move |event, window, cx| {
                 if event.pressed_button == Some(MouseButton::Left) {
-                    bounds_entity.update(cx, |view, _| view.drag_thumb(event.position.y));
+                    bounds_entity
+                        .update(cx, |view, cx| view.drag_thumb(event.position.y, window, cx));
                 }
             });
         let viewport_bounds = canvas(
-            move |bounds, _window, cx| {
-                viewport_entity.update(cx, |view, _| view.set_viewport(bounds));
+            move |bounds, window, cx| {
+                viewport_entity.update(cx, |view, cx| view.set_viewport(bounds, window, cx));
             },
             |_bounds, _, _window, _cx| {},
         )

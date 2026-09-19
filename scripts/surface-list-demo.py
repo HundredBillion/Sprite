@@ -26,10 +26,16 @@ def connect(message):
     sock.connect(os.environ['SPRITE_SURFACE_SOCKET'])
     wire = sock.makefile('rwb', buffering=0)
     message = dict(message, pane=message.get('pane', pane))
-    wire.write((os.environ['SPRITE_SURFACE_KEY'] + ' ' + json.dumps(message) + '\n').encode())
+    write_all(wire, (os.environ['SPRITE_SURFACE_KEY'] + ' ' + json.dumps(message) + '\n').encode())
     return sock, wire, json.loads(wire.readline())
 
-def send(wire, message): wire.write((json.dumps(message) + '\n').encode())
+def write_all(wire, payload):
+    while payload:
+        written = wire.write(payload)
+        if not written: raise OSError('surface socket closed during write')
+        payload = payload[written:]
+
+def send(wire, message): write_all(wire, (json.dumps(message) + '\n').encode())
 def expect(wire, kind, operation=None):
     while True:
         raw = wire.readline()
@@ -56,9 +62,9 @@ description = {
     'left_padding': 8, 'right_padding': 8,
     'heading': {'text': 'EXPLORER', 'height': 35, 'font_size': 11},
     'section': {'text': 'PROJECT', 'height': 22, 'font_size': 11, 'font_weight': 'bold'},
-    'colors': {'background':'#1f1f1f','foreground':'#cccccc','hover':'#2a2d2e',
-    'selected':'#094771','inactive_selected':'#37373d','selected_foreground':'#ffffff',
-    'focus':'#007fd4','guide':'#404040','border':'#3f3f46','scrollbar':'#797979'}}}
+    'colors': {'background':'#181818','foreground':'#cccccc','hover':'#2a2d2e',
+    'selected':'#04395e','inactive_selected':'#37373d','selected_foreground':'#ffffff',
+    'focus':'#0078d4','guide':'#404040','border':'#3f3f46','scrollbar':'#797979'}}}
 
 try:
     capabilities = query({'type':'capabilities','version':1,'owner_pid':os.getpid(),'return_target':'terminal'})
