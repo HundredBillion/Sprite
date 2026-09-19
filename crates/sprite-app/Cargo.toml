@@ -19,6 +19,7 @@ path = "src/bin/sprite-observation-bench.rs"
 [dependencies]
 async-channel = { workspace = true }
 image = { workspace = true }
+resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 sprite-pane = { workspace = true }
@@ -26,6 +27,7 @@ sprite-term = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+gpui = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui = { workspace = true, features = ["wayland", "x11"] }

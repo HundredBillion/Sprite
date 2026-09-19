@@ -136,6 +136,13 @@ pub enum FocusTarget {
     Surface(SurfaceId),
 }
 
+/// Where an owned Surface returns focus when it closes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReturnTarget {
+    Terminal,
+    Surface(SurfaceId),
+}
+
 /// What an `open` asked for. The description is still JSON here: it is parsed
 /// on the GPUI thread, where the token registry lives.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +152,10 @@ pub struct Open {
     /// A dock's width in logical pixels; ignored for the other positions.
     pub size: f32,
     pub focus: bool,
+    /// A fill may register its process; a dock supplies all ownership fields.
+    pub owner_pid: Option<u32>,
+    pub return_target: Option<ReturnTarget>,
+    pub resizable: bool,
     pub description: Value,
 }
 
@@ -280,11 +291,19 @@ impl std::fmt::Debug for SurfaceConnection {
 
 /// How the window answers a request: once, or not at all if it is closing.
 pub type Reply = SyncSender<Result<(), Refusal>>;
+pub type JsonReply = SyncSender<Result<Value, Refusal>>;
 
 /// What a connection asks the window to do. Crosses from a connection thread
 /// to the GPUI thread; the pane is named so the window can find the view.
 #[derive(Debug)]
 pub enum SurfaceRequest {
+    /// A side-effect-free query validated by the pane on the GPUI thread.
+    Capabilities {
+        pane: PaneId,
+        owner_pid: u32,
+        return_target: ReturnTarget,
+        reply: JsonReply,
+    },
     Open {
         id: SurfaceId,
         pane: PaneId,
@@ -322,6 +341,13 @@ pub enum SurfaceRequest {
         id: SurfaceId,
         pane: PaneId,
         ops: Vec<crate::surface::grid::Op>,
+    },
+    /// A validated virtual-list operation. The model is mutated on the GPUI
+    /// thread with its description, just as grid operations are.
+    List {
+        id: SurfaceId,
+        pane: PaneId,
+        op: crate::surface::list::ListOp,
     },
     RegisterToken {
         name: String,
@@ -524,6 +550,9 @@ fn converse(
     };
     match message.get("type").and_then(Value::as_str) {
         Some("open") => serve_surface(stream, reader, &message, requests),
+        Some("capabilities") => json_one_shot(&mut stream, requests, |reply| {
+            capabilities_request(&message, reply)
+        }),
         Some("focus") => one_shot(&mut stream, requests, event_focused(), |reply| {
             let pane = pane_of(&message)?;
             let target = focus_target(&message)?;
@@ -539,11 +568,38 @@ fn converse(
         other => refuse(
             &mut stream,
             &Refusal::Malformed(format!(
-                "the first message is open, focus, or token, not {}",
+                "the first message is open, capabilities, focus, or token, not {}",
                 other.unwrap_or("nothing")
             ))
             .reason(),
         ),
+    }
+}
+
+fn json_one_shot(
+    stream: &mut UnixStream,
+    requests: &async_channel::Sender<SurfaceRequest>,
+    request: impl FnOnce(JsonReply) -> Result<SurfaceRequest, Refusal>,
+) {
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    let request = match request(reply) {
+        Ok(request) => request,
+        Err(refusal) => {
+            refuse(stream, &refusal.reason());
+            return;
+        }
+    };
+    if requests.send_blocking(request).is_err() {
+        refuse(stream, NOT_ANSWERING);
+        return;
+    }
+    match answer.recv_timeout(REPLY_TIMEOUT) {
+        Ok(Ok(answer)) => {
+            let _ = writeln!(stream, "{answer}");
+            let _ = stream.shutdown(Shutdown::Write);
+        }
+        Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
+        Err(_) => refuse(stream, NO_ANSWER),
     }
 }
 
@@ -659,6 +715,17 @@ fn serve_surface(
                     }
                 }
             }
+            Some(kind) if crate::surface::list::is_op(kind) => {
+                match crate::surface::list::parse_op(&message) {
+                    Ok(op) => SurfaceRequest::List { id, pane, op },
+                    Err(refusal) => {
+                        if handle.send(&event_refused(&refusal.reason())) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
             Some("close") => {
                 // The window answers `closed` through the connection and drops
                 // its end; this thread has nothing more to read.
@@ -668,7 +735,7 @@ fn serve_surface(
             other => {
                 if handle.send(&event_refused(
                     &Refusal::Malformed(format!(
-                        "a message is update, focus, close, or a grid operation, not {}",
+                        "a message is update, focus, close, a grid operation, or a list operation, not {}",
                         other.unwrap_or("nothing")
                     ))
                     .reason(),
@@ -727,6 +794,67 @@ fn pane_of(message: &Value) -> Result<PaneId, Refusal> {
         .ok_or_else(|| Refusal::Malformed("a pane id is needed".to_owned()))
 }
 
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn safe_integer(value: Option<&Value>, reason: &str) -> Result<u64, Refusal> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| Refusal::Malformed(reason.to_owned()))
+}
+
+fn capabilities_request(message: &Value, reply: JsonReply) -> Result<SurfaceRequest, Refusal> {
+    if safe_integer(message.get("version"), "a version is needed")? != VERSION {
+        return Err(Refusal::UnsupportedVersion);
+    }
+    let pane = safe_integer(message.get("pane"), "a pane id is needed").map(PaneId)?;
+    let owner_pid = safe_integer(
+        message.get("owner_pid"),
+        "owner_pid is a positive process id",
+    )?;
+    let owner_pid = u32::try_from(owner_pid)
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| Refusal::Malformed("owner_pid is a positive process id".to_owned()))?;
+    let return_target = match message.get("return_target") {
+        Some(Value::String(target)) if target == "terminal" => ReturnTarget::Terminal,
+        Some(value) => safe_integer(Some(value), "return_target is \"terminal\" or a Surface id")
+            .and_then(|id| {
+            (id > 0)
+                .then_some(ReturnTarget::Surface(SurfaceId(id)))
+                .ok_or_else(|| {
+                    Refusal::Malformed("return_target is \"terminal\" or a Surface id".to_owned())
+                })
+        })?,
+        None => {
+            return Err(Refusal::Malformed(
+                "return_target is \"terminal\" or a Surface id".to_owned(),
+            ));
+        }
+    };
+    Ok(SurfaceRequest::Capabilities {
+        pane,
+        owner_pid,
+        return_target,
+        reply,
+    })
+}
+
+pub(crate) fn capabilities(eligible: bool) -> Value {
+    json!({
+        "type": "capabilities",
+        "version": VERSION,
+        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1"],
+        "limits": {
+            "message_bytes": MAX_MESSAGE_BYTES,
+            "list_rows": 100_000,
+            "asset_bytes": 67_108_864,
+            "asset_count": 4_096
+        },
+        "eligible": eligible
+    })
+}
+
 /// Where a `focus` message points: absent or `"terminal"` for the pane's
 /// terminal, a number for another Surface the pane hosts.
 fn focus_target(message: &Value) -> Result<FocusTarget, Refusal> {
@@ -769,6 +897,53 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
         Some(Value::Bool(focus)) => *focus,
         Some(_) => return Err(Refusal::Malformed("focus is true or false".to_owned())),
     };
+    let owner_pid = match message.get("owner_pid") {
+        None => None,
+        value => Some(
+            u32::try_from(safe_integer(value, "owner_pid is a positive process id")?)
+                .ok()
+                .filter(|pid| *pid > 0)
+                .ok_or_else(|| {
+                    Refusal::Malformed("owner_pid is a positive process id".to_owned())
+                })?,
+        ),
+    };
+    let return_target = match message.get("return_target") {
+        None => None,
+        Some(Value::String(target)) if target == "terminal" => Some(ReturnTarget::Terminal),
+        Some(value) => Some(
+            safe_integer(Some(value), "return_target is \"terminal\" or a Surface id").and_then(
+                |id| {
+                    (id > 0)
+                        .then_some(ReturnTarget::Surface(SurfaceId(id)))
+                        .ok_or_else(|| {
+                            Refusal::Malformed(
+                                "return_target is \"terminal\" or a Surface id".to_owned(),
+                            )
+                        })
+                },
+            )?,
+        ),
+    };
+    let resizable = match message.get("resizable") {
+        None => false,
+        Some(Value::Bool(resizable)) => *resizable,
+        Some(_) => return Err(Refusal::Malformed("resizable is true or false".to_owned())),
+    };
+    let ownership_is_valid = match position {
+        Position::Fill => return_target.is_none() && !resizable,
+        Position::Dock => {
+            let legacy = owner_pid.is_none() && return_target.is_none() && !resizable;
+            let owned = owner_pid.is_some() && return_target.is_some() && resizable;
+            legacy || owned
+        }
+        Position::Overlay => owner_pid.is_none() && return_target.is_none() && !resizable,
+    };
+    if !ownership_is_valid {
+        return Err(Refusal::Malformed(
+            "owned docks need owner_pid, return_target, and resizable true".to_owned(),
+        ));
+    }
     let description = message
         .get("description")
         .cloned()
@@ -780,6 +955,9 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
             side,
             size,
             focus,
+            owner_pid,
+            return_target,
+            resizable,
             description,
         },
     ))
@@ -829,6 +1007,38 @@ pub fn event_opened(id: SurfaceId) -> String {
 
 pub fn event_refused(reason: &str) -> String {
     json!({ "type": "refused", "reason": reason }).to_string()
+}
+
+pub fn event_applied(operation: &str, revision: Option<u64>) -> String {
+    match revision {
+        Some(revision) => {
+            json!({ "type": "applied", "operation": operation, "revision": revision })
+        }
+        None => json!({ "type": "applied", "operation": operation }),
+    }
+    .to_string()
+}
+
+pub fn event_list_click(
+    revision: u64,
+    id: &str,
+    count: u32,
+    button: &str,
+    modifiers: &str,
+) -> String {
+    json!({ "type": "list_click", "revision": revision, "id": id, "count": count, "button": button, "modifiers": modifiers }).to_string()
+}
+
+pub fn event_list_action(revision: u64, action: &str) -> String {
+    json!({ "type": "list_action", "revision": revision, "action": action }).to_string()
+}
+
+pub fn event_list_scroll(revision: u64, top: &str, offset: f32, visible_rows: u32) -> String {
+    json!({ "type": "list_scroll", "revision": revision, "top": top, "offset": offset, "visible_rows": visible_rows }).to_string()
+}
+
+pub fn event_dock_size(width: u32) -> String {
+    json!({ "type": "dock_size", "width": width }).to_string()
 }
 
 pub fn event_registered() -> String {
@@ -942,6 +1152,52 @@ mod tests {
 
     use serde_json::{Value, json};
 
+    #[test]
+    fn shared_wire_fixture_matches_discovery_and_outbound_serialization() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .expect("shared fixture");
+        let request = &fixture["capabilities"]["request"];
+        let (reply, _receiver) = mpsc::sync_channel(1);
+        assert!(matches!(
+            capabilities_request(request, reply),
+            Ok(SurfaceRequest::Capabilities {
+                pane: PaneId(9),
+                owner_pid: 1234,
+                return_target: ReturnTarget::Terminal,
+                ..
+            })
+        ));
+        assert_eq!(capabilities(true), fixture["capabilities"]["reply"]);
+        for pair in fixture["operations"].as_array().expect("operations") {
+            let expected = &pair["reply"];
+            if expected["type"] == "applied" {
+                let operation = pair["request"]["type"].as_str().expect("operation");
+                let revision = pair["request"]["revision"].as_u64();
+                let actual: Value =
+                    serde_json::from_str(&event_applied(operation, revision)).unwrap();
+                assert_eq!(&actual, expected);
+            } else {
+                let actual: Value =
+                    serde_json::from_str(&event_refused(expected["reason"].as_str().unwrap()))
+                        .unwrap();
+                assert_eq!(&actual, expected);
+            }
+        }
+        let events = fixture["events"].as_array().expect("events");
+        let emitted = [
+            event_list_click(1, "r2", 1, "left", ""),
+            event_list_action(1, "root-toggle"),
+            event_list_scroll(1, "r2", 3.0, 24),
+            event_dock_size(300),
+        ];
+        assert_eq!(emitted.len(), events.len());
+        for (actual, expected) in emitted.iter().zip(events) {
+            assert_eq!(&serde_json::from_str::<Value>(actual).unwrap(), expected);
+        }
+    }
+
     /// A private directory of this test's own, removed when it is dropped.
     /// Named as short as the observation tests name theirs, because it sits
     /// inside `$TMPDIR`, which on macOS is already ~48 bytes, and what is left
@@ -1013,12 +1269,110 @@ mod tests {
         })
     }
 
+    fn capabilities_message(pane: u64, owner_pid: u64, return_target: Value) -> Value {
+        json!({
+            "type": "capabilities", "version": VERSION, "pane": pane,
+            "owner_pid": owner_pid, "return_target": return_target
+        })
+    }
+
+    #[test]
+    fn an_owned_dock_open_carries_its_owner_return_target_and_resize_policy() {
+        let mut message = open_message(3);
+        message["owner_pid"] = json!(41);
+        message["return_target"] = json!(7);
+        message["resizable"] = json!(true);
+
+        let (pane, open) = parse_open(&message).expect("owned open");
+        assert_eq!(pane, PaneId(3));
+        assert_eq!(open.owner_pid, Some(41));
+        assert_eq!(
+            open.return_target,
+            Some(ReturnTarget::Surface(SurfaceId(7)))
+        );
+        assert!(open.resizable);
+    }
+
+    #[test]
+    fn partial_or_misplaced_ownership_is_refused_during_open_parsing() {
+        let mut owner_only_dock = open_message(3);
+        owner_only_dock["owner_pid"] = json!(41);
+        let mut target_only_dock = open_message(3);
+        target_only_dock["return_target"] = json!("terminal");
+        let mut fixed_owned_dock = open_message(3);
+        fixed_owned_dock["owner_pid"] = json!(41);
+        fixed_owned_dock["return_target"] = json!("terminal");
+        fixed_owned_dock["resizable"] = json!(false);
+        let mut owned_overlay = open_message(3);
+        owned_overlay["position"] = json!("overlay");
+        owned_overlay["owner_pid"] = json!(41);
+
+        for message in [
+            owner_only_dock,
+            target_only_dock,
+            fixed_owned_dock,
+            owned_overlay,
+        ] {
+            assert!(matches!(parse_open(&message), Err(Refusal::Malformed(_))));
+        }
+
+        let mut registered_fill = open_message(3);
+        registered_fill["position"] = json!("fill");
+        registered_fill["owner_pid"] = json!(41);
+        assert_eq!(
+            parse_open(&registered_fill)
+                .expect("registered fill")
+                .1
+                .owner_pid,
+            Some(41)
+        );
+    }
+
+    #[test]
+    fn capability_discovery_is_a_side_effect_free_json_exchange() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let _window = window(rx, |request| match request {
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target,
+                reply,
+            } => {
+                assert_eq!(pane, PaneId(3));
+                assert_eq!(owner_pid, 41);
+                assert_eq!(return_target, ReturnTarget::Terminal);
+                reply.send(Ok(capabilities(true))).expect("reply");
+                false
+            }
+            other => panic!("discovery opened or changed a Surface: {other:?}"),
+        });
+
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(
+            stream,
+            "{} {}",
+            endpoint.key_hex(),
+            capabilities_message(3, 41, json!("terminal"))
+        )
+        .expect("write");
+        assert_eq!(line(&mut reader), capabilities(true));
+    }
+
     #[test]
     fn a_client_with_the_wrong_key_is_refused_with_one_fixed_answer() {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
 
-        for first_line in ["", "deadbeef", &format!("deadbeef {}", open_message(1))] {
+        for first_line in [
+            "",
+            "deadbeef",
+            &format!("deadbeef {}", open_message(1)),
+            &format!(
+                "deadbeef {}",
+                capabilities_message(1, 41, json!("terminal"))
+            ),
+        ] {
             let (mut stream, mut reader) = connect(&endpoint);
             writeln!(stream, "{first_line}").expect("write");
             assert_eq!(
@@ -1031,6 +1385,87 @@ mod tests {
             assert!(
                 rx.try_recv().is_err(),
                 "the window was asked by an unauthorised caller"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_unsupported_discovery_never_reaches_the_window() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let mut missing_pane = capabilities_message(1, 41, json!("terminal"));
+        missing_pane.as_object_mut().expect("object").remove("pane");
+        for (message, reason) in [
+            (
+                capabilities_message(1, 41, json!("terminal")),
+                "unsupported version",
+            ),
+            (
+                capabilities_message(1, 0, json!("terminal")),
+                "malformed: owner_pid is a positive process id",
+            ),
+            (
+                capabilities_message(1, u64::from(u32::MAX) + 1, json!("terminal")),
+                "malformed: owner_pid is a positive process id",
+            ),
+            (missing_pane, "malformed: a pane id is needed"),
+            (
+                capabilities_message(1, 41, json!(9_007_199_254_740_992_u64)),
+                "malformed: return_target is \"terminal\" or a Surface id",
+            ),
+        ] {
+            let mut message = message;
+            if reason == "unsupported version" {
+                message["version"] = json!(VERSION + 1);
+            }
+            let (mut stream, mut reader) = connect(&endpoint);
+            writeln!(stream, "{} {message}", endpoint.key_hex()).expect("write");
+            assert_eq!(
+                line(&mut reader),
+                json!({ "type": "refused", "reason": reason })
+            );
+            assert!(rx.try_recv().is_err(), "invalid discovery reached window");
+        }
+    }
+
+    #[test]
+    fn pane_owner_and_return_target_are_validated_by_the_window() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let _window = window(rx, |request| match request {
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target,
+                reply,
+            } => {
+                let refusal = if pane == PaneId(99) {
+                    Refusal::UnknownPane
+                } else {
+                    assert!(
+                        owner_pid == 42 || return_target == ReturnTarget::Surface(SurfaceId(7))
+                    );
+                    Refusal::Ineligible
+                };
+                reply.send(Err(refusal)).expect("reply");
+                true
+            }
+            other => panic!("discovery opened or changed a Surface: {other:?}"),
+        });
+
+        for (message, reason) in [
+            (
+                capabilities_message(99, 41, json!("terminal")),
+                "unknown pane",
+            ),
+            (capabilities_message(3, 42, json!("terminal")), "ineligible"),
+            (capabilities_message(3, 41, json!(7)), "ineligible"),
+        ] {
+            let (mut stream, mut reader) = connect(&endpoint);
+            writeln!(stream, "{} {message}", endpoint.key_hex()).expect("write");
+            assert_eq!(
+                line(&mut reader),
+                json!({ "type": "refused", "reason": reason })
             );
         }
     }

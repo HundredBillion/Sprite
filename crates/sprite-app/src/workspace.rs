@@ -476,6 +476,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match request {
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target,
+                reply,
+            } => {
+                let answer = self.terminal(pane).and_then(|view| {
+                    view.update(cx, |view, _cx| {
+                        view.capability_owner_group(owner_pid, return_target)
+                    })
+                });
+                let _ = reply.send(answer.map(|_| crate::surface::channel::capabilities(true)));
+            }
             SurfaceRequest::Open {
                 id,
                 pane,
@@ -502,7 +515,7 @@ impl Workspace {
             SurfaceRequest::Focus { id, pane, target } => {
                 if let Ok(view) = self.terminal(pane) {
                     view.update(cx, |view, cx| {
-                        if let Err(refusal) = view.focus_target(target, window, cx) {
+                        if let Err(refusal) = view.focus_from_surface(id, target, window, cx) {
                             view.refuse_on(id, &refusal);
                         }
                     });
@@ -526,6 +539,11 @@ impl Workspace {
             SurfaceRequest::Grid { id, pane, ops } => {
                 if let Ok(view) = self.terminal(pane) {
                     view.update(cx, |view, cx| view.grid_operations(id, ops, cx));
+                }
+            }
+            SurfaceRequest::List { id, pane, op } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| view.list_operation(id, op, cx));
                 }
             }
             SurfaceRequest::RegisterToken {

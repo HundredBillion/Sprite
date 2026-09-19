@@ -195,6 +195,12 @@ impl EntityInputHandler for TerminalView {
     ) {
         let was_composing = self.preedit.take().is_some();
         if was_composing && !text.is_empty() {
+            if let Some(id) = self.focused_surface(window).map(|surface| surface.id())
+                && !self.accept_surface_input(id, window, cx)
+            {
+                cx.notify();
+                return;
+            }
             // Computed before the match so the borrow of `self` from
             // `focused_surface` ends before `self.send` needs `&mut self`.
             let target = self
@@ -244,7 +250,7 @@ impl EntityInputHandler for TerminalView {
                     let cursor = grid.cursor_snapshot();
                     (cursor.row, cursor.column)
                 }
-                Body::Elements(_) => (0, 0),
+                Body::Elements { .. } | Body::List { .. } => (0, 0),
             },
             None => {
                 let cursor = self.bundle.as_ref()?.render.cursor;

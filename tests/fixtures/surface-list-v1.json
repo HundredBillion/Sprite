@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "capabilities": {
+    "request": {"type":"capabilities","version":1,"pane":9,"owner_pid":1234,"return_target":"terminal"},
+    "reply": {"type":"capabilities","version":1,"features":["owned-dock-v1","virtual-list-v1","svg-assets-v1","dock-resize-v1"],"limits":{"message_bytes":16777216,"list_rows":100000,"asset_bytes":67108864,"asset_count":4096},"eligible":true}
+  },
+  "description": {"version":1,"root":{"kind":"virtual_list","border_side":"right","row_height":22,"font_size":13,"font_family":"system","icon_size":16,"icon_gap":6,"left_padding":8,"right_padding":8,"scrollbar_width":10,"guide_visibility":"hover","inactive_guide_opacity":0.4,"scrollbar_opacity":0.4,"scrollbar_hover_opacity":0.7,"scrollbar_active_opacity":0.4,"heading":{"text":"EXPLORER","height":35},"section":{"text":"PROJECT","height":22,"icon":"chevron-down","action":"root-toggle"},"colors":{"background":"svgtree.background","foreground":"svgtree.foreground","hover":"svgtree.hover","selected":"svgtree.selection","inactive_selected":"svgtree.inactiveSelection","selected_foreground":"svgtree.selectionForeground","focus":"svgtree.focus","guide":"svgtree.guide","inactive_guide":"svgtree.guide","border":"svgtree.border","scrollbar":"svgtree.scrollbar","scrollbar_hover":"#646464","scrollbar_active":"#bfbfbf"}}},
+  "operations": [
+    {"request":{"type":"assets","entries":{"typescript":"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"}},"reply":{"type":"applied","operation":"assets"}},
+    {"request":{"type":"list_rows","revision":1,"rows":[{"id":"r1","text":"src","indent":0,"icon":"folder","leading":"chevron-right","guides":[]},{"id":"r2","text":"index.ts","indent":8,"icon":"typescript","guides":[{"offset":8,"id":"r1"}]}],"selected":"r2"},"reply":{"type":"applied","operation":"list_rows","revision":1}},
+    {"request":{"type":"list_state","revision":1,"selected":"r2","reveal":"r2","status":null},"reply":{"type":"applied","operation":"list_state","revision":1}},
+    {"request":{"type":"list_state","revision":1,"scroll":{"id":"r2","offset":3},"status":"/index — 1 match"},"reply":{"type":"applied","operation":"list_state","revision":1}},
+    {"request":{"type":"list_state","revision":2,"selected":"r1"},"reply":{"type":"refused","reason":"malformed: a state revision matches the current rows"}},
+    {"request":{"type":"list_rows","revision":2,"rows":[{"id":"r1","text":"src","indent":0,"guides":[]},{"id":"r1","text":"duplicate","indent":0,"guides":[]}],"selected":null},"reply":{"type":"refused","reason":"malformed: duplicate row id \"r1\""}},
+    {"request":{"type":"list_state","revision":1,"active_guides":["r1"]},"reply":{"type":"applied","operation":"list_state","revision":1}},
+    {"request":{"type":"list_state","revision":1,"active_guides":["missing"]},"reply":{"type":"refused","reason":"malformed: active guide does not exist"}},
+    {"request":{"type":"list_state","revision":1,"active_guides":[3]},"reply":{"type":"refused","reason":"malformed: active guide id is a string"}}
+  ],
+  "events": [
+    {"type":"list_click","revision":1,"id":"r2","count":1,"button":"left","modifiers":""},
+    {"type":"list_action","revision":1,"action":"root-toggle"},
+    {"type":"list_scroll","revision":1,"top":"r2","offset":3.0,"visible_rows":24},
+    {"type":"dock_size","width":300}
+  ]
+}

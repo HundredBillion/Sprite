@@ -37,6 +37,7 @@ pub enum Kind {
     Image,
     Button,
     Grid,
+    VirtualList,
 }
 
 impl Kind {
@@ -48,6 +49,7 @@ impl Kind {
             "image" => Kind::Image,
             "button" => Kind::Button,
             "grid" => Kind::Grid,
+            "virtual_list" => Kind::VirtualList,
             _ => return None,
         })
     }
@@ -60,6 +62,7 @@ impl Kind {
             Kind::Image => "image",
             Kind::Button => "button",
             Kind::Grid => "grid",
+            Kind::VirtualList => "virtual_list",
         }
     }
 }
@@ -89,6 +92,77 @@ pub struct GridSize {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ListHeader {
+    pub text: String,
+    pub height: f32,
+    pub icon: Option<String>,
+    pub action: Option<String>,
+    pub font_size: Option<f32>,
+    pub font_weight: Option<ListFontWeight>,
+    pub left_padding: Option<f32>,
+    pub icon_gap: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListFontWeight {
+    Normal,
+    Bold,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuideVisibility {
+    Always,
+    Hover,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListBorderSide {
+    All,
+    Left,
+    Right,
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListColors {
+    pub background: ColorRef,
+    pub foreground: ColorRef,
+    pub hover: ColorRef,
+    pub selected: ColorRef,
+    pub inactive_selected: ColorRef,
+    pub selected_foreground: ColorRef,
+    pub focus: ColorRef,
+    pub guide: ColorRef,
+    pub inactive_guide: ColorRef,
+    pub border: ColorRef,
+    pub scrollbar: ColorRef,
+    pub scrollbar_hover: ColorRef,
+    pub scrollbar_active: ColorRef,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListConfig {
+    pub border_side: ListBorderSide,
+    pub row_height: f32,
+    pub font_size: f32,
+    pub font_family: String,
+    pub icon_size: f32,
+    pub icon_gap: f32,
+    pub left_padding: f32,
+    pub right_padding: f32,
+    pub scrollbar_width: f32,
+    pub guide_visibility: GuideVisibility,
+    pub guide_opacity: f32,
+    pub inactive_guide_opacity: f32,
+    pub scrollbar_opacity: f32,
+    pub scrollbar_hover_opacity: f32,
+    pub scrollbar_active_opacity: f32,
+    pub heading: Option<ListHeader>,
+    pub section: Option<ListHeader>,
+    pub colors: ListColors,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Element {
     pub kind: Kind,
     /// Utility tokens, each already checked against the style table.
@@ -103,6 +177,8 @@ pub struct Element {
     pub children: Vec<Element>,
     /// The grid this element opens, set only for `Kind::Grid`.
     pub grid: Option<GridSize>,
+    /// The layout and colour roles for a root-only virtual list.
+    pub list: Option<ListConfig>,
 }
 
 /// A description that parsed, and the colour names in it that nobody knows.
@@ -158,7 +234,7 @@ fn element(
         .ok_or_else(|| Refusal::Malformed("an element needs a kind".to_owned()))?;
     let kind = Kind::parse(kind_name).ok_or_else(|| Refusal::UnknownKind(kind_name.to_owned()))?;
 
-    if kind == Kind::Grid && depth > 0 {
+    if matches!(kind, Kind::Grid | Kind::VirtualList) && depth > 0 {
         return Err(Refusal::Malformed(
             "a grid is the root element; it cannot sit inside a box".to_owned(),
         ));
@@ -242,6 +318,26 @@ fn element(
         None
     };
 
+    let list = if kind == Kind::VirtualList {
+        if text.is_some()
+            || svg.is_some()
+            || on_click.is_some()
+            || !style.is_empty()
+            || color.is_some()
+            || background.is_some()
+            || border.is_some()
+            || object.contains_key("cols")
+            || object.contains_key("rows")
+        {
+            return Err(Refusal::Malformed(
+                "a virtual_list root takes list configuration, not element payloads".to_owned(),
+            ));
+        }
+        Some(list_config(object, registry, warnings)?)
+    } else {
+        None
+    };
+
     let children = match object.get("children") {
         None => Vec::new(),
         Some(Value::Array(items)) if matches!(kind, Kind::Box | Kind::List) => items
@@ -272,7 +368,188 @@ fn element(
         on_click,
         children,
         grid,
+        list,
     })
+}
+
+fn list_config(
+    object: &serde_json::Map<String, Value>,
+    registry: &TokenRegistry,
+    warnings: &mut Vec<String>,
+) -> Result<ListConfig, Refusal> {
+    let metric =
+        |key: &str, minimum: f32, maximum: f32| finite_field(object, key, minimum, maximum);
+    let colors = object
+        .get("colors")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Refusal::Malformed("virtual_list needs colors".to_owned()))?;
+    let (
+        guide,
+        scrollbar,
+        background,
+        foreground,
+        hover,
+        selected,
+        inactive_selected,
+        selected_foreground,
+        focus,
+        border,
+    ) = {
+        let mut color = |key, role| {
+            color_ref(colors, key, role, registry, warnings)?
+                .ok_or_else(|| Refusal::Malformed(format!("virtual_list colors needs {key}")))
+        };
+        (
+            color("guide", Role::Fill)?,
+            color("scrollbar", Role::Fill)?,
+            color("background", Role::Fill)?,
+            color("foreground", Role::Text)?,
+            color("hover", Role::Fill)?,
+            color("selected", Role::Fill)?,
+            color("inactive_selected", Role::Fill)?,
+            color("selected_foreground", Role::Text)?,
+            color("focus", Role::Fill)?,
+            color("border", Role::Fill)?,
+        )
+    };
+    let optional_color =
+        |key: &str, fallback: &ColorRef, warnings: &mut Vec<String>| -> Result<ColorRef, Refusal> {
+            Ok(color_ref(colors, key, Role::Fill, registry, warnings)?
+                .unwrap_or_else(|| fallback.clone()))
+        };
+    let inactive_guide = optional_color("inactive_guide", &guide, warnings)?;
+    let scrollbar_hover = optional_color("scrollbar_hover", &scrollbar, warnings)?;
+    let scrollbar_active = optional_color("scrollbar_active", &scrollbar, warnings)?;
+    let optional_metric = |key: &str, default: f32, min: f32, max: f32| -> Result<f32, Refusal> {
+        if object.contains_key(key) {
+            finite_field(object, key, min, max)
+        } else {
+            Ok(default)
+        }
+    };
+    let guide_visibility = match object.get("guide_visibility") {
+        None => GuideVisibility::Always,
+        Some(Value::String(value)) if value == "always" => GuideVisibility::Always,
+        Some(Value::String(value)) if value == "hover" => GuideVisibility::Hover,
+        _ => {
+            return Err(Refusal::Malformed(
+                "guide_visibility is always or hover".into(),
+            ));
+        }
+    };
+    let border_side = match object.get("border_side") {
+        None => ListBorderSide::All,
+        Some(Value::String(value)) if value == "all" => ListBorderSide::All,
+        Some(Value::String(value)) if value == "left" => ListBorderSide::Left,
+        Some(Value::String(value)) if value == "right" => ListBorderSide::Right,
+        Some(Value::String(value)) if value == "none" => ListBorderSide::None,
+        _ => {
+            return Err(Refusal::Malformed(
+                "border_side is all, left, right, or none".into(),
+            ));
+        }
+    };
+    Ok(ListConfig {
+        border_side,
+        row_height: metric("row_height", 12.0, 128.0)?,
+        font_size: metric("font_size", 6.0, 64.0)?,
+        font_family: string_field(object, "font_family")?
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| Refusal::Malformed("virtual_list needs font_family".to_owned()))?,
+        icon_size: metric("icon_size", 6.0, 64.0)?,
+        icon_gap: metric("icon_gap", 0.0, 128.0)?,
+        left_padding: metric("left_padding", 0.0, 128.0)?,
+        right_padding: metric("right_padding", 0.0, 128.0)?,
+        scrollbar_width: optional_metric("scrollbar_width", 6.0, 4.0, 32.0)?,
+        guide_visibility,
+        guide_opacity: optional_metric("guide_opacity", 1.0, 0.0, 1.0)?,
+        inactive_guide_opacity: optional_metric("inactive_guide_opacity", 1.0, 0.0, 1.0)?,
+        scrollbar_opacity: optional_metric("scrollbar_opacity", 1.0, 0.0, 1.0)?,
+        scrollbar_hover_opacity: optional_metric("scrollbar_hover_opacity", 1.0, 0.0, 1.0)?,
+        scrollbar_active_opacity: optional_metric("scrollbar_active_opacity", 1.0, 0.0, 1.0)?,
+        heading: list_header(object, "heading")?,
+        section: list_header(object, "section")?,
+        colors: ListColors {
+            background,
+            foreground,
+            hover,
+            selected,
+            inactive_selected,
+            selected_foreground,
+            focus,
+            guide,
+            inactive_guide,
+            border,
+            scrollbar,
+            scrollbar_hover,
+            scrollbar_active,
+        },
+    })
+}
+
+fn list_header(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<ListHeader>, Refusal> {
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    let header = value
+        .as_object()
+        .ok_or_else(|| Refusal::Malformed(format!("{key} is an object")))?;
+    let font_weight = match string_field(header, "font_weight")?.as_deref() {
+        None => None,
+        Some("normal") => Some(ListFontWeight::Normal),
+        Some("bold") => Some(ListFontWeight::Bold),
+        Some(_) => {
+            return Err(Refusal::Malformed(format!(
+                "{key} font_weight is normal or bold"
+            )));
+        }
+    };
+    Ok(Some(ListHeader {
+        text: string_field(header, "text")?
+            .ok_or_else(|| Refusal::Malformed(format!("{key} needs text")))?,
+        height: finite_field(header, "height", 0.0, 128.0)?,
+        icon: string_field(header, "icon")?,
+        action: string_field(header, "action")?,
+        font_size: optional_metric(header, "font_size", 6.0, 64.0)?,
+        font_weight,
+        left_padding: optional_metric(header, "left_padding", 0.0, 128.0)?,
+        icon_gap: optional_metric(header, "icon_gap", 0.0, 128.0)?,
+    }))
+}
+
+fn optional_metric(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    minimum: f32,
+    maximum: f32,
+) -> Result<Option<f32>, Refusal> {
+    object
+        .get(key)
+        .map(|_| finite_field(object, key, minimum, maximum))
+        .transpose()
+}
+
+fn finite_field(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    minimum: f32,
+    maximum: f32,
+) -> Result<f32, Refusal> {
+    let value = object
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| Refusal::Malformed(format!("{key} is a finite number")))?
+        as f32;
+    if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+        return Err(Refusal::Malformed(format!(
+            "{key} is from {minimum} to {maximum}"
+        )));
+    }
+    Ok(value)
 }
 
 fn string_field(
@@ -492,6 +769,113 @@ mod tests {
                 "{refusal:?} should mention {needle}"
             );
         }
+    }
+
+    #[test]
+    fn a_virtual_list_has_typed_metrics_colours_and_header_overrides() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .expect("shared fixture");
+        let shared = parsed(fixture["description"].clone());
+        assert_eq!(shared.description.root.kind, Kind::VirtualList);
+        assert_eq!(
+            shared
+                .description
+                .root
+                .list
+                .as_ref()
+                .expect("list")
+                .row_height,
+            22.0
+        );
+        let list = parsed(json!({"version":1,"root":{"kind":"virtual_list",
+            "row_height":22,"font_size":13,"font_family":"system","icon_size":16,"icon_gap":6,"left_padding":8,"right_padding":8,
+            "heading":{"text":"EXPLORER","height":35,"font_size":11,"font_weight":"normal","left_padding":20,"icon_gap":2},
+            "section":{"text":"PROJECT","height":22,"font_size":11,"font_weight":"bold","left_padding":20,"icon_gap":2},
+            "colors":{"background":"terminal.background","foreground":"terminal.foreground","hover":"terminal.background","selected":"terminal.background","inactive_selected":"terminal.background","selected_foreground":"terminal.foreground","focus":"terminal.background","guide":"terminal.background","border":"terminal.background","scrollbar":"terminal.background"}}}));
+        let config = list.description.root.list.expect("list config");
+        assert_eq!(config.row_height, 22.0);
+        assert_eq!(config.scrollbar_width, 6.0);
+        assert_eq!(config.guide_visibility, GuideVisibility::Always);
+        assert_eq!(config.border_side, ListBorderSide::All);
+        assert_eq!(config.colors.scrollbar_hover, config.colors.scrollbar);
+        assert_eq!(config.colors.scrollbar_active, config.colors.scrollbar);
+        assert_eq!(config.colors.inactive_guide, config.colors.guide);
+        assert_eq!(config.scrollbar_opacity, 1.0);
+        let styled = shared.description.root.list.expect("styled list");
+        assert_eq!(styled.scrollbar_width, 10.0);
+        assert_eq!(styled.guide_visibility, GuideVisibility::Hover);
+        assert_eq!(styled.border_side, ListBorderSide::Right);
+        assert_eq!(styled.scrollbar_hover_opacity, 0.7);
+        assert_eq!(
+            config.section.expect("section").font_weight,
+            Some(ListFontWeight::Bold)
+        );
+        for key in [
+            "row_height",
+            "font_size",
+            "icon_size",
+            "icon_gap",
+            "left_padding",
+            "right_padding",
+        ] {
+            let mut root = serde_json::json!({"kind":"virtual_list","row_height":22,"font_size":13,"font_family":"system","icon_size":16,"icon_gap":6,"left_padding":8,"right_padding":8,"colors":{"background":"terminal.background","foreground":"terminal.foreground","hover":"terminal.background","selected":"terminal.background","inactive_selected":"terminal.background","selected_foreground":"terminal.foreground","focus":"terminal.background","guide":"terminal.background","border":"terminal.background","scrollbar":"terminal.background"}});
+            root[key] = json!(-1);
+            assert!(matches!(
+                refused(json!({"version":1,"root":root})),
+                Refusal::Malformed(_)
+            ));
+        }
+        for (key, value) in [
+            ("border_side", json!("top")),
+            ("border_side", json!(null)),
+            ("border_side", json!(1)),
+            ("scrollbar_width", json!(3)),
+            ("guide_visibility", json!("sometimes")),
+            ("scrollbar_hover_opacity", json!(1.1)),
+            ("inactive_guide_opacity", json!(-0.1)),
+        ] {
+            let mut description = fixture["description"].clone();
+            description["root"][key] = value;
+            assert!(matches!(refused(description), Refusal::Malformed(_)));
+        }
+        for (value, expected) in [
+            ("all", ListBorderSide::All),
+            ("left", ListBorderSide::Left),
+            ("right", ListBorderSide::Right),
+            ("none", ListBorderSide::None),
+        ] {
+            let mut description = fixture["description"].clone();
+            description["root"]["border_side"] = json!(value);
+            assert_eq!(
+                parsed(description)
+                    .description
+                    .root
+                    .list
+                    .unwrap()
+                    .border_side,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_virtual_list_cannot_be_nested_or_carry_element_payloads() {
+        assert!(matches!(
+            refused(
+                json!({"version":1,"root":{"kind":"box","children":[{"kind":"virtual_list"}]}})
+            ),
+            Refusal::Malformed(_)
+        ));
+        assert!(matches!(
+            refused(json!({"version":1,"root":{"kind":"virtual_list","text":"no"}})),
+            Refusal::Malformed(_)
+        ));
+        assert!(matches!(
+            refused(json!({"version":1,"root":{"kind":"virtual_list","cols":80,"rows":24}})),
+            Refusal::Malformed(_)
+        ));
     }
 
     #[test]

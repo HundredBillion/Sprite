@@ -6,6 +6,7 @@ pub mod client;
 pub mod description;
 pub mod grid;
 pub mod host;
+pub mod list;
 pub mod render;
 pub mod style;
 
@@ -26,6 +27,7 @@ pub enum Refusal {
     UnknownPane,
     NotATerminal,
     PositionOccupied,
+    Ineligible,
     TokenConflict,
 }
 
@@ -40,6 +42,7 @@ impl Refusal {
             Refusal::UnknownPane => "unknown pane".to_owned(),
             Refusal::NotATerminal => "pane not a terminal".to_owned(),
             Refusal::PositionOccupied => "position occupied".to_owned(),
+            Refusal::Ineligible => "ineligible".to_owned(),
             Refusal::TokenConflict => "token conflict".to_owned(),
         }
     }
@@ -60,6 +63,7 @@ mod tests {
             Refusal::UnknownPane,
             Refusal::NotATerminal,
             Refusal::PositionOccupied,
+            Refusal::Ineligible,
             Refusal::TokenConflict,
         ]
         .iter()

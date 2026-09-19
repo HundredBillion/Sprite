@@ -99,7 +99,7 @@ impl TerminalView {
         // reason enough for the pane to keep one.
         let grid_blinks = self.surfaces.iter().any(|surface| match &surface.body {
             Body::Grid { grid, .. } => grid.cursor_blinks(),
-            Body::Elements(_) => false,
+            Body::Elements { .. } | Body::List { .. } => false,
         });
         if !(terminal_blinks || grid_blinks) {
             if !self.blink_on {
@@ -206,6 +206,9 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Terminal activity causes frames, so ownership is rechecked without
+        // creating an idle timer that wakes otherwise quiet panes.
+        self.close_invalid_owned_surfaces(window, cx);
         self.synchronise_size(window);
 
         let rows = self.laid_out_rows();
@@ -540,5 +543,7 @@ impl Render for TerminalView {
             .children(layers.left)
             .children(layers.right)
             .children(layers.overlays)
+            .children(layers.dock_edges)
+            .children(layers.dock_capture)
     }
 }

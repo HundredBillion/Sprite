@@ -7,6 +7,8 @@
 
 use std::process::ExitCode;
 
+mod reference_fonts;
+
 use gpui::{
     App, AppContext, Application, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions,
     px, size,
@@ -84,6 +86,8 @@ fn open_window(args: WindowArgs) {
     }
 
     Application::new().run(move |cx: &mut App| {
+        #[cfg(target_os = "linux")]
+        reference_fonts::install(cx);
         let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
         let command = args.command.clone();
         let config_path = args.config.clone();

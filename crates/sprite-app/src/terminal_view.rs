@@ -6,6 +6,7 @@
 
 mod geometry;
 mod input;
+mod list_view;
 mod render;
 mod surfaces;
 mod theme;
@@ -28,6 +29,7 @@ use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FORE
 use geometry::physical;
 use input::Drag;
 use render::BLINK_INTERVAL;
+use surfaces::DockDrag;
 use surfaces::HostedSurface;
 use theme::{chosen_family, measure_cell_width, unpack};
 
@@ -71,6 +73,7 @@ pub struct TerminalView {
     observation: Option<crate::observation::panes::PaneLink>,
     /// What programs have asked this pane to draw beside or over its grid.
     surfaces: SurfaceHost<HostedSurface>,
+    dock_drag: Option<DockDrag>,
     /// The pixels this pane has been given.
     ///
     /// A pane is not the window: once a tab holds several, sizing the grid from
@@ -303,6 +306,7 @@ impl TerminalView {
             ended: false,
             observation,
             surfaces: SurfaceHost::default(),
+            dock_drag: None,
             font_size,
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
@@ -383,6 +387,7 @@ impl TerminalView {
             // A view that never started a session has nothing to observe.
             observation: None,
             surfaces: SurfaceHost::default(),
+            dock_drag: None,
             font_size: px(crate::config::Font::DEFAULT_SIZE),
             bundle: None,
             textures: crate::graphics_cache::GraphicsCache::default(),
@@ -474,6 +479,13 @@ impl TerminalView {
             return sprite_term::ForegroundState::Idle;
         };
         session.foreground()
+    }
+
+    /// Returns the process group when `pid` owns this pane's foreground.
+    pub fn foreground_owner_group(&self, pid: u32) -> Option<i32> {
+        self.session
+            .as_ref()
+            .and_then(|session| session.foreground_owner_group(pid))
     }
 
     /// What this pane is called, as the tab and the window title will show it.
