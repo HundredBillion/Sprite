@@ -69,7 +69,7 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
             effects.push(Effect::Status(
                 format!(
                     "[paste held: {lines} lines would run as commands — \
-                     press Ctrl+Shift+V again to paste anyway]"
+                     repeat the paste shortcut to paste anyway]"
                 )
                 .into(),
             ));
@@ -172,6 +172,10 @@ mod tests {
         assert_eq!(held.len(), 2, "a held paste both holds and explains");
         assert!(matches!(held[0], Effect::HoldPaste(ref text) if text == "one\ntwo\n"));
         assert!(matches!(held[1], Effect::Status(ref line) if line.contains("2 lines")));
+        assert!(matches!(
+            &held[1],
+            Effect::Status(line) if line.contains("repeat the paste shortcut")
+        ));
     }
 
     #[test]

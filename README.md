@@ -183,7 +183,8 @@ builds do not reach the network.
 | `Ctrl+Shift+W` | Close pane |
 | `Ctrl+Shift+R` | Rename the tab; Enter keeps, Escape abandons, empty removes |
 | `Ctrl+Shift+±` / `Ctrl+Shift+0` | Font size, and reset |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy the selection / paste |
+| `Cmd/Super+C` / `Cmd/Super+V` | Copy the selection / paste |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste compatibility bindings |
 
 Closing a pane, tab or window that is running a program asks first: the banner
 names what would be interrupted, and repeating the same gesture confirms.
