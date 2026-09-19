@@ -71,7 +71,8 @@ Automated tests cover:
 - `Ctrl+Shift+C` and `Ctrl+Shift+V` remaining supported;
 - plain Control, plain Shift, Alt combinations, and mixed platform modifiers
   remaining unclaimed;
-- drag release ending the gesture without requesting a copy;
+- drag release ending the gesture without requesting a copy when GPUI's test
+  platform can exercise the real handler without a synthetic production seam;
 - the existing Terminal Core selection and paste tests continuing to pass.
 
 Manual acceptance on macOS:
