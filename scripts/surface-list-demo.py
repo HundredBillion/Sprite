@@ -50,11 +50,8 @@ def query(message):
     return reply
 
 def close(wire):
-    try:
-        send(wire, {'type': 'close'})
-        expect(wire, 'closed')
-    except (AssertionError, OSError, socket.timeout):
-        pass
+    send(wire, {'type': 'close'})
+    assert expect(wire, 'closed')['type'] == 'closed'
 
 description = {
     'version': 1, 'root': {'kind': 'virtual_list', 'row_height': 22,
@@ -66,6 +63,8 @@ description = {
     'selected':'#04395e','inactive_selected':'#37373d','selected_foreground':'#ffffff',
     'focus':'#0078d4','guide':'#404040','border':'#3f3f46','scrollbar':'#797979'}}}
 
+wire = None
+error = None
 try:
     capabilities = query({'type':'capabilities','version':1,'owner_pid':os.getpid(),'return_target':'terminal'})
     assert capabilities['type'] == 'capabilities' and 'virtual-list-v1' in capabilities['features']
@@ -91,20 +90,33 @@ try:
     else:
         print('Virtual list visible; Ctrl-C or stdin/socket EOF closes it.', flush=True)
         sock.settimeout(None)
+        socket_eof = False
         while True:
             readable, _, _ = select.select([sock, sys.stdin], [], [])
             if sock in readable:
                 raw = wire.readline()
-                if not raw: break
+                if not raw:
+                    socket_eof = True
+                    break
                 event = json.loads(raw); events.append(event); print(json.dumps(event), flush=True)
             if sys.stdin in readable and not sys.stdin.readline(): break
-        close(wire)
-        checks.append('closed after interactive EOF')
+        if socket_eof:
+            checks.append('surface connection ended at socket EOF')
+        else:
+            close(wire)
+            checks.append('closed after interactive EOF')
 except KeyboardInterrupt:
-    close(wire)
-    checks.append('closed after interrupt')
+    if wire is not None:
+        try:
+            close(wire)
+            checks.append('closed after interrupt')
+        except BaseException:
+            error = traceback.format_exc()
+            raise
 except BaseException:
-    args.output.write_text(json.dumps({'host_pid':os.getppid(),'pane':pane,'checks':checks,'events':events,'error':traceback.format_exc()}, indent=2))
+    error = traceback.format_exc()
     raise
-else:
-    args.output.write_text(json.dumps({'host_pid':os.getppid(),'pane':pane,'checks':checks,'events':events}, indent=2))
+finally:
+    result = {'host_pid':os.getppid(),'pane':pane,'checks':checks,'events':events}
+    if error: result['error'] = error
+    args.output.write_text(json.dumps(result, indent=2))

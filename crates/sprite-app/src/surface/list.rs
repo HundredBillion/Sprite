@@ -569,6 +569,43 @@ mod tests {
     }
 
     #[test]
+    fn replacement_keeps_fractional_anchor_by_identity_then_nearest_survivor() {
+        let mut model = ListModel::with_row_height(22.0);
+        model
+            .apply(parse_op(&rows(1, &["a", "b", "c", "d"])).unwrap())
+            .unwrap();
+        model.apply(parse_op(&serde_json::json!({"type":"list_state","revision":1,"scroll":{"id":"b","offset":3}})).unwrap()).unwrap();
+        model
+            .apply(parse_op(&rows(2, &["x", "b", "d", "a"])).unwrap())
+            .unwrap();
+        assert_eq!(
+            model.scroll,
+            Some(ScrollAnchor {
+                id: "b".into(),
+                offset: 3.0
+            })
+        );
+        model
+            .apply(parse_op(&rows(3, &["a", "d"])).unwrap())
+            .unwrap();
+        assert_eq!(
+            model.scroll,
+            Some(ScrollAnchor {
+                id: "d".into(),
+                offset: 3.0
+            })
+        );
+        model.apply(parse_op(&rows(4, &["a"])).unwrap()).unwrap();
+        assert_eq!(
+            model.scroll,
+            Some(ScrollAnchor {
+                id: "a".into(),
+                offset: 3.0
+            })
+        );
+    }
+
+    #[test]
     fn invalid_dimensions_and_assets_are_refused_before_mutation() {
         for indent in [
             serde_json::json!(-1),
