@@ -263,4 +263,12 @@ mod tests {
         assert_eq!(allocated(400.0).0, 200.0);
         assert_eq!(allocated(800.0).0, 300.0);
     }
+
+    #[test]
+    fn a_fill_grid_uses_the_center_between_two_docks() {
+        let (room, shift) = grid_room(content(940.0, 600.0), 300.0, 190.0);
+        assert_eq!(shift, px(300.0));
+        assert_eq!(room, content(450.0, 600.0));
+        assert_eq!(grid_size(room, px(8.0), px(16.0), 1.0).unwrap().cols, 56);
+    }
 }

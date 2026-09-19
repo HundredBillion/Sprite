@@ -864,12 +864,29 @@ impl TerminalView {
                         cx.stop_propagation();
                     }),
                 )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
+                        view.dock_drag = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                    }),
+                )
                 .into_any_element()
         });
+        let (fill_size, fill_shift) =
+            super::geometry::grid_room(allocated, left_width, right_width);
         let fill = self.surfaces.fill.as_mut().map(|surface| {
-            Self::surface_element(
-                surface, allocated, registry, metrics, highlights, focused, preedit, cx, true,
-            )
+            div()
+                .absolute()
+                .top(px(0.0))
+                .left(fill_shift)
+                .w(fill_size.width)
+                .h_full()
+                .child(Self::surface_element(
+                    surface, fill_size, registry, metrics, highlights, focused, preedit, cx, true,
+                ))
+                .into_any_element()
         });
         let left = self.surfaces.left.as_mut().map(|surface| {
             let strip = Size {
