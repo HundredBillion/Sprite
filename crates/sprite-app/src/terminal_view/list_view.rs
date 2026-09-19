@@ -786,6 +786,7 @@ struct HeaderEvent {
     host: WeakEntity<TerminalView>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn header_element(
     header: &crate::surface::description::ListHeader,
     config: &ListConfig,

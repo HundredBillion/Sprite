@@ -383,21 +383,35 @@ fn list_config(
         .get("colors")
         .and_then(Value::as_object)
         .ok_or_else(|| Refusal::Malformed("virtual_list needs colors".to_owned()))?;
-    let mut color = |key, role| {
-        color_ref(colors, key, role, registry, warnings)?
-            .ok_or_else(|| Refusal::Malformed(format!("virtual_list colors needs {key}")))
+    let (
+        guide,
+        scrollbar,
+        background,
+        foreground,
+        hover,
+        selected,
+        inactive_selected,
+        selected_foreground,
+        focus,
+        border,
+    ) = {
+        let mut color = |key, role| {
+            color_ref(colors, key, role, registry, warnings)?
+                .ok_or_else(|| Refusal::Malformed(format!("virtual_list colors needs {key}")))
+        };
+        (
+            color("guide", Role::Fill)?,
+            color("scrollbar", Role::Fill)?,
+            color("background", Role::Fill)?,
+            color("foreground", Role::Text)?,
+            color("hover", Role::Fill)?,
+            color("selected", Role::Fill)?,
+            color("inactive_selected", Role::Fill)?,
+            color("selected_foreground", Role::Text)?,
+            color("focus", Role::Fill)?,
+            color("border", Role::Fill)?,
+        )
     };
-    let guide = color("guide", Role::Fill)?;
-    let scrollbar = color("scrollbar", Role::Fill)?;
-    let background = color("background", Role::Fill)?;
-    let foreground = color("foreground", Role::Text)?;
-    let hover = color("hover", Role::Fill)?;
-    let selected = color("selected", Role::Fill)?;
-    let inactive_selected = color("inactive_selected", Role::Fill)?;
-    let selected_foreground = color("selected_foreground", Role::Text)?;
-    let focus = color("focus", Role::Fill)?;
-    let border = color("border", Role::Fill)?;
-    drop(color);
     let optional_color =
         |key: &str, fallback: &ColorRef, warnings: &mut Vec<String>| -> Result<ColorRef, Refusal> {
             Ok(color_ref(colors, key, Role::Fill, registry, warnings)?
