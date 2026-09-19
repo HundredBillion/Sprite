@@ -178,6 +178,7 @@ builds do not reach the network.
 |---|---|
 | `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split right / split down |
 | `Ctrl+Shift+←↑↓→` | Move focus between panes |
+| `Cmd/Super+[` / `Cmd/Super+]` | Move focus left / right between panes |
 | `Ctrl+Shift+T` / `Ctrl+Shift+Q` | New tab / close tab |
 | `Ctrl+Shift+PageUp` / `PageDown` | Previous / next tab |
 | `Ctrl+Shift+W` | Close pane |

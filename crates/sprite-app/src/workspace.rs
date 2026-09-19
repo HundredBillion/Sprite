@@ -1144,6 +1144,21 @@ enum WorkspaceAction {
 
 fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
     let modifiers = &keystroke.modifiers;
+    // Command on macOS and Super on Linux are GPUI's platform modifier. These
+    // are direct alternatives to the arrow bindings below, matching the
+    // platform-native left/right pane navigation used by Ghostty.
+    if modifiers.platform
+        && !modifiers.control
+        && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.function
+    {
+        return match keystroke.key.as_str() {
+            "[" => Some(WorkspaceAction::Focus(Direction::Left)),
+            "]" => Some(WorkspaceAction::Focus(Direction::Right)),
+            _ => None,
+        };
+    }
     if !modifiers.control || modifiers.platform {
         return None;
     }
@@ -1806,6 +1821,13 @@ mod tests {
         }
     }
 
+    fn platform() -> Modifiers {
+        Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        }
+    }
+
     fn plain(key: &str, key_char: Option<&str>) -> Keystroke {
         Keystroke {
             modifiers: Modifiers::default(),
@@ -2110,6 +2132,47 @@ mod tests {
             Some(WorkspaceAction::NextTab)
         );
         assert_eq!(workspace_action(&press("f5", ctrl_shift())), None);
+    }
+
+    #[test]
+    fn platform_brackets_move_focus_left_and_right() {
+        assert_eq!(
+            workspace_action(&press("[", platform())),
+            Some(WorkspaceAction::Focus(Direction::Left))
+        );
+        assert_eq!(
+            workspace_action(&press("]", platform())),
+            Some(WorkspaceAction::Focus(Direction::Right))
+        );
+    }
+
+    #[test]
+    fn platform_brackets_require_only_the_platform_modifier() {
+        for modifiers in [
+            Modifiers {
+                platform: true,
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                function: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert_eq!(workspace_action(&press("[", modifiers)), None);
+            assert_eq!(workspace_action(&press("]", modifiers)), None);
+        }
     }
 
     #[test]
