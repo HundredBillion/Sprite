@@ -371,6 +371,34 @@ impl Workspace {
         self.may_close(CloseScope::Window, cx)
     }
 
+    /// Closes Sprite in response to its platform shortcut.
+    ///
+    /// `Window::remove_window` bypasses the native close callback, so this
+    /// performs the same confirmation and cleanup explicitly before asking the
+    /// application to exit. That keeps Cmd+Q and Super+W from becoming a way
+    /// around the close warning for running programs.
+    fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.may_close(CloseScope::Quit, cx) {
+            return;
+        }
+        let cleanups = self.begin_shutdown(cx);
+        window.remove_window();
+        if cleanups.is_empty() {
+            cx.quit();
+            return;
+        }
+        let finished = cx.background_executor().spawn(async move {
+            for cleanup in cleanups {
+                cleanup();
+            }
+        });
+        cx.spawn(async move |_workspace, cx| {
+            let _ = finished.await;
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    }
+
     /// Whether a close may go ahead now, or must be asked about first.
     ///
     /// PRD story 11, and the last thing between a mistyped binding and an hour
@@ -413,7 +441,7 @@ impl Workspace {
                 .into_iter()
                 .map(|(_, _, pane)| pane)
                 .collect(),
-            CloseScope::Window => self
+            CloseScope::Window | CloseScope::Quit => self
                 .tabs
                 .all_panes()
                 .into_iter()
@@ -1072,6 +1100,7 @@ enum CloseScope {
     Pane,
     Tab,
     Window,
+    Quit,
 }
 
 impl CloseScope {
@@ -1079,7 +1108,7 @@ impl CloseScope {
         match self {
             Self::Pane => "pane",
             Self::Tab => "tab",
-            Self::Window => "window",
+            Self::Window | Self::Quit => "window",
         }
     }
 
@@ -1091,6 +1120,7 @@ impl CloseScope {
         match self {
             Self::Pane | Self::Tab => "press the same keys again",
             Self::Window => "click close again",
+            Self::Quit => "press the same keys again",
         }
     }
 }
@@ -1134,6 +1164,7 @@ enum WorkspaceAction {
     FontReset,
     NewTab,
     CloseTab,
+    Quit,
     RenameTab,
     NextTab,
     PreviousTab,
@@ -1144,6 +1175,23 @@ enum WorkspaceAction {
 
 fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceAction> {
     let modifiers = &keystroke.modifiers;
+    // Command on macOS and Super on Linux are GPUI's platform modifier. These
+    // are direct alternatives to the arrow bindings below, matching the
+    // platform-native left/right pane navigation used by Ghostty.
+    if modifiers.platform
+        && !modifiers.control
+        && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.function
+    {
+        return match keystroke.key.as_str() {
+            "[" => Some(WorkspaceAction::Focus(Direction::Left)),
+            "]" => Some(WorkspaceAction::Focus(Direction::Right)),
+            "q" if cfg!(target_os = "macos") => Some(WorkspaceAction::Quit),
+            "w" if cfg!(target_os = "linux") => Some(WorkspaceAction::Quit),
+            _ => None,
+        };
+    }
     if !modifiers.control || modifiers.platform {
         return None;
     }
@@ -1667,7 +1715,11 @@ impl Render for Workspace {
                     // and the key carries on to whatever it was for.
                     if !matches!(
                         action,
-                        Some(WorkspaceAction::ClosePane | WorkspaceAction::CloseTab)
+                        Some(
+                            WorkspaceAction::ClosePane
+                                | WorkspaceAction::CloseTab
+                                | WorkspaceAction::Quit
+                        )
                     ) {
                         workspace.dismiss_pending_close(cx);
                     }
@@ -1694,6 +1746,7 @@ impl Render for Workspace {
                     WorkspaceAction::FontReset => workspace.reset_font(cx),
                     WorkspaceAction::NewTab => workspace.open_tab(window, cx),
                     WorkspaceAction::CloseTab => workspace.close_active_tab(cx),
+                    WorkspaceAction::Quit => workspace.quit(window, cx),
                     WorkspaceAction::RenameTab => workspace.begin_rename(cx),
                     WorkspaceAction::NextTab => workspace.switch_tab(true, cx),
                     WorkspaceAction::PreviousTab => workspace.switch_tab(false, cx),
@@ -1802,6 +1855,13 @@ mod tests {
     fn ctrl() -> Modifiers {
         Modifiers {
             control: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn platform() -> Modifiers {
+        Modifiers {
+            platform: true,
             ..Modifiers::default()
         }
     }
@@ -2003,6 +2063,7 @@ mod tests {
         assert_eq!(CloseScope::Pane.noun(), "pane");
         assert_eq!(CloseScope::Tab.noun(), "tab");
         assert_eq!(CloseScope::Window.noun(), "window");
+        assert_eq!(CloseScope::Quit.noun(), "window");
     }
 
     /// The banner tells a person how to answer. A title-bar close was not a
@@ -2012,6 +2073,7 @@ mod tests {
         assert_eq!(CloseScope::Pane.again(), "press the same keys again");
         assert_eq!(CloseScope::Tab.again(), "press the same keys again");
         assert_eq!(CloseScope::Window.again(), "click close again");
+        assert_eq!(CloseScope::Quit.again(), "press the same keys again");
     }
 
     /// The distinction the whole command rests on: what may change under a
@@ -2110,6 +2172,62 @@ mod tests {
             Some(WorkspaceAction::NextTab)
         );
         assert_eq!(workspace_action(&press("f5", ctrl_shift())), None);
+    }
+
+    #[test]
+    fn platform_brackets_move_focus_left_and_right() {
+        assert_eq!(
+            workspace_action(&press("[", platform())),
+            Some(WorkspaceAction::Focus(Direction::Left))
+        );
+        assert_eq!(
+            workspace_action(&press("]", platform())),
+            Some(WorkspaceAction::Focus(Direction::Right))
+        );
+    }
+
+    #[test]
+    fn platform_brackets_require_only_the_platform_modifier() {
+        for modifiers in [
+            Modifiers {
+                platform: true,
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                function: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert_eq!(workspace_action(&press("[", modifiers)), None);
+            assert_eq!(workspace_action(&press("]", modifiers)), None);
+        }
+    }
+
+    #[test]
+    fn platform_quit_shortcut_follows_the_host_convention() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            workspace_action(&press("q", platform())),
+            Some(WorkspaceAction::Quit)
+        );
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            workspace_action(&press("w", platform())),
+            Some(WorkspaceAction::Quit)
+        );
     }
 
     #[test]
