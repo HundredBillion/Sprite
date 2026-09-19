@@ -18,11 +18,13 @@ pub(crate) enum Effect {
     FailRequest(String),
 }
 
-/// What one event implies, and whether the stream is finished.
+/// What one event implies, whether the stream is finished, and whether its pane closes.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Decision {
     pub effects: Vec<Effect>,
     pub stop: bool,
+    /// An ordinary child exit removes its pane from the workspace.
+    pub close_pane: bool,
 }
 
 /// The line a pane shows once its child is gone.
@@ -47,6 +49,7 @@ fn describe_exit(exit: &sprite_term::ChildExit) -> String {
 pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
     let mut effects = Vec::new();
     let mut stop = false;
+    let mut close_pane = false;
 
     match event {
         // Nothing to present. Working directory and bell are carried for
@@ -105,7 +108,10 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
         }
 
         Ok(TerminalEvent::Exited(exit)) => {
-            effects.push(Effect::Status(describe_exit(&exit).into()));
+            close_pane = !exit.requested && exit.signal.is_none() && exit.code.is_some();
+            if !close_pane {
+                effects.push(Effect::Status(describe_exit(&exit).into()));
+            }
             stop = true;
         }
 
@@ -114,7 +120,11 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
         Err(_) => stop = true,
     }
 
-    Decision { effects, stop }
+    Decision {
+        effects,
+        stop,
+        close_pane,
+    }
 }
 
 #[cfg(test)]
@@ -274,19 +284,38 @@ mod tests {
         ));
     }
 
-    /// An exit is the one event that both says something and ends the stream:
-    /// there is nothing more to read once the child is gone.
+    /// An ordinary exit ends the stream and asks the workspace to remove the pane.
     #[test]
-    fn an_exit_is_reported_and_ends_the_loop() {
+    fn an_ordinary_exit_closes_the_pane() {
         let ended = decide(Ok(TerminalEvent::Exited(sprite_term::ChildExit {
             code: Some(3),
             signal: None,
             requested: false,
         })));
         assert!(ended.stop);
-        assert!(
-            matches!(ended.effects.as_slice(), [Effect::Status(line)] if line.contains("status 3"))
-        );
+        assert!(ended.close_pane);
+        assert!(ended.effects.is_empty());
+    }
+
+    #[test]
+    fn a_signalled_or_requested_exit_stays_visible() {
+        for exit in [
+            sprite_term::ChildExit {
+                code: None,
+                signal: Some("TERM".into()),
+                requested: false,
+            },
+            sprite_term::ChildExit {
+                code: Some(0),
+                signal: None,
+                requested: true,
+            },
+        ] {
+            let decision = decide(Ok(TerminalEvent::Exited(exit)));
+            assert!(decision.stop);
+            assert!(!decision.close_pane);
+            assert!(matches!(decision.effects.as_slice(), [Effect::Status(_)]));
+        }
     }
 
     fn snapshot() -> Arc<HistorySnapshot> {

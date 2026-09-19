@@ -22,7 +22,7 @@ use crate::pane_tree::{Direction, Orientation, PaneId};
 use crate::surface::Refusal;
 use crate::surface::channel::{SurfaceEndpoint, SurfaceRequest};
 use crate::tabs::{TabId, Tabs};
-use crate::terminal_view::TerminalView;
+use crate::terminal_view::{PaneExit, TerminalView};
 use crate::tokens::TokenRegistry;
 
 const BACKGROUND: u32 = 0x101014;
@@ -90,6 +90,9 @@ pub struct Workspace {
     surfaces: Option<SurfaceEndpoint>,
     /// Keeps the surface request loop alive for as long as the window is.
     _surface_requests: gpui::Task<()>,
+    /// Ordinary shell exits are handled here, where the owning tab is known.
+    exit_sender: async_channel::Sender<(TabId, PaneId)>,
+    _exits: gpui::Task<()>,
     /// The pane that should hold the keyboard, applied while rendering.
     ///
     /// A pane created by a split has no element in the dispatch tree until the
@@ -147,15 +150,31 @@ impl Workspace {
         // the first — finds current settings the moment it subscribes.
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
 
+        let (exit_sender, exit_receiver) = async_channel::unbounded();
         let tabs = Tabs::new(make_pane(
             command.clone(),
             settings.clone(),
-            &panes,
-            endpoint.as_ref(),
-            surfaces.as_ref(),
+            PaneServices {
+                panes: &panes,
+                endpoint: endpoint.as_ref(),
+                surfaces: surfaces.as_ref(),
+                exit: exit_sender.clone(),
+            },
             window,
             cx,
         ));
+        let exit_task = cx.spawn(async move |workspace, cx| {
+            while let Ok((tab, pane)) = exit_receiver.recv().await {
+                if workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.close_exited_pane(tab, pane, cx)
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
         // The window focuses the workspace; the workspace hands the keyboard to
         let reload_task = cx.spawn(async move |workspace, cx| {
             while let Ok(request) = reload_rx.recv().await {
@@ -204,6 +223,8 @@ impl Workspace {
             reload_sender,
             surfaces,
             _surface_requests: surface_task,
+            exit_sender,
+            _exits: exit_task,
         }
     }
 
@@ -261,9 +282,12 @@ impl Workspace {
             make_pane(
                 self.command.clone(),
                 self.settings.clone(),
-                &self.panes,
-                self.endpoint.as_ref(),
-                self.surfaces.as_ref(),
+                PaneServices {
+                    panes: &self.panes,
+                    endpoint: self.endpoint.as_ref(),
+                    surfaces: self.surfaces.as_ref(),
+                    exit: self.exit_sender.clone(),
+                },
                 window,
                 cx,
             ),
@@ -276,9 +300,12 @@ impl Workspace {
         self.tabs.open(make_pane(
             self.command.clone(),
             self.settings.clone(),
-            &self.panes,
-            self.endpoint.as_ref(),
-            self.surfaces.as_ref(),
+            PaneServices {
+                panes: &self.panes,
+                endpoint: self.endpoint.as_ref(),
+                surfaces: self.surfaces.as_ref(),
+                exit: self.exit_sender.clone(),
+            },
             window,
             cx,
         ));
@@ -305,6 +332,20 @@ impl Workspace {
         };
         self.shut_down(view, cx);
         self.after_close(cx);
+    }
+
+    /// A shell can exit in a background tab, so close by identity rather than focus.
+    fn close_exited_pane(&mut self, tab: TabId, pane: PaneId, cx: &mut Context<Self>) {
+        let was_active = !self.tabs.is_empty() && self.tabs.active_tab() == tab;
+        let Some(view) = self.tabs.close_pane(tab, pane) else {
+            return;
+        };
+        self.shut_down(view, cx);
+        if was_active || self.tabs.is_empty() {
+            self.after_close(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn close_active_tab(&mut self, cx: &mut Context<Self>) {
@@ -780,6 +821,13 @@ pub(crate) struct ReloadRequest {
     pub(crate) reply: std::sync::mpsc::SyncSender<String>,
 }
 
+struct PaneServices<'a> {
+    panes: &'a Arc<WindowPanes>,
+    endpoint: Option<&'a Endpoint>,
+    surfaces: Option<&'a SurfaceEndpoint>,
+    exit: async_channel::Sender<(TabId, PaneId)>,
+}
+
 /// Builds one Pane, wherever a Pane is built.
 ///
 /// Free rather than a method on `Workspace`: every call site holds `&mut
@@ -789,16 +837,27 @@ pub(crate) struct ReloadRequest {
 fn make_pane<'a>(
     command: Option<Vec<std::ffi::OsString>>,
     settings: crate::config::Settings,
-    panes: &'a Arc<WindowPanes>,
-    endpoint: Option<&'a Endpoint>,
-    surfaces: Option<&'a SurfaceEndpoint>,
+    services: PaneServices<'a>,
     window: &'a mut Window,
     cx: &'a mut Context<Workspace>,
 ) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle> + 'a {
     move |tab, pane| {
-        let environment = session_environment(endpoint, surfaces, tab, pane);
-        let link = pane_link(panes, endpoint, tab, pane);
-        Rc::new(cx.new(|cx| TerminalView::new(command, settings, environment, link, window, cx)))
+        let environment = session_environment(services.endpoint, services.surfaces, tab, pane);
+        let link = pane_link(services.panes, services.endpoint, tab, pane);
+        Rc::new(cx.new(|cx| {
+            TerminalView::new(
+                command,
+                settings,
+                environment,
+                link,
+                PaneExit {
+                    sender: services.exit,
+                    identity: (tab, pane),
+                },
+                window,
+                cx,
+            )
+        }))
     }
 }
 
