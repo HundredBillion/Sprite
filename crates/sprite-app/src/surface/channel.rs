@@ -1153,7 +1153,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn shared_wire_fixture_matches_discovery_and_outbound_events() {
+    fn shared_wire_fixture_matches_discovery_and_outbound_serialization() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/surface-list-v1.json"
         ))
@@ -1192,6 +1192,7 @@ mod tests {
             event_list_scroll(1, "r2", 3.0, 24),
             event_dock_size(300),
         ];
+        assert_eq!(emitted.len(), events.len());
         for (actual, expected) in emitted.iter().zip(events) {
             assert_eq!(&serde_json::from_str::<Value>(actual).unwrap(), expected);
         }

@@ -6,19 +6,20 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, Context, ElementId, Entity, FontWeight, Image, ImageFormat,
-    InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, ParentElement, Render,
-    SharedString, Styled, UniformListScrollHandle, Window, canvas, div, img, px, rgb, uniform_list,
+    AnyElement, Bounds, Context, ElementId, FontWeight, InteractiveElement, IntoElement,
+    ListSizingBehavior, MouseButton, ParentElement, Render, RenderImage, SharedString, Styled,
+    UniformListScrollHandle, WeakEntity, Window, canvas, div, img, px, rgb, uniform_list,
 };
 
 use crate::grid_paint::pack;
 use crate::surface::Refusal;
 use crate::surface::SurfaceId;
 use crate::surface::channel::{
-    SurfaceConnection, event_list_action, event_list_click, event_list_scroll, neovim_modifiers,
+    event_list_action, event_list_click, event_list_scroll, neovim_modifiers,
 };
 use crate::surface::description::ListConfig;
 use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
+use crate::surface::render::render_svg;
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -45,19 +46,30 @@ fn dragged_scroll_offset(total: f32, viewport: f32, pointer_y: f32, grab: f32) -
 }
 
 fn sync_image_cache(
-    cache: &mut Arc<BTreeMap<String, Arc<Image>>>,
+    cache: &mut Arc<BTreeMap<String, Arc<RenderImage>>>,
     assets: &BTreeMap<String, String>,
+    ids: impl IntoIterator<Item = String>,
+    raster_width: f32,
 ) {
-    if assets.keys().all(|id| cache.contains_key(id)) {
+    let ids: Vec<String> = ids.into_iter().collect();
+    if ids
+        .iter()
+        .all(|id| cache.contains_key(id) || !assets.contains_key(id))
+    {
         return;
     }
     let mut images = (**cache).clone();
-    for (id, svg) in assets {
-        images.entry(id.clone()).or_insert_with(|| {
-            Arc::new(Image::from_bytes(ImageFormat::Svg, svg.as_bytes().to_vec()))
-        });
+    for id in ids {
+        if !images.contains_key(&id)
+            && let Some(svg) = assets.get(&id)
+            && let Some(image) = render_svg(svg, Some(raster_width))
+        {
+            images.insert(id, image);
+        }
     }
-    *cache = Arc::new(images);
+    if images.len() != cache.len() {
+        *cache = Arc::new(images);
+    }
 }
 
 /// Converts GPUI's negative pixel offset into the wire-format row anchor.
@@ -90,25 +102,44 @@ fn restored_pixel_offset(
     (index as f32 * row_height + intra).clamp(0.0, (rows as f32 * row_height - viewport).max(0.0))
 }
 
+fn revealed_pixel_offset(
+    index: usize,
+    current: f32,
+    row_height: f32,
+    viewport: f32,
+    rows: usize,
+) -> f32 {
+    let start = index as f32 * row_height;
+    let end = start + row_height;
+    let offset = if start < current {
+        start
+    } else if end > current + viewport {
+        end - viewport
+    } else {
+        current
+    };
+    offset.clamp(0.0, (rows as f32 * row_height - viewport).max(0.0))
+}
+
 pub(super) struct VirtualListView {
     pub(super) model: ListModel,
     config: ListConfig,
     surface: SurfaceId,
-    host: Entity<TerminalView>,
+    host: WeakEntity<TerminalView>,
     pub(super) scroll: UniformListScrollHandle,
-    images: Arc<BTreeMap<String, Arc<Image>>>,
+    images: Arc<BTreeMap<String, Arc<RenderImage>>>,
+    raster_width: f32,
     focused: bool,
     viewport: Option<Bounds<gpui::Pixels>>,
-    last_anchor: Option<(u64, usize, f32, u32)>,
+    last_anchor: Option<(String, f32, u32)>,
     thumb_grab: Option<f32>,
 }
 
 impl VirtualListView {
     pub(super) fn new(
         config: ListConfig,
-        _connection: SurfaceConnection,
         surface: SurfaceId,
-        host: Entity<TerminalView>,
+        host: WeakEntity<TerminalView>,
     ) -> Self {
         Self {
             model: ListModel::with_row_height(config.row_height),
@@ -117,6 +148,7 @@ impl VirtualListView {
             host,
             scroll: UniformListScrollHandle::new(),
             images: Arc::new(BTreeMap::new()),
+            raster_width: 0.0,
             focused: false,
             viewport: None,
             last_anchor: None,
@@ -125,7 +157,6 @@ impl VirtualListView {
     }
 
     pub(super) fn apply(&mut self, op: ListOp, cx: &mut Context<Self>) -> Result<(), Refusal> {
-        let assets = matches!(op, ListOp::Assets(_));
         let rows = matches!(op, ListOp::Rows { .. });
         let previous_scroll = self.model.scroll.clone();
         let navigation = rows
@@ -148,9 +179,6 @@ impl VirtualListView {
             self.model.scroll = previous_scroll;
             return Err(error);
         }
-        if assets {
-            sync_image_cache(&mut self.images, &self.model.assets);
-        }
         if navigation && let Some(anchor) = self.model.scroll.as_ref() {
             if let Some(index) = self.model.index_of(&anchor.id) {
                 let viewport = self.viewport.map_or(0.0, |b| f32::from(b.size.height));
@@ -171,15 +199,61 @@ impl VirtualListView {
             && let Some(id) = self.model.reveal.take()
             && let Some(index) = self.model.index_of(&id)
         {
-            self.scroll.scroll_to_item(index, gpui::ScrollStrategy::Top);
+            let viewport = self.viewport.map_or(0.0, |b| f32::from(b.size.height));
+            if viewport > 0.0 {
+                let current = -f32::from(self.scroll.0.borrow().base_handle.offset().y);
+                let pixels = revealed_pixel_offset(
+                    index,
+                    current,
+                    self.config.row_height,
+                    viewport,
+                    self.model.rows.len(),
+                );
+                self.scroll
+                    .0
+                    .borrow_mut()
+                    .base_handle
+                    .set_offset(gpui::point(px(0.0), px(-pixels)));
+            } else {
+                self.model.reveal = Some(id);
+            }
         }
         cx.notify();
         Ok(())
     }
 
     pub(super) fn reconfigure(&mut self, config: ListConfig, cx: &mut Context<Self>) {
+        let viewport = self.viewport.map_or(0.0, |b| f32::from(b.size.height));
+        let (index, intra, _) = scroll_anchor(
+            self.model.rows.len(),
+            self.config.row_height,
+            viewport,
+            f32::from(self.scroll.0.borrow().base_handle.offset().y),
+        );
+        if let Some(row) = self.model.rows.get(index) {
+            self.model.scroll = Some(ScrollAnchor {
+                id: row.id.clone(),
+                offset: intra,
+            });
+        }
         self.model.set_row_height(config.row_height);
         self.config = config;
+        if let Some(anchor) = &self.model.scroll
+            && let Some(index) = self.model.index_of(&anchor.id)
+        {
+            let pixels = restored_pixel_offset(
+                index,
+                anchor.offset,
+                self.model.rows.len(),
+                self.config.row_height,
+                viewport,
+            );
+            self.scroll
+                .0
+                .borrow_mut()
+                .base_handle
+                .set_offset(gpui::point(px(0.0), px(-pixels)));
+        }
         cx.notify();
     }
 
@@ -202,8 +276,8 @@ impl VirtualListView {
         let Some(row) = self.model.rows.get(index) else {
             return;
         };
-        let anchor = (self.model.revision, index, intra, visible);
-        if self.last_anchor != Some(anchor) {
+        let anchor = (row.id.clone(), intra, visible);
+        if self.last_anchor.as_ref() != Some(&anchor) {
             self.last_anchor = Some(anchor);
             self.model.scroll = Some(ScrollAnchor {
                 id: row.id.clone(),
@@ -213,7 +287,7 @@ impl VirtualListView {
             let host = self.host.clone();
             let surface = self.surface;
             window.defer(cx, move |window, cx| {
-                host.update(cx, |view, cx| {
+                let _ = host.update(cx, |view, cx| {
                     view.dispatch_surface_event(surface, &event, window, cx)
                 });
             });
@@ -228,6 +302,24 @@ impl VirtualListView {
     ) {
         if self.viewport != Some(bounds) {
             self.viewport = Some(bounds);
+            if let Some(id) = self.model.reveal.take()
+                && let Some(index) = self.model.index_of(&id)
+            {
+                let viewport = f32::from(bounds.size.height);
+                let current = -f32::from(self.scroll.0.borrow().base_handle.offset().y);
+                let pixels = revealed_pixel_offset(
+                    index,
+                    current,
+                    self.config.row_height,
+                    viewport,
+                    self.model.rows.len(),
+                );
+                self.scroll
+                    .0
+                    .borrow_mut()
+                    .base_handle
+                    .set_offset(gpui::point(px(0.0), px(-pixels)));
+            }
             cx.notify();
         }
         self.report_anchor(window, cx);
@@ -263,6 +355,41 @@ impl VirtualListView {
 
 impl Render for VirtualListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let raster_width = (self.config.icon_size * window.scale_factor())
+            .ceil()
+            .max(1.0);
+        if self.raster_width != raster_width {
+            self.raster_width = raster_width;
+            self.images = Arc::new(BTreeMap::new());
+        }
+        let viewport = self
+            .viewport
+            .map_or(0.0, |bounds| f32::from(bounds.size.height));
+        let (top, _, visible) = scroll_anchor(
+            self.model.rows.len(),
+            self.config.row_height,
+            viewport,
+            f32::from(self.scroll.0.borrow().base_handle.offset().y),
+        );
+        let start = top.saturating_sub(8);
+        let end = (top + visible as usize + 8).min(self.model.rows.len());
+        let icons = self.model.rows[start..end]
+            .iter()
+            .flat_map(|row| [row.icon.clone(), row.leading.clone()])
+            .flatten()
+            .chain(
+                self.config
+                    .heading
+                    .iter()
+                    .filter_map(|header| header.icon.clone()),
+            )
+            .chain(
+                self.config
+                    .section
+                    .iter()
+                    .filter_map(|header| header.icon.clone()),
+            );
+        sync_image_cache(&mut self.images, &self.model.assets, icons, raster_width);
         let registry = cx.global::<TokenRegistry>();
         let config = self.config.clone();
         let colors = &config.colors;
@@ -276,9 +403,13 @@ impl Render for VirtualListView {
             })
             .resolve(registry, Role::Fill),
         ));
-        let selected_text = rgb(pack(
-            colors.selected_foreground.resolve(registry, Role::Text),
-        ));
+        let selected_text = if self.focused {
+            rgb(pack(
+                colors.selected_foreground.resolve(registry, Role::Text),
+            ))
+        } else {
+            foreground
+        };
         let hover = rgb(pack(colors.hover.resolve(registry, Role::Fill)));
         let guide_color = rgb(pack(colors.guide.resolve(registry, Role::Fill)));
         let border_color = rgb(pack(colors.border.resolve(registry, Role::Fill)));
@@ -300,10 +431,13 @@ impl Render for VirtualListView {
         };
         let row_config = config.clone();
         let row_font_family = font_family.clone();
+        let list_width = self
+            .viewport
+            .map_or(0.0, |bounds| f32::from(bounds.size.width));
         let list = uniform_list(
             ElementId::NamedInteger(SharedString::from("virtual-list-rows"), surface.0),
             rows.len(),
-            move |range, _window, _cx| {
+            move |range, window, _cx| {
                 range
                     .map(|index| {
                         let row = &rows[index];
@@ -334,13 +468,14 @@ impl Render for VirtualListView {
                                 selected_text
                             } else {
                                 foreground
-                            })
-                            .hover(|style| style.bg(hover));
+                            });
                         if is_selected {
                             line = line.bg(selected);
                             if row_focused {
                                 line = line.border_1().border_color(focus_color);
                             }
+                        } else {
+                            line = line.hover(|style| style.bg(hover));
                         }
                         for guide in &row.guides {
                             line = line.child(
@@ -366,12 +501,41 @@ impl Render for VirtualListView {
                         }
                         line = line.child(icon_slot);
                         let row_host = row_host.clone();
+                        let label_width = (list_width
+                            - row_config.left_padding
+                            - row.indent
+                            - row_config.right_padding
+                            - row_config.icon_size
+                            - row_config.icon_gap
+                            - if row.leading.is_some() {
+                                row_config.icon_size + row_config.icon_gap
+                            } else {
+                                0.0
+                            }
+                            - 2.0)
+                            .max(0.0);
+                        let label = if label_width > 0.0 {
+                            window
+                                .text_system()
+                                .line_wrapper(
+                                    gpui::font(row_font_family.clone()),
+                                    px(row_config.font_size),
+                                )
+                                .truncate_line(
+                                    SharedString::from(row.text.clone()),
+                                    px(label_width),
+                                    "…",
+                                    &mut Vec::new(),
+                                )
+                        } else {
+                            SharedString::from(row.text.clone())
+                        };
                         line.child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
-                                .child(SharedString::from(row.text.clone())),
+                                .overflow_hidden()
+                                .child(div().w_full().truncate().child(label)),
                         )
                         .on_click(move |event, window, cx| {
                             let payload = event_list_click(
@@ -381,7 +545,7 @@ impl Render for VirtualListView {
                                 "left",
                                 &neovim_modifiers(&event.modifiers()),
                             );
-                            row_host.update(cx, |view, cx| {
+                            let _ = row_host.update(cx, |view, cx| {
                                 view.dispatch_surface_event(surface, &payload, window, cx)
                             });
                         })
@@ -533,23 +697,23 @@ impl Render for VirtualListView {
 }
 
 fn images_for_header(
-    images: &Arc<BTreeMap<String, Arc<Image>>>,
+    images: &Arc<BTreeMap<String, Arc<RenderImage>>>,
     id: Option<&str>,
-) -> Option<Arc<Image>> {
+) -> Option<Arc<RenderImage>> {
     id.and_then(|id| images.get(id)).cloned()
 }
 struct HeaderEvent {
     index: u64,
     revision: u64,
     surface: SurfaceId,
-    host: Entity<TerminalView>,
+    host: WeakEntity<TerminalView>,
 }
 
 fn header_element(
     header: &crate::surface::description::ListHeader,
     config: &ListConfig,
     foreground: gpui::Rgba,
-    icon: &Option<Arc<Image>>,
+    icon: &Option<Arc<RenderImage>>,
     font_family: &str,
     event: HeaderEvent,
 ) -> AnyElement {
@@ -587,7 +751,7 @@ fn header_element(
             .cursor_pointer()
             .on_click(move |_event, window, cx| {
                 let payload = event_list_action(event.revision, &action);
-                event.host.update(cx, |view, cx| {
+                let _ = event.host.update(cx, |view, cx| {
                     view.dispatch_surface_event(event.surface, &payload, window, cx)
                 });
             })
@@ -625,19 +789,50 @@ mod tests {
         assert_eq!(scroll_anchor(10_000, 22.0, 440.0, -last).0, 9980);
     }
     #[test]
+    fn reveal_moves_only_the_edge_crossed_and_preserves_visible_offsets() {
+        assert_eq!(revealed_pixel_offset(20, 0.0, 22.0, 440.0, 100), 22.0);
+        assert_eq!(revealed_pixel_offset(0, 22.0, 22.0, 440.0, 100), 0.0);
+        assert_eq!(revealed_pixel_offset(10, 3.0, 22.0, 440.0, 100), 3.0);
+        assert_eq!(revealed_pixel_offset(20, 3.0, 22.0, 440.0, 100), 22.0);
+        assert_eq!(revealed_pixel_offset(100, 3.0, 22.0, 440.0, 1000), 1782.0);
+    }
+    #[test]
+    fn row_height_change_restores_live_top_identity_and_fraction() {
+        let old = 100.0 * 22.0 + 3.0;
+        let (index, intra, _) = scroll_anchor(1000, 22.0, 440.0, -old);
+        assert_eq!((index, intra), (100, 3.0));
+        let restored = restored_pixel_offset(index, intra, 1000, 24.0, 440.0);
+        assert_eq!(scroll_anchor(1000, 24.0, 440.0, -restored), (100, 3.0, 19));
+    }
+    #[test]
     fn accepted_duplicate_assets_reuse_cache_and_image_arcs() {
         let mut cache = Arc::new(BTreeMap::new());
         let mut assets = BTreeMap::new();
-        assets.insert("first".to_owned(), "<svg/>".to_owned());
-        sync_image_cache(&mut cache, &assets);
+        assets.insert(
+            "first".to_owned(),
+            "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>".to_owned(),
+        );
+        sync_image_cache(&mut cache, &assets, ["first".to_owned()], 2.0);
         let old_cache = cache.clone();
         let old_image = cache["first"].clone();
-        sync_image_cache(&mut cache, &assets);
+        sync_image_cache(&mut cache, &assets, ["first".to_owned()], 2.0);
         assert!(Arc::ptr_eq(&cache, &old_cache));
-        assets.insert("second".to_owned(), "<svg/>".to_owned());
-        sync_image_cache(&mut cache, &assets);
+        assets.insert(
+            "second".to_owned(),
+            "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>".to_owned(),
+        );
+        sync_image_cache(&mut cache, &assets, ["second".to_owned()], 2.0);
         assert!(Arc::ptr_eq(&cache["first"], &old_image));
         assert_eq!(cache.len(), 2);
+    }
+    #[test]
+    fn svg_cache_keeps_blue_red_and_alpha_channels_in_renderer_order() {
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='1'><rect width='1' height='1' fill='#0000ff'/><rect x='1' width='1' height='1' fill='#ff0000' fill-opacity='0.5'/></svg>";
+        let image = render_svg(svg, None).expect("SVG decodes");
+        let pixels = image.as_bytes(0).expect("first frame");
+        assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[4..8], &[0, 0, 255, 128]);
+        assert_eq!(render_svg(svg, Some(4.0)).unwrap().size(0).width.0, 4);
     }
     #[test]
     fn thumb_grab_preserves_position_and_drag_direction() {

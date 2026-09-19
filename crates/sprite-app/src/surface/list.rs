@@ -111,22 +111,22 @@ impl ListModel {
     }
 
     fn apply_assets(&mut self, entries: BTreeMap<String, String>) -> Result<(), Refusal> {
-        let mut assets = self.assets.clone();
-        for (id, svg) in entries {
-            match assets.get(&id) {
-                Some(current) if current == &svg => {}
+        let mut added_count = 0;
+        let mut bytes = self.assets.values().map(String::len).sum::<usize>();
+        for (id, svg) in &entries {
+            match self.assets.get(id) {
+                Some(current) if current == svg => {}
                 Some(_) => return Err(malformed(format!("asset {id:?} cannot be redefined"))),
                 None => {
-                    assets.insert(id, svg);
+                    added_count += 1;
+                    bytes += svg.len();
                 }
             }
         }
-        if assets.len() > MAX_ASSETS
-            || assets.values().map(String::len).sum::<usize>() > MAX_ASSET_BYTES
-        {
+        if self.assets.len() + added_count > MAX_ASSETS || bytes > MAX_ASSET_BYTES {
             return Err(malformed("assets exceed this Surface's budget"));
         }
-        self.assets = assets;
+        self.assets.extend(entries);
         Ok(())
     }
 

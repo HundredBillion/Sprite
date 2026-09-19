@@ -170,14 +170,14 @@ pub(super) struct SurfaceLayers {
 fn eligible_owner_group(
     owner_pid: u32,
     return_target: ReturnTarget,
-    fill: Option<(SurfaceId, u32, i32)>,
+    fill: Option<(SurfaceId, Option<(u32, i32)>)>,
     owner_group: impl Fn(u32) -> Option<i32>,
 ) -> Result<i32, Refusal> {
     let group = owner_group(owner_pid).ok_or(Refusal::Ineligible)?;
     match return_target {
         ReturnTarget::Terminal if fill.is_none() => Ok(group),
         ReturnTarget::Surface(target) => {
-            let Some((fill_id, fill_pid, fill_group)) = fill else {
+            let Some((fill_id, Some((fill_pid, fill_group)))) = fill else {
                 return Err(Refusal::Ineligible);
             };
             (fill_id == target && fill_group == group && owner_group(fill_pid) == Some(fill_group))
@@ -272,10 +272,11 @@ impl TerminalView {
         owner_pid: u32,
         return_target: crate::surface::channel::ReturnTarget,
     ) -> Result<i32, Refusal> {
-        let fill = self.surfaces.fill.as_ref().and_then(|fill| {
-            fill.registered_owner
-                .map(|(pid, group)| (fill.id, pid, group))
-        });
+        let fill = self
+            .surfaces
+            .fill
+            .as_ref()
+            .map(|fill| (fill.id, fill.registered_owner));
         eligible_owner_group(owner_pid, return_target, fill, |pid| {
             self.foreground_owner_group(pid)
         })
@@ -401,10 +402,10 @@ impl TerminalView {
             },
             None if root.list.is_some() => {
                 let config = root.list.as_ref().expect("checked").clone();
-                let host = cx.entity();
+                let host = cx.entity().downgrade();
                 Body::List {
                     root,
-                    view: cx.new(|_| VirtualListView::new(config, connection.clone(), id, host)),
+                    view: cx.new(|_| VirtualListView::new(config, id, host)),
                 }
             }
             None => Body::Elements(Description { root }),
@@ -1369,8 +1370,17 @@ mod tests {
             eligible_owner_group(
                 41,
                 ReturnTarget::Terminal,
-                Some((SurfaceId(7), 42, 9)),
+                Some((SurfaceId(7), Some((42, 9)))),
                 group,
+            ),
+            Err(Refusal::Ineligible)
+        );
+        assert_eq!(
+            eligible_owner_group(
+                41,
+                ReturnTarget::Terminal,
+                Some((SurfaceId(7), None)),
+                group
             ),
             Err(Refusal::Ineligible)
         );
@@ -1382,16 +1392,17 @@ mod tests {
             eligible_owner_group(
                 41,
                 ReturnTarget::Surface(SurfaceId(7)),
-                Some((SurfaceId(7), 42, 9)),
+                Some((SurfaceId(7), Some((42, 9)))),
                 group,
             ),
             Ok(9)
         );
         for fill in [
             None,
-            Some((SurfaceId(8), 42, 9)),
-            Some((SurfaceId(7), 50, 10)),
-            Some((SurfaceId(7), 99, 9)),
+            Some((SurfaceId(7), None)),
+            Some((SurfaceId(8), Some((42, 9)))),
+            Some((SurfaceId(7), Some((50, 10)))),
+            Some((SurfaceId(7), Some((99, 9)))),
         ] {
             assert_eq!(
                 eligible_owner_group(41, ReturnTarget::Surface(SurfaceId(7)), fill, group),
@@ -1406,7 +1417,7 @@ mod tests {
             eligible_owner_group(
                 41,
                 ReturnTarget::Surface(SurfaceId(8)),
-                Some((SurfaceId(7), 42, 9)),
+                Some((SurfaceId(7), Some((42, 9)))),
                 group,
             ),
             Err(Refusal::Ineligible)
@@ -1427,5 +1438,59 @@ mod tests {
             .into_iter(),
         );
         assert_eq!(plan.dependents, vec![SurfaceId(8)]);
+    }
+
+    #[gpui::test]
+    fn closing_a_list_window_releases_host_and_list_entities(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        host.update_in(cx, |view, window, cx| {
+            view.open_surface(
+                SurfaceId(1),
+                Open {
+                    position: Position::Fill,
+                    side: Side::Left,
+                    size: 0.0,
+                    focus: false,
+                    owner_pid: None,
+                    return_target: None,
+                    resizable: false,
+                    description: fixture["description"].clone(),
+                },
+                connection,
+                window,
+                cx,
+            )
+            .unwrap();
+        });
+        let list = host.read_with(cx, |view, _| {
+            match &view.surfaces.fill.as_ref().unwrap().body {
+                Body::List { view, .. } => view.downgrade(),
+                _ => panic!("expected a list"),
+            }
+        });
+        let weak_host = host.downgrade();
+        assert!(list.upgrade().is_some());
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+        cx.run_until_parked();
+        cx.cx.update(|_| {});
+        assert!(weak_host.upgrade().is_none());
+        assert!(list.upgrade().is_none());
     }
 }

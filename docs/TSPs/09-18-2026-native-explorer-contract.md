@@ -126,6 +126,10 @@ JSON null clears selection or status, and referenced row ids must exist.
 and intra-row pixel offset in `[0,row_height)`. Supplying both is refused. On
 structural replacement, preserve the existing top row identity and offset;
 if missing, use the next surviving old row, then the previous one, then the top.
+Changing row height also preserves the current top row identity and legal
+intra-row offset. A selected row keeps its selection background under hover;
+when the list is unfocused, selected text uses the normal foreground role.
+The `selected_foreground` role applies while the list is focused.
 
 `assets`, `list_rows`, and `list_state` each respond with `applied` carrying
 `operation` and, for list operations, `revision`. Errors use existing `refused`.

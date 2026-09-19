@@ -7,9 +7,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, ElementId, Entity, Image, ImageFormat, InteractiveElement, IntoElement,
-    ParentElement, Pixels, SharedString, Size, StatefulInteractiveElement, Styled, div, img, px,
-    rgb,
+    AnyElement, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RenderImage, SharedString, Size, StatefulInteractiveElement, Styled, div, img, px, rgb,
 };
 use sprite_term::Rgb;
 
@@ -39,6 +38,36 @@ pub(crate) fn render(
         &host,
         &mut next,
     )
+}
+
+pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<RenderImage>> {
+    let tree =
+        resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let scale = target_width.map_or(1.0, |target| target / size.width());
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(
+        (size.width() * scale).ceil() as u32,
+        (size.height() * scale).ceil() as u32,
+    )?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let width = pixmap.width();
+    let height = pixmap.height();
+    let mut pixels = pixmap.take();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = pixel[3] as u16;
+        if alpha > 0 && alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((*channel as u16 * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+        pixel.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
 /// What a grid borrows from the pane it lives in, so it is drawn with the same
@@ -196,9 +225,10 @@ fn element(
     *next += 1;
 
     if node.kind == Kind::Image {
-        let bytes = node.svg.clone().unwrap_or_default().into_bytes();
-        let picture = img(Arc::new(Image::from_bytes(ImageFormat::Svg, bytes)));
-        return style::apply_all(picture, &node.style).into_any_element();
+        if let Some(picture) = node.svg.as_deref().and_then(|svg| render_svg(svg, None)) {
+            return style::apply_all(img(picture), &node.style).into_any_element();
+        }
+        return div().into_any_element();
     }
 
     let mut boxed = div();
