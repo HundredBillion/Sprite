@@ -206,6 +206,9 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Terminal activity causes frames, so ownership is rechecked without
+        // creating an idle timer that wakes otherwise quiet panes.
+        self.close_invalid_owned_surfaces(window, cx);
         self.synchronise_size(window);
 
         let rows = self.laid_out_rows();

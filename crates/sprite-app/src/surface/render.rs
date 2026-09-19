@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, ElementId, Image, ImageFormat, InteractiveElement, IntoElement, ParentElement,
-    Pixels, SharedString, Size, StatefulInteractiveElement, Styled, div, img, px, rgb,
+    AnyElement, ElementId, Entity, Image, ImageFormat, InteractiveElement, IntoElement,
+    ParentElement, Pixels, SharedString, Size, StatefulInteractiveElement, Styled, div, img, px,
+    rgb,
 };
 use sprite_term::Rgb;
 
@@ -19,6 +20,7 @@ use crate::surface::channel::{SurfaceConnection, event_click};
 use crate::surface::description::{Description, Element, Kind};
 use crate::surface::grid::GridSurface;
 use crate::surface::style;
+use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
 pub(crate) fn render(
@@ -26,9 +28,17 @@ pub(crate) fn render(
     surface: SurfaceId,
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
+    host: Option<Entity<TerminalView>>,
 ) -> AnyElement {
     let mut next = 0u64;
-    element(&description.root, surface, registry, connection, &mut next)
+    element(
+        &description.root,
+        surface,
+        registry,
+        connection,
+        &host,
+        &mut next,
+    )
 }
 
 /// What a grid borrows from the pane it lives in, so it is drawn with the same
@@ -177,6 +187,7 @@ fn element(
     surface: SurfaceId,
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
+    host: &Option<Entity<TerminalView>>,
     next: &mut u64,
 ) -> AnyElement {
     // Numbered in tree order, so a clickable element's identity is stable for
@@ -204,7 +215,7 @@ fn element(
     let children: Vec<AnyElement> = node
         .children
         .iter()
-        .map(|child| element(child, surface, registry, connection, next))
+        .map(|child| element(child, surface, registry, connection, host, next))
         .collect();
     boxed = boxed.children(children);
 
@@ -213,13 +224,22 @@ fn element(
         Some(name) => {
             let name = name.clone();
             let connection = connection.clone();
+            let host = host.clone();
             boxed
                 .id(ElementId::NamedInteger(
                     SharedString::from(format!("surface-{}", surface.0)),
                     index,
                 ))
-                .on_click(move |_event, _window, _cx| {
-                    connection.send(&event_click(&name));
+                .on_click(move |_event, window, cx| {
+                    let event = event_click(&name);
+                    match &host {
+                        Some(host) => host.update(cx, |view, cx| {
+                            view.dispatch_surface_event(surface, &event, window, cx);
+                        }),
+                        None => {
+                            connection.send(&event);
+                        }
+                    }
                 })
                 .into_any_element()
         }
@@ -263,7 +283,13 @@ mod tests {
 
         // Building the element tree needs no window; that is the property
         // this test locks down, since every frame rebuilds it.
-        let _element = render(&parsed.description, SurfaceId(1), &registry, &connection);
+        let _element = render(
+            &parsed.description,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+        );
     }
 
     #[test]

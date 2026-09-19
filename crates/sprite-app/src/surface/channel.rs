@@ -152,6 +152,10 @@ pub struct Open {
     /// A dock's width in logical pixels; ignored for the other positions.
     pub size: f32,
     pub focus: bool,
+    /// A fill may register its process; a dock supplies all ownership fields.
+    pub owner_pid: Option<u32>,
+    pub return_target: Option<ReturnTarget>,
+    pub resizable: bool,
     pub description: Value,
 }
 
@@ -822,7 +826,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": [],
+        "features": ["owned-dock-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
@@ -875,6 +879,53 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
         Some(Value::Bool(focus)) => *focus,
         Some(_) => return Err(Refusal::Malformed("focus is true or false".to_owned())),
     };
+    let owner_pid = match message.get("owner_pid") {
+        None => None,
+        value => Some(
+            u32::try_from(safe_integer(value, "owner_pid is a positive process id")?)
+                .ok()
+                .filter(|pid| *pid > 0)
+                .ok_or_else(|| {
+                    Refusal::Malformed("owner_pid is a positive process id".to_owned())
+                })?,
+        ),
+    };
+    let return_target = match message.get("return_target") {
+        None => None,
+        Some(Value::String(target)) if target == "terminal" => Some(ReturnTarget::Terminal),
+        Some(value) => Some(
+            safe_integer(Some(value), "return_target is \"terminal\" or a Surface id").and_then(
+                |id| {
+                    (id > 0)
+                        .then_some(ReturnTarget::Surface(SurfaceId(id)))
+                        .ok_or_else(|| {
+                            Refusal::Malformed(
+                                "return_target is \"terminal\" or a Surface id".to_owned(),
+                            )
+                        })
+                },
+            )?,
+        ),
+    };
+    let resizable = match message.get("resizable") {
+        None => false,
+        Some(Value::Bool(resizable)) => *resizable,
+        Some(_) => return Err(Refusal::Malformed("resizable is true or false".to_owned())),
+    };
+    let ownership_is_valid = match position {
+        Position::Fill => return_target.is_none() && !resizable,
+        Position::Dock => {
+            let legacy = owner_pid.is_none() && return_target.is_none() && !resizable;
+            let owned = owner_pid.is_some() && return_target.is_some() && resizable;
+            legacy || owned
+        }
+        Position::Overlay => owner_pid.is_none() && return_target.is_none() && !resizable,
+    };
+    if !ownership_is_valid {
+        return Err(Refusal::Malformed(
+            "owned docks need owner_pid, return_target, and resizable true".to_owned(),
+        ));
+    }
     let description = message
         .get("description")
         .cloned()
@@ -886,6 +937,9 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
             side,
             size,
             focus,
+            owner_pid,
+            return_target,
+            resizable,
             description,
         },
     ))
@@ -1124,6 +1178,58 @@ mod tests {
             "type": "capabilities", "version": VERSION, "pane": pane,
             "owner_pid": owner_pid, "return_target": return_target
         })
+    }
+
+    #[test]
+    fn an_owned_dock_open_carries_its_owner_return_target_and_resize_policy() {
+        let mut message = open_message(3);
+        message["owner_pid"] = json!(41);
+        message["return_target"] = json!(7);
+        message["resizable"] = json!(true);
+
+        let (pane, open) = parse_open(&message).expect("owned open");
+        assert_eq!(pane, PaneId(3));
+        assert_eq!(open.owner_pid, Some(41));
+        assert_eq!(
+            open.return_target,
+            Some(ReturnTarget::Surface(SurfaceId(7)))
+        );
+        assert!(open.resizable);
+    }
+
+    #[test]
+    fn partial_or_misplaced_ownership_is_refused_during_open_parsing() {
+        let mut owner_only_dock = open_message(3);
+        owner_only_dock["owner_pid"] = json!(41);
+        let mut target_only_dock = open_message(3);
+        target_only_dock["return_target"] = json!("terminal");
+        let mut fixed_owned_dock = open_message(3);
+        fixed_owned_dock["owner_pid"] = json!(41);
+        fixed_owned_dock["return_target"] = json!("terminal");
+        fixed_owned_dock["resizable"] = json!(false);
+        let mut owned_overlay = open_message(3);
+        owned_overlay["position"] = json!("overlay");
+        owned_overlay["owner_pid"] = json!(41);
+
+        for message in [
+            owner_only_dock,
+            target_only_dock,
+            fixed_owned_dock,
+            owned_overlay,
+        ] {
+            assert!(matches!(parse_open(&message), Err(Refusal::Malformed(_))));
+        }
+
+        let mut registered_fill = open_message(3);
+        registered_fill["position"] = json!("fill");
+        registered_fill["owner_pid"] = json!(41);
+        assert_eq!(
+            parse_open(&registered_fill)
+                .expect("registered fill")
+                .1
+                .owner_pid,
+            Some(41)
+        );
     }
 
     #[test]

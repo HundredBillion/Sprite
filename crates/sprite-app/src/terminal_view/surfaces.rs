@@ -16,9 +16,9 @@ use gpui::{
 
 use crate::config::Highlights;
 use crate::surface::channel::{
-    FocusTarget, Open, Position, SurfaceConnection, event_blur, event_closed, event_focus,
-    event_grid_resize, event_input, event_mouse, event_paste, event_refused, event_resize,
-    event_warning, neovim_modifiers,
+    FocusTarget, Open, Position, ReturnTarget, SurfaceConnection, event_blur, event_closed,
+    event_focus, event_grid_resize, event_input, event_mouse, event_paste, event_refused,
+    event_resize, event_warning, neovim_modifiers,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -69,9 +69,23 @@ pub(super) struct HostedSurface {
     /// become whole cells exactly as they do for the terminal.
     wheel_rows: crate::grid::ScrollAccumulator,
     wheel_cols: crate::grid::ScrollAccumulator,
+    owner: Option<Owner>,
+    registered_owner: Option<(u32, i32)>,
+    #[allow(dead_code)]
+    resizable: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Owner {
+    pid: u32,
+    group: i32,
+    return_target: FocusTarget,
 }
 
 impl HostedSurface {
+    pub(super) fn id(&self) -> SurfaceId {
+        self.id
+    }
     pub(super) fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
     }
@@ -91,19 +105,103 @@ pub(super) struct SurfaceLayers {
     pub(super) overlays: Vec<AnyElement>,
 }
 
+fn eligible_owner_group(
+    owner_pid: u32,
+    return_target: ReturnTarget,
+    fill: Option<(SurfaceId, u32, i32)>,
+    owner_group: impl Fn(u32) -> Option<i32>,
+) -> Result<i32, Refusal> {
+    let group = owner_group(owner_pid).ok_or(Refusal::Ineligible)?;
+    match return_target {
+        ReturnTarget::Terminal if fill.is_none() => Ok(group),
+        ReturnTarget::Surface(target) => {
+            let Some((fill_id, fill_pid, fill_group)) = fill else {
+                return Err(Refusal::Ineligible);
+            };
+            (fill_id == target && fill_group == group && owner_group(fill_pid) == Some(fill_group))
+                .then_some(group)
+                .ok_or(Refusal::Ineligible)
+        }
+        ReturnTarget::Terminal => Err(Refusal::Ineligible),
+    }
+}
+
 impl TerminalView {
     pub(crate) fn capability_owner_group(
         &self,
         owner_pid: u32,
         return_target: crate::surface::channel::ReturnTarget,
     ) -> Result<i32, Refusal> {
-        if return_target != crate::surface::channel::ReturnTarget::Terminal
-            || self.surfaces.fill.is_some()
+        let fill = self.surfaces.fill.as_ref().and_then(|fill| {
+            fill.registered_owner
+                .map(|(pid, group)| (fill.id, pid, group))
+        });
+        eligible_owner_group(owner_pid, return_target, fill, |pid| {
+            self.foreground_owner_group(pid)
+        })
+    }
+
+    fn valid_return_handle(&self, owner: Owner) -> Option<FocusHandle> {
+        match owner.return_target {
+            FocusTarget::Terminal => self.surfaces.fill.is_none().then(|| self.focus.clone()),
+            FocusTarget::Surface(id) => {
+                let fill = self.surfaces.fill.as_ref().filter(|fill| fill.id == id)?;
+                let (pid, group) = fill.registered_owner?;
+                (group == owner.group && self.foreground_owner_group(pid) == Some(group))
+                    .then(|| fill.focus.clone())
+            }
+        }
+    }
+
+    fn validate_surface_owner(&self, id: SurfaceId) -> Result<(), Refusal> {
+        let surface = self
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == id)
+            .ok_or(Refusal::Ineligible)?;
+        let Some(owner) = surface.owner else {
+            return match surface.registered_owner {
+                Some((pid, group)) if self.foreground_owner_group(pid) != Some(group) => {
+                    Err(Refusal::Ineligible)
+                }
+                Some(_) | None => Ok(()),
+            };
+        };
+        if self.foreground_owner_group(owner.pid) != Some(owner.group)
+            || self.valid_return_handle(owner).is_none()
         {
             return Err(Refusal::Ineligible);
         }
-        self.foreground_owner_group(owner_pid)
-            .ok_or(Refusal::Ineligible)
+        Ok(())
+    }
+
+    pub(super) fn accept_surface_input(
+        &mut self,
+        id: SurfaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.validate_surface_owner(id).is_ok() {
+            true
+        } else {
+            self.close_surface(id, window, cx);
+            false
+        }
+    }
+
+    pub(crate) fn dispatch_surface_event(
+        &mut self,
+        id: SurfaceId,
+        event: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_surface_input(id, window, cx) {
+            return;
+        }
+        if let Some(surface) = self.surfaces.iter().find(|surface| surface.id == id) {
+            surface.connection.send(event);
+        }
     }
 
     /// Opens a Surface, or says why not. Focus moves only here, never on an
@@ -116,6 +214,28 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), Refusal> {
+        let registered_owner = match open.owner_pid {
+            Some(pid) if open.position == Position::Fill => Some((
+                pid,
+                self.foreground_owner_group(pid)
+                    .ok_or(Refusal::Ineligible)?,
+            )),
+            _ => None,
+        };
+        let owner = match (open.owner_pid, open.return_target) {
+            (Some(pid), Some(return_target)) => {
+                let group = self.capability_owner_group(pid, return_target)?;
+                Some(Owner {
+                    pid,
+                    group,
+                    return_target: match return_target {
+                        ReturnTarget::Terminal => FocusTarget::Terminal,
+                        ReturnTarget::Surface(id) => FocusTarget::Surface(id),
+                    },
+                })
+            }
+            _ => None,
+        };
         let parsed = description::parse(&open.description, cx.global::<TokenRegistry>())?;
         let focus = cx.focus_handle();
         let on_focus = cx.on_focus(&focus, window, {
@@ -155,6 +275,9 @@ impl TerminalView {
             pressed: None,
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
+            owner,
+            registered_owner,
+            resizable: open.resizable,
         };
         self.surfaces.place(open.position, open.side, hosted)?;
         for warning in warnings {
@@ -348,6 +471,12 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), Refusal> {
+        if let FocusTarget::Surface(id) = target {
+            if let Err(refusal) = self.validate_surface_owner(id) {
+                self.close_surface(id, window, cx);
+                return Err(refusal);
+            }
+        }
         let handle = match target {
             FocusTarget::Terminal => self.focus.clone(),
             FocusTarget::Surface(other) => self
@@ -364,6 +493,20 @@ impl TerminalView {
         Ok(())
     }
 
+    pub(crate) fn focus_from_surface(
+        &mut self,
+        id: SurfaceId,
+        target: FocusTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Refusal> {
+        if let Err(refusal) = self.validate_surface_owner(id) {
+            self.close_surface(id, window, cx);
+            return Err(refusal);
+        }
+        self.focus_target(target, window, cx)
+    }
+
     /// Removes a Surface and returns its space to the grid. Always answers
     /// `closed`: a write to a connection that is already gone simply fails
     /// (and, per `SurfaceConnection::send`, marks it dead), and a client that
@@ -375,6 +518,26 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .surfaces
+            .fill
+            .as_ref()
+            .is_some_and(|fill| fill.id == id)
+        {
+            let dependents = self
+                .surfaces
+                .iter()
+                .filter_map(|surface| {
+                    surface.owner.and_then(|owner| match owner.return_target {
+                        FocusTarget::Surface(target) if target == id => Some(surface.id),
+                        FocusTarget::Terminal | FocusTarget::Surface(_) => None,
+                    })
+                })
+                .collect::<Vec<_>>();
+            for dependent in dependents {
+                self.close_surface(dependent, window, cx);
+            }
+        }
         let Some((surface, position)) = self.surfaces.take(|surface| surface.id == id) else {
             return;
         };
@@ -383,22 +546,46 @@ impl TerminalView {
             // An overlay gives the keyboard back to whoever had it. Anything
             // else — or a previous holder that has since closed — falls back to
             // the terminal, which is always there.
-            let previous = match position {
-                Position::Overlay => surface.previous_focus.filter(|handle| {
-                    *handle == self.focus
-                        || self.surfaces.iter().any(|other| other.focus == *handle)
-                }),
-                Position::Fill | Position::Dock => None,
-            };
+            let previous = surface
+                .owner
+                .and_then(|owner| self.valid_return_handle(owner))
+                .or_else(|| match position {
+                    Position::Overlay => surface.previous_focus.filter(|handle| {
+                        *handle == self.focus
+                            || self.surfaces.iter().any(|other| other.focus == *handle)
+                    }),
+                    Position::Fill | Position::Dock => None,
+                });
             window.focus(&previous.unwrap_or_else(|| self.focus.clone()));
         }
         self.size = None;
         cx.notify();
     }
 
+    pub(super) fn close_invalid_owned_surfaces(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let invalid = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.owner.is_some() || surface.registered_owner.is_some())
+            .filter_map(|surface| {
+                self.validate_surface_owner(surface.id)
+                    .is_err()
+                    .then_some(surface.id)
+            })
+            .collect::<Vec<_>>();
+        for id in invalid {
+            self.close_surface(id, window, cx);
+        }
+    }
+
     /// Terminal → Surfaces in opening order → terminal: the safety net for a
     /// program that forgets to hand the keyboard back.
     pub(crate) fn cycle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_invalid_owned_surfaces(window, cx);
         let mut order = vec![self.focus.clone()];
         order.extend(self.surfaces.iter().map(|surface| surface.focus.clone()));
         let current = order
@@ -542,6 +729,7 @@ impl TerminalView {
                 surface.id,
                 registry,
                 &surface.connection,
+                Some(cx.entity()),
             ),
             Body::Grid { grid, .. } => {
                 crate::surface::render::render_grid(grid, highlights, metrics)
@@ -598,7 +786,6 @@ impl TerminalView {
         )
         .absolute()
         .inset_0();
-        let keys = surface.connection.clone();
         let focus = surface.focus.clone();
         let mut wrapper = div();
         if fills {
@@ -615,7 +802,19 @@ impl TerminalView {
         wrapper
             .overflow_hidden()
             .track_focus(&surface.focus)
-            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                if !view.accept_surface_input(id, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                let Some(keys) = view
+                    .surfaces
+                    .iter()
+                    .find(|surface| surface.id == id)
+                    .map(|surface| surface.connection.clone())
+                else {
+                    return;
+                };
                 // Workspace chords were claimed on capture before this ran. The
                 // terminal's own shortcuts are still recognised with a Surface
                 // focused, but they act on the Surface: a paste goes to the
@@ -676,6 +875,10 @@ impl TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     window.focus(&focus);
                     view.report_grid_press(id, event.position, "left", &event.modifiers);
                     cx.stop_propagation();
@@ -683,14 +886,22 @@ impl TerminalView {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     view.report_grid_press(id, event.position, "right", &event.modifiers);
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     view.report_grid_press(id, event.position, "middle", &event.modifiers);
                     cx.stop_propagation();
                 }),
@@ -700,7 +911,11 @@ impl TerminalView {
             // neither reported nor stopped, so the selection carries on
             // underneath exactly as it did before Surfaces heard the mouse.
             .on_mouse_move(
-                cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseMoveEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     let button = match event.pressed_button {
                         Some(MouseButton::Left) => "left",
                         Some(MouseButton::Right) => "right",
@@ -730,7 +945,11 @@ impl TerminalView {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseUpEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.report_grid_gesture(
                         id,
                         event.position,
@@ -744,7 +963,11 @@ impl TerminalView {
             )
             .on_mouse_up(
                 MouseButton::Right,
-                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseUpEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.report_grid_gesture(
                         id,
                         event.position,
@@ -758,7 +981,11 @@ impl TerminalView {
             )
             .on_mouse_up(
                 MouseButton::Middle,
-                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseUpEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.report_grid_gesture(
                         id,
                         event.position,
@@ -778,7 +1005,11 @@ impl TerminalView {
             // until it ends.
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseUpEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.report_grid_gesture(
                         id,
                         event.position,
@@ -792,7 +1023,11 @@ impl TerminalView {
             )
             .on_mouse_up_out(
                 MouseButton::Right,
-                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseUpEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.report_grid_gesture(
                         id,
                         event.position,
@@ -806,7 +1041,11 @@ impl TerminalView {
             )
             .on_mouse_up_out(
                 MouseButton::Middle,
-                cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseUpEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if view.report_grid_gesture(
                         id,
                         event.position,
@@ -819,7 +1058,11 @@ impl TerminalView {
                 }),
             )
             .on_scroll_wheel(
-                cx.listener(move |view, event: &ScrollWheelEvent, _window, cx| {
+                cx.listener(move |view, event: &ScrollWheelEvent, window, cx| {
+                    if !view.accept_surface_input(id, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     view.report_grid_wheel(id, event);
                     cx.stop_propagation();
                 }),
@@ -829,5 +1072,63 @@ impl TerminalView {
             .children(composition)
             .child(input_handler)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(pid: u32) -> Option<i32> {
+        match pid {
+            41 | 42 => Some(9),
+            50 => Some(10),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_terminal_target_needs_a_live_foreground_owner_and_no_fill() {
+        assert_eq!(
+            eligible_owner_group(41, ReturnTarget::Terminal, None, group),
+            Ok(9)
+        );
+        assert_eq!(
+            eligible_owner_group(99, ReturnTarget::Terminal, None, group),
+            Err(Refusal::Ineligible)
+        );
+        assert_eq!(
+            eligible_owner_group(
+                41,
+                ReturnTarget::Terminal,
+                Some((SurfaceId(7), 42, 9)),
+                group,
+            ),
+            Err(Refusal::Ineligible)
+        );
+    }
+
+    #[test]
+    fn a_fill_target_must_name_a_live_registered_fill_in_the_same_group() {
+        assert_eq!(
+            eligible_owner_group(
+                41,
+                ReturnTarget::Surface(SurfaceId(7)),
+                Some((SurfaceId(7), 42, 9)),
+                group,
+            ),
+            Ok(9)
+        );
+        for fill in [
+            None,
+            Some((SurfaceId(8), 42, 9)),
+            Some((SurfaceId(7), 50, 10)),
+            Some((SurfaceId(7), 99, 9)),
+        ] {
+            assert_eq!(
+                eligible_owner_group(41, ReturnTarget::Surface(SurfaceId(7)), fill, group),
+                Err(Refusal::Ineligible)
+            );
+        }
     }
 }

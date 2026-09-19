@@ -474,7 +474,7 @@ impl Workspace {
             SurfaceRequest::Focus { id, pane, target } => {
                 if let Ok(view) = self.terminal(pane) {
                     view.update(cx, |view, cx| {
-                        if let Err(refusal) = view.focus_target(target, window, cx) {
+                        if let Err(refusal) = view.focus_from_surface(id, target, window, cx) {
                             view.refuse_on(id, &refusal);
                         }
                     });
