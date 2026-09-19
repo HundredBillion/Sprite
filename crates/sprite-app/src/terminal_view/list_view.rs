@@ -496,7 +496,13 @@ impl Render for VirtualListView {
                         if is_selected {
                             line = line.bg(selected);
                             if row_focused {
-                                line = line.border_1().border_color(focus_color);
+                                line = line.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .border_1()
+                                        .border_color(focus_color),
+                                );
                             }
                         } else {
                             line = line.hover(|style| style.bg(hover));
@@ -619,6 +625,8 @@ impl Render for VirtualListView {
                 foreground,
                 &images_for_header(&self.images, header.icon.as_deref()),
                 &font_family,
+                list_width,
+                window,
                 HeaderEvent {
                     index: 0,
                     revision,
@@ -634,6 +642,8 @@ impl Render for VirtualListView {
                 foreground,
                 &images_for_header(&self.images, header.icon.as_deref()),
                 &font_family,
+                list_width,
+                window,
                 HeaderEvent {
                     index: 1,
                     revision,
@@ -782,6 +792,8 @@ fn header_element(
     foreground: gpui::Rgba,
     icon: &Option<Arc<RenderImage>>,
     font_family: &str,
+    list_width: f32,
+    window: &mut Window,
     event: HeaderEvent,
 ) -> AnyElement {
     let weight = match header.font_weight {
@@ -791,6 +803,7 @@ fn header_element(
     let line = div()
         .h(px(header.height))
         .flex()
+        .w_full()
         .items_center()
         .px(px(header.left_padding.unwrap_or(config.left_padding)))
         .gap(px(header.icon_gap.unwrap_or(config.icon_gap)))
@@ -807,7 +820,37 @@ fn header_element(
     } else {
         line
     };
-    let line = line.child(SharedString::from(header.text.clone()));
+    let label_width = (list_width
+        - 2.0 * header.left_padding.unwrap_or(config.left_padding)
+        - if header.icon.is_some() {
+            config.icon_size + header.icon_gap.unwrap_or(config.icon_gap)
+        } else {
+            0.0
+        }
+        - 2.0)
+        .max(0.0);
+    let mut label_font = gpui::font(font_family.to_owned());
+    label_font.weight = weight;
+    let label = if label_width > 0.0 {
+        window
+            .text_system()
+            .line_wrapper(label_font, px(header.font_size.unwrap_or(config.font_size)))
+            .truncate_line(
+                SharedString::from(header.text.clone()),
+                px(label_width),
+                "…",
+                &mut Vec::new(),
+            )
+    } else {
+        SharedString::from(header.text.clone())
+    };
+    let line = line.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .child(div().w_full().truncate().child(label)),
+    );
     match &header.action {
         Some(action) => {
             let action = action.clone();
