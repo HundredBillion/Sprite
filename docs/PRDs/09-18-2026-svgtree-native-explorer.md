@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-18
 
-**Status:** PRD approved and hardened through grilling on 2026-09-18; ready for implementation planning.
+**Status:** PRD approved and hardened through grilling on 2026-09-18; implementation plans written and cross-checked. Implementation has not started.
 
 **Repositories:** `Sprite`, `sprite.nvim`, `svgtree.nvim`.
 
@@ -509,3 +509,12 @@ capability negotiation, ownership, document limits, input, stale events, and
 icon resolution. Repository-specific plans must turn these contracts into exact
 APIs and meaningful checks before implementation begins; this review is not
 evidence that any feature has been implemented or visually verified.
+
+Implementation planning produced the shared contract and Sprite support TSP in
+this repository's `docs/TSPs/09-18-2026-native-explorer-contract.md` and
+`docs/TSPs/09-18-2026-plugin-surface-support.md`, the API TSP in
+`sprite.nvim/docs/TSPs/09-18-2026-plugin-api.md`, and the consumer TSP in
+`svgtree.nvim/docs/TSPs/09-18-2026-native-explorer.md`. The latter stays local
+under SVGTree's existing ignored-docs policy. See ADR 0020 for the virtual-list
+choice. Execute inline in that dependency order under the user's standing
+approval, with repository-specific worktrees and verification gates.
