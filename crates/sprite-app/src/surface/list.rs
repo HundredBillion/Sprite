@@ -347,6 +347,12 @@ fn preserved_anchor(
             id: row.id.clone(),
             offset: anchor.offset,
         })
+        .or_else(|| {
+            new.first().map(|row| ScrollAnchor {
+                id: row.id.clone(),
+                offset: anchor.offset,
+            })
+        })
 }
 
 fn revision(object: &Map<String, Value>) -> Result<u64, Refusal> {
@@ -541,6 +547,25 @@ mod tests {
         model.apply(parse_op(&valid).unwrap()).unwrap();
         model.set_row_height(12.0);
         assert!(model.scroll.as_ref().expect("scroll").offset < 12.0);
+    }
+
+    #[test]
+    fn replacement_without_any_old_row_restores_the_new_top_row() {
+        let mut model = ListModel::with_row_height(22.0);
+        model
+            .apply(parse_op(&rows(1, &["old-one", "old-two"])).unwrap())
+            .unwrap();
+        model.apply(parse_op(&serde_json::json!({"type":"list_state","revision":1,"scroll":{"id":"old-two","offset":3}})).unwrap()).unwrap();
+        model
+            .apply(parse_op(&rows(2, &["new-top", "new-next"])).unwrap())
+            .unwrap();
+        assert_eq!(
+            model.scroll,
+            Some(ScrollAnchor {
+                id: "new-top".into(),
+                offset: 3.0
+            })
+        );
     }
 
     #[test]
