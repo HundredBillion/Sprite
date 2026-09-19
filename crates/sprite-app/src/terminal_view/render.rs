@@ -491,18 +491,8 @@ impl Render for TerminalView {
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
-                    match view.drag.take() {
-                        // A completed drag copies, which is what a terminal
-                        // user expects from a selection gesture.
-                        Some(drag) if drag.moved => {
-                            view.send(TerminalCommand::CopySelection);
-                        }
-                        // A click that never moved selected nothing, so there
-                        // is nothing to copy and the clipboard is left alone.
-                        Some(_) => {}
-                        None => {
-                            view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
-                        }
+                    if view.drag.take().is_none() {
+                        view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
                     }
                 }),
             )

@@ -42,7 +42,17 @@ pub(super) enum Shortcut {
 /// child, and a binding claimed here is never also typed.
 pub(super) fn application_shortcut(keystroke: &gpui::Keystroke) -> Option<Shortcut> {
     let modifiers = &keystroke.modifiers;
-    if !(modifiers.control && modifiers.shift) || modifiers.alt || modifiers.platform {
+    let platform = modifiers.platform
+        && !modifiers.control
+        && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.function;
+    let terminal = modifiers.control
+        && modifiers.shift
+        && !modifiers.platform
+        && !modifiers.alt
+        && !modifiers.function;
+    if !platform && !terminal {
         return None;
     }
     match keystroke.key.as_str() {
@@ -259,5 +269,89 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Shortcut, application_shortcut};
+    use gpui::{Keystroke, Modifiers};
+
+    fn press(key: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            modifiers,
+            key: key.to_owned(),
+            key_char: None,
+        }
+    }
+
+    fn ctrl_shift() -> Modifiers {
+        Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn platform() -> Modifiers {
+        Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn clipboard_shortcuts_accept_platform_and_terminal_families() {
+        for modifiers in [platform(), ctrl_shift()] {
+            assert_eq!(
+                application_shortcut(&press("c", modifiers)),
+                Some(Shortcut::Copy)
+            );
+            assert_eq!(
+                application_shortcut(&press("v", modifiers)),
+                Some(Shortcut::Paste)
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_shortcuts_require_an_exact_modifier_family() {
+        let rejected = [
+            Modifiers::default(),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                alt: true,
+                platform: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                function: true,
+                platform: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                control: true,
+                platform: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                shift: true,
+                platform: true,
+                ..Modifiers::default()
+            },
+        ];
+
+        for modifiers in rejected {
+            assert_eq!(application_shortcut(&press("c", modifiers)), None);
+            assert_eq!(application_shortcut(&press("v", modifiers)), None);
+        }
+        assert_eq!(application_shortcut(&press("x", platform())), None);
     }
 }
