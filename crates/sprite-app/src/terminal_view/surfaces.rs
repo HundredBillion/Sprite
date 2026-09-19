@@ -104,10 +104,6 @@ fn close_plan(
     ClosePlan { dependents }
 }
 
-fn restore_focus_on_close(focused: bool) -> bool {
-    focused
-}
-
 impl HostedSurface {
     pub(super) fn id(&self) -> SurfaceId {
         self.id
@@ -561,7 +557,7 @@ impl TerminalView {
             return;
         };
         surface.connection.send(&event_closed());
-        if restore_focus_on_close(surface.focus.is_focused(window)) {
+        if surface.focus.is_focused(window) {
             // An overlay gives the keyboard back to whoever had it. Anything
             // else — or a previous holder that has since closed — falls back to
             // the terminal, which is always there.
@@ -1178,11 +1174,5 @@ mod tests {
             .into_iter(),
         );
         assert_eq!(plan.dependents, vec![SurfaceId(8)]);
-    }
-
-    #[test]
-    fn only_a_focused_surface_restores_focus_when_it_closes() {
-        assert!(restore_focus_on_close(true));
-        assert!(!restore_focus_on_close(false));
     }
 }
