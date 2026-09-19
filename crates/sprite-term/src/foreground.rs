@@ -109,6 +109,14 @@ impl ForegroundWatch {
         }
         ForegroundState::Busy(executable_name(group))
     }
+
+    /// Returns the process group when `pid` owns this pane's foreground.
+    pub fn owner_group(&self, pid: u32) -> Option<i32> {
+        let attached = self.attached.get()?;
+        let foreground = pty_unix::foreground_group(&attached.master)?;
+        let candidate = pty_unix::process_group_of(pid)?;
+        (foreground == candidate).then_some(candidate)
+    }
 }
 
 impl std::fmt::Debug for ForegroundWatch {
@@ -141,6 +149,12 @@ mod tests {
             !watch.state().should_confirm(),
             "not knowing must not mean prompting forever"
         );
+    }
+
+    #[test]
+    fn owner_is_unknown_until_the_pty_is_attached() {
+        let watch = ForegroundWatch::default();
+        assert_eq!(watch.owner_group(std::process::id()), None);
     }
 
     #[test]

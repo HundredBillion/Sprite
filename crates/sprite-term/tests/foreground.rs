@@ -38,6 +38,29 @@ fn wait_for(
     }
 }
 
+fn wait_for_owner(session: &TerminalSession, pid: u32, present: bool) -> Option<i32> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let owner = session.foreground_owner_group(pid);
+        if owner.is_some() == present {
+            return owner;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "waited five seconds for owner {pid} to be {}foreground; got {owner:?}",
+            if present { "" } else { "not " }
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn reported_owner(text: &str) -> Option<u32> {
+    text.lines().find_map(|line| {
+        line.strip_prefix("OWNER=")
+            .and_then(|pid| pid.trim().parse().ok())
+    })
+}
+
 /// An interactive shell, its prompt reached, and its snapshot pump alive for
 /// as long as the returned session is.
 fn interactive_shell() -> (TerminalSession, SnapshotPump) {
@@ -111,4 +134,29 @@ fn a_finished_program_leaves_the_pane_idle_again() {
         *state == ForegroundState::Idle
     });
     assert_eq!(state, ForegroundState::Idle);
+}
+
+#[test]
+fn owner_matches_only_the_live_foreground_job() {
+    let (mut session, snapshots) = interactive_shell();
+
+    session
+        .send(TerminalCommand::Input(
+            b"sh -c 'echo OWNER=$$; sleep 30'\n".to_vec(),
+        ))
+        .expect("start foreground job");
+    let bundle = snapshots.wait_for("the foreground job's pid", |bundle| {
+        reported_owner(&pane_text(bundle)).is_some()
+    });
+    let text = pane_text(&bundle);
+    let pid = reported_owner(&text)
+        .unwrap_or_else(|| panic!("foreground job did not report a pid: {text:?}"));
+
+    assert!(wait_for_owner(&session, pid, true).is_some());
+    assert_eq!(session.foreground_owner_group(std::process::id()), None);
+
+    session
+        .send(TerminalCommand::Input(vec![0x1a]))
+        .expect("suspend foreground job");
+    assert_eq!(wait_for_owner(&session, pid, false), None);
 }

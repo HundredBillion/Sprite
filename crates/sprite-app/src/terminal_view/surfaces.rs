@@ -92,6 +92,20 @@ pub(super) struct SurfaceLayers {
 }
 
 impl TerminalView {
+    pub(crate) fn capability_owner_group(
+        &self,
+        owner_pid: u32,
+        return_target: crate::surface::channel::ReturnTarget,
+    ) -> Result<i32, Refusal> {
+        if return_target != crate::surface::channel::ReturnTarget::Terminal
+            || self.surfaces.fill.is_some()
+        {
+            return Err(Refusal::Ineligible);
+        }
+        self.foreground_owner_group(owner_pid)
+            .ok_or(Refusal::Ineligible)
+    }
+
     /// Opens a Surface, or says why not. Focus moves only here, never on an
     /// update: a dock refreshing itself steals nothing.
     pub(crate) fn open_surface(

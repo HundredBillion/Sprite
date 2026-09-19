@@ -136,6 +136,13 @@ pub enum FocusTarget {
     Surface(SurfaceId),
 }
 
+/// Where an owned Surface returns focus when it closes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReturnTarget {
+    Terminal,
+    Surface(SurfaceId),
+}
+
 /// What an `open` asked for. The description is still JSON here: it is parsed
 /// on the GPUI thread, where the token registry lives.
 #[derive(Clone, Debug, PartialEq)]
@@ -280,11 +287,19 @@ impl std::fmt::Debug for SurfaceConnection {
 
 /// How the window answers a request: once, or not at all if it is closing.
 pub type Reply = SyncSender<Result<(), Refusal>>;
+pub type JsonReply = SyncSender<Result<Value, Refusal>>;
 
 /// What a connection asks the window to do. Crosses from a connection thread
 /// to the GPUI thread; the pane is named so the window can find the view.
 #[derive(Debug)]
 pub enum SurfaceRequest {
+    /// A side-effect-free query validated by the pane on the GPUI thread.
+    Capabilities {
+        pane: PaneId,
+        owner_pid: u32,
+        return_target: ReturnTarget,
+        reply: JsonReply,
+    },
     Open {
         id: SurfaceId,
         pane: PaneId,
@@ -524,6 +539,9 @@ fn converse(
     };
     match message.get("type").and_then(Value::as_str) {
         Some("open") => serve_surface(stream, reader, &message, requests),
+        Some("capabilities") => json_one_shot(&mut stream, requests, |reply| {
+            capabilities_request(&message, reply)
+        }),
         Some("focus") => one_shot(&mut stream, requests, event_focused(), |reply| {
             let pane = pane_of(&message)?;
             let target = focus_target(&message)?;
@@ -539,11 +557,38 @@ fn converse(
         other => refuse(
             &mut stream,
             &Refusal::Malformed(format!(
-                "the first message is open, focus, or token, not {}",
+                "the first message is open, capabilities, focus, or token, not {}",
                 other.unwrap_or("nothing")
             ))
             .reason(),
         ),
+    }
+}
+
+fn json_one_shot(
+    stream: &mut UnixStream,
+    requests: &async_channel::Sender<SurfaceRequest>,
+    request: impl FnOnce(JsonReply) -> Result<SurfaceRequest, Refusal>,
+) {
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    let request = match request(reply) {
+        Ok(request) => request,
+        Err(refusal) => {
+            refuse(stream, &refusal.reason());
+            return;
+        }
+    };
+    if requests.send_blocking(request).is_err() {
+        refuse(stream, NOT_ANSWERING);
+        return;
+    }
+    match answer.recv_timeout(REPLY_TIMEOUT) {
+        Ok(Ok(answer)) => {
+            let _ = writeln!(stream, "{answer}");
+            let _ = stream.shutdown(Shutdown::Write);
+        }
+        Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
+        Err(_) => refuse(stream, NO_ANSWER),
     }
 }
 
@@ -725,6 +770,67 @@ fn pane_of(message: &Value) -> Result<PaneId, Refusal> {
         .and_then(Value::as_u64)
         .map(PaneId)
         .ok_or_else(|| Refusal::Malformed("a pane id is needed".to_owned()))
+}
+
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn safe_integer(value: Option<&Value>, reason: &str) -> Result<u64, Refusal> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| Refusal::Malformed(reason.to_owned()))
+}
+
+fn capabilities_request(message: &Value, reply: JsonReply) -> Result<SurfaceRequest, Refusal> {
+    if safe_integer(message.get("version"), "a version is needed")? != VERSION {
+        return Err(Refusal::UnsupportedVersion);
+    }
+    let pane = safe_integer(message.get("pane"), "a pane id is needed").map(PaneId)?;
+    let owner_pid = safe_integer(
+        message.get("owner_pid"),
+        "owner_pid is a positive process id",
+    )?;
+    let owner_pid = u32::try_from(owner_pid)
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| Refusal::Malformed("owner_pid is a positive process id".to_owned()))?;
+    let return_target = match message.get("return_target") {
+        Some(Value::String(target)) if target == "terminal" => ReturnTarget::Terminal,
+        Some(value) => safe_integer(Some(value), "return_target is \"terminal\" or a Surface id")
+            .and_then(|id| {
+            (id > 0)
+                .then_some(ReturnTarget::Surface(SurfaceId(id)))
+                .ok_or_else(|| {
+                    Refusal::Malformed("return_target is \"terminal\" or a Surface id".to_owned())
+                })
+        })?,
+        None => {
+            return Err(Refusal::Malformed(
+                "return_target is \"terminal\" or a Surface id".to_owned(),
+            ));
+        }
+    };
+    Ok(SurfaceRequest::Capabilities {
+        pane,
+        owner_pid,
+        return_target,
+        reply,
+    })
+}
+
+pub(crate) fn capabilities(eligible: bool) -> Value {
+    json!({
+        "type": "capabilities",
+        "version": VERSION,
+        "features": [],
+        "limits": {
+            "message_bytes": MAX_MESSAGE_BYTES,
+            "list_rows": 100_000,
+            "asset_bytes": 67_108_864,
+            "asset_count": 4_096
+        },
+        "eligible": eligible
+    })
 }
 
 /// Where a `focus` message points: absent or `"terminal"` for the pane's
@@ -1013,12 +1119,58 @@ mod tests {
         })
     }
 
+    fn capabilities_message(pane: u64, owner_pid: u64, return_target: Value) -> Value {
+        json!({
+            "type": "capabilities", "version": VERSION, "pane": pane,
+            "owner_pid": owner_pid, "return_target": return_target
+        })
+    }
+
+    #[test]
+    fn capability_discovery_is_a_side_effect_free_json_exchange() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let _window = window(rx, |request| match request {
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target,
+                reply,
+            } => {
+                assert_eq!(pane, PaneId(3));
+                assert_eq!(owner_pid, 41);
+                assert_eq!(return_target, ReturnTarget::Terminal);
+                reply.send(Ok(capabilities(true))).expect("reply");
+                false
+            }
+            other => panic!("discovery opened or changed a Surface: {other:?}"),
+        });
+
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(
+            stream,
+            "{} {}",
+            endpoint.key_hex(),
+            capabilities_message(3, 41, json!("terminal"))
+        )
+        .expect("write");
+        assert_eq!(line(&mut reader), capabilities(true));
+    }
+
     #[test]
     fn a_client_with_the_wrong_key_is_refused_with_one_fixed_answer() {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
 
-        for first_line in ["", "deadbeef", &format!("deadbeef {}", open_message(1))] {
+        for first_line in [
+            "",
+            "deadbeef",
+            &format!("deadbeef {}", open_message(1)),
+            &format!(
+                "deadbeef {}",
+                capabilities_message(1, 41, json!("terminal"))
+            ),
+        ] {
             let (mut stream, mut reader) = connect(&endpoint);
             writeln!(stream, "{first_line}").expect("write");
             assert_eq!(
@@ -1031,6 +1183,87 @@ mod tests {
             assert!(
                 rx.try_recv().is_err(),
                 "the window was asked by an unauthorised caller"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_unsupported_discovery_never_reaches_the_window() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let mut missing_pane = capabilities_message(1, 41, json!("terminal"));
+        missing_pane.as_object_mut().expect("object").remove("pane");
+        for (message, reason) in [
+            (
+                capabilities_message(1, 41, json!("terminal")),
+                "unsupported version",
+            ),
+            (
+                capabilities_message(1, 0, json!("terminal")),
+                "malformed: owner_pid is a positive process id",
+            ),
+            (
+                capabilities_message(1, u64::from(u32::MAX) + 1, json!("terminal")),
+                "malformed: owner_pid is a positive process id",
+            ),
+            (missing_pane, "malformed: a pane id is needed"),
+            (
+                capabilities_message(1, 41, json!(9_007_199_254_740_992_u64)),
+                "malformed: return_target is \"terminal\" or a Surface id",
+            ),
+        ] {
+            let mut message = message;
+            if reason == "unsupported version" {
+                message["version"] = json!(VERSION + 1);
+            }
+            let (mut stream, mut reader) = connect(&endpoint);
+            writeln!(stream, "{} {message}", endpoint.key_hex()).expect("write");
+            assert_eq!(
+                line(&mut reader),
+                json!({ "type": "refused", "reason": reason })
+            );
+            assert!(rx.try_recv().is_err(), "invalid discovery reached window");
+        }
+    }
+
+    #[test]
+    fn pane_owner_and_return_target_are_validated_by_the_window() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let _window = window(rx, |request| match request {
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target,
+                reply,
+            } => {
+                let refusal = if pane == PaneId(99) {
+                    Refusal::UnknownPane
+                } else {
+                    assert!(
+                        owner_pid == 42 || return_target == ReturnTarget::Surface(SurfaceId(7))
+                    );
+                    Refusal::Ineligible
+                };
+                reply.send(Err(refusal)).expect("reply");
+                true
+            }
+            other => panic!("discovery opened or changed a Surface: {other:?}"),
+        });
+
+        for (message, reason) in [
+            (
+                capabilities_message(99, 41, json!("terminal")),
+                "unknown pane",
+            ),
+            (capabilities_message(3, 42, json!("terminal")), "ineligible"),
+            (capabilities_message(3, 41, json!(7)), "ineligible"),
+        ] {
+            let (mut stream, mut reader) = connect(&endpoint);
+            writeln!(stream, "{} {message}", endpoint.key_hex()).expect("write");
+            assert_eq!(
+                line(&mut reader),
+                json!({ "type": "refused", "reason": reason })
             );
         }
     }

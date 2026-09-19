@@ -1100,6 +1100,11 @@ impl TerminalSession {
         self.foreground.state()
     }
 
+    /// Returns the process group when `pid` owns this terminal's foreground.
+    pub fn foreground_owner_group(&self, pid: u32) -> Option<i32> {
+        self.foreground.owner_group(pid)
+    }
+
     pub fn take_event_stream(&mut self) -> Result<EventStream, SessionError> {
         self.events.take().ok_or_else(|| {
             SessionError::new("take_event_stream", "the event stream was already taken")

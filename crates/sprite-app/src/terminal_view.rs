@@ -455,6 +455,13 @@ impl TerminalView {
         session.foreground()
     }
 
+    /// Returns the process group when `pid` owns this pane's foreground.
+    pub fn foreground_owner_group(&self, pid: u32) -> Option<i32> {
+        self.session
+            .as_ref()
+            .and_then(|session| session.foreground_owner_group(pid))
+    }
+
     /// What this pane is called, as the tab and the window title will show it.
     ///
     /// The child's own title first, because a program that set one meant it.

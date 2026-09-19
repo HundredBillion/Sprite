@@ -435,6 +435,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match request {
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target,
+                reply,
+            } => {
+                let answer = self.terminal(pane).and_then(|view| {
+                    view.update(cx, |view, _cx| {
+                        view.capability_owner_group(owner_pid, return_target)
+                    })
+                });
+                let _ = reply.send(answer.map(|_| crate::surface::channel::capabilities(true)));
+            }
             SurfaceRequest::Open {
                 id,
                 pane,
