@@ -82,6 +82,32 @@ struct Owner {
     return_target: FocusTarget,
 }
 
+struct ClosePlan {
+    dependents: Vec<SurfaceId>,
+}
+
+fn close_plan(
+    id: SurfaceId,
+    closes_fill: bool,
+    surfaces: impl Iterator<Item = (SurfaceId, Option<FocusTarget>)>,
+) -> ClosePlan {
+    let dependents = if closes_fill {
+        surfaces
+            .filter_map(|(surface, target)| match target {
+                Some(FocusTarget::Surface(target)) if target == id => Some(surface),
+                Some(FocusTarget::Terminal) | Some(FocusTarget::Surface(_)) | None => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ClosePlan { dependents }
+}
+
+fn restore_focus_on_close(focused: bool) -> bool {
+    focused
+}
+
 impl HostedSurface {
     pub(super) fn id(&self) -> SurfaceId {
         self.id
@@ -239,15 +265,13 @@ impl TerminalView {
         let parsed = description::parse(&open.description, cx.global::<TokenRegistry>())?;
         let focus = cx.focus_handle();
         let on_focus = cx.on_focus(&focus, window, {
-            let connection = connection.clone();
-            move |_view, _window, _cx| {
-                connection.send(&event_focus());
+            move |view, window, cx| {
+                view.dispatch_surface_event(id, &event_focus(), window, cx);
             }
         });
         let on_blur = cx.on_blur(&focus, window, {
-            let connection = connection.clone();
-            move |_view, _window, _cx| {
-                connection.send(&event_blur());
+            move |view, window, cx| {
+                view.dispatch_surface_event(id, &event_blur(), window, cx);
             }
         });
         let previous_focus = match open.position {
@@ -518,31 +542,26 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
+        let closes_fill = self
             .surfaces
             .fill
             .as_ref()
-            .is_some_and(|fill| fill.id == id)
-        {
-            let dependents = self
-                .surfaces
+            .is_some_and(|fill| fill.id == id);
+        let plan = close_plan(
+            id,
+            closes_fill,
+            self.surfaces
                 .iter()
-                .filter_map(|surface| {
-                    surface.owner.and_then(|owner| match owner.return_target {
-                        FocusTarget::Surface(target) if target == id => Some(surface.id),
-                        FocusTarget::Terminal | FocusTarget::Surface(_) => None,
-                    })
-                })
-                .collect::<Vec<_>>();
-            for dependent in dependents {
-                self.close_surface(dependent, window, cx);
-            }
+                .map(|surface| (surface.id, surface.owner.map(|owner| owner.return_target))),
+        );
+        for dependent in plan.dependents {
+            self.close_surface(dependent, window, cx);
         }
         let Some((surface, position)) = self.surfaces.take(|surface| surface.id == id) else {
             return;
         };
         surface.connection.send(&event_closed());
-        if surface.focus.is_focused(window) {
+        if restore_focus_on_close(surface.focus.is_focused(window)) {
             // An overlay gives the keyboard back to whoever had it. Anything
             // else — or a previous holder that has since closed — falls back to
             // the terminal, which is always there.
@@ -1130,5 +1149,40 @@ mod tests {
                 Err(Refusal::Ineligible)
             );
         }
+    }
+
+    #[test]
+    fn a_dock_id_cannot_be_used_as_the_return_fill() {
+        assert_eq!(
+            eligible_owner_group(
+                41,
+                ReturnTarget::Surface(SurfaceId(8)),
+                Some((SurfaceId(7), 42, 9)),
+                group,
+            ),
+            Err(Refusal::Ineligible)
+        );
+    }
+
+    #[test]
+    fn closing_a_fill_schedules_its_dependent_docks_before_the_fill() {
+        let plan = close_plan(
+            SurfaceId(7),
+            true,
+            [
+                (SurfaceId(7), None),
+                (SurfaceId(8), Some(FocusTarget::Surface(SurfaceId(7)))),
+                (SurfaceId(9), Some(FocusTarget::Terminal)),
+                (SurfaceId(10), Some(FocusTarget::Surface(SurfaceId(6)))),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(plan.dependents, vec![SurfaceId(8)]);
+    }
+
+    #[test]
+    fn only_a_focused_surface_restores_focus_when_it_closes() {
+        assert!(restore_focus_on_close(true));
+        assert!(!restore_focus_on_close(false));
     }
 }

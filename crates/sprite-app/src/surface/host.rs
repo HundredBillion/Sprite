@@ -124,6 +124,19 @@ mod tests {
     }
 
     #[test]
+    fn an_occupied_owned_dock_slot_keeps_the_incumbent() {
+        let mut host: SurfaceHost<&str> = SurfaceHost::default();
+        host.place(Position::Dock, Side::Left, "incumbent")
+            .expect("first dock");
+
+        assert_eq!(
+            host.place(Position::Dock, Side::Left, "owned candidate"),
+            Err(Refusal::PositionOccupied)
+        );
+        assert_eq!(host.left, Some("incumbent"));
+    }
+
+    #[test]
     fn overlays_stack_in_the_order_they_opened() {
         let mut host: SurfaceHost<&str> = SurfaceHost::default();
         for name in ["first", "second", "third"] {
