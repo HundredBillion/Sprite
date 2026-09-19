@@ -500,6 +500,11 @@ impl Workspace {
                     view.update(cx, |view, cx| view.grid_operations(id, ops, cx));
                 }
             }
+            SurfaceRequest::List { id, pane, op } => {
+                if let Ok(view) = self.terminal(pane) {
+                    view.update(cx, |view, cx| view.list_operation(id, op, cx));
+                }
+            }
             SurfaceRequest::RegisterToken {
                 name,
                 default,

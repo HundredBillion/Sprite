@@ -85,6 +85,12 @@ are 6..64; gaps/paddings are 0..128; headers are 0..128 pixels tall. Font family
 `system` resolves to the platform UI font, not the terminal grid font. Color
 references use existing Semantic Token/literal rules and warnings. Heading and
 section are optional, with text, height, optional SVG asset id, optional action.
+Each header also accepts optional `font_size` (6..64), `font_weight` (`normal`
+or `bold`), `left_padding` (0..128), and `icon_gap` (0..128). Missing metrics
+inherit the corresponding list metric; missing weight is normal. These let
+clients express distinct heading and section typography without renderer-specific
+knowledge. The measured Explorer uses 11px normal heading text and 11px bold
+section text, while its rows use 13px; the client supplies those values.
 Header actions emit `list_action` with the current revision and action string.
 An unknown or unloaded decorative header asset leaves its slot empty.
 

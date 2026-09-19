@@ -16,12 +16,13 @@ use gpui::{
 
 use crate::config::Highlights;
 use crate::surface::channel::{
-    FocusTarget, Open, Position, ReturnTarget, SurfaceConnection, event_blur, event_closed,
-    event_focus, event_grid_resize, event_input, event_mouse, event_paste, event_refused,
-    event_resize, event_warning, neovim_modifiers,
+    FocusTarget, Open, Position, ReturnTarget, SurfaceConnection, event_applied, event_blur,
+    event_closed, event_focus, event_grid_resize, event_input, event_mouse, event_paste,
+    event_refused, event_resize, event_warning, neovim_modifiers,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
+use crate::surface::list::{ListModel, ListOp};
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
 
@@ -36,6 +37,11 @@ pub(super) enum Body {
         /// element root's box does. A grid root refuses `style` and `border`,
         /// so those never arrive here.
         root: Element,
+    },
+    /// The renderer replaces this model later without changing the wire mutation seam.
+    List {
+        root: Element,
+        model: ListModel,
     },
 }
 
@@ -275,12 +281,20 @@ impl TerminalView {
             Position::Fill | Position::Dock => None,
         };
         let warnings = parsed.warnings;
-        let body = match parsed.description.root.grid {
+        let root = parsed.description.root;
+        let body = match root.grid {
             Some(size) => Body::Grid {
                 grid: GridSurface::new(size.cols, size.rows),
-                root: parsed.description.root,
+                root,
             },
-            None => Body::Elements(parsed.description),
+            None if root.list.is_some() => {
+                let row_height = root.list.as_ref().expect("checked").row_height;
+                Body::List {
+                    root,
+                    model: ListModel::with_row_height(row_height),
+                }
+            }
+            None => Body::Elements(Description { root }),
         };
         let hosted = HostedSurface {
             id,
@@ -444,9 +458,41 @@ impl TerminalView {
         let parsed = description::parse(&document, cx.global::<TokenRegistry>());
         match parsed {
             Ok(parsed) => {
-                surface.body = Body::Elements(parsed.description);
+                if let Body::List { root, model } = &mut surface.body {
+                    if parsed.description.root.list.is_none() {
+                        surface.connection.send(&event_refused(
+                            &Refusal::Malformed(
+                                "a virtual_list update keeps kind virtual_list".to_owned(),
+                            )
+                            .reason(),
+                        ));
+                        return;
+                    }
+                    let row_height = parsed
+                        .description
+                        .root
+                        .list
+                        .as_ref()
+                        .expect("checked")
+                        .row_height;
+                    *root = parsed.description.root;
+                    model.set_row_height(row_height);
+                } else if parsed.description.root.list.is_some() {
+                    surface.connection.send(&event_refused(
+                        &Refusal::Malformed(
+                            "a virtual_list update needs a virtual_list Surface".to_owned(),
+                        )
+                        .reason(),
+                    ));
+                    return;
+                } else {
+                    surface.body = Body::Elements(parsed.description);
+                }
                 for warning in parsed.warnings {
                     surface.connection.send(&event_warning(&warning));
+                }
+                if surface.owner.is_some() {
+                    surface.connection.send(&event_applied("update", None));
                 }
                 cx.notify();
             }
@@ -480,6 +526,32 @@ impl TerminalView {
         if let Err(refusal) = grid.apply_all(ops) {
             surface.connection.send(&event_refused(&refusal.reason()));
         }
+        cx.notify();
+    }
+
+    pub(crate) fn list_operation(&mut self, id: SurfaceId, op: ListOp, cx: &mut Context<Self>) {
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let Body::List { model, .. } = &mut surface.body else {
+            surface.connection.send(&event_refused(
+                &Refusal::Malformed("this Surface is not a virtual_list".to_owned()).reason(),
+            ));
+            return;
+        };
+        let operation = match &op {
+            ListOp::Assets(_) => "assets",
+            ListOp::Rows { .. } => "list_rows",
+            ListOp::State { .. } => "list_state",
+        };
+        let revision = match &op {
+            ListOp::Rows { revision, .. } | ListOp::State { revision, .. } => Some(*revision),
+            ListOp::Assets(_) => None,
+        };
+        match model.apply(op) {
+            Ok(()) => surface.connection.send(&event_applied(operation, revision)),
+            Err(refusal) => surface.connection.send(&event_refused(&refusal.reason())),
+        };
         cx.notify();
     }
 
@@ -732,7 +804,7 @@ impl TerminalView {
                 let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
                 event_grid_resize(told.0, told.1, cols, rows)
             }
-            Body::Elements(_) => event_resize(told.0, told.1),
+            Body::Elements(_) | Body::List { .. } => event_resize(told.0, told.1),
         };
         if surface.told.as_deref() != Some(event.as_str()) {
             surface.connection.send(&event);
@@ -749,6 +821,7 @@ impl TerminalView {
             Body::Grid { grid, .. } => {
                 crate::surface::render::render_grid(grid, highlights, metrics)
             }
+            Body::List { .. } => div().size_full().into_any_element(),
         };
         // A composition belongs to whoever holds the keyboard. A grid shows
         // it at its cursor, as the terminal shows its own; an element Surface

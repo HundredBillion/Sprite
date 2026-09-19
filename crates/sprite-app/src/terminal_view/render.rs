@@ -99,7 +99,7 @@ impl TerminalView {
         // reason enough for the pane to keep one.
         let grid_blinks = self.surfaces.iter().any(|surface| match &surface.body {
             Body::Grid { grid, .. } => grid.cursor_blinks(),
-            Body::Elements(_) => false,
+            Body::Elements(_) | Body::List { .. } => false,
         });
         if !(terminal_blinks || grid_blinks) {
             if !self.blink_on {

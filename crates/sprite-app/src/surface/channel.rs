@@ -342,6 +342,13 @@ pub enum SurfaceRequest {
         pane: PaneId,
         ops: Vec<crate::surface::grid::Op>,
     },
+    /// A validated virtual-list operation. The model is mutated on the GPUI
+    /// thread with its description, just as grid operations are.
+    List {
+        id: SurfaceId,
+        pane: PaneId,
+        op: crate::surface::list::ListOp,
+    },
     RegisterToken {
         name: String,
         default: Rgb,
@@ -708,6 +715,17 @@ fn serve_surface(
                     }
                 }
             }
+            Some(kind) if crate::surface::list::is_op(kind) => {
+                match crate::surface::list::parse_op(&message) {
+                    Ok(op) => SurfaceRequest::List { id, pane, op },
+                    Err(refusal) => {
+                        if handle.send(&event_refused(&refusal.reason())) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
             Some("close") => {
                 // The window answers `closed` through the connection and drops
                 // its end; this thread has nothing more to read.
@@ -717,7 +735,7 @@ fn serve_surface(
             other => {
                 if handle.send(&event_refused(
                     &Refusal::Malformed(format!(
-                        "a message is update, focus, close, or a grid operation, not {}",
+                        "a message is update, focus, close, a grid operation, or a list operation, not {}",
                         other.unwrap_or("nothing")
                     ))
                     .reason(),
@@ -826,7 +844,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1"],
+        "features": ["owned-dock-v1", "svg-assets-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
@@ -989,6 +1007,38 @@ pub fn event_opened(id: SurfaceId) -> String {
 
 pub fn event_refused(reason: &str) -> String {
     json!({ "type": "refused", "reason": reason }).to_string()
+}
+
+pub fn event_applied(operation: &str, revision: Option<u64>) -> String {
+    match revision {
+        Some(revision) => {
+            json!({ "type": "applied", "operation": operation, "revision": revision })
+        }
+        None => json!({ "type": "applied", "operation": operation }),
+    }
+    .to_string()
+}
+
+pub fn event_list_click(
+    revision: u64,
+    id: &str,
+    count: u32,
+    button: &str,
+    modifiers: &str,
+) -> String {
+    json!({ "type": "list_click", "revision": revision, "id": id, "count": count, "button": button, "modifiers": modifiers }).to_string()
+}
+
+pub fn event_list_action(revision: u64, action: &str) -> String {
+    json!({ "type": "list_action", "revision": revision, "action": action }).to_string()
+}
+
+pub fn event_list_scroll(revision: u64, top: &str, offset: f32, visible_rows: u32) -> String {
+    json!({ "type": "list_scroll", "revision": revision, "top": top, "offset": offset, "visible_rows": visible_rows }).to_string()
+}
+
+pub fn event_dock_size(width: u32) -> String {
+    json!({ "type": "dock_size", "width": width }).to_string()
 }
 
 pub fn event_registered() -> String {

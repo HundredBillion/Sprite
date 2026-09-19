@@ -6,6 +6,7 @@ pub mod client;
 pub mod description;
 pub mod grid;
 pub mod host;
+pub mod list;
 pub mod render;
 pub mod style;
 

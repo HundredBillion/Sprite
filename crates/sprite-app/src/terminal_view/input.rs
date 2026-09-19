@@ -240,7 +240,7 @@ impl EntityInputHandler for TerminalView {
                     let cursor = grid.cursor_snapshot();
                     (cursor.row, cursor.column)
                 }
-                Body::Elements(_) => (0, 0),
+                Body::Elements(_) | Body::List { .. } => (0, 0),
             },
             None => {
                 let cursor = self.bundle.as_ref()?.render.cursor;
