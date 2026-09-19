@@ -675,6 +675,22 @@ mod tests {
 
     #[test]
     fn a_virtual_list_has_typed_metrics_colours_and_header_overrides() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .expect("shared fixture");
+        let shared = parsed(fixture["description"].clone());
+        assert_eq!(shared.description.root.kind, Kind::VirtualList);
+        assert_eq!(
+            shared
+                .description
+                .root
+                .list
+                .as_ref()
+                .expect("list")
+                .row_height,
+            22.0
+        );
         let list = parsed(json!({"version":1,"root":{"kind":"virtual_list",
             "row_height":22,"font_size":13,"font_family":"system","icon_size":16,"icon_gap":6,"left_padding":8,"right_padding":8,
             "heading":{"text":"EXPLORER","height":35,"font_size":11,"font_weight":"normal","left_padding":20,"icon_gap":2},

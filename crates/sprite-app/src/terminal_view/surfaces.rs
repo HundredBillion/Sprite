@@ -91,7 +91,7 @@ pub(super) struct DockDrag {
 
 fn dragged_width(start: f32, delta: f32, left: bool, limit: f32) -> f32 {
     let wanted = start + if left { delta } else { -delta };
-    wanted.clamp(64.0_f32.min(limit), limit.min(4096.0).max(0.0))
+    wanted.clamp(64.0_f32.min(limit), limit.clamp(0.0, 4096.0))
 }
 
 #[cfg(test)]
@@ -676,11 +676,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), Refusal> {
-        if let FocusTarget::Surface(id) = target {
-            if let Err(refusal) = self.validate_surface_owner(id) {
-                self.close_surface(id, window, cx);
-                return Err(refusal);
-            }
+        if let FocusTarget::Surface(id) = target
+            && let Err(refusal) = self.validate_surface_owner(id)
+        {
+            self.close_surface(id, window, cx);
+            return Err(refusal);
         }
         let handle = match target {
             FocusTarget::Terminal => self.focus.clone(),

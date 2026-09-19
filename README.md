@@ -283,6 +283,39 @@ An `image` element's SVG is rendered from the bytes given, with no resource
 directory, so an `href` that points at a file resolves to nothing; embed
 what the picture needs.
 
+Programs that want a native dock first send an authenticated `capabilities`
+request with the pane id, their PID, and a `return_target` of `"terminal"` or
+the id of a live fill Surface in that pane. The answer lists supported feature
+names and limits without opening anything. Unknown panes, unsupported versions,
+invalid owners, or owners outside the pane's foreground process group receive
+`refused`; an unknown foreground state is ineligible. Sprite checks ownership
+again when opening and before delivering input or focus. A dock whose owner
+leaves that group closes; focus returns to its still-live target or the terminal.
+
+An owned dock opens with `owner_pid`, `return_target`, and `resizable:true`.
+Closing it while focused returns focus to that target. Closing its fill Surface
+also closes dependent docks; closing after focus has moved elsewhere leaves
+focus where it is. Connection EOF closes a Surface. A client should close its
+dock before suspending its editor, reopen it on resume only if it was open,
+and close on exit. Clients unable to establish ownership can keep drawing in
+the terminal. These additions do not change Surface Channel version 1, its
+authentication or NDJSON framing, or the behavior of older grid and element
+clients that omit ownership fields.
+
+The root-only `virtual_list` kind draws fixed-height rows in a dock. The
+[list demo](scripts/surface-list-demo.py) shows discovery, asset registration,
+row replacement, selection, scroll, header actions, and resize. The
+[wire fixture](tests/fixtures/surface-list-v1.json) gives example requests,
+acknowledgements, refusals, and events for other clients. Send `assets` before
+rows, then `list_rows` with a strictly increasing revision; use `list_state`
+at that revision for selection, status, and reveal or exact scroll. Each
+successful mutation replies `applied`. A malformed or stale mutation replies
+`refused` and leaves the last valid list intact. Wait for the content
+acknowledgements before focusing the dock or reporting it ready, and ignore
+events from stale revisions. On a theme replacement, reopen the Surface to
+release its scoped assets. Current limits are 16 MiB per message, 100,000 rows,
+4,096 assets, and 64 MiB of SVG text per Surface; batch assets below 8 MiB.
+
 An editor draws differently: it opens a *grid* Surface (`{"kind":"grid",
 "cols":80,"rows":24}`) and streams cells with highlight ids — `rows`,
 `highlights`, `cursor`, `scroll`, and friends, alone or in a `batch` that

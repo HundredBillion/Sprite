@@ -454,6 +454,33 @@ fn malformed(why: impl Into<String>) -> Refusal {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shared_wire_fixture_applies_atomically_and_retains_last_good_state() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .expect("shared fixture");
+        let mut model = ListModel::with_row_height(22.0);
+        for pair in fixture["operations"].as_array().expect("operations") {
+            let before = model.clone();
+            let result = parse_op(&pair["request"]).and_then(|op| model.apply(op));
+            if pair["reply"]["type"] == "applied" {
+                result.expect("fixture operation applies");
+            } else {
+                let refusal = result.expect_err("fixture operation is refused");
+                assert_eq!(pair["reply"]["reason"], refusal.reason());
+                assert_eq!(model.revision, before.revision);
+                assert_eq!(model.rows, before.rows);
+                assert_eq!(model.selected, before.selected);
+                assert_eq!(model.status, before.status);
+                assert_eq!(model.scroll, before.scroll);
+            }
+        }
+        assert_eq!(model.revision, 1);
+        assert_eq!(model.selected.as_deref(), Some("r2"));
+        assert_eq!(model.scroll.as_ref().expect("scroll").offset, 3.0);
+    }
+
     fn rows(revision: u64, ids: &[&str]) -> Value {
         serde_json::json!({"type":"list_rows", "revision":revision,
             "rows":ids.iter().map(|id| serde_json::json!({"id":id,"text":id,"indent":0,"guides":[]})).collect::<Vec<_>>(),

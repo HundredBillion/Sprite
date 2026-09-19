@@ -167,10 +167,11 @@ impl VirtualListView {
                     .base_handle
                     .set_offset(gpui::point(px(0.0), px(-pixels)));
             }
-        } else if navigation && let Some(id) = self.model.reveal.take() {
-            if let Some(index) = self.model.index_of(&id) {
-                self.scroll.scroll_to_item(index, gpui::ScrollStrategy::Top);
-            }
+        } else if navigation
+            && let Some(id) = self.model.reveal.take()
+            && let Some(index) = self.model.index_of(&id)
+        {
+            self.scroll.scroll_to_item(index, gpui::ScrollStrategy::Top);
         }
         cx.notify();
         Ok(())
@@ -414,10 +415,12 @@ impl Render for VirtualListView {
                 foreground,
                 &images_for_header(&self.images, header.icon.as_deref()),
                 &font_family,
-                0,
-                revision,
-                surface,
-                host.clone(),
+                HeaderEvent {
+                    index: 0,
+                    revision,
+                    surface,
+                    host: host.clone(),
+                },
             ));
         }
         if let Some(header) = &config.section {
@@ -427,10 +430,12 @@ impl Render for VirtualListView {
                 foreground,
                 &images_for_header(&self.images, header.icon.as_deref()),
                 &font_family,
-                1,
-                revision,
-                surface,
-                host.clone(),
+                HeaderEvent {
+                    index: 1,
+                    revision,
+                    surface,
+                    host: host.clone(),
+                },
             ));
         }
         let entity = cx.entity();
@@ -533,16 +538,20 @@ fn images_for_header(
 ) -> Option<Arc<Image>> {
     id.and_then(|id| images.get(id)).cloned()
 }
+struct HeaderEvent {
+    index: u64,
+    revision: u64,
+    surface: SurfaceId,
+    host: Entity<TerminalView>,
+}
+
 fn header_element(
     header: &crate::surface::description::ListHeader,
     config: &ListConfig,
     foreground: gpui::Rgba,
     icon: &Option<Arc<Image>>,
     font_family: &str,
-    header_index: u64,
-    revision: u64,
-    surface: SurfaceId,
-    host: Entity<TerminalView>,
+    event: HeaderEvent,
 ) -> AnyElement {
     let weight = match header.font_weight {
         Some(crate::surface::description::ListFontWeight::Bold) => FontWeight::BOLD,
@@ -572,14 +581,14 @@ fn header_element(
         Some(action) => {
             let action = action.clone();
             line.id(ElementId::NamedInteger(
-                SharedString::from(format!("surface-{}-header", surface.0)),
-                header_index,
+                SharedString::from(format!("surface-{}-header", event.surface.0)),
+                event.index,
             ))
             .cursor_pointer()
             .on_click(move |_event, window, cx| {
-                let payload = event_list_action(revision, &action);
-                host.update(cx, |view, cx| {
-                    view.dispatch_surface_event(surface, &payload, window, cx)
+                let payload = event_list_action(event.revision, &action);
+                event.host.update(cx, |view, cx| {
+                    view.dispatch_surface_event(event.surface, &payload, window, cx)
                 });
             })
             .into_any_element()

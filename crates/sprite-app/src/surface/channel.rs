@@ -1152,6 +1152,51 @@ mod tests {
 
     use serde_json::{Value, json};
 
+    #[test]
+    fn shared_wire_fixture_matches_discovery_and_outbound_events() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .expect("shared fixture");
+        let request = &fixture["capabilities"]["request"];
+        let (reply, _receiver) = mpsc::sync_channel(1);
+        assert!(matches!(
+            capabilities_request(request, reply),
+            Ok(SurfaceRequest::Capabilities {
+                pane: PaneId(9),
+                owner_pid: 1234,
+                return_target: ReturnTarget::Terminal,
+                ..
+            })
+        ));
+        assert_eq!(capabilities(true), fixture["capabilities"]["reply"]);
+        for pair in fixture["operations"].as_array().expect("operations") {
+            let expected = &pair["reply"];
+            if expected["type"] == "applied" {
+                let operation = pair["request"]["type"].as_str().expect("operation");
+                let revision = pair["request"]["revision"].as_u64();
+                let actual: Value =
+                    serde_json::from_str(&event_applied(operation, revision)).unwrap();
+                assert_eq!(&actual, expected);
+            } else {
+                let actual: Value =
+                    serde_json::from_str(&event_refused(expected["reason"].as_str().unwrap()))
+                        .unwrap();
+                assert_eq!(&actual, expected);
+            }
+        }
+        let events = fixture["events"].as_array().expect("events");
+        let emitted = [
+            event_list_click(1, "r2", 1, "left", ""),
+            event_list_action(1, "root-toggle"),
+            event_list_scroll(1, "r2", 3.0, 24),
+            event_dock_size(300),
+        ];
+        for (actual, expected) in emitted.iter().zip(events) {
+            assert_eq!(&serde_json::from_str::<Value>(actual).unwrap(), expected);
+        }
+    }
+
     /// A private directory of this test's own, removed when it is dropped.
     /// Named as short as the observation tests name theirs, because it sits
     /// inside `$TMPDIR`, which on macOS is already ~48 bytes, and what is left
