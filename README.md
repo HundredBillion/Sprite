@@ -303,7 +303,11 @@ authentication or NDJSON framing, or the behavior of older grid and element
 clients that omit ownership fields.
 
 The root-only `virtual_list` kind draws fixed-height rows in a dock. The
-[list demo](scripts/surface-list-demo.py) shows discovery, asset registration,
+optional `border_side` field controls its one-pixel outer border: `all`
+(the default), `left`, `right`, or `none`. A left dock uses `right` for its
+editor-facing separator; a right dock uses `left`. The border consumes layout
+space only on the selected edge, so header and row metrics stay unchanged.
+The [list demo](scripts/surface-list-demo.py) shows discovery, asset registration,
 row replacement, selection, scroll, header actions, and resize. The
 [wire fixture](tests/fixtures/surface-list-v1.json) gives example requests,
 acknowledgements, refusals, and events for other clients. Send `assets` before

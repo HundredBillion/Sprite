@@ -115,6 +115,14 @@ pub enum GuideVisibility {
     Hover,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListBorderSide {
+    All,
+    Left,
+    Right,
+    None,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListColors {
     pub background: ColorRef,
@@ -134,6 +142,7 @@ pub struct ListColors {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListConfig {
+    pub border_side: ListBorderSide,
     pub row_height: f32,
     pub font_size: f32,
     pub font_family: String,
@@ -414,7 +423,20 @@ fn list_config(
             ));
         }
     };
+    let border_side = match object.get("border_side") {
+        None => ListBorderSide::All,
+        Some(Value::String(value)) if value == "all" => ListBorderSide::All,
+        Some(Value::String(value)) if value == "left" => ListBorderSide::Left,
+        Some(Value::String(value)) if value == "right" => ListBorderSide::Right,
+        Some(Value::String(value)) if value == "none" => ListBorderSide::None,
+        _ => {
+            return Err(Refusal::Malformed(
+                "border_side is all, left, right, or none".into(),
+            ));
+        }
+    };
     Ok(ListConfig {
+        border_side,
         row_height: metric("row_height", 12.0, 128.0)?,
         font_size: metric("font_size", 6.0, 64.0)?,
         font_family: string_field(object, "font_family")?
@@ -762,6 +784,7 @@ mod tests {
         assert_eq!(config.row_height, 22.0);
         assert_eq!(config.scrollbar_width, 6.0);
         assert_eq!(config.guide_visibility, GuideVisibility::Always);
+        assert_eq!(config.border_side, ListBorderSide::All);
         assert_eq!(config.colors.scrollbar_hover, config.colors.scrollbar);
         assert_eq!(config.colors.scrollbar_active, config.colors.scrollbar);
         assert_eq!(config.colors.inactive_guide, config.colors.guide);
@@ -769,6 +792,7 @@ mod tests {
         let styled = shared.description.root.list.expect("styled list");
         assert_eq!(styled.scrollbar_width, 10.0);
         assert_eq!(styled.guide_visibility, GuideVisibility::Hover);
+        assert_eq!(styled.border_side, ListBorderSide::Right);
         assert_eq!(styled.scrollbar_hover_opacity, 0.7);
         assert_eq!(
             config.section.expect("section").font_weight,
@@ -790,6 +814,9 @@ mod tests {
             ));
         }
         for (key, value) in [
+            ("border_side", json!("top")),
+            ("border_side", json!(null)),
+            ("border_side", json!(1)),
             ("scrollbar_width", json!(3)),
             ("guide_visibility", json!("sometimes")),
             ("scrollbar_hover_opacity", json!(1.1)),
@@ -798,6 +825,24 @@ mod tests {
             let mut description = fixture["description"].clone();
             description["root"][key] = value;
             assert!(matches!(refused(description), Refusal::Malformed(_)));
+        }
+        for (value, expected) in [
+            ("all", ListBorderSide::All),
+            ("left", ListBorderSide::Left),
+            ("right", ListBorderSide::Right),
+            ("none", ListBorderSide::None),
+        ] {
+            let mut description = fixture["description"].clone();
+            description["root"]["border_side"] = json!(value);
+            assert_eq!(
+                parsed(description)
+                    .description
+                    .root
+                    .list
+                    .unwrap()
+                    .border_side,
+                expected
+            );
         }
     }
 

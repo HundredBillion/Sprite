@@ -76,6 +76,12 @@ Surface elements. It is a generic list: no filesystem access or folder logic.
 
 The initial description has empty rows and explicit typography/colors:
 
+The optional `border_side` on the `virtual_list` root accepts exactly `all`,
+`left`, `right`, or `none`. Omission means `all`, preserving existing clients.
+It paints a one-pixel outer border only on the selected edge (or all/none),
+with layout inset on painted edges. A left Explorer dock sends `right`; a right
+dock sends `left`, using `colors.border` for the editor-facing separator.
+
 ```json
 {"version":1,"root":{"kind":"virtual_list","row_height":22,"font_size":13,"font_family":"system","icon_size":16,"icon_gap":6,"left_padding":8,"right_padding":8,"heading":{"text":"EXPLORER","height":35},"section":{"text":"PROJECT","height":22,"icon":"chevron-down","action":"root-toggle"},"colors":{"background":"svgtree.background","foreground":"svgtree.foreground","hover":"svgtree.hover","selected":"svgtree.selection","inactive_selected":"svgtree.inactiveSelection","selected_foreground":"svgtree.selectionForeground","focus":"svgtree.focus","guide":"svgtree.guide","border":"svgtree.border","scrollbar":"svgtree.scrollbar"}}}
 ```

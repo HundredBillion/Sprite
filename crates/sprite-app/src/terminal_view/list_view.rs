@@ -17,7 +17,7 @@ use crate::surface::SurfaceId;
 use crate::surface::channel::{
     event_list_action, event_list_click, event_list_scroll, neovim_modifiers,
 };
-use crate::surface::description::{GuideVisibility, ListConfig};
+use crate::surface::description::{GuideVisibility, ListBorderSide, ListConfig};
 use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
 use crate::surface::render::render_svg;
 use crate::terminal_view::TerminalView;
@@ -604,9 +604,14 @@ impl Render for VirtualListView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .border_1()
-            .border_color(border_color)
             .bg(background);
+        root = match config.border_side {
+            ListBorderSide::All => root.border_1(),
+            ListBorderSide::Left => root.border_l_1(),
+            ListBorderSide::Right => root.border_r_1(),
+            ListBorderSide::None => root,
+        }
+        .border_color(border_color);
         if let Some(header) = &config.heading {
             root = root.child(header_element(
                 header,
