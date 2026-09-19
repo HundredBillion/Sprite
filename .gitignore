@@ -1,6 +1,7 @@
 .DS_Store
 .worktrees/
-/target/
+.superpowers/
+/target
 
 # makepkg's staging directory and its output, from packaging/PKGBUILD.local
 /packaging/pkg/

@@ -72,6 +72,12 @@ pub fn owner_group(&self, pid: u32) -> Option<i32> {
 Expose it through Session without exposing the PTY fd. Do not reject the shell
 group categorically: Sprite can launch a program directly rather than via shell.
 
+Task 1 advertises no feature flags. Until Task 2 adds fill ownership metadata,
+Surface return targets are ineligible; terminal targets still require no fill.
+Task 2 completes live owned-fill validation and advertises owned-dock-v1;
+Tasks 3–4 complete and advertise svg-assets-v1 and virtual-list-v1 respectively;
+Task 5 advertises dock-resize-v1.
+
 - [ ] Extend channel first-message dispatch with the exact capabilities request/response in the common contract. Parse finite safe integer fields; validate pane/return target on the GPUI thread via workspace routing. Implement a separate JSON-reply exchange rather than changing existing `Reply`/`one_shot` consumers.
 - [ ] Add channel tests using the existing listener/converse harness: successful discovery emits no Open request; wrong auth reveals nothing; unsupported version, unknown pane, nonforeground owner and stale return target are refused. Old open/focus/token tests remain unchanged.
 - [ ] Run `cargo test -p sprite-term --locked --offline` and `cargo test -p sprite-app --locked --offline surface::channel`. Commit only these implementation files and their tests as `feat: discover plugin surface capabilities without opening a surface`.

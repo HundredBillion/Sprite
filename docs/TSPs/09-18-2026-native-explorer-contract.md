@@ -33,6 +33,10 @@ The authenticated first request gains a side-effect-free `capabilities` form:
 {"type":"capabilities","version":1,"features":["owned-dock-v1","virtual-list-v1","svg-assets-v1","dock-resize-v1"],"limits":{"message_bytes":16777216,"list_rows":100000,"asset_bytes":67108864,"asset_count":4096},"eligible":true}
 ```
 
+The example lists the completed implementation. During staged implementation,
+return only features already supported end to end; discovery alone returns an
+empty feature list. Add each flag with its implementing task.
+
 Refuse invalid/missing panes, malformed fields, nonpositive/nonrepresentable
 PIDs, unsupported versions, and owners outside the pane's foreground process
 group. Unknown foreground state is ineligible, not inferred support.
