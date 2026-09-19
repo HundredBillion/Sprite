@@ -57,6 +57,9 @@ pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<Ren
     static FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
         let mut db = resvg::usvg::fontdb::Database::new();
         db.load_system_fonts();
+        db.load_font_data(include_bytes!("../../assets/fonts/AdwaitaSans-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../../assets/fonts/AdwaitaSans-Bold.ttf").to_vec());
+        db.set_sans_serif_family("Adwaita Sans");
         Arc::new(db)
     });
     static OPTIONS: LazyLock<resvg::usvg::Options<'static>> = LazyLock::new(|| {
