@@ -157,15 +157,18 @@ impl<T> Tabs<T> {
     /// caller must consult [`Tabs::is_empty`] afterwards: a window with no tabs
     /// left has nothing to show.
     pub fn close_focused_pane(&mut self) -> Option<T> {
-        let focused = self.active().focus();
-        let closed = self.tabs[self.active].1.close(focused);
-        if self.tabs[self.active].1.is_empty() {
-            let tab = self.active_tab();
-            // Every session it owned is already handed back; this removes the
-            // now-empty tab and moves the selection.
+        self.close_pane(self.active_tab(), self.active().focus())
+    }
+
+    /// Closes a specific pane, including one in a tab that is not active.
+    pub fn close_pane(&mut self, tab: TabId, pane: PaneId) -> Option<T> {
+        let index = self.index_of(tab)?;
+        let closed = self.tabs[index].1.close(pane)?;
+        if self.tabs[index].1.is_empty() {
+            // The last pane takes its tab with it.
             let _ = self.close_tab(tab);
         }
-        closed
+        Some(closed)
     }
 
     pub fn focus_direction(&mut self, direction: Direction) -> Option<PaneId> {
@@ -451,6 +454,19 @@ mod tests {
                 "a closed pane's ID is not handed out again"
             );
         }
+    }
+
+    #[test]
+    fn close_pane_removes_only_the_named_background_pane() {
+        let log: Log = Rc::default();
+        let mut tabs = Tabs::new(|_, _| spy("first", &log));
+        let first = tabs.active_tab();
+        let pane = tabs.active().focus();
+        tabs.open(|_, _| spy("second", &log));
+        drop(tabs.close_pane(first, pane));
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(ended(&log), vec!["first"]);
+        assert_eq!(tabs.active().focus(), tabs.all_panes()[0].1);
     }
 
     #[test]

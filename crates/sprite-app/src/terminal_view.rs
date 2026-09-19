@@ -37,6 +37,8 @@ pub struct TerminalView {
     /// A pane whose configured program could not be run still has to draw the
     /// reason it could not, and nothing it draws needs a terminal behind it.
     session: Option<TerminalSession>,
+    /// Set as soon as the worker reports exit, before the workspace removes us.
+    ended: bool,
     bundle: Option<Arc<SnapshotBundle>>,
     /// Textures for the images this pane is showing.
     ///
@@ -116,6 +118,12 @@ pub struct TerminalView {
     _settings: gpui::Subscription,
 }
 
+/// Where an ordinary child exit is reported, with its owning tab and pane.
+pub(crate) struct PaneExit {
+    pub sender: async_channel::Sender<(crate::tabs::TabId, crate::pane_tree::PaneId)>,
+    pub identity: (crate::tabs::TabId, crate::pane_tree::PaneId),
+}
+
 impl TerminalView {
     /// `environment` carries this pane's observation variables: the window's
     /// socket and key, and the pane's own identity. It is the only route by
@@ -125,6 +133,7 @@ impl TerminalView {
         settings: crate::config::Settings,
         environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
         observation: Option<crate::observation::panes::PaneLink>,
+        exit: PaneExit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -228,6 +237,13 @@ impl TerminalView {
             let Ok(mut events) = events else { return };
             loop {
                 let decision = crate::terminal_events::decide(events.next().await);
+                if decision.stop {
+                    let _ = view.update(cx, |view, _| view.ended = true);
+                }
+                if decision.close_pane {
+                    let _ = exit.sender.try_send(exit.identity);
+                    return;
+                }
                 if !decision.effects.is_empty() {
                     let applied = view.update(cx, |view, cx| {
                         for effect in decision.effects {
@@ -284,6 +300,7 @@ impl TerminalView {
 
         Self {
             session: Some(session),
+            ended: false,
             observation,
             surfaces: SurfaceHost::default(),
             font_size,
@@ -362,6 +379,7 @@ impl TerminalView {
             });
         Self {
             session: None,
+            ended: true,
             // A view that never started a session has nothing to observe.
             observation: None,
             surfaces: SurfaceHost::default(),
@@ -436,6 +454,9 @@ impl TerminalView {
         // Sending to a view with no session is a no-op, not an error: a failed
         // pane has nothing to send to, and reporting a send failure over its
         // status line would replace the reason it failed with a symptom.
+        if self.ended {
+            return;
+        }
         let Some(session) = self.session.as_mut() else {
             return;
         };
