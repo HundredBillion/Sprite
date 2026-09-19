@@ -94,3 +94,27 @@ Manual acceptance on Linux repeats the same checks with `Super+C` and
 - Changes to selection modes such as word, line, or rectangular selection.
 - Clipboard behavior inside hosted Surfaces beyond their existing paste
   routing.
+
+## Grilling Record
+
+Hardened against the repository and its pinned dependencies on September 18,
+2026:
+
+- GPUI 0.2.2 defines `platform` as Command on macOS and Super on Linux. Its
+  Wayland path reads XKB's Logo modifier and its X11 path reads Mod4, so the
+  shortcut does not need an operating-system branch.
+- An exact shortcut family also excludes GPUI's Function modifier. This keeps
+  the rule literal and prevents an additional held modifier from unexpectedly
+  claiming a terminal key.
+- Hosted Surfaces reuse the terminal shortcut resolver. They therefore gain the
+  platform paste binding automatically; copy remains consumed without changing
+  the clipboard because a Surface has no terminal selection. This is the
+  existing ownership rule, not new Surface behavior.
+- The drag-release regression has no honest pure unit seam: a helper returning
+  whether an `Option<Drag>` is empty would only restate the implementation. The
+  regression is verified through GPUI pointer simulation if the existing test
+  platform can construct a Terminal View cheaply; otherwise the macOS and Linux
+  manual acceptance checks are the required proof. Shortcut classification
+  remains fully unit tested.
+- No glossary term or hard-to-reverse architectural decision changed, so this
+  work adds neither a `CONTEXT.md` entry nor an ADR.
