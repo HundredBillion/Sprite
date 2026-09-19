@@ -6,6 +6,7 @@
 
 mod geometry;
 mod input;
+mod list_view;
 mod render;
 mod surfaces;
 mod theme;
