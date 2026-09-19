@@ -88,6 +88,16 @@ the Surface Channel; Sprite Terminal never names it.
 _Avoid_: the Neovim pane, the Neovim plugin (unqualified), embedded Neovim,
 the distro (for the repository)
 
+**Native Tree**:
+SVGTree's file-tree presentation drawn by Sprite Terminal as a Surface,
+alongside either a terminal-rendered or adapter-rendered editor.
+_Avoid_: native editor, Neovim GUI (when referring only to the tree)
+
+**Terminal Tree**:
+SVGTree's existing file-tree presentation inside a Neovim buffer, with image
+icons where terminal graphics are supported and text otherwise.
+_Avoid_: native tree, plain tree (which obscures graphics support)
+
 ## Superseded
 
 Terms retired on 2026-09-07 by `docs/PRDs/09-07-2026-native-surfaces.md`,
