@@ -8,7 +8,6 @@ import argparse
 import json
 import os
 import select
-import signal
 import socket
 import sys
 import traceback
@@ -23,6 +22,7 @@ events, checks = [], []
 
 def connect(message):
     sock = socket.socket(socket.AF_UNIX)
+    sock.settimeout(8)
     sock.connect(os.environ['SPRITE_SURFACE_SOCKET'])
     wire = sock.makefile('rwb', buffering=0)
     message = dict(message, pane=message.get('pane', pane))
@@ -35,8 +35,20 @@ def expect(wire, kind, operation=None):
         raw = wire.readline()
         if not raw: raise AssertionError('EOF waiting for ' + kind)
         event = json.loads(raw); events.append(event)
-        if event['type'] == 'refused': raise AssertionError(event)
         if event['type'] == kind and (operation is None or event.get('operation') == operation): return event
+        if event['type'] == 'refused': raise AssertionError(event)
+
+def query(message):
+    sock, wire, reply = connect(message)
+    wire.close(); sock.close()
+    return reply
+
+def close(wire):
+    try:
+        send(wire, {'type': 'close'})
+        expect(wire, 'closed')
+    except (AssertionError, OSError, socket.timeout):
+        pass
 
 description = {
     'version': 1, 'root': {'kind': 'virtual_list', 'row_height': 22,
@@ -44,9 +56,14 @@ description = {
     'left_padding': 8, 'right_padding': 8,
     'heading': {'text': 'EXPLORER', 'height': 35, 'font_size': 11},
     'section': {'text': 'PROJECT', 'height': 22, 'font_size': 11, 'font_weight': 'bold'},
-    'colors': {key: '#8b95a7' for key in ('background','foreground','hover','selected','inactive_selected','selected_foreground','focus','guide','border','scrollbar')}}}
+    'colors': {'background':'#1f1f1f','foreground':'#cccccc','hover':'#2a2d2e',
+    'selected':'#094771','inactive_selected':'#37373d','selected_foreground':'#ffffff',
+    'focus':'#007fd4','guide':'#404040','border':'#3f3f46','scrollbar':'#797979'}}}
 
 try:
+    capabilities = query({'type':'capabilities','version':1,'owner_pid':os.getpid(),'return_target':'terminal'})
+    assert capabilities['type'] == 'capabilities' and 'virtual-list-v1' in capabilities['features']
+    checks.append('virtual-list capability discovered')
     open_message = {'type':'open','version':1,'position':'dock','side':'left','size':300,
                     'owner_pid':os.getpid(),'return_target':'terminal','resizable':True,
                     'focus':False,'description':description}
@@ -61,11 +78,25 @@ try:
     assert expect(wire, 'applied', 'list_state')['revision'] == 1; checks.append('scroll state acknowledged')
     send(wire, {'type':'list_state','revision':2,'selected':'r1'})
     refused = expect(wire, 'refused'); assert refused['type'] == 'refused'; checks.append('stale revision refused while surface stays open')
+    send(wire, {'type':'list_state','revision':1,'selected':'r1'})
+    assert expect(wire, 'applied', 'list_state')['revision'] == 1; checks.append('connection remains usable after refusal')
     if args.check:
-        send(wire, {'type':'close'}); expect(wire, 'closed'); checks.append('closed after protocol check')
+        close(wire); checks.append('closed after protocol check')
     else:
-        print('Virtual list visible; press Ctrl-C to close.', flush=True)
-        signal.pause()
+        print('Virtual list visible; Ctrl-C or stdin/socket EOF closes it.', flush=True)
+        sock.settimeout(None)
+        while True:
+            readable, _, _ = select.select([sock, sys.stdin], [], [])
+            if sock in readable:
+                raw = wire.readline()
+                if not raw: break
+                event = json.loads(raw); events.append(event); print(json.dumps(event), flush=True)
+            if sys.stdin in readable and not sys.stdin.readline(): break
+        close(wire)
+        checks.append('closed after interactive EOF')
+except KeyboardInterrupt:
+    close(wire)
+    checks.append('closed after interrupt')
 except BaseException:
     args.output.write_text(json.dumps({'host_pid':os.getppid(),'pane':pane,'checks':checks,'events':events,'error':traceback.format_exc()}, indent=2))
     raise
