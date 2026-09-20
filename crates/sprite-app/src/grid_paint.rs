@@ -535,6 +535,10 @@ impl Element for GridPaint {
     }
 }
 
+fn blank_glyph(text: &str) -> bool {
+    text.is_empty() || text.chars().all(char::is_whitespace) || text.starts_with('\u{10eeee}')
+}
+
 impl GridPaint {
     /// Draws one cell's text on its own pixel, clipped to its own column.
     fn paint_glyph(
@@ -548,7 +552,7 @@ impl GridPaint {
     ) {
         // A cell holding nothing but blanks has no ink, and shaping one costs
         // the same as shaping a letter. Most of a terminal is blank.
-        if cell.text.is_empty() || cell.text.chars().all(char::is_whitespace) {
+        if blank_glyph(&cell.text) {
             return;
         }
 
@@ -790,6 +794,13 @@ impl IntoElement for GridPaint {
 mod tests {
     use super::*;
     use crate::tokens::unpack;
+
+    #[test]
+    fn image_placeholders_leave_no_glyph_under_transparent_pixels() {
+        assert!(blank_glyph("\u{10eeee}\u{0305}\u{030d}"));
+        assert!(blank_glyph(" "));
+        assert!(!blank_glyph("file.lua"));
+    }
 
     #[test]
     fn snapping_lands_on_whole_device_pixels() {
