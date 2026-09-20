@@ -77,6 +77,48 @@ fn placement_element(
     )
 }
 
+fn placeholder_element(
+    placement: &sprite_term::Placement,
+    texture: Arc<gpui::RenderImage>,
+    image_width: u32,
+    image_height: u32,
+    column: u16,
+    row: usize,
+    image_column: u32,
+    image_row: u32,
+    cell_width: Pixels,
+    cell_height: Pixels,
+) -> Option<gpui::Div> {
+    if image_column >= placement.columns || image_row >= placement.rows {
+        return None;
+    }
+    let width = f32::from(cell_width);
+    let height = f32::from(cell_height);
+    let fit = super::placeholder::fit_image(
+        image_width,
+        image_height,
+        placement.columns as f32 * width,
+        placement.rows as f32 * height,
+    )?;
+    Some(
+        div()
+            .absolute()
+            .left(px(f32::from(column) * width))
+            .top(px(row as f32 * height))
+            .w(cell_width)
+            .h(cell_height)
+            .overflow_hidden()
+            .child(
+                img(ImageSource::Render(texture))
+                    .absolute()
+                    .left(px(fit.left - image_column as f32 * width))
+                    .top(px(fit.top - image_row as f32 * height))
+                    .w(px(fit.width))
+                    .h(px(fit.height)),
+            ),
+    )
+}
+
 impl TerminalView {
     /// The visible grid as positioned cells, one vector per row.
     pub(super) fn laid_out_rows(&self) -> Vec<Vec<PositionedCell>> {
@@ -114,12 +156,11 @@ impl TerminalView {
 
     /// The images to draw, grouped by the band they belong to.
     ///
-    /// Virtual placements are left out: they are addressed by text rather than
-    /// drawn, so drawing one would put a picture where a character should be.
-    /// Placements entirely off screen are left out too, rather than drawn and
-    /// clipped to nothing.
+    /// Virtual placements draw only where a matching Unicode placeholder cell
+    /// appears; fixed placements retain their own viewport coordinates.
     pub(super) fn image_layers(
         &self,
+        rows: &[Vec<PositionedCell>],
         cell_width: Pixels,
         cell_height: Pixels,
     ) -> [Vec<gpui::Div>; 3] {
@@ -157,6 +198,28 @@ impl TerminalView {
                 sprite_term::Layer::AboveText => 2,
             };
             layers[band].push(element);
+        }
+        for cell in super::placeholder::image_cells(rows, &frame.placements) {
+            let Some(image) = frame.image(cell.placement.image) else {
+                continue;
+            };
+            let Some(texture) = self.textures.get(image.id, image.generation) else {
+                continue;
+            };
+            if let Some(element) = placeholder_element(
+                cell.placement,
+                texture,
+                image.width,
+                image.height,
+                cell.column,
+                cell.row,
+                cell.image_column,
+                cell.image_row,
+                cell_width,
+                cell_height,
+            ) {
+                layers[1].push(element);
+            }
         }
         layers
     }
@@ -256,7 +319,8 @@ impl Render for TerminalView {
 
         // Images first, because whether any belong below the text decides how
         // the rows themselves are drawn.
-        let [below_background, below_text, above_text] = self.image_layers(cell_width, cell_height);
+        let [below_background, below_text, above_text] =
+            self.image_layers(&rows, cell_width, cell_height);
         // The split costs an extra pass over the cells, so it is taken only
         // when something actually needs to sit between them. The Kitty default
         // is above the text, so the common case never pays for it.
