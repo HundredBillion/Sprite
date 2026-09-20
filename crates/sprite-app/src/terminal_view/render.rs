@@ -78,41 +78,37 @@ fn placement_element(
 }
 
 fn placeholder_element(
-    placement: &sprite_term::Placement,
+    cell: &super::placeholder::ImageCell<'_>,
     texture: Arc<gpui::RenderImage>,
-    image_width: u32,
-    image_height: u32,
-    column: u16,
-    row: usize,
-    image_column: u32,
-    image_row: u32,
+    image: &sprite_term::ImagePixels,
     cell_width: Pixels,
     cell_height: Pixels,
 ) -> Option<gpui::Div> {
-    if image_column >= placement.columns || image_row >= placement.rows {
+    let placement = cell.placement;
+    if cell.image_column >= placement.columns || cell.image_row >= placement.rows {
         return None;
     }
     let width = f32::from(cell_width);
     let height = f32::from(cell_height);
     let fit = super::placeholder::fit_image(
-        image_width,
-        image_height,
+        image.width,
+        image.height,
         placement.columns as f32 * width,
         placement.rows as f32 * height,
     )?;
     Some(
         div()
             .absolute()
-            .left(px(f32::from(column) * width))
-            .top(px(row as f32 * height))
+            .left(px(f32::from(cell.column) * width))
+            .top(px(cell.row as f32 * height))
             .w(cell_width)
             .h(cell_height)
             .overflow_hidden()
             .child(
                 img(ImageSource::Render(texture))
                     .absolute()
-                    .left(px(fit.left - image_column as f32 * width))
-                    .top(px(fit.top - image_row as f32 * height))
+                    .left(px(fit.left - cell.image_column as f32 * width))
+                    .top(px(fit.top - cell.image_row as f32 * height))
                     .w(px(fit.width))
                     .h(px(fit.height)),
             ),
@@ -206,18 +202,9 @@ impl TerminalView {
             let Some(texture) = self.textures.get(image.id, image.generation) else {
                 continue;
             };
-            if let Some(element) = placeholder_element(
-                cell.placement,
-                texture,
-                image.width,
-                image.height,
-                cell.column,
-                cell.row,
-                cell.image_column,
-                cell.image_row,
-                cell_width,
-                cell_height,
-            ) {
+            if let Some(element) =
+                placeholder_element(&cell, texture, image.as_ref(), cell_width, cell_height)
+            {
                 layers[1].push(element);
             }
         }
