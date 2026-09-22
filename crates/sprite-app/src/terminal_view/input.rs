@@ -79,9 +79,26 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Matches Ghostty's link gesture: Super (Command) on macOS, Ctrl on Linux.
-pub(super) fn opens_link(modifiers: gpui::Modifiers) -> bool {
-    modifiers.platform || modifiers.control
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LinkClickBehavior {
+    Plain,
+    Modified,
+    Selection,
+}
+
+/// Keeps modified link clicks distinct from ordinary and selection clicks.
+pub(super) fn link_click_behavior(modifiers: gpui::Modifiers) -> LinkClickBehavior {
+    if !modifiers.alt
+        && !modifiers.shift
+        && !modifiers.function
+        && (modifiers.platform ^ modifiers.control)
+    {
+        LinkClickBehavior::Modified
+    } else if !modifiers.modified() {
+        LinkClickBehavior::Plain
+    } else {
+        LinkClickBehavior::Selection
+    }
 }
 
 impl TerminalView {
@@ -303,7 +320,9 @@ impl EntityInputHandler for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Shortcut, application_shortcut, dropped_paths_text, opens_link};
+    use super::{
+        LinkClickBehavior, Shortcut, application_shortcut, dropped_paths_text, link_click_behavior,
+    };
     use gpui::{Keystroke, Modifiers};
     use std::path::Path;
 
@@ -419,13 +438,29 @@ mod tests {
     }
 
     #[test]
-    fn link_activation_uses_command_or_control_but_not_a_plain_click() {
-        assert!(opens_link(platform()), "macOS uses Command-click");
-        assert!(opens_link(Modifiers {
-            control: true,
-            ..Modifiers::default()
-        }), "Linux uses Ctrl-click");
-        assert!(!opens_link(Modifiers::default()));
+    fn link_activation_supports_plain_and_platform_modifier_clicks() {
+        assert_eq!(
+            link_click_behavior(Modifiers::default()),
+            LinkClickBehavior::Plain
+        );
+        assert_eq!(
+            link_click_behavior(platform()),
+            LinkClickBehavior::Modified
+        );
+        assert_eq!(
+            link_click_behavior(Modifiers {
+                control: true,
+                ..Modifiers::default()
+            }),
+            LinkClickBehavior::Modified
+        );
+        assert_eq!(
+            link_click_behavior(Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            }),
+            LinkClickBehavior::Selection
+        );
     }
 
     #[test]

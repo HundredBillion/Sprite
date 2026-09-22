@@ -3,7 +3,9 @@
 //! drawing reads nearly every field the view holds, from the bundle to the
 //! textures to the grid's corner.
 
-use super::input::{Drag, application_shortcut, dropped_paths_text, opens_link};
+use super::input::{
+    Drag, LinkClickBehavior, application_shortcut, dropped_paths_text, link_click_behavior,
+};
 use super::surfaces::{Body, SurfaceLayers};
 use super::*;
 
@@ -497,11 +499,10 @@ impl Render for TerminalView {
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
-                    view.pending_link_click = Some(cell);
-                    // Match Ghostty: Command-click on macOS or Ctrl-click on
-                    // Linux asks about a link rather than selecting. The
-                    // answer arrives as an event; the click carries no target.
-                    if opens_link(event.modifiers) {
+                    // Modified clicks open links immediately; a plain click
+                    // waits until release so a drag remains a text selection.
+                    if link_click_behavior(event.modifiers) == LinkClickBehavior::Modified {
+                        view.pending_link_click = Some(cell);
                         view.send(TerminalCommand::ResolveHyperlink(cell));
                         return;
                     }
@@ -553,7 +554,14 @@ impl Render for TerminalView {
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
-                    if view.drag.take().is_none() {
+                    if let Some(drag) = view.drag.take() {
+                        if !drag.moved
+                            && link_click_behavior(event.modifiers) == LinkClickBehavior::Plain
+                        {
+                            view.pending_link_click = Some(cell);
+                            view.send(TerminalCommand::ResolveHyperlink(cell));
+                        }
+                    } else {
                         view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
                     }
                 }),
