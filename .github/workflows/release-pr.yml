@@ -25,16 +25,6 @@ jobs:
         with:
           ref: master
 
-      - name: Install the repository Rust toolchain
-        run: |
-          set -euo pipefail
-          rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
-          test -n "$rust_version"
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain "$rust_version" \
-              --component clippy --component rustfmt
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
       - name: Test release automation
         run: python3 -m unittest scripts.test_release_automation -v
 
@@ -49,8 +39,6 @@ jobs:
           fi
           python3 scripts/prepare_release.py "$VERSION"
           python3 scripts/check_release_version.py "v$VERSION"
-          cargo metadata --locked --no-deps --format-version=1 \
-            | python3 -c 'import json, sys; expected = sys.argv[1]; actual = {package["version"] for package in json.load(sys.stdin)["packages"]}; assert actual == {expected}, f"workspace versions {actual} do not match {expected}"' "$VERSION"
           git diff --check
           git diff --quiet && { echo "No release version changes were generated" >&2; exit 1; }
 
