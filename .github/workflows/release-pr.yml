@@ -47,7 +47,6 @@ jobs:
             exit 1
           fi
           python3 scripts/prepare_release.py "$VERSION"
-          cargo update --workspace --offline
           python3 scripts/check_release_version.py "v$VERSION"
           cargo metadata --locked --no-deps --format-version=1 \
             | python3 -c 'import json, sys; expected = sys.argv[1]; actual = {package["version"] for package in json.load(sys.stdin)["packages"]}; assert actual == {expected}, f"workspace versions {actual} do not match {expected}"' "$VERSION"
