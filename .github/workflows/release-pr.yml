@@ -40,7 +40,10 @@ jobs:
           python3 scripts/prepare_release.py "$VERSION"
           python3 scripts/check_release_version.py "v$VERSION"
           git diff --check
-          git diff --quiet && { echo "No release version changes were generated" >&2; exit 1; }
+          if git diff --quiet; then
+            echo "No release version changes were generated" >&2
+            exit 1
+          fi
 
       - name: Create release branch and pull request
         env:

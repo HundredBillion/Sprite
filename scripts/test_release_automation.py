@@ -18,6 +18,17 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("rustup", workflow)
         self.assertNotIn("cargo metadata", workflow)
 
+    def test_release_preparation_allows_generated_version_changes(self):
+        workflow = RELEASE_WORKFLOW.read_text()
+
+        self.assertIn(
+            'if git diff --quiet; then\n'
+            '            echo "No release version changes were generated" >&2\n'
+            '            exit 1\n'
+            '          fi',
+            workflow,
+        )
+
 
 class PrepareReleaseTests(unittest.TestCase):
     def test_updates_workspace_package_recipe_and_readme(self):
