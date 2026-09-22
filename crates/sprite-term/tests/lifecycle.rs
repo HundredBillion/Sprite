@@ -121,7 +121,7 @@ fn the_login_shell_carries_sprite_identity() {
     // The PATH membership test runs in the shell because a full PATH would wrap
     // across pane rows and defeat a plain text search.
     let probe = format!(
-        "printf 'ID''ENT:%s:%s:%s\\n' \"$TERM\" \"$TERM_PROGRAM\" \"$TERM_PROGRAM_VERSION\"\n\
+        "printf 'ID''ENT:%s:%s:%s:%s\\n' \"$TERM\" \"$TERM_PROGRAM\" \"$TERM_PROGRAM_VERSION\" \"$COLORTERM\"\n\
          infocmp xterm-ghostty >/dev/null 2>&1 && printf 'TERMINFO''_OK\\n'\n\
          case \":$PATH:\" in *\":{executable_directory}:\"*) printf 'EXEDIR''_OK\\n' ;; \
          *) printf 'EXEDIR''_MISSING\\n' ;; esac\n"
@@ -136,7 +136,10 @@ fn the_login_shell_carries_sprite_identity() {
     });
     let text = support::pane_text(&bundle);
 
-    let identity = format!("IDENT:xterm-ghostty:Sprite:{}", env!("CARGO_PKG_VERSION"));
+    let identity = format!(
+        "IDENT:xterm-ghostty:Sprite:{}:truecolor",
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(
         text.contains(&identity),
         "the child sees Sprite's terminal identity, got:\n{text}"

@@ -12,7 +12,10 @@ pub(crate) enum Effect {
     /// The child set, or cleared, its title.
     Title(Option<String>),
     HoldPaste(String),
-    OpenUrl(String),
+    OpenUrl {
+        position: sprite_term::CellPosition,
+        uri: Option<String>,
+    },
     Clipboard(String),
     DeliverHistory(Arc<HistorySnapshot>),
     FailRequest(String),
@@ -58,9 +61,11 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
         Ok(TerminalEvent::Ready)
         | Ok(TerminalEvent::Bell)
         | Ok(TerminalEvent::WorkingDirectoryChanged(_))
-        | Ok(TerminalEvent::Graphics(_))
-        // No link, or a refused scheme. Indistinguishable on purpose.
-        | Ok(TerminalEvent::Hyperlink { uri: None, .. }) => {}
+        | Ok(TerminalEvent::Graphics(_)) => {}
+
+        Ok(TerminalEvent::Hyperlink { position, uri }) => {
+            effects.push(Effect::OpenUrl { position, uri });
+        }
 
         // A Pane Title, shown on the tab and in the window's title bar.
         Ok(TerminalEvent::TitleChanged(title)) => effects.push(Effect::Title(title)),
@@ -76,13 +81,6 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
                 )
                 .into(),
             ));
-        }
-
-        // Terminal Core already applied the scheme policy, so reaching here
-        // means the target is allowed. Sprite never builds a command line from
-        // terminal-provided text.
-        Ok(TerminalEvent::Hyperlink { uri: Some(uri), .. }) => {
-            effects.push(Effect::OpenUrl(uri));
         }
 
         // Belongs to whoever asked for it. The view forwards because it is the
@@ -172,7 +170,16 @@ mod tests {
                 uri: None,
             },
         ] {
-            assert!(effects(event).is_empty());
+            let is_hyperlink = matches!(&event, TerminalEvent::Hyperlink { .. });
+            let effects = effects(event);
+            if is_hyperlink {
+                assert!(matches!(
+                    effects.as_slice(),
+                    [Effect::OpenUrl { uri: None, .. }]
+                ));
+            } else {
+                assert!(effects.is_empty());
+            }
         }
     }
 
@@ -195,7 +202,7 @@ mod tests {
             uri: Some("https://example.invalid/".to_owned()),
         });
         assert!(
-            matches!(opened.as_slice(), [Effect::OpenUrl(uri)] if uri == "https://example.invalid/")
+            matches!(opened.as_slice(), [Effect::OpenUrl { uri: Some(uri), .. }] if uri == "https://example.invalid/")
         );
     }
 

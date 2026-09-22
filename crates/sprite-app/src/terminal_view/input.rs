@@ -6,6 +6,7 @@
 use super::*;
 
 use std::ops::Range;
+use std::path::Path;
 
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window, point, px};
 use sprite_term::{CellPosition, MouseAction, MouseEvent, TerminalCommand};
@@ -34,6 +35,7 @@ pub(super) struct Drag {
 pub(super) enum Shortcut {
     Copy,
     Paste,
+    DeleteLine,
 }
 
 /// The application's own bindings.
@@ -58,8 +60,28 @@ pub(super) fn application_shortcut(keystroke: &gpui::Keystroke) -> Option<Shortc
     match keystroke.key.as_str() {
         "c" => Some(Shortcut::Copy),
         "v" => Some(Shortcut::Paste),
+        "backspace" if platform => Some(Shortcut::DeleteLine),
         _ => None,
     }
+}
+
+/// Turns files dropped from the desktop into shell input without allowing a
+/// path's punctuation or whitespace to change the command line.
+pub(super) fn dropped_paths_text(paths: &[impl AsRef<Path>]) -> String {
+    paths
+        .iter()
+        .map(|path| shell_quote(&path.as_ref().to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Matches Ghostty's link gesture: Super (Command) on macOS, Ctrl on Linux.
+pub(super) fn opens_link(modifiers: gpui::Modifiers) -> bool {
+    modifiers.platform || modifiers.control
 }
 
 impl TerminalView {
@@ -125,6 +147,7 @@ impl TerminalView {
                     self.send(TerminalCommand::Paste(text));
                 }
             }
+            Shortcut::DeleteLine => self.send(TerminalCommand::Input(vec![0x15])),
         }
     }
 }
@@ -280,8 +303,9 @@ impl EntityInputHandler for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Shortcut, application_shortcut};
+    use super::{Shortcut, application_shortcut, dropped_paths_text, opens_link};
     use gpui::{Keystroke, Modifiers};
+    use std::path::Path;
 
     fn press(key: &str, modifiers: Modifiers) -> Keystroke {
         Keystroke {
@@ -359,5 +383,60 @@ mod tests {
             assert_eq!(application_shortcut(&press("v", modifiers)), None);
         }
         assert_eq!(application_shortcut(&press("x", platform())), None);
+    }
+
+    #[test]
+    fn command_backspace_kills_the_line() {
+        assert_eq!(
+            application_shortcut(&press("backspace", platform())),
+            Some(Shortcut::DeleteLine)
+        );
+        assert_eq!(
+            application_shortcut(&press(
+                "backspace",
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                }
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn control_u_is_left_for_the_linux_shell_line_kill_binding() {
+        assert_eq!(
+            application_shortcut(&press(
+                "u",
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                }
+            )),
+            None,
+            "Sprite must not consume Ctrl+U; shells use it to kill the line"
+        );
+    }
+
+    #[test]
+    fn link_activation_uses_command_or_control_but_not_a_plain_click() {
+        assert!(opens_link(platform()), "macOS uses Command-click");
+        assert!(opens_link(Modifiers {
+            control: true,
+            ..Modifiers::default()
+        }), "Linux uses Ctrl-click");
+        assert!(!opens_link(Modifiers::default()));
+    }
+
+    #[test]
+    fn dropped_paths_are_shell_quoted_without_adding_image_markup() {
+        let paths = [
+            Path::new("/tmp/a screenshot.png"),
+            Path::new("/tmp/O'Reilly.txt"),
+        ];
+        assert_eq!(
+            dropped_paths_text(&paths),
+            "'/tmp/a screenshot.png' '/tmp/O'\\''Reilly.txt'"
+        );
     }
 }

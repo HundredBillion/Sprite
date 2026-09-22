@@ -1272,13 +1272,83 @@ fn resolve_hyperlink(terminal: &Terminal<'_, '_>, position: CellPosition) -> Opt
         .ok()?;
 
     let mut buffer = [0_u8; 2048];
-    let written = grid_ref.hyperlink_uri(&mut buffer).ok()?;
-    if written == 0 {
-        return None;
+    if let Ok(written) = grid_ref.hyperlink_uri(&mut buffer) {
+        if written != 0 {
+            if let Ok(uri) = std::str::from_utf8(&buffer[..written]) {
+                if crate::is_allowed_link(uri) {
+                    return Some(uri.to_owned());
+                }
+            }
+        }
     }
 
-    let uri = std::str::from_utf8(&buffer[..written]).ok()?;
-    crate::is_allowed_link(uri).then(|| uri.to_owned())
+    let columns = usize::from(terminal.cols().ok()?);
+    let mut row = vec![' '; columns];
+    for (column, character) in row.iter_mut().enumerate() {
+        let cell = terminal
+            .grid_ref(Point::Viewport(PointCoordinate {
+                x: column as u16,
+                y: u32::from(position.row),
+            }))
+            .ok()?;
+        let mut graphemes = [' '; 8];
+        if let Ok(count) = cell.graphemes(&mut graphemes) {
+            if let Some(first) = graphemes[..count].first() {
+                *character = *first;
+            }
+        }
+    }
+    url_at(&row, usize::from(position.column))
+}
+
+fn url_at(row: &[char], column: usize) -> Option<String> {
+    let starts = ["http://", "https://"];
+    for start in 0..row.len() {
+        let remaining: String = row[start..].iter().collect();
+        let Some(prefix) = starts.iter().find(|prefix| remaining.starts_with(**prefix)) else {
+            continue;
+        };
+        let mut end = start
+            + remaining
+                .find(char::is_whitespace)
+                .unwrap_or(remaining.len());
+        while end > start && ".,!?;:)]}>".contains(row[end - 1]) {
+            end -= 1;
+        }
+        if start <= column && column < end {
+            let uri: String = row[start..end].iter().collect();
+            if uri.starts_with(prefix) && crate::is_allowed_link(&uri) {
+                return Some(uri);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod hyperlink_tests {
+    use super::url_at;
+
+    #[test]
+    fn resolves_visible_http_url_at_clicked_cell() {
+        let row: Vec<char> = "open https://example.com/path now".chars().collect();
+        assert_eq!(
+            url_at(&row, 15).as_deref(),
+            Some("https://example.com/path")
+        );
+    }
+
+    #[test]
+    fn excludes_trailing_punctuation_and_non_http_schemes() {
+        let row: Vec<char> = "https://example.com/path, ftp://example.com"
+            .chars()
+            .collect();
+        assert_eq!(
+            url_at(&row, 10).as_deref(),
+            Some("https://example.com/path")
+        );
+        assert_eq!(url_at(&row, 30), None);
+    }
 }
 
 /// Whether a paste can be performed without asking.

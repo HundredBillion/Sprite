@@ -90,6 +90,8 @@ pub struct TerminalView {
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
     drag: Option<Drag>,
+    /// The most recent click awaiting terminal link resolution.
+    pending_link_click: Option<sprite_term::CellPosition>,
     /// Where the grid's top-left corner sits inside the pane.
     ///
     /// Not the pane's own corner: the padding and the leftover from rounding
@@ -329,6 +331,7 @@ impl TerminalView {
             title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
+            pending_link_click: None,
             origin: point(px(grid.padding), px(grid.padding)),
             padding: grid.padding,
             content_origin: None,
@@ -407,6 +410,7 @@ impl TerminalView {
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag: None,
+            pending_link_click: None,
             origin: point(
                 px(crate::config::Grid::DEFAULT_PADDING),
                 px(crate::config::Grid::DEFAULT_PADDING),
@@ -431,7 +435,13 @@ impl TerminalView {
             Effect::Status(line) => self.status = Some(line),
             Effect::Title(title) => self.title = title.map(SharedString::from),
             Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
-            Effect::OpenUrl(uri) => cx.open_url(&uri),
+            Effect::OpenUrl { position, uri } => {
+                if self.pending_link_click.take() == Some(position) {
+                    if let Some(uri) = uri {
+                        cx.open_url(&uri);
+                    }
+                }
+            }
             Effect::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Effect::DeliverHistory(history) => {
                 if let Some(link) = &self.observation {

@@ -112,12 +112,10 @@ fn an_executable_scheme_is_denied() {
     );
 }
 
-/// A cell with no link resolves to nothing rather than to whatever text is
-/// under it.
+/// Ordinary text that is not a URL still resolves to nothing.
 #[test]
-fn plain_text_is_not_a_link() {
-    let mut session =
-        session("printf 'https://example.com not a link\\n'; printf 'DONE\\n'; sleep 30");
+fn ordinary_plain_text_is_not_a_link() {
+    let mut session = session("printf 'just ordinary text\\n'; printf 'DONE\\n'; sleep 30");
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
     events.expect_ready();
@@ -125,6 +123,23 @@ fn plain_text_is_not_a_link() {
     assert_eq!(
         resolve(&mut session, &events, &snapshots, 2),
         None,
-        "text that looks like a URL is not an OSC 8 link"
+        "ordinary text has no hyperlink target"
+    );
+}
+
+/// URLs printed without OSC 8 metadata still behave like terminal links when
+/// the user clicks a cell in the visible URL.
+#[test]
+fn a_visible_url_resolves_without_osc8_metadata() {
+    let mut session = session(
+        "printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30",
+    );
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    assert_eq!(
+        resolve(&mut session, &events, &snapshots, 15).as_deref(),
+        Some("https://example.com/page")
     );
 }

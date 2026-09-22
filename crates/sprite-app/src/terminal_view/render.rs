@@ -3,7 +3,7 @@
 //! drawing reads nearly every field the view holds, from the bundle to the
 //! textures to the grid's corner.
 
-use super::input::{Drag, application_shortcut};
+use super::input::{Drag, application_shortcut, dropped_paths_text, opens_link};
 use super::surfaces::{Body, SurfaceLayers};
 use super::*;
 
@@ -12,9 +12,9 @@ use std::sync::Arc;
 use gpui::prelude::*;
 
 use gpui::{
-    Context, ElementInputHandler, ImageSource, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent,
-    SharedString, Window, canvas, div, img, px, rgb,
+    Context, ElementInputHandler, ExternalPaths, ImageSource, KeyDownEvent, KeyUpEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
+    ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
 };
 use sprite_term::{
     CellPosition, KeyAction, MouseAction, SelectionMode, SnapshotBundle, TerminalCommand,
@@ -448,6 +448,12 @@ impl Render for TerminalView {
             .text_size(metrics.font_size)
             .line_height(metrics.cell_height)
             .track_focus(&self.focus)
+            .on_drop(cx.listener(|view, paths: &ExternalPaths, _window, _cx| {
+                let text = dropped_paths_text(paths.paths());
+                if !text.is_empty() {
+                    view.send(TerminalCommand::Paste(text));
+                }
+            }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 // The terminal types only what it holds the keyboard for. A
                 // focused Surface lets an ordinary key propagate so the input
@@ -491,10 +497,11 @@ impl Render for TerminalView {
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
-                    // Ctrl+Click asks about a link rather than selecting. The
-                    // answer arrives as an event, and only then is anything
-                    // opened — the click itself never carries a destination.
-                    if event.modifiers.control {
+                    view.pending_link_click = Some(cell);
+                    // Match Ghostty: Command-click on macOS or Ctrl-click on
+                    // Linux asks about a link rather than selecting. The
+                    // answer arrives as an event; the click carries no target.
+                    if opens_link(event.modifiers) {
                         view.send(TerminalCommand::ResolveHyperlink(cell));
                         return;
                     }
@@ -532,6 +539,7 @@ impl Render for TerminalView {
                     anchor: drag.anchor,
                     moved: true,
                 });
+                view.pending_link_click = None;
                 view.send(TerminalCommand::Select {
                     anchor: drag.anchor,
                     head: cell,

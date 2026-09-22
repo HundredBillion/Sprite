@@ -145,6 +145,7 @@ fn identity_environment() -> Vec<(OsString, OsString)> {
     let mut entries = vec![
         (OsString::from("TERM"), OsString::from(TERM)),
         (OsString::from("TERM_PROGRAM"), OsString::from(TERM_PROGRAM)),
+        (OsString::from("COLORTERM"), OsString::from("truecolor")),
         (
             OsString::from("TERM_PROGRAM_VERSION"),
             OsString::from(TERM_PROGRAM_VERSION),
