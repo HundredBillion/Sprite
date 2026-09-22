@@ -11,6 +11,7 @@ from pathlib import Path
 VERSION_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
 )
+WORKSPACE_PACKAGES = ("sprite-app", "sprite-pane", "sprite-term")
 
 
 def replace_once(
@@ -19,6 +20,27 @@ def replace_once(
     updated, count = pattern.subn(replacement, content)
     if count != 1:
         raise ValueError(f"expected exactly one version reference in {path}")
+    return updated
+
+
+def update_cargo_lock(content: str, current: str, version: str) -> str:
+    updated = content
+    for package_name in WORKSPACE_PACKAGES:
+        package = re.compile(
+            r"(?ms)(^\[\[package\]\]\n(?:(?!^\[\[package\]\]).)*?^name = \""
+            + re.escape(package_name)
+            + r"\"\n)(.*?)(?=^\[\[package\]\]|\Z)"
+        )
+        match = package.search(updated)
+        if match is None:
+            raise ValueError(f"Cargo.lock has no package entry for {package_name}")
+        version_line = re.compile(r'(?m)^version = "' + re.escape(current) + r'"$')
+        body, count = version_line.subn(
+            f'version = "{version}"', match.group(2), count=1
+        )
+        if count != 1:
+            raise ValueError(f"Cargo.lock has no unique version for {package_name}")
+        updated = updated[: match.start(2)] + body + updated[match.end(2) :]
     return updated
 
 
@@ -44,6 +66,8 @@ def prepare_release(root: Path, version: str) -> None:
         + section_body
         + cargo_content[match.end(2) :]
     )
+    cargo_lock = root / "Cargo.lock"
+    updated_lock = update_cargo_lock(cargo_lock.read_text(), current, version)
 
     pkgbuild = root / "packaging" / "PKGBUILD"
     updated_pkgbuild = replace_once(
@@ -63,6 +87,7 @@ def prepare_release(root: Path, version: str) -> None:
     )
 
     cargo_toml.write_text(updated_cargo)
+    cargo_lock.write_text(updated_lock)
     pkgbuild.write_text(updated_pkgbuild)
     readme.write_text(updated_readme)
 

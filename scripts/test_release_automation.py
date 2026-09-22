@@ -17,6 +17,11 @@ class PrepareReleaseTests(unittest.TestCase):
             (root / "Cargo.toml").write_text(
                 '[workspace.package]\nversion = "0.2.0"\n'
             )
+            (root / "Cargo.lock").write_text(
+                '[[package]]\nname = "sprite-app"\nversion = "0.2.0"\n\n'
+                '[[package]]\nname = "sprite-pane"\nversion = "0.2.0"\n\n'
+                '[[package]]\nname = "sprite-term"\nversion = "0.2.0"\n'
+            )
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
             (root / "README.md").write_text(
@@ -31,6 +36,10 @@ class PrepareReleaseTests(unittest.TestCase):
             )
 
             self.assertIn('version = "0.2.1"', (root / "Cargo.toml").read_text())
+            self.assertEqual(
+                3,
+                (root / "Cargo.lock").read_text().count('version = "0.2.1"'),
+            )
             self.assertEqual(
                 "pkgver=0.2.1\n",
                 (root / "packaging" / "PKGBUILD").read_text(),
@@ -111,6 +120,43 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertEqual(original_cargo, (root / "Cargo.toml").read_text())
             self.assertEqual(original_readme, (root / "README.md").read_text())
+
+    def test_updates_workspace_packages_in_cargo_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "Cargo.toml").write_text(
+                '[workspace.package]\nversion = "0.2.0"\n'
+            )
+            (root / "Cargo.lock").write_text(
+                '[[package]]\n'
+                'name = "sprite-app"\n'
+                'version = "0.2.0"\n\n'
+                '[[package]]\n'
+                'name = "sprite-pane"\n'
+                'version = "0.2.0"\n\n'
+                '[[package]]\n'
+                'name = "sprite-term"\n'
+                'version = "0.2.0"\n\n'
+                '[[package]]\n'
+                'name = "other-package"\n'
+                'version = "0.2.0"\n'
+            )
+            (root / "packaging").mkdir()
+            (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
+            (root / "README.md").write_text(
+                "sudo pacman -U sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
+            )
+
+            subprocess.run(
+                [sys.executable, str(PREPARE), "0.2.1", "--root", str(root)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            lockfile = (root / "Cargo.lock").read_text()
+            self.assertEqual(3, lockfile.count('version = "0.2.1"'))
+            self.assertIn('name = "other-package"\nversion = "0.2.0"', lockfile)
 
 
 class ReleaseTagCheckTests(unittest.TestCase):
