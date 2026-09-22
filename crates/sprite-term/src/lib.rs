@@ -697,6 +697,15 @@ pub struct HyperlinkSpan {
     pub end_column: u16,
 }
 
+impl HyperlinkSpan {
+    /// Whether a terminal cell lies within this visible link label.
+    pub fn contains(self, position: CellPosition) -> bool {
+        position.row == self.row
+            && self.start_column <= position.column
+            && position.column < self.end_column
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderRow {
     pub cells: Vec<RenderCell>,

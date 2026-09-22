@@ -1166,6 +1166,16 @@ fn group_is_alive(group: i32) -> bool {
 }
 
 /// Opens the PTY, launches the child, and hands the child to its waiter.
+fn configure_child_environment(
+    command: &mut CommandBuilder,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) {
+    command.env_remove("NO_COLOR");
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+}
+
 fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Started, SessionError> {
     let size = config.size;
     let pair = native_pty_system()
@@ -1184,9 +1194,7 @@ fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Start
     if let Some(directory) = &config.working_directory {
         command.cwd(directory);
     }
-    for (key, value) in &config.environment {
-        command.env(key, value);
-    }
+    configure_child_environment(&mut command, &config.environment);
 
     let child = pair
         .slave
@@ -1289,35 +1297,28 @@ fn resolve_hyperlink(
         .ok()?;
 
     let mut buffer = [0_u8; 2048];
-    if let Ok(written) = grid_ref.hyperlink_uri(&mut buffer) {
-        if written != 0 {
-            if let Ok(uri) = std::str::from_utf8(&buffer[..written]) {
-                if crate::is_allowed_link(uri) {
-                    let columns = usize::from(terminal.cols().ok()?);
-                    let mut start = usize::from(position.column);
-                    let mut end = start + 1;
-                    while start > 0
-                        && hyperlink_uri_at(terminal, position.row, start - 1).as_deref()
-                            == Some(uri)
-                    {
-                        start -= 1;
-                    }
-                    while end < columns
-                        && hyperlink_uri_at(terminal, position.row, end).as_deref() == Some(uri)
-                    {
-                        end += 1;
-                    }
-                    return Some(ResolvedHyperlink {
-                        uri: uri.to_owned(),
-                        span: crate::HyperlinkSpan {
-                            row: position.row,
-                            start_column: start as u16,
-                            end_column: end as u16,
-                        },
-                    });
-                }
-            }
+    if let Ok(written) = grid_ref.hyperlink_uri(&mut buffer)
+        && written != 0
+        && let Ok(uri) = std::str::from_utf8(&buffer[..written])
+        && crate::is_allowed_link(uri)
+    {
+        let columns = usize::from(terminal.cols().ok()?);
+        let mut start = usize::from(position.column);
+        let mut end = start + 1;
+        while start > 0 && hyperlink_uri_matches(terminal, position.row, start - 1, uri) {
+            start -= 1;
         }
+        while end < columns && hyperlink_uri_matches(terminal, position.row, end, uri) {
+            end += 1;
+        }
+        return Some(ResolvedHyperlink {
+            uri: uri.to_owned(),
+            span: crate::HyperlinkSpan {
+                row: position.row,
+                start_column: start as u16,
+                end_column: end as u16,
+            },
+        });
     }
 
     let columns = usize::from(terminal.cols().ok()?);
@@ -1330,10 +1331,10 @@ fn resolve_hyperlink(
             }))
             .ok()?;
         let mut graphemes = [' '; 8];
-        if let Ok(count) = cell.graphemes(&mut graphemes) {
-            if let Some(first) = graphemes[..count].first() {
-                *character = *first;
-            }
+        if let Ok(count) = cell.graphemes(&mut graphemes)
+            && let Some(first) = graphemes[..count].first()
+        {
+            *character = *first;
         }
     }
     url_at(&row, usize::from(position.column)).map(|(uri, start, end)| ResolvedHyperlink {
@@ -1346,42 +1347,43 @@ fn resolve_hyperlink(
     })
 }
 
-fn hyperlink_uri_at(terminal: &Terminal<'_, '_>, row: u16, column: usize) -> Option<String> {
+fn hyperlink_uri_matches(
+    terminal: &Terminal<'_, '_>,
+    row: u16,
+    column: usize,
+    expected: &str,
+) -> bool {
     use libghostty_vt::terminal::{Point, PointCoordinate};
-    let cell = terminal
-        .grid_ref(Point::Viewport(PointCoordinate {
-            x: column as u16,
-            y: u32::from(row),
-        }))
-        .ok()?;
+    let Ok(cell) = terminal.grid_ref(Point::Viewport(PointCoordinate {
+        x: column as u16,
+        y: u32::from(row),
+    })) else {
+        return false;
+    };
     let mut buffer = [0_u8; 2048];
-    let written = cell.hyperlink_uri(&mut buffer).ok()?;
-    (written != 0)
-        .then(|| {
-            std::str::from_utf8(&buffer[..written])
-                .ok()
-                .map(str::to_owned)
-        })
-        .flatten()
+    cell.hyperlink_uri(&mut buffer)
+        .is_ok_and(|written| written != 0 && &buffer[..written] == expected.as_bytes())
 }
 
 fn url_at(row: &[char], column: usize) -> Option<(String, usize, usize)> {
     let starts = ["http://", "https://"];
     for start in 0..row.len() {
-        let remaining: String = row[start..].iter().collect();
-        let Some(prefix) = starts.iter().find(|prefix| remaining.starts_with(**prefix)) else {
+        let Some(prefix) = starts.iter().find(|prefix| {
+            row.get(start..start + prefix.len())
+                .is_some_and(|characters| characters.iter().copied().eq(prefix.chars()))
+        }) else {
             continue;
         };
-        let mut end = start
-            + remaining
-                .find(char::is_whitespace)
-                .unwrap_or(remaining.len());
+        let mut end = start + prefix.len();
+        while end < row.len() && !row[end].is_whitespace() {
+            end += 1;
+        }
         while end > start && ".,!?;:)]}>".contains(row[end - 1]) {
             end -= 1;
         }
         if start <= column && column < end {
             let uri: String = row[start..end].iter().collect();
-            if uri.starts_with(prefix) && crate::is_allowed_link(&uri) {
+            if crate::is_allowed_link(&uri) {
                 return Some((uri, start, end));
             }
         }
@@ -1394,10 +1396,20 @@ mod hyperlink_tests {
     use super::url_at;
 
     #[test]
+    fn child_environment_disables_inherited_no_color() {
+        let mut command = portable_pty::CommandBuilder::new("sh");
+        command.env("NO_COLOR", "1");
+
+        super::configure_child_environment(&mut command, &[]);
+
+        assert_eq!(command.get_env("NO_COLOR"), None);
+    }
+
+    #[test]
     fn resolves_visible_http_url_at_clicked_cell() {
         let row: Vec<char> = "open https://example.com/path now".chars().collect();
         assert_eq!(
-            url_at(&row, 15).map(|(uri, start, end)| (uri, start, end)),
+            url_at(&row, 15),
             Some(("https://example.com/path".to_owned(), 5, 29))
         );
     }
@@ -1412,6 +1424,19 @@ mod hyperlink_tests {
             Some("https://example.com/path".to_owned())
         );
         assert_eq!(url_at(&row, 30), None);
+    }
+
+    #[test]
+    fn resolves_the_url_under_the_column_when_a_row_has_multiple_urls() {
+        let row: Vec<char> = "https://one.example https://two.example/path"
+            .chars()
+            .collect();
+        let column = "https://one.example ".chars().count();
+
+        assert_eq!(
+            url_at(&row, column).map(|(uri, _, _)| uri),
+            Some("https://two.example/path".to_owned())
+        );
     }
 }
 

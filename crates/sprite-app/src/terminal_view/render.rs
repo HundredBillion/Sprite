@@ -264,10 +264,10 @@ impl Render for TerminalView {
         self.synchronise_size(window);
 
         let mut rows = self.laid_out_rows();
-        if let (Some(bundle), Some((generation, span))) = (&self.bundle, self.hovered_link) {
-            if bundle.generation == generation {
-                style_hyperlink_span(&mut rows, span);
-            }
+        if let (Some(bundle), Some((generation, span))) = (&self.bundle, self.hovered_link)
+            && bundle.generation == generation
+        {
+            style_hyperlink_span(&mut rows, span);
         }
         // The one place the pane's cell, font and colours are read for a frame:
         // the terminal's own rows and any hosted grid draw from the same values,
@@ -514,12 +514,15 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
+                    view.plain_link_click.cancel();
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
+                    let behavior = link_click_behavior(event.modifiers);
+                    view.plain_link_click.press(cell, behavior);
                     // Modified clicks open links immediately; a plain click
                     // waits until release so a drag remains a text selection.
-                    if link_click_behavior(event.modifiers) == LinkClickBehavior::Modified {
+                    if behavior == LinkClickBehavior::Modified {
                         view.request_link_click(cell);
                         return;
                     }
@@ -540,17 +543,28 @@ impl Render for TerminalView {
                 if event.pressed_button.is_none() {
                     let cell = view.cell_under(event.position);
                     if view.hovered_cell != cell {
-                        view.hovered_link = None;
                         view.hovered_cell = cell;
-                        if let Some(cell) = cell {
+                        let remains_on_link = cell.is_some_and(|cell| {
+                            view.hovered_link.is_some_and(|(generation, span)| {
+                                view.bundle.as_ref().is_some_and(|bundle| {
+                                    bundle.generation == generation && span.contains(cell)
+                                })
+                            })
+                        });
+                        if !remains_on_link {
+                            view.hovered_link = None;
+                        }
+                        if !remains_on_link && let Some(cell) = cell {
                             view.request_hover_link(cell);
                         }
                     }
                     return;
                 }
                 let Some(cell) = view.cell_under(event.position) else {
+                    view.plain_link_click.cancel();
                     return;
                 };
+                view.plain_link_click.moved_to(cell);
                 let Some(drag) = view.drag else {
                     view.route_mouse(cell, MouseAction::Motion, event.modifiers.shift);
                     return;
@@ -577,16 +591,20 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseUpEvent, _window, _cx| {
                     let Some(cell) = view.cell_under(event.position) else {
+                        view.plain_link_click.cancel();
                         return;
                     };
+                    let open_link = view.plain_link_click.release(cell)
+                        && link_click_behavior(event.modifiers) == LinkClickBehavior::Plain;
                     if let Some(drag) = view.drag.take() {
-                        if !drag.moved
-                            && link_click_behavior(event.modifiers) == LinkClickBehavior::Plain
-                        {
+                        if !drag.moved && open_link {
                             view.request_link_click(cell);
                         }
                     } else {
                         view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
+                        if open_link {
+                            view.request_link_click(cell);
+                        }
                     }
                 }),
             )

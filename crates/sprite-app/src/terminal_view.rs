@@ -90,6 +90,7 @@ pub struct TerminalView {
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
     drag: Option<Drag>,
+    plain_link_click: input::PlainLinkClick,
     /// The most recent click awaiting terminal link resolution.
     pending_link_click: Option<u64>,
     hovered_cell: Option<sprite_term::CellPosition>,
@@ -363,6 +364,7 @@ impl TerminalView {
             title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
+            plain_link_click: input::PlainLinkClick::default(),
             pending_link_click: None,
             hovered_cell: None,
             hovered_link: None,
@@ -446,6 +448,7 @@ impl TerminalView {
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag: None,
+            plain_link_click: input::PlainLinkClick::default(),
             pending_link_click: None,
             hovered_cell: None,
             hovered_link: None,

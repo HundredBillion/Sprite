@@ -93,6 +93,20 @@ fn an_osc8_resolution_includes_the_visible_label_span() {
     ));
 }
 
+#[test]
+fn a_visible_link_span_contains_only_its_cells_on_its_row() {
+    let span = sprite_term::HyperlinkSpan {
+        row: 2,
+        start_column: 4,
+        end_column: 9,
+    };
+
+    assert!(span.contains(CellPosition { row: 2, column: 4 }));
+    assert!(span.contains(CellPosition { row: 2, column: 8 }));
+    assert!(!span.contains(CellPosition { row: 2, column: 9 }));
+    assert!(!span.contains(CellPosition { row: 3, column: 5 }));
+}
+
 /// The label is chosen by whoever wrote the link and must never be what gets
 /// opened. Here the label impersonates a different, trusted destination.
 #[test]

@@ -30,6 +30,29 @@ pub(super) struct Drag {
     pub(super) moved: bool,
 }
 
+#[derive(Default)]
+pub(super) struct PlainLinkClick(Option<CellPosition>);
+
+impl PlainLinkClick {
+    pub(super) fn press(&mut self, cell: CellPosition, behavior: LinkClickBehavior) {
+        self.0 = (behavior == LinkClickBehavior::Plain).then_some(cell);
+    }
+
+    pub(super) fn moved_to(&mut self, cell: CellPosition) {
+        if self.0.is_some_and(|origin| origin != cell) {
+            self.0 = None;
+        }
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.0 = None;
+    }
+
+    pub(super) fn release(&mut self, cell: CellPosition) -> bool {
+        self.0.take() == Some(cell)
+    }
+}
+
 /// An application binding, resolved before anything reaches the terminal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Shortcut {
@@ -321,7 +344,8 @@ impl EntityInputHandler for TerminalView {
 #[cfg(test)]
 mod tests {
     use super::{
-        LinkClickBehavior, Shortcut, application_shortcut, dropped_paths_text, link_click_behavior,
+        LinkClickBehavior, PlainLinkClick, Shortcut, application_shortcut, dropped_paths_text,
+        link_click_behavior,
     };
     use gpui::{Keystroke, Modifiers};
     use std::path::Path;
@@ -443,10 +467,7 @@ mod tests {
             link_click_behavior(Modifiers::default()),
             LinkClickBehavior::Plain
         );
-        assert_eq!(
-            link_click_behavior(platform()),
-            LinkClickBehavior::Modified
-        );
+        assert_eq!(link_click_behavior(platform()), LinkClickBehavior::Modified);
         assert_eq!(
             link_click_behavior(Modifiers {
                 control: true,
@@ -461,6 +482,22 @@ mod tests {
             }),
             LinkClickBehavior::Selection
         );
+    }
+
+    #[test]
+    fn plain_link_click_is_tracked_independently_of_mouse_reporting() {
+        let origin = sprite_term::CellPosition { row: 2, column: 4 };
+        let mut click = PlainLinkClick::default();
+
+        click.press(origin, LinkClickBehavior::Plain);
+        assert!(click.release(origin));
+
+        click.press(origin, LinkClickBehavior::Plain);
+        click.moved_to(sprite_term::CellPosition { row: 2, column: 5 });
+        assert!(!click.release(origin));
+
+        click.press(origin, LinkClickBehavior::Selection);
+        assert!(!click.release(origin));
     }
 
     #[test]
