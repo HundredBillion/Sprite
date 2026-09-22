@@ -14,8 +14,8 @@ use std::sync::Arc;
 use gpui::prelude::*;
 
 use gpui::{
-    Context, ElementInputHandler, ExternalPaths, ImageSource, KeyDownEvent, KeyUpEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
+    Context, ElementInputHandler, ExternalPaths, ImageSource, InteractiveElement, KeyDownEvent,
+    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
     ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
 };
 use sprite_term::{
@@ -23,7 +23,7 @@ use sprite_term::{
     WheelEvent,
 };
 
-use crate::grid::{PositionedCell, lay_out_row};
+use crate::grid::{PositionedCell, lay_out_row, style_hyperlink_span};
 use crate::grid_paint::{RowPass, pack};
 use crate::input::gpui_key_event;
 use crate::tokens::TokenRegistry;
@@ -263,7 +263,12 @@ impl Render for TerminalView {
         self.close_invalid_owned_surfaces(window, cx);
         self.synchronise_size(window);
 
-        let rows = self.laid_out_rows();
+        let mut rows = self.laid_out_rows();
+        if let (Some(bundle), Some((generation, span))) = (&self.bundle, self.hovered_link) {
+            if bundle.generation == generation {
+                style_hyperlink_span(&mut rows, span);
+            }
+        }
         // The one place the pane's cell, font and colours are read for a frame:
         // the terminal's own rows and any hosted grid draw from the same values,
         // so a grid cannot end up a font behind the text beside it.
@@ -293,6 +298,7 @@ impl Render for TerminalView {
             .filter(|_| self.focused_surface(window).is_none());
         let focus_for_input = self.focus.clone();
         let entity_for_input = cx.entity();
+        let entity_for_hover = cx.entity();
         let entity_for_bounds = cx.entity();
         // Where the grid sits inside the pane, and how much of it it covers.
         // Both are needed here: the padding is what separates the two, and the
@@ -438,8 +444,20 @@ impl Render for TerminalView {
                     .child(status)
             }));
 
-        div()
-            .relative()
+        let pane = gpui::StatefulInteractiveElement::on_hover(
+            div().id("terminal-link-hover"),
+            move |hovered, _, cx| {
+                if !*hovered {
+                    entity_for_hover.update(cx, |view, cx| {
+                        view.hovered_cell = None;
+                        view.hovered_link = None;
+                        cx.notify();
+                    });
+                }
+            },
+        );
+
+        pane.relative()
             .size_full()
             // The terminal's own colours, not a constant: a pane whose
             // background is configured — or set by a program — must not show a
@@ -502,8 +520,7 @@ impl Render for TerminalView {
                     // Modified clicks open links immediately; a plain click
                     // waits until release so a drag remains a text selection.
                     if link_click_behavior(event.modifiers) == LinkClickBehavior::Modified {
-                        view.pending_link_click = Some(cell);
-                        view.send(TerminalCommand::ResolveHyperlink(cell));
+                        view.request_link_click(cell);
                         return;
                     }
                     let shift = event.modifiers.shift;
@@ -520,12 +537,20 @@ impl Render for TerminalView {
                 }),
             )
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, _cx| {
+                if event.pressed_button.is_none() {
+                    let cell = view.cell_under(event.position);
+                    if view.hovered_cell != cell {
+                        view.hovered_link = None;
+                        view.hovered_cell = cell;
+                        if let Some(cell) = cell {
+                            view.request_hover_link(cell);
+                        }
+                    }
+                    return;
+                }
                 let Some(cell) = view.cell_under(event.position) else {
                     return;
                 };
-                if event.pressed_button.is_none() {
-                    return;
-                }
                 let Some(drag) = view.drag else {
                     view.route_mouse(cell, MouseAction::Motion, event.modifiers.shift);
                     return;
@@ -558,8 +583,7 @@ impl Render for TerminalView {
                         if !drag.moved
                             && link_click_behavior(event.modifiers) == LinkClickBehavior::Plain
                         {
-                            view.pending_link_click = Some(cell);
-                            view.send(TerminalCommand::ResolveHyperlink(cell));
+                            view.request_link_click(cell);
                         }
                     } else {
                         view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);

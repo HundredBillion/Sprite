@@ -12,9 +12,12 @@ pub(crate) enum Effect {
     /// The child set, or cleared, its title.
     Title(Option<String>),
     HoldPaste(String),
-    OpenUrl {
+    HyperlinkResolved {
         position: sprite_term::CellPosition,
+        request_id: u64,
+        generation: u64,
         uri: Option<String>,
+        span: Option<sprite_term::HyperlinkSpan>,
     },
     Clipboard(String),
     DeliverHistory(Arc<HistorySnapshot>),
@@ -63,8 +66,20 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
         | Ok(TerminalEvent::WorkingDirectoryChanged(_))
         | Ok(TerminalEvent::Graphics(_)) => {}
 
-        Ok(TerminalEvent::Hyperlink { position, uri }) => {
-            effects.push(Effect::OpenUrl { position, uri });
+        Ok(TerminalEvent::Hyperlink {
+            position,
+            request_id,
+            generation,
+            uri,
+            span,
+        }) => {
+            effects.push(Effect::HyperlinkResolved {
+                position,
+                request_id,
+                generation,
+                uri,
+                span,
+            });
         }
 
         // A Pane Title, shown on the tab and in the window's title bar.
@@ -167,7 +182,10 @@ mod tests {
             TerminalEvent::WorkingDirectoryChanged(None),
             TerminalEvent::Hyperlink {
                 position: origin(),
+                request_id: 1,
+                generation: 1,
                 uri: None,
+                span: None,
             },
         ] {
             let is_hyperlink = matches!(&event, TerminalEvent::Hyperlink { .. });
@@ -175,7 +193,7 @@ mod tests {
             if is_hyperlink {
                 assert!(matches!(
                     effects.as_slice(),
-                    [Effect::OpenUrl { uri: None, .. }]
+                    [Effect::HyperlinkResolved { uri: None, .. }]
                 ));
             } else {
                 assert!(effects.is_empty());
@@ -199,10 +217,13 @@ mod tests {
     fn an_allowed_link_is_opened() {
         let opened = effects(TerminalEvent::Hyperlink {
             position: origin(),
+            request_id: 1,
+            generation: 1,
             uri: Some("https://example.invalid/".to_owned()),
+            span: None,
         });
         assert!(
-            matches!(opened.as_slice(), [Effect::OpenUrl { uri: Some(uri), .. }] if uri == "https://example.invalid/")
+            matches!(opened.as_slice(), [Effect::HyperlinkResolved { uri: Some(uri), .. }] if uri == "https://example.invalid/")
         );
     }
 

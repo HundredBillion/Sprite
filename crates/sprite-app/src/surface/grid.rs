@@ -626,6 +626,7 @@ impl GridSurface {
                 text: cell.text.clone(),
                 style: self.style_for(cell.hl, theme),
                 selected: false,
+                hovered_link: false,
             });
         }
         placed

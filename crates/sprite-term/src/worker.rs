@@ -673,10 +673,19 @@ pub(crate) fn run(
                         }
                     }
                 }
-                TerminalCommand::ResolveHyperlink(position) => {
-                    let uri = resolve_hyperlink(&terminal, position);
+                TerminalCommand::ResolveHyperlink {
+                    position,
+                    request_id,
+                } => {
+                    let resolved = resolve_hyperlink(&terminal, position);
                     if events
-                        .send_blocking(TerminalEvent::Hyperlink { position, uri })
+                        .send_blocking(TerminalEvent::Hyperlink {
+                            position,
+                            request_id,
+                            generation,
+                            uri: resolved.as_ref().map(|link| link.uri.clone()),
+                            span: resolved.map(|link| link.span),
+                        })
                         .is_err()
                     {
                         break;
@@ -1261,7 +1270,15 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
 /// Returns `None` for a cell with no link and for any target the scheme policy
 /// refuses, so a caller cannot distinguish "no link" from "denied" and act on
 /// the difference.
-fn resolve_hyperlink(terminal: &Terminal<'_, '_>, position: CellPosition) -> Option<String> {
+struct ResolvedHyperlink {
+    uri: String,
+    span: crate::HyperlinkSpan,
+}
+
+fn resolve_hyperlink(
+    terminal: &Terminal<'_, '_>,
+    position: CellPosition,
+) -> Option<ResolvedHyperlink> {
     use libghostty_vt::terminal::{Point, PointCoordinate};
 
     let grid_ref = terminal
@@ -1276,7 +1293,28 @@ fn resolve_hyperlink(terminal: &Terminal<'_, '_>, position: CellPosition) -> Opt
         if written != 0 {
             if let Ok(uri) = std::str::from_utf8(&buffer[..written]) {
                 if crate::is_allowed_link(uri) {
-                    return Some(uri.to_owned());
+                    let columns = usize::from(terminal.cols().ok()?);
+                    let mut start = usize::from(position.column);
+                    let mut end = start + 1;
+                    while start > 0
+                        && hyperlink_uri_at(terminal, position.row, start - 1).as_deref()
+                            == Some(uri)
+                    {
+                        start -= 1;
+                    }
+                    while end < columns
+                        && hyperlink_uri_at(terminal, position.row, end).as_deref() == Some(uri)
+                    {
+                        end += 1;
+                    }
+                    return Some(ResolvedHyperlink {
+                        uri: uri.to_owned(),
+                        span: crate::HyperlinkSpan {
+                            row: position.row,
+                            start_column: start as u16,
+                            end_column: end as u16,
+                        },
+                    });
                 }
             }
         }
@@ -1298,10 +1336,36 @@ fn resolve_hyperlink(terminal: &Terminal<'_, '_>, position: CellPosition) -> Opt
             }
         }
     }
-    url_at(&row, usize::from(position.column))
+    url_at(&row, usize::from(position.column)).map(|(uri, start, end)| ResolvedHyperlink {
+        uri,
+        span: crate::HyperlinkSpan {
+            row: position.row,
+            start_column: start as u16,
+            end_column: end as u16,
+        },
+    })
 }
 
-fn url_at(row: &[char], column: usize) -> Option<String> {
+fn hyperlink_uri_at(terminal: &Terminal<'_, '_>, row: u16, column: usize) -> Option<String> {
+    use libghostty_vt::terminal::{Point, PointCoordinate};
+    let cell = terminal
+        .grid_ref(Point::Viewport(PointCoordinate {
+            x: column as u16,
+            y: u32::from(row),
+        }))
+        .ok()?;
+    let mut buffer = [0_u8; 2048];
+    let written = cell.hyperlink_uri(&mut buffer).ok()?;
+    (written != 0)
+        .then(|| {
+            std::str::from_utf8(&buffer[..written])
+                .ok()
+                .map(str::to_owned)
+        })
+        .flatten()
+}
+
+fn url_at(row: &[char], column: usize) -> Option<(String, usize, usize)> {
     let starts = ["http://", "https://"];
     for start in 0..row.len() {
         let remaining: String = row[start..].iter().collect();
@@ -1318,7 +1382,7 @@ fn url_at(row: &[char], column: usize) -> Option<String> {
         if start <= column && column < end {
             let uri: String = row[start..end].iter().collect();
             if uri.starts_with(prefix) && crate::is_allowed_link(&uri) {
-                return Some(uri);
+                return Some((uri, start, end));
             }
         }
     }
@@ -1333,8 +1397,8 @@ mod hyperlink_tests {
     fn resolves_visible_http_url_at_clicked_cell() {
         let row: Vec<char> = "open https://example.com/path now".chars().collect();
         assert_eq!(
-            url_at(&row, 15).as_deref(),
-            Some("https://example.com/path")
+            url_at(&row, 15).map(|(uri, start, end)| (uri, start, end)),
+            Some(("https://example.com/path".to_owned(), 5, 29))
         );
     }
 
@@ -1344,8 +1408,8 @@ mod hyperlink_tests {
             .chars()
             .collect();
         assert_eq!(
-            url_at(&row, 10).as_deref(),
-            Some("https://example.com/path")
+            url_at(&row, 10).map(|(uri, _, _)| uri),
+            Some("https://example.com/path".to_owned())
         );
         assert_eq!(url_at(&row, 30), None);
     }
