@@ -12,7 +12,13 @@ pub(crate) enum Effect {
     /// The child set, or cleared, its title.
     Title(Option<String>),
     HoldPaste(String),
-    OpenUrl(String),
+    HyperlinkResolved {
+        position: sprite_term::CellPosition,
+        request_id: u64,
+        generation: u64,
+        uri: Option<String>,
+        span: Option<sprite_term::HyperlinkSpan>,
+    },
     Clipboard(String),
     DeliverHistory(Arc<HistorySnapshot>),
     FailRequest(String),
@@ -58,9 +64,23 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
         Ok(TerminalEvent::Ready)
         | Ok(TerminalEvent::Bell)
         | Ok(TerminalEvent::WorkingDirectoryChanged(_))
-        | Ok(TerminalEvent::Graphics(_))
-        // No link, or a refused scheme. Indistinguishable on purpose.
-        | Ok(TerminalEvent::Hyperlink { uri: None, .. }) => {}
+        | Ok(TerminalEvent::Graphics(_)) => {}
+
+        Ok(TerminalEvent::Hyperlink {
+            position,
+            request_id,
+            generation,
+            uri,
+            span,
+        }) => {
+            effects.push(Effect::HyperlinkResolved {
+                position,
+                request_id,
+                generation,
+                uri,
+                span,
+            });
+        }
 
         // A Pane Title, shown on the tab and in the window's title bar.
         Ok(TerminalEvent::TitleChanged(title)) => effects.push(Effect::Title(title)),
@@ -76,13 +96,6 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
                 )
                 .into(),
             ));
-        }
-
-        // Terminal Core already applied the scheme policy, so reaching here
-        // means the target is allowed. Sprite never builds a command line from
-        // terminal-provided text.
-        Ok(TerminalEvent::Hyperlink { uri: Some(uri), .. }) => {
-            effects.push(Effect::OpenUrl(uri));
         }
 
         // Belongs to whoever asked for it. The view forwards because it is the
@@ -169,10 +182,22 @@ mod tests {
             TerminalEvent::WorkingDirectoryChanged(None),
             TerminalEvent::Hyperlink {
                 position: origin(),
+                request_id: 1,
+                generation: 1,
                 uri: None,
+                span: None,
             },
         ] {
-            assert!(effects(event).is_empty());
+            let is_hyperlink = matches!(&event, TerminalEvent::Hyperlink { .. });
+            let effects = effects(event);
+            if is_hyperlink {
+                assert!(matches!(
+                    effects.as_slice(),
+                    [Effect::HyperlinkResolved { uri: None, .. }]
+                ));
+            } else {
+                assert!(effects.is_empty());
+            }
         }
     }
 
@@ -192,10 +217,13 @@ mod tests {
     fn an_allowed_link_is_opened() {
         let opened = effects(TerminalEvent::Hyperlink {
             position: origin(),
+            request_id: 1,
+            generation: 1,
             uri: Some("https://example.invalid/".to_owned()),
+            span: None,
         });
         assert!(
-            matches!(opened.as_slice(), [Effect::OpenUrl(uri)] if uri == "https://example.invalid/")
+            matches!(opened.as_slice(), [Effect::HyperlinkResolved { uri: Some(uri), .. }] if uri == "https://example.invalid/")
         );
     }
 

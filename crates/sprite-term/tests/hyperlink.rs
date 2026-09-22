@@ -24,28 +24,40 @@ fn link_script(uri: &str, label: &str) -> String {
     format!("printf '\\033]8;;{uri}\\007{label}\\033]8;;\\007\\n'; printf 'DONE\\n'; sleep 30")
 }
 
+fn resolve_event(
+    session: &mut TerminalSession,
+    events: &EventPump,
+    snapshots: &SnapshotPump,
+    column: u16,
+) -> TerminalEvent {
+    snapshots.wait_for("the link", |bundle| pane_text(bundle).contains("DONE"));
+    session
+        .send(TerminalCommand::ResolveHyperlink {
+            position: CellPosition { row: 0, column },
+            request_id: 1,
+        })
+        .expect("resolve a hyperlink");
+
+    for _ in 0..8 {
+        match events.next() {
+            event @ TerminalEvent::Hyperlink { .. } => return event,
+            TerminalEvent::Error(error) => panic!("resolve failed: {error}"),
+            _ => {}
+        }
+    }
+    panic!("no hyperlink answer arrived");
+}
+
 fn resolve(
     session: &mut TerminalSession,
     events: &EventPump,
     snapshots: &SnapshotPump,
     column: u16,
 ) -> Option<String> {
-    snapshots.wait_for("the link", |bundle| pane_text(bundle).contains("DONE"));
-    session
-        .send(TerminalCommand::ResolveHyperlink(CellPosition {
-            row: 0,
-            column,
-        }))
-        .expect("resolve a hyperlink");
-
-    for _ in 0..8 {
-        match events.next() {
-            TerminalEvent::Hyperlink { uri, .. } => return uri,
-            TerminalEvent::Error(error) => panic!("resolve failed: {error}"),
-            _ => {}
-        }
+    match resolve_event(session, events, snapshots, column) {
+        TerminalEvent::Hyperlink { uri, .. } => uri,
+        _ => unreachable!("resolve_event returns a hyperlink event"),
     }
-    panic!("no hyperlink answer arrived");
 }
 
 #[test]
@@ -59,6 +71,40 @@ fn an_https_link_resolves_to_its_target() {
         resolve(&mut session, &events, &snapshots, 2).as_deref(),
         Some("https://example.com/page")
     );
+}
+
+#[test]
+fn an_osc8_resolution_includes_the_visible_label_span() {
+    let mut session = session(&link_script("https://example.com/page", "click me"));
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    assert!(matches!(
+        resolve_event(&mut session, &events, &snapshots, 2),
+        TerminalEvent::Hyperlink {
+            span: Some(sprite_term::HyperlinkSpan {
+                row: 0,
+                start_column: 0,
+                end_column: 8
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_visible_link_span_contains_only_its_cells_on_its_row() {
+    let span = sprite_term::HyperlinkSpan {
+        row: 2,
+        start_column: 4,
+        end_column: 9,
+    };
+
+    assert!(span.contains(CellPosition { row: 2, column: 4 }));
+    assert!(span.contains(CellPosition { row: 2, column: 8 }));
+    assert!(!span.contains(CellPosition { row: 2, column: 9 }));
+    assert!(!span.contains(CellPosition { row: 3, column: 5 }));
 }
 
 /// The label is chosen by whoever wrote the link and must never be what gets
@@ -112,12 +158,10 @@ fn an_executable_scheme_is_denied() {
     );
 }
 
-/// A cell with no link resolves to nothing rather than to whatever text is
-/// under it.
+/// Ordinary text that is not a URL still resolves to nothing.
 #[test]
-fn plain_text_is_not_a_link() {
-    let mut session =
-        session("printf 'https://example.com not a link\\n'; printf 'DONE\\n'; sleep 30");
+fn ordinary_plain_text_is_not_a_link() {
+    let mut session = session("printf 'just ordinary text\\n'; printf 'DONE\\n'; sleep 30");
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
     events.expect_ready();
@@ -125,6 +169,44 @@ fn plain_text_is_not_a_link() {
     assert_eq!(
         resolve(&mut session, &events, &snapshots, 2),
         None,
-        "text that looks like a URL is not an OSC 8 link"
+        "ordinary text has no hyperlink target"
     );
+}
+
+/// URLs printed without OSC 8 metadata still behave like terminal links when
+/// the user clicks a cell in the visible URL.
+#[test]
+fn a_visible_url_resolves_without_osc8_metadata() {
+    let mut session =
+        session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    assert_eq!(
+        resolve(&mut session, &events, &snapshots, 15).as_deref(),
+        Some("https://example.com/page")
+    );
+}
+
+#[test]
+fn a_visible_url_resolution_includes_its_cell_span() {
+    let mut session =
+        session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    events.expect_ready();
+
+    assert!(matches!(
+        resolve_event(&mut session, &events, &snapshots, 15),
+        TerminalEvent::Hyperlink {
+            uri: Some(uri),
+            span: Some(sprite_term::HyperlinkSpan {
+                row: 0,
+                start_column: 6,
+                end_column: 30,
+            }),
+            ..
+        } if uri == "https://example.com/page"
+    ));
 }

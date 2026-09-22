@@ -3,7 +3,9 @@
 //! drawing reads nearly every field the view holds, from the bundle to the
 //! textures to the grid's corner.
 
-use super::input::{Drag, application_shortcut};
+use super::input::{
+    Drag, LinkClickBehavior, application_shortcut, dropped_paths_text, link_click_behavior,
+};
 use super::surfaces::{Body, SurfaceLayers};
 use super::*;
 
@@ -12,16 +14,16 @@ use std::sync::Arc;
 use gpui::prelude::*;
 
 use gpui::{
-    Context, ElementInputHandler, ImageSource, KeyDownEvent, KeyUpEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent,
-    SharedString, Window, canvas, div, img, px, rgb,
+    Context, ElementInputHandler, ExternalPaths, ImageSource, InteractiveElement, KeyDownEvent,
+    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
+    ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
 };
 use sprite_term::{
     CellPosition, KeyAction, MouseAction, SelectionMode, SnapshotBundle, TerminalCommand,
     WheelEvent,
 };
 
-use crate::grid::{PositionedCell, lay_out_row};
+use crate::grid::{PositionedCell, lay_out_row, style_hyperlink_span};
 use crate::grid_paint::{RowPass, pack};
 use crate::input::gpui_key_event;
 use crate::tokens::TokenRegistry;
@@ -261,7 +263,12 @@ impl Render for TerminalView {
         self.close_invalid_owned_surfaces(window, cx);
         self.synchronise_size(window);
 
-        let rows = self.laid_out_rows();
+        let mut rows = self.laid_out_rows();
+        if let (Some(bundle), Some((generation, span))) = (&self.bundle, self.hovered_link)
+            && bundle.generation == generation
+        {
+            style_hyperlink_span(&mut rows, span);
+        }
         // The one place the pane's cell, font and colours are read for a frame:
         // the terminal's own rows and any hosted grid draw from the same values,
         // so a grid cannot end up a font behind the text beside it.
@@ -291,6 +298,7 @@ impl Render for TerminalView {
             .filter(|_| self.focused_surface(window).is_none());
         let focus_for_input = self.focus.clone();
         let entity_for_input = cx.entity();
+        let entity_for_hover = cx.entity();
         let entity_for_bounds = cx.entity();
         // Where the grid sits inside the pane, and how much of it it covers.
         // Both are needed here: the padding is what separates the two, and the
@@ -436,8 +444,20 @@ impl Render for TerminalView {
                     .child(status)
             }));
 
-        div()
-            .relative()
+        let pane = gpui::StatefulInteractiveElement::on_hover(
+            div().id("terminal-link-hover"),
+            move |hovered, _, cx| {
+                if !*hovered {
+                    entity_for_hover.update(cx, |view, cx| {
+                        view.hovered_cell = None;
+                        view.hovered_link = None;
+                        cx.notify();
+                    });
+                }
+            },
+        );
+
+        pane.relative()
             .size_full()
             // The terminal's own colours, not a constant: a pane whose
             // background is configured — or set by a program — must not show a
@@ -448,6 +468,12 @@ impl Render for TerminalView {
             .text_size(metrics.font_size)
             .line_height(metrics.cell_height)
             .track_focus(&self.focus)
+            .on_drop(cx.listener(|view, paths: &ExternalPaths, _window, _cx| {
+                let text = dropped_paths_text(paths.paths());
+                if !text.is_empty() {
+                    view.send(TerminalCommand::Paste(text));
+                }
+            }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 // The terminal types only what it holds the keyboard for. A
                 // focused Surface lets an ordinary key propagate so the input
@@ -488,14 +514,16 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
+                    view.plain_link_click.cancel();
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
-                    // Ctrl+Click asks about a link rather than selecting. The
-                    // answer arrives as an event, and only then is anything
-                    // opened — the click itself never carries a destination.
-                    if event.modifiers.control {
-                        view.send(TerminalCommand::ResolveHyperlink(cell));
+                    let behavior = link_click_behavior(event.modifiers);
+                    view.plain_link_click.press(cell, behavior);
+                    // Modified clicks open links immediately; a plain click
+                    // waits until release so a drag remains a text selection.
+                    if behavior == LinkClickBehavior::Modified {
+                        view.request_link_click(cell);
                         return;
                     }
                     let shift = event.modifiers.shift;
@@ -512,12 +540,31 @@ impl Render for TerminalView {
                 }),
             )
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, _cx| {
-                let Some(cell) = view.cell_under(event.position) else {
-                    return;
-                };
                 if event.pressed_button.is_none() {
+                    let cell = view.cell_under(event.position);
+                    if view.hovered_cell != cell {
+                        view.hovered_cell = cell;
+                        let remains_on_link = cell.is_some_and(|cell| {
+                            view.hovered_link.is_some_and(|(generation, span)| {
+                                view.bundle.as_ref().is_some_and(|bundle| {
+                                    bundle.generation == generation && span.contains(cell)
+                                })
+                            })
+                        });
+                        if !remains_on_link {
+                            view.hovered_link = None;
+                        }
+                        if !remains_on_link && let Some(cell) = cell {
+                            view.request_hover_link(cell);
+                        }
+                    }
                     return;
                 }
+                let Some(cell) = view.cell_under(event.position) else {
+                    view.plain_link_click.cancel();
+                    return;
+                };
+                view.plain_link_click.moved_to(cell);
                 let Some(drag) = view.drag else {
                     view.route_mouse(cell, MouseAction::Motion, event.modifiers.shift);
                     return;
@@ -532,6 +579,7 @@ impl Render for TerminalView {
                     anchor: drag.anchor,
                     moved: true,
                 });
+                view.pending_link_click = None;
                 view.send(TerminalCommand::Select {
                     anchor: drag.anchor,
                     head: cell,
@@ -543,10 +591,20 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseUpEvent, _window, _cx| {
                     let Some(cell) = view.cell_under(event.position) else {
+                        view.plain_link_click.cancel();
                         return;
                     };
-                    if view.drag.take().is_none() {
+                    let open_link = view.plain_link_click.release(cell)
+                        && link_click_behavior(event.modifiers) == LinkClickBehavior::Plain;
+                    if let Some(drag) = view.drag.take() {
+                        if !drag.moved && open_link {
+                            view.request_link_click(cell);
+                        }
+                    } else {
                         view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
+                        if open_link {
+                            view.request_link_click(cell);
+                        }
                     }
                 }),
             )

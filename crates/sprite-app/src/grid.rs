@@ -10,7 +10,9 @@
 //! its cell is clipped rather than allowed to displace its neighbours.
 
 use gpui::{Pixels, Point, Size, px, size};
-use sprite_term::{CellStyle, CellWidth, RenderRow, TerminalSize};
+use sprite_term::{
+    CellStyle, CellWidth, HyperlinkSpan, RenderRow, SnapshotColor, TerminalSize, UnderlineStyle,
+};
 
 /// One drawable cell, positioned in grid columns.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +24,7 @@ pub(crate) struct PositionedCell {
     pub text: String,
     pub style: CellStyle,
     pub selected: bool,
+    pub hovered_link: bool,
 }
 
 impl PositionedCell {
@@ -56,6 +59,7 @@ pub(crate) fn lay_out_row(row: &RenderRow) -> Vec<PositionedCell> {
                     text: cell.text.clone(),
                     style: cell.style,
                     selected: cell.selected,
+                    hovered_link: false,
                 });
             }
             // The wide character before it already covers this column.
@@ -65,6 +69,24 @@ pub(crate) fn lay_out_row(row: &RenderRow) -> Vec<PositionedCell> {
     }
 
     placed
+}
+
+pub(crate) fn style_hyperlink_span(rows: &mut [Vec<PositionedCell>], span: HyperlinkSpan) {
+    let Some(row) = rows.get_mut(usize::from(span.row)) else {
+        return;
+    };
+    for cell in row {
+        let cell_span = cell.span();
+        if cell_span.start < u32::from(span.end_column)
+            && cell_span.end > u32::from(span.start_column)
+        {
+            cell.style.bold = true;
+            cell.style.foreground = SnapshotColor::Palette(12);
+            cell.style.underline_color = SnapshotColor::Palette(12);
+            cell.style.underline = UnderlineStyle::Single;
+            cell.hovered_link = true;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +109,38 @@ mod tests {
             overline: false,
             underline: UnderlineStyle::None,
         }
+    }
+
+    #[test]
+    fn hovered_link_styles_only_its_cells_with_theme_blue_underline_and_bold() {
+        let cell = |column| PositionedCell {
+            column,
+            columns: 1,
+            text: "x".to_owned(),
+            style: style(),
+            selected: false,
+            hovered_link: false,
+        };
+        let mut rows = vec![vec![cell(0), cell(1), cell(2), cell(3)]];
+        style_hyperlink_span(
+            &mut rows,
+            HyperlinkSpan {
+                row: 0,
+                start_column: 1,
+                end_column: 3,
+            },
+        );
+
+        assert!(!rows[0][0].style.bold);
+        assert!(rows[0][1].style.bold);
+        assert_eq!(rows[0][1].style.foreground, SnapshotColor::Palette(12));
+        assert_eq!(rows[0][1].style.underline_color, SnapshotColor::Palette(12));
+        assert_eq!(rows[0][1].style.underline, UnderlineStyle::Single);
+        assert!(rows[0][1].hovered_link);
+        assert!(rows[0][2].style.bold);
+        assert!(rows[0][2].hovered_link);
+        assert!(!rows[0][3].style.bold);
+        assert!(!rows[0][3].hovered_link);
     }
 
     fn cell(text: &str, width: CellWidth) -> RenderCell {

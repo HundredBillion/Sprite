@@ -587,9 +587,14 @@ impl GridPaint {
             underline,
             strikethrough,
         };
+        let font_size = if cell.hovered_link {
+            self.font_size + px(1.0)
+        } else {
+            self.font_size
+        };
         let line = window
             .text_system()
-            .shape_line(text, self.font_size, &[run], None);
+            .shape_line(text, font_size, &[run], None);
 
         // The origin is the cell's snapped corner, the same one its background
         // and its neighbours use. The text system rasterises a glyph at one of

@@ -90,6 +90,13 @@ pub struct TerminalView {
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
     drag: Option<Drag>,
+    plain_link_click: input::PlainLinkClick,
+    /// The most recent click awaiting terminal link resolution.
+    pending_link_click: Option<u64>,
+    hovered_cell: Option<sprite_term::CellPosition>,
+    hovered_link: Option<(u64, sprite_term::HyperlinkSpan)>,
+    hover_request: Option<(u64, sprite_term::CellPosition)>,
+    next_link_request: u64,
     /// Where the grid's top-left corner sits inside the pane.
     ///
     /// Not the pane's own corner: the padding and the leftover from rounding
@@ -129,6 +136,29 @@ pub(crate) struct PaneExit {
 }
 
 impl TerminalView {
+    fn request_hover_link(&mut self, position: sprite_term::CellPosition) {
+        self.hovered_link = None;
+        if self.hover_request.is_none() {
+            let request_id = self.next_link_request;
+            self.next_link_request = self.next_link_request.wrapping_add(1);
+            self.hover_request = Some((request_id, position));
+            self.send(TerminalCommand::ResolveHyperlink {
+                position,
+                request_id,
+            });
+        }
+    }
+
+    fn request_link_click(&mut self, position: sprite_term::CellPosition) {
+        let request_id = self.next_link_request;
+        self.next_link_request = self.next_link_request.wrapping_add(1);
+        self.pending_link_click = Some(request_id);
+        self.send(TerminalCommand::ResolveHyperlink {
+            position,
+            request_id,
+        });
+    }
+
     /// `environment` carries this pane's observation variables: the window's
     /// socket and key, and the pane's own identity. It is the only route by
     /// which a child learns the key.
@@ -283,6 +313,11 @@ impl TerminalView {
                         if newer {
                             view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
+                            if view.hover_request.is_none()
+                                && let Some(cell) = view.hovered_cell
+                            {
+                                view.request_hover_link(cell);
+                            }
                             cx.notify();
                         }
                     })
@@ -329,6 +364,12 @@ impl TerminalView {
             title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
+            plain_link_click: input::PlainLinkClick::default(),
+            pending_link_click: None,
+            hovered_cell: None,
+            hovered_link: None,
+            hover_request: None,
+            next_link_request: 1,
             origin: point(px(grid.padding), px(grid.padding)),
             padding: grid.padding,
             content_origin: None,
@@ -407,6 +448,12 @@ impl TerminalView {
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag: None,
+            plain_link_click: input::PlainLinkClick::default(),
+            pending_link_click: None,
+            hovered_cell: None,
+            hovered_link: None,
+            hover_request: None,
+            next_link_request: 1,
             origin: point(
                 px(crate::config::Grid::DEFAULT_PADDING),
                 px(crate::config::Grid::DEFAULT_PADDING),
@@ -431,7 +478,38 @@ impl TerminalView {
             Effect::Status(line) => self.status = Some(line),
             Effect::Title(title) => self.title = title.map(SharedString::from),
             Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
-            Effect::OpenUrl(uri) => cx.open_url(&uri),
+            Effect::HyperlinkResolved {
+                position,
+                request_id,
+                generation,
+                uri,
+                span,
+            } => {
+                if self.pending_link_click == Some(request_id) {
+                    self.pending_link_click = None;
+                    if let Some(uri) = uri {
+                        cx.open_url(&uri);
+                    }
+                }
+                if self.hover_request == Some((request_id, position)) {
+                    self.hover_request = None;
+                    if self.hovered_cell == Some(position) {
+                        if self
+                            .bundle
+                            .as_ref()
+                            .is_some_and(|bundle| bundle.generation == generation)
+                        {
+                            self.hovered_link = span.map(|span| (generation, span));
+                        } else {
+                            self.request_hover_link(position);
+                        }
+                    }
+                    if let Some(cell) = self.hovered_cell.filter(|cell| *cell != position) {
+                        self.request_hover_link(cell);
+                    }
+                    cx.notify();
+                }
+            }
             Effect::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Effect::DeliverHistory(history) => {
                 if let Some(link) = &self.observation {

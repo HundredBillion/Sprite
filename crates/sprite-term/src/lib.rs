@@ -385,7 +385,10 @@ pub enum TerminalCommand {
     /// Resolved on demand rather than carried in every snapshot: a link lookup
     /// is per cell, so resolving a full screen each capture would mean
     /// thousands of calls a second for information almost never used.
-    ResolveHyperlink(CellPosition),
+    ResolveHyperlink {
+        position: CellPosition,
+        request_id: u64,
+    },
     Capture,
     /// Ask for the active screen plus up to N lines of history, answered once
     /// with [`TerminalEvent::History`].
@@ -686,6 +689,23 @@ pub struct RenderCell {
     pub selected: bool,
 }
 
+/// A half-open range of visible cells containing one hyperlink label.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperlinkSpan {
+    pub row: u16,
+    pub start_column: u16,
+    pub end_column: u16,
+}
+
+impl HyperlinkSpan {
+    /// Whether a terminal cell lies within this visible link label.
+    pub fn contains(self, position: CellPosition) -> bool {
+        position.row == self.row
+            && self.start_column <= position.column
+            && position.column < self.end_column
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderRow {
     pub cells: Vec<RenderCell>,
@@ -880,7 +900,10 @@ pub enum TerminalEvent {
     /// is chosen by whatever wrote the link and may impersonate anything.
     Hyperlink {
         position: CellPosition,
+        request_id: u64,
+        generation: u64,
         uri: Option<String>,
+        span: Option<HyperlinkSpan>,
     },
     /// A child asked to put text on the clipboard and policy allowed it.
     ///

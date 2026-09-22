@@ -6,6 +6,7 @@
 use super::*;
 
 use std::ops::Range;
+use std::path::Path;
 
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window, point, px};
 use sprite_term::{CellPosition, MouseAction, MouseEvent, TerminalCommand};
@@ -29,11 +30,35 @@ pub(super) struct Drag {
     pub(super) moved: bool,
 }
 
+#[derive(Default)]
+pub(super) struct PlainLinkClick(Option<CellPosition>);
+
+impl PlainLinkClick {
+    pub(super) fn press(&mut self, cell: CellPosition, behavior: LinkClickBehavior) {
+        self.0 = (behavior == LinkClickBehavior::Plain).then_some(cell);
+    }
+
+    pub(super) fn moved_to(&mut self, cell: CellPosition) {
+        if self.0.is_some_and(|origin| origin != cell) {
+            self.0 = None;
+        }
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.0 = None;
+    }
+
+    pub(super) fn release(&mut self, cell: CellPosition) -> bool {
+        self.0.take() == Some(cell)
+    }
+}
+
 /// An application binding, resolved before anything reaches the terminal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Shortcut {
     Copy,
     Paste,
+    DeleteLine,
 }
 
 /// The application's own bindings.
@@ -58,7 +83,44 @@ pub(super) fn application_shortcut(keystroke: &gpui::Keystroke) -> Option<Shortc
     match keystroke.key.as_str() {
         "c" => Some(Shortcut::Copy),
         "v" => Some(Shortcut::Paste),
+        "backspace" if platform => Some(Shortcut::DeleteLine),
         _ => None,
+    }
+}
+
+/// Turns files dropped from the desktop into shell input without allowing a
+/// path's punctuation or whitespace to change the command line.
+pub(super) fn dropped_paths_text(paths: &[impl AsRef<Path>]) -> String {
+    paths
+        .iter()
+        .map(|path| shell_quote(&path.as_ref().to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LinkClickBehavior {
+    Plain,
+    Modified,
+    Selection,
+}
+
+/// Keeps modified link clicks distinct from ordinary and selection clicks.
+pub(super) fn link_click_behavior(modifiers: gpui::Modifiers) -> LinkClickBehavior {
+    if !modifiers.alt
+        && !modifiers.shift
+        && !modifiers.function
+        && (modifiers.platform ^ modifiers.control)
+    {
+        LinkClickBehavior::Modified
+    } else if !modifiers.modified() {
+        LinkClickBehavior::Plain
+    } else {
+        LinkClickBehavior::Selection
     }
 }
 
@@ -125,6 +187,7 @@ impl TerminalView {
                     self.send(TerminalCommand::Paste(text));
                 }
             }
+            Shortcut::DeleteLine => self.send(TerminalCommand::Input(vec![0x15])),
         }
     }
 }
@@ -280,8 +343,12 @@ impl EntityInputHandler for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Shortcut, application_shortcut};
+    use super::{
+        LinkClickBehavior, PlainLinkClick, Shortcut, application_shortcut, dropped_paths_text,
+        link_click_behavior,
+    };
     use gpui::{Keystroke, Modifiers};
+    use std::path::Path;
 
     fn press(key: &str, modifiers: Modifiers) -> Keystroke {
         Keystroke {
@@ -359,5 +426,89 @@ mod tests {
             assert_eq!(application_shortcut(&press("v", modifiers)), None);
         }
         assert_eq!(application_shortcut(&press("x", platform())), None);
+    }
+
+    #[test]
+    fn command_backspace_kills_the_line() {
+        assert_eq!(
+            application_shortcut(&press("backspace", platform())),
+            Some(Shortcut::DeleteLine)
+        );
+        assert_eq!(
+            application_shortcut(&press(
+                "backspace",
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                }
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn control_u_is_left_for_the_linux_shell_line_kill_binding() {
+        assert_eq!(
+            application_shortcut(&press(
+                "u",
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                }
+            )),
+            None,
+            "Sprite must not consume Ctrl+U; shells use it to kill the line"
+        );
+    }
+
+    #[test]
+    fn link_activation_supports_plain_and_platform_modifier_clicks() {
+        assert_eq!(
+            link_click_behavior(Modifiers::default()),
+            LinkClickBehavior::Plain
+        );
+        assert_eq!(link_click_behavior(platform()), LinkClickBehavior::Modified);
+        assert_eq!(
+            link_click_behavior(Modifiers {
+                control: true,
+                ..Modifiers::default()
+            }),
+            LinkClickBehavior::Modified
+        );
+        assert_eq!(
+            link_click_behavior(Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            }),
+            LinkClickBehavior::Selection
+        );
+    }
+
+    #[test]
+    fn plain_link_click_is_tracked_independently_of_mouse_reporting() {
+        let origin = sprite_term::CellPosition { row: 2, column: 4 };
+        let mut click = PlainLinkClick::default();
+
+        click.press(origin, LinkClickBehavior::Plain);
+        assert!(click.release(origin));
+
+        click.press(origin, LinkClickBehavior::Plain);
+        click.moved_to(sprite_term::CellPosition { row: 2, column: 5 });
+        assert!(!click.release(origin));
+
+        click.press(origin, LinkClickBehavior::Selection);
+        assert!(!click.release(origin));
+    }
+
+    #[test]
+    fn dropped_paths_are_shell_quoted_without_adding_image_markup() {
+        let paths = [
+            Path::new("/tmp/a screenshot.png"),
+            Path::new("/tmp/O'Reilly.txt"),
+        ];
+        assert_eq!(
+            dropped_paths_text(&paths),
+            "'/tmp/a screenshot.png' '/tmp/O'\\''Reilly.txt'"
+        );
     }
 }
