@@ -11,7 +11,7 @@ use std::sync::Arc;
 use libghostty_vt::Terminal;
 use libghostty_vt::kitty::graphics::PlacementIterator;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
-use libghostty_vt::screen::{CellWide, Screen};
+use libghostty_vt::screen::{CellContentTag, CellWide, Screen};
 use libghostty_vt::selection::{FormatOptions, Selection};
 use libghostty_vt::style::{RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{Point, PointCoordinate};
@@ -265,6 +265,21 @@ impl<'vt> Projector<'vt> {
                             .graphemes_utf8(&mut grapheme)
                             .map_err(vt("cell_graphemes"))?;
                         let style = cell_iteration.style().map_err(vt("cell_style"))?;
+                        let background =
+                            match raw_cell.content_tag().map_err(vt("cell_content_tag"))? {
+                                CellContentTag::BgColorPalette => SnapshotColor::Palette(
+                                    raw_cell
+                                        .bg_color_palette()
+                                        .map_err(vt("cell_background_palette"))?
+                                        .0,
+                                ),
+                                CellContentTag::BgColorRgb => SnapshotColor::Rgb(rgb(raw_cell
+                                    .bg_color_rgb()
+                                    .map_err(vt("cell_background_rgb"))?)),
+                                CellContentTag::Codepoint | CellContentTag::CodepointGrapheme => {
+                                    color(style.bg_color)
+                                }
+                            };
                         // One FFI call per cell, so it is skipped entirely when
                         // nothing is selected — the common case. Measured at ~1,900
                         // calls per capture on a default grid, which was most of a
@@ -299,7 +314,7 @@ impl<'vt> Projector<'vt> {
                             selected,
                             style: CellStyle {
                                 foreground: color(style.fg_color),
-                                background: color(style.bg_color),
+                                background,
                                 underline_color: color(style.underline_color),
                                 bold: style.bold,
                                 italic: style.italic,

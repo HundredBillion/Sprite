@@ -13,7 +13,9 @@ mod support;
 use std::ffi::OsString;
 use std::sync::Arc;
 
-use sprite_term::{ColorDefaults, Rgb, SessionConfig, SnapshotBundle, TerminalSession};
+use sprite_term::{
+    ColorDefaults, Rgb, SessionConfig, SnapshotBundle, SnapshotColor, TerminalSession,
+};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
@@ -51,6 +53,44 @@ fn configured_colours_are_what_a_pane_starts_with() {
     assert_eq!(bundle.render.default_background, color(0x44, 0x55, 0x66));
     assert_eq!(bundle.render.cursor_color, Some(color(0x77, 0x88, 0x99)));
     assert_eq!(bundle.render.palette[1], color(0xaa, 0xbb, 0xcc));
+}
+
+#[test]
+fn an_erased_blank_row_keeps_the_programs_background_before_any_text_is_typed() {
+    let background = color(0x8c, 0x8c, 0x8c);
+    let bundle = shown(
+        ColorDefaults::default(),
+        "printf '\\033[48;2;140;140;140m\\033[2K\\033[0m\\r\\nREADY\\n'; sleep 30",
+        "READY",
+    );
+
+    let backgrounds: Vec<_> = bundle.render.rows[0]
+        .cells
+        .iter()
+        .map(|cell| cell.style.background)
+        .collect();
+    assert!(
+        backgrounds
+            .iter()
+            .all(|actual| *actual == SnapshotColor::Rgb(background)),
+        "erased-cell backgrounds were {backgrounds:?}"
+    );
+}
+
+#[test]
+fn an_erased_palette_background_keeps_its_palette_reference() {
+    let bundle = shown(
+        ColorDefaults::default(),
+        "printf '\\033[48;5;42m\\033[2K\\033[0m\\r\\nREADY\\n'; sleep 30",
+        "READY",
+    );
+
+    assert!(
+        bundle.render.rows[0]
+            .cells
+            .iter()
+            .all(|cell| cell.style.background == SnapshotColor::Palette(42))
+    );
 }
 
 /// Sparse on purpose: changing one entry must not flatten the other 255.
