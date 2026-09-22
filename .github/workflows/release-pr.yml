@@ -1,0 +1,78 @@
+name: prepare release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable release version without the v prefix (for example 0.2.1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-pr-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare and open release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+
+      - name: Install the repository Rust toolchain
+        run: |
+          set -euo pipefail
+          rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$rust_version"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$rust_version"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Test release automation
+        run: python3 -m unittest scripts.test_release_automation -v
+
+      - name: Validate version and prepare release files
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "Release tag v$VERSION already exists" >&2
+            exit 1
+          fi
+          python3 scripts/prepare_release.py "$VERSION"
+          cargo update --workspace --offline
+          python3 scripts/check_release_version.py "v$VERSION"
+          cargo metadata --locked --no-deps --format-version=1 \
+            | python3 -c 'import json, sys; expected = sys.argv[1]; actual = {package["version"] for package in json.load(sys.stdin)["packages"]}; assert actual == {expected}, f"workspace versions {actual} do not match {expected}"' "$VERSION"
+          git diff --check
+          git diff --quiet && { echo "No release version changes were generated" >&2; exit 1; }
+
+      - name: Create release branch and pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          release_branch="release/v$VERSION"
+          if git ls-remote --exit-code --heads origin "$release_branch" >/dev/null 2>&1; then
+            echo "Release branch $release_branch already exists; inspect or remove it before retrying" >&2
+            exit 1
+          fi
+          git switch -c "$release_branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock packaging/PKGBUILD README.md
+          git commit -m "chore: prepare v$VERSION release"
+          git push origin "$release_branch"
+          gh pr create \
+            --base master \
+            --head "$release_branch" \
+            --title "chore: prepare v$VERSION release" \
+            --body "Updates the workspace, lockfile, Arch package recipe, and README package example to v$VERSION. After merging, push the matching v$VERSION tag; CI verifies it against Cargo."

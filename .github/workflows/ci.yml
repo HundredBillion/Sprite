@@ -22,6 +22,14 @@ env:
   GHOSTTY_COMMIT: "ab0b9da9e88fcb4b0533a1854e84628f663930af"
 
 jobs:
+  release-automation:
+    name: release version automation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Test release version helpers
+        run: python3 -m unittest scripts.test_release_automation -v
+
   arch:
     name: arch linux
     runs-on: ubuntu-latest
