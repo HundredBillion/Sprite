@@ -8,6 +8,15 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PREPARE = REPO / "scripts" / "prepare_release.py"
 CHECK = REPO / "scripts" / "check_release_version.py"
+RELEASE_WORKFLOW = REPO / ".github" / "workflows" / "release-pr.yml"
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_preparation_does_not_depend_on_rust_or_cargo(self):
+        workflow = RELEASE_WORKFLOW.read_text()
+
+        self.assertNotIn("rustup", workflow)
+        self.assertNotIn("cargo metadata", workflow)
 
 
 class PrepareReleaseTests(unittest.TestCase):
