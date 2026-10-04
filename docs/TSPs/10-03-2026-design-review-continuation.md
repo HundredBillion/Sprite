@@ -171,23 +171,23 @@ CellMetrics has one measuring constructor. ValidTerminalSize has one validating
 constructor and getters; SessionConfig and Resize carry it. Snapped/Col/Row types
 are used at the geometry edge.
 
-- [ ] Add compile-fail docs and parser tests for contradictory Element/Ownership
+- [x] Add compile-fail docs and parser tests for contradictory Element/Ownership
   shapes (including Fill + return_target), preserving existing wire error text
   where clients rely on it. Match exhaustively in rendering and host management.
-- [ ] Replace the option bag with variants for stack/text/image/grid/list and their
+- [x] Replace the option bag with variants for stack/text/image/grid/list and their
   valid attributes. Parse wire data once into valid values. Route all consumers
   through variants; do not recreate independent kind/payload pairs. Parse utility
   styles into valid values once, replacing validated strings that are parsed again
   during rendering; preserve the existing utility vocabulary and error messages.
-- [ ] Replace independent font/cell fields with measured CellMetrics. Startup and
+- [x] Replace independent font/cell fields with measured CellMetrics. Startup and
   reload assign one measured value; tests change font family/size/line height and
   verify terminal and Surface use matching metrics.
-- [ ] Introduce ValidTerminalSize, moving size validation to its constructor.
+- [x] Introduce ValidTerminalSize, moving size validation to its constructor.
   Migrate resize/session call sites and tests without clamping invalid sizes into
   acceptance. Expose unvalidated dimensions only as input/DTO where required.
-- [ ] Use Snapped(Pixels), Col and Row in grid/box geometry so unsnapped box edges
+- [x] Use Snapped(Pixels), Col and Row in grid/box geometry so unsnapped box edges
   cannot compile. Retain tiling properties across fractional scale and wide cells.
-- [ ] Run relevant parser/geometry/terminal lifecycle tests, compile-fail docs,
+- [x] Run relevant parser/geometry/terminal lifecycle tests, compile-fail docs,
   workspace tests/clippy. Commit focused invariants together with their evidence.
 
 ### Task 6: Share terminal text/rows and cache paint preparation
