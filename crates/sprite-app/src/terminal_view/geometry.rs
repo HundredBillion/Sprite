@@ -6,13 +6,9 @@
 use super::*;
 
 use gpui::{Pixels, Size, Window, px};
-use sprite_term::{TerminalCommand, TerminalSize};
+use sprite_term::{MAX_CELLS, TerminalCommand, TerminalSize};
 
 use crate::grid::{content_area, grid_origin};
-
-/// The largest grid Terminal Core will accept, mirrored here so the view never
-/// asks for one it knows will be refused.
-const MAX_CELLS: u64 = 1_000_000;
 
 /// The grid's room once docks have taken their strips, and how far right the
 /// grid moves to clear the left one.

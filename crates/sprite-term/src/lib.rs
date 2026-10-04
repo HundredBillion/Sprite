@@ -5,10 +5,12 @@
 //! the Sprite application. No libghostty pointer, borrowed row or cell,
 //! allocator, iterator, or PTY handle appears in this crate's public interface.
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("Sprite Terminal Core supports Linux and macOS only");
+
 mod foreground;
 mod graphics;
 mod png_decoder;
-#[cfg(unix)]
 mod pty_unix;
 mod shell;
 mod snapshot;
@@ -35,7 +37,7 @@ const EVENT_CAPACITY: usize = 32;
 const SNAPSHOT_CAPACITY: usize = 1;
 
 /// The largest grid Sprite will allocate, in cells.
-const MAX_CELLS: u64 = 1_000_000;
+pub const MAX_CELLS: u64 = 1_000_000;
 
 /// Default scrollback budget, in bytes. Ten mebibytes is the same order as
 /// Ghostty's own default and holds a long history at ordinary line lengths.

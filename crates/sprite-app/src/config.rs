@@ -1,21 +1,20 @@
-//! The settings Sprite reads at startup.
+//! TOML settings for startup and explicit configuration reload.
 //!
-//! **This is a slice, not the configuration subsystem.** The PRD describes a
-//! versioned TOML schema covering fonts, theme, keybindings and much else, with
-//! hot reload through a filesystem watcher and a last-known-good rollback. None
-//! of that is here. What is here is the one setting Checkpoint 3 owns —
-//! whether a window offers pane observation at all — read once when a window
-//! opens.
+//! Covers fonts, colors, named highlights, cursor, and grid padding.
+//! Also covers shell launch, scrollback, graphics budgets, and pane observation.
+//! Both platforms discover `$XDG_CONFIG_HOME/sprite/config.toml` when nonempty.
+//! Otherwise discovery uses `$HOME/.config/sprite/config.toml`.
+//! `sprite --config <path>` selects a file for that window.
 //!
-//! Absent or invalid configuration produces defaults rather than an error. A
-//! terminal that refuses to start because of a typo in a settings file is worse
-//! than one that starts with its documented behaviour and says what it ignored.
+//! Startup falls back to defaults if the file is unreadable or invalid TOML.
+//! Explicit reload rejects whole-file errors and preserves the active settings.
+//! Unusable fields use defaults or clamped values and produce complaints.
+//! The workspace decides which settings apply live or only to future sessions.
+//! No schema version or automatic file watcher is implemented.
 
 use std::path::{Path, PathBuf};
 
 /// Everything Sprite reads from a configuration file today.
-// Not `Copy` or `Eq`: a font family is a name and a size is a float. Settings
-// are read once and cloned rarely, so neither is worth contorting the type for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub pane_observation: PaneObservation,
@@ -1013,8 +1012,8 @@ pub fn path() -> Option<PathBuf> {
 
 /// Where this user's configuration lives.
 ///
-/// `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, as the PRD specifies for
-/// Linux. macOS's own location arrives with the configuration subsystem.
+/// Both platforms prefer a nonempty `$XDG_CONFIG_HOME` and fall back to `$HOME/.config`.
+/// A window's explicit `--config` path is selected by its caller.
 fn configuration_path() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(base).join("sprite/config.toml"));

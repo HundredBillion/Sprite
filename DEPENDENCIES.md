@@ -12,14 +12,19 @@ Each entry records:
 - license and source;
 - pin and update policy.
 
-CI checks unused dependencies, vulnerabilities, duplicate versions, feature
-expansion, and licenses. There is no arbitrary numerical cap: review asks how
-much maintained complexity the dependency removes from Sprite.
+CI prints duplicate versions and the resolved feature tree with locked, offline
+`cargo tree` commands on Linux. It also runs formatting, Clippy, tests, builds,
+and source-level forbidden-state checks. It does not currently run an unused
+dependency, vulnerability, or license audit, or enforce a feature-tree baseline.
+There is no arbitrary numerical cap: review asks how much maintained complexity
+the dependency removes from Sprite.
 
 ## Current direct dependencies
 
-Nine direct external crates, all pinned to exact versions in
-`Cargo.toml` and locked in `Cargo.lock`.
+Ten direct external runtime crates: nine exact version requirements and
+`resvg` with a compatible `0.45.1` requirement. All resolved versions are locked
+in `Cargo.lock`. The `sprite-term` test-only dependency `flate2 =1.1.9` is
+separate from this runtime ledger.
 
 ### `toml` `=0.8.23`
 
@@ -41,10 +46,12 @@ edge from `sprite-app`.
 no `serde` derive integration. Sprite reads a `toml::Value` and takes the fields
 it knows, so a key it does not understand is ignored rather than refused.
 
-**Scope today.** One setting, `pane_observation.enabled`, read once when a
-window opens. The versioned schema, hot reload, filesystem watcher, and
-last-known-good rollback the PRD describes are not implemented and are not
-covered by this entry.
+**Scope today.** Fonts, colors, highlights, cursor, grid padding, shell launch,
+scrollback, graphics budgets, and pane observation, read at window startup and
+on explicit `sprite config reload`. Whole-file reload errors preserve active
+settings; field-level complaints retain defaults or clamp values while the
+rest apply. No schema version, configurable keybinding table, or filesystem
+watcher is implemented.
 
 **License and source.** MIT OR Apache-2.0, crates.io.
 
@@ -73,13 +80,36 @@ compiled in and none of them ever sees a byte a child printed.
 **Pin and updates.** Exact pin, and it must stay equal to whatever version GPUI
 resolves to; a mismatch is a type error rather than a runtime surprise.
 
+### `resvg` `0.45.1` (compatible requirement)
+
+**Capability.** Rasterizing SVG Surface elements, including text, into image
+buffers that Sprite hands to GPUI. Its re-exported font database also supports
+the reference-font inspection tools.
+
+**Why not std.** The standard library has no SVG parser, rasterizer, font
+discovery, or text shaping. GPUI's image buffer interface does not render the
+SVG descriptions supplied through the Surface Channel.
+
+**Features.** Defaults off; `text`, `system-fonts`, and `memmap-fonts` are enabled
+for shaping and loading fonts. `raster-images` stays off, so the optional GIF,
+WebP, and JPEG decoders are not enabled by Sprite's declaration. Sprite loads
+system fonts and bundled Adwaita Sans fonts for SVG text.
+
+**License and source.** Apache-2.0 OR MIT.
+<https://github.com/linebender/resvg>.
+
+**Pin and updates.** The manifest uses `version = "0.45.1"`, which permits
+compatible `0.45.x` releases; `Cargo.lock` currently resolves `0.45.1`.
+This is the exception to the exact-pin policy. Version or feature changes need
+SVG rendering and font validation; locked CI does not automatically update it.
+
 ### `png` `=0.18.1`
 
 **Capability.** Decoding PNG images transmitted through the Kitty graphics
 protocol.
 
 **Not provided.** `libghostty-vt` accepts a decoder through `set_png_decoder`
-but does not supply a usable one — see its entry above for the two reasons.
+but does not supply a usable one — see its entry for the two reasons.
 Sprite therefore implements `DecodePng` itself, and needs a PNG decoder to do
 it. Writing one is out of the question: PNG is a container format with
 filtering, interlacing, palettes, and multiple bit depths, decoded from bytes an
@@ -123,8 +153,9 @@ without inventing a field.
 `gpui`. Declaring it directly changed the lock file by exactly one line — an
 edge from `sprite-app` — with no new crates and no version changes.
 
-**Features.** Defaults (`std`). No `preserve_order`, no `arbitrary_precision`,
-no `unbounded_depth`.
+**Features.** Defaults (`std`) plus explicitly enabled `preserve_order`, because
+Surface Channel events promise the `"type"` field first and retain construction
+order. No `arbitrary_precision` or `unbounded_depth`.
 
 **Derive is deliberately not used.** The schema is built by writing every field
 out by hand rather than deriving `Serialize` on Sprite's own types. A derive
@@ -160,9 +191,9 @@ correctness-hard code Sprite would otherwise own.
 `windows-manifest`. Linux re-enables `wayland` and `x11`; each transitively
 enables `blade-graphics`, `blade-macros`, `blade-util`, `bytemuck`,
 `cosmic-text`, `font-kit`, `xkbcommon`, `open`, and its own protocol crates.
-macOS enables no features, so `font-kit` stays off there; Task 8 must confirm
-that the macOS backend loads a monospaced face without it and re-enable the
-feature in this ledger if it does not.
+macOS explicitly enables `font-kit` so GPUI selects its real text system rather
+than the no-op backend. Sprite's development dependency also enables
+`test-support` for headless GUI tests.
 
 **License and source.** Apache-2.0. <https://github.com/zed-industries/zed>.
 
@@ -249,7 +280,8 @@ lifecycle and reaping suite.
 ### `nix` `=0.28.0`
 
 **Capability.** An interruptible PTY-read wait (`poll` on the PTY plus a
-cancellation socket) and bounded process-group shutdown (`signal`, `process`).
+cancellation socket), bounded process-group shutdown (`signal`, `process`),
+and safe descriptor duplication and flags (`fs`).
 
 **Why not std.** `std` offers no way to wake a blocking read on another
 descriptor and no process-group signalling. Without it the PTY reader is
@@ -257,9 +289,9 @@ unjoinable whenever a descendant holds the PTY open, and the only alternatives
 are periodic polling, a detached thread, or an async runtime — all rejected by
 ADR 0011 and the Phase 1 threading model.
 
-**Features.** Sprite directly declares `default-features = false` with `poll`,
-`process`, and `signal`, on Unix targets only. `portable-pty` already resolves
-this same package and requests `default`, `term`, and `fs`, so Cargo's resolved
+**Features.** Sprite directly declares `default-features = false` with `fs`,
+`poll`, `process`, and `signal`, on Unix targets only. `portable-pty` already
+resolves this same package and requests `default`, `term`, and `fs`, so Cargo's resolved
 union is `default`, `fs`, `poll`, `process`, `signal`, and `term`. The direct
 declaration therefore adds audited OS operations rather than another package.
 
@@ -322,14 +354,15 @@ These are not runtime Rust dependencies.
 
 ## Duplicate versions
 
-`cargo tree --duplicates` reports 106 duplicated packages. Every one is reached
-only through GPUI's dependency tree — for example `async-channel 1.9.0` via
+`cargo tree --locked --offline --duplicates` prints the current duplicated
+package versions; the total depends on the target and resolved graph. For
+example, GPUI brings in `async-channel 1.9.0` via
 `async-std`, alongside `async-channel 2.5.0` via `smol` and `zbus`. Sprite's own
-five direct dependencies contribute no duplicates, and Sprite declares
-`async-channel` at the version GPUI already resolves. These are accepted as
-GPUI/platform-integration duplicates rather than enumerated individually; a
-duplicate introduced by a Sprite direct dependency is a review finding and
-needs its own entry here.
+direct `async-channel` declaration matches GPUI's resolved version. Existing
+GPUI/platform-integration duplicates are accepted rather than enumerated
+individually; a duplicate introduced by a Sprite direct dependency is a review
+finding and needs its own entry here. CI reports the graph for review rather
+than enforcing a duplicate-count threshold.
 
 Croft, Neovim, tmux, Omarchy, AI providers, `gpui-ghostty`, and `tty7` are not
 runtime dependencies. GPUI resolves `async-std`, `smol`, and `tokio`
