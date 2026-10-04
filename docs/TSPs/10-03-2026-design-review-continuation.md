@@ -308,20 +308,20 @@ terminal_view settings consumers; Cargo manifests/lock; DEPENDENCIES.md.
 bounded finite metrics and canonical palette entries. Settings::diff produces a
 typed change set consumed by reload and documented live/restart behavior.
 
-- [ ] Capture existing config parse/to_toml behavior and error-recovery fixtures.
+- [x] Capture existing config parse/to_toml behavior and error-recovery fixtures.
   Add proptest (test-only, pinned) and direct serde 1.0.229; fetch once, then offline.
-- [ ] Deserialize raw fields with serde while preserving per-field diagnostics and
+- [x] Deserialize raw fields with serde while preserving per-field diagnostics and
   fallback for malformed sections, unknown keys and values. Convert to validated
   newtypes through one constructor per invariant. No NaN/zero/negative metrics can
   enter drawable settings through CLI/font actions or tests.
-- [ ] Canonicalize palette indices in the type; remove duplicate default values
+- [x] Canonicalize palette indices in the type; remove duplicate default values
   from parser/serializer/app paths. Preserve explicit ordering in serialized files.
-- [ ] Replace classify with Settings::diff and use its typed live/restart effects
+- [x] Replace classify with Settings::diff and use its typed live/restart effects
   during reload. One source defines both behavior and explanatory diagnostics.
-- [ ] Add generated `parse(to_toml(settings)) == settings` and drawable-metrics
+- [x] Add generated `parse(to_toml(settings)) == settings` and drawable-metrics
   properties with boundary/nonfinite cases and shrinking. Test malformed-input
   compatibility and round-trip all settings sections/highlights/shell preferences.
-- [ ] Run config/property/reload tests and full locked offline suite/clippy; update
+- [x] Run config/property/reload tests and full locked offline suite/clippy; update
   dependency ledger and configuration docs. Commit parser + caller migration.
 
 ### Task 11: Split remaining large files by responsibility and complete PR
