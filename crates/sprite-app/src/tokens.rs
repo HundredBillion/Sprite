@@ -253,7 +253,7 @@ mod tests {
     fn the_theme_overrides_a_built_in_token_by_its_existing_colors_key() {
         let colors = Colors {
             background: Some(rgb(0x123456)),
-            palette: vec![(4, rgb(0xabcdef))],
+            palette: vec![(4, rgb(0xabcdef))].into(),
             ..Colors::default()
         };
         let registry = TokenRegistry::new(&colors);
@@ -279,7 +279,7 @@ mod tests {
         );
 
         let colors = Colors {
-            tokens: vec![("scm.added".to_owned(), rgb(0x40a02b))],
+            tokens: vec![("scm.added".to_owned(), rgb(0x40a02b))].into(),
             ..Colors::default()
         };
         registry.apply_theme(&colors);
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn a_theme_only_token_counts_as_known() {
         let colors = Colors {
-            tokens: vec![("demo.label".to_owned(), rgb(0xc0caf5))],
+            tokens: vec![("demo.label".to_owned(), rgb(0xc0caf5))].into(),
             ..Colors::default()
         };
         let registry = TokenRegistry::new(&colors);

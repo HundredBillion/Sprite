@@ -79,7 +79,7 @@ pub struct Workspace {
     settings: crate::config::Settings,
     /// The size the configuration asked for, so "reset" returns to what a
     /// person set rather than to Sprite's own default.
-    configured_font_size: f32,
+    configured_font_size: crate::config::FontSize,
     /// What every pane in this window runs instead of a login shell.
     ///
     /// Held so that a pane created later — by a split or a new tab — runs the
@@ -675,9 +675,11 @@ impl Workspace {
         };
         let (settings, complaints) = candidate;
 
-        let outcome = classify(&self.settings, &settings);
-        cx.global_mut::<crate::tokens::TokenRegistry>()
-            .apply_theme(&settings.colors);
+        let outcome = self.settings.diff(&settings);
+        if outcome.has(crate::config::LiveChange::Colors) {
+            cx.global_mut::<crate::tokens::TokenRegistry>()
+                .apply_theme(&settings.colors);
+        }
         // Published, not pushed: each pane observes the global with its own
         // window in hand, which is what a cell re-measure needs and what this
         // method, reached from an endpoint thread, does not have.
@@ -686,7 +688,9 @@ impl Workspace {
         self.configured_font_size = self.settings.font.size;
         // Observation is the one setting the window itself owns, and it can be
         // turned on or off without a frame.
-        self.set_observation_enabled(self.settings.pane_observation.enabled, cx);
+        if outcome.has(crate::config::LiveChange::Observation) {
+            self.set_observation_enabled(self.settings.pane_observation.enabled, cx);
+        }
         cx.notify();
 
         outcome.describe(&path, &complaints.0)
@@ -924,11 +928,7 @@ impl Workspace {
         // A keystroke has no complaints channel, so the size is simply held
         // inside the readable range; a file setting goes through the same
         // rule and says so when it had to.
-        let wanted = crate::config::clamp_or_default(
-            self.settings.font.size + delta,
-            crate::config::Font::MIN_SIZE..=crate::config::Font::MAX_SIZE,
-            crate::config::Font::DEFAULT_SIZE,
-        );
+        let wanted = crate::config::FontSize::new(self.settings.font.size.get() + delta);
         self.apply_font_size(wanted, cx);
     }
 
@@ -939,8 +939,8 @@ impl Workspace {
         self.apply_font_size(configured, cx);
     }
 
-    fn apply_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        if (size - self.settings.font.size).abs() < f32::EPSILON {
+    fn apply_font_size(&mut self, size: crate::config::FontSize, cx: &mut Context<Self>) {
+        if size == self.settings.font.size {
             return;
         }
         self.settings.font.size = size;
@@ -1090,84 +1090,6 @@ fn session_environment(
             .flat_map(|surfaces| surfaces.environment(tab, pane)),
     );
     environment
-}
-
-/// What a reload changed, and when each change takes effect.
-///
-/// The three groups are the honest ones. "Live" is applied before the answer
-/// is printed. "Next session" is a setting that belongs to a terminal already
-/// running — its shell, its scrollback, what it will accept in the way of
-/// images — and quietly restarting a PTY to apply it would discard somebody's
-/// work. "Ignored" is what the file asked for and could not have.
-#[derive(Debug, Default, Eq, PartialEq)]
-struct ReloadOutcome {
-    live: Vec<&'static str>,
-    next_session: Vec<&'static str>,
-}
-
-impl ReloadOutcome {
-    fn describe(&self, path: &std::path::Path, ignored: &[String]) -> String {
-        let mut lines = vec![format!("reloaded {}", path.display())];
-        if self.live.is_empty() && self.next_session.is_empty() {
-            lines.push("nothing changed".to_owned());
-        }
-        if !self.live.is_empty() {
-            lines.push(format!("applied now: {}", self.live.join(", ")));
-        }
-        if !self.next_session.is_empty() {
-            lines.push(format!(
-                "waiting for a new pane: {}",
-                self.next_session.join(", ")
-            ));
-        }
-        for complaint in ignored {
-            lines.push(format!("ignored: {complaint}"));
-        }
-        lines.join("\n")
-    }
-}
-
-/// Sorts the differences between two configurations into when they can apply.
-fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -> ReloadOutcome {
-    let mut outcome = ReloadOutcome::default();
-
-    if current.font != next.font {
-        outcome.live.push("font");
-    }
-    if current.colors != next.colors {
-        outcome.live.push("colors");
-    }
-    if current.grid != next.grid {
-        outcome.live.push("grid");
-    }
-    if current.highlights != next.highlights {
-        outcome.live.push("highlights");
-    }
-    if current.cursor != next.cursor {
-        outcome.live.push("cursor");
-    }
-    if current.graphics.texture_bytes != next.graphics.texture_bytes {
-        outcome.live.push("graphics.texture_bytes");
-    }
-    if current.pane_observation != next.pane_observation {
-        outcome.live.push("pane_observation");
-    }
-
-    if current.shell != next.shell {
-        outcome.next_session.push("shell");
-    }
-    if current.scrollback != next.scrollback {
-        outcome.next_session.push("scrollback");
-    }
-    // The terminal's own image limits are set when a session starts, and
-    // lowering one afterwards would not release what a pane already holds.
-    if current.graphics.enabled != next.graphics.enabled
-        || current.graphics.storage_bytes != next.graphics.storage_bytes
-    {
-        outcome.next_session.push("graphics storage");
-    }
-
-    outcome
 }
 
 /// One pane's place in the frame: its identity, its pixel rectangle as
@@ -1921,7 +1843,7 @@ impl Render for Workspace {
 mod tests {
     use super::{
         CloseScope, CursorStyle, DIVIDER_FLOOR_PX, DIVIDER_GRAB_PX, DIVIDER_PX, Direction,
-        DividerDrag, Orientation, PaneId, RenameStep, WorkspaceAction, classify, describe_running,
+        DividerDrag, Orientation, PaneId, RenameStep, WorkspaceAction, describe_running,
         divider_placements, divider_ratio, nudged_ratio, rename_step, strip_leading, tab_label,
         window_title, workspace_action,
     };
@@ -2777,15 +2699,15 @@ mod tests {
         let current = Settings::default();
 
         let mut fonts = current.clone();
-        fonts.font.size = 20.0;
-        let outcome = classify(&current, &fonts);
-        assert_eq!(outcome.live, vec!["font"]);
+        fonts.font.size = crate::config::FontSize::new(20.0);
+        let outcome = current.diff(&fonts);
+        assert_eq!(outcome.live, vec![crate::config::LiveChange::Font]);
         assert!(outcome.next_session.is_empty());
 
         let mut grid = current.clone();
-        grid.grid.padding = 24.0;
-        let outcome = classify(&current, &grid);
-        assert_eq!(outcome.live, vec!["grid"]);
+        grid.grid.padding = crate::config::Padding::new(24.0);
+        let outcome = current.diff(&grid);
+        assert_eq!(outcome.live, vec![crate::config::LiveChange::Grid]);
         assert!(outcome.next_session.is_empty());
 
         let mut highlights = current.clone();
@@ -2796,27 +2718,36 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        let outcome = classify(&current, &highlights);
-        assert_eq!(outcome.live, vec!["highlights"]);
+        let outcome = current.diff(&highlights);
+        assert_eq!(outcome.live, vec![crate::config::LiveChange::Highlights]);
         assert!(outcome.next_session.is_empty());
 
         let mut shell = current.clone();
-        shell.scrollback.bytes = 4096;
-        shell.shell.program = Some(std::path::PathBuf::from("/bin/zsh"));
-        let outcome = classify(&current, &shell);
+        shell.scrollback.bytes = crate::config::ScrollbackBytes::new(4096);
+        shell.shell.program = crate::config::NonBlank::new("/bin/zsh".into());
+        let outcome = current.diff(&shell);
         assert!(outcome.live.is_empty());
-        assert_eq!(outcome.next_session, vec!["shell", "scrollback"]);
+        assert_eq!(
+            outcome.next_session,
+            vec![
+                crate::config::NextSessionChange::Shell,
+                crate::config::NextSessionChange::Scrollback
+            ]
+        );
 
         // The two graphics limits part company here: one belongs to the
         // renderer and can change now, the other to a terminal already running.
         let mut graphics = current.clone();
-        graphics.graphics.texture_bytes = 1024;
-        graphics.graphics.storage_bytes = 1024;
-        let outcome = classify(&current, &graphics);
-        assert_eq!(outcome.live, vec!["graphics.texture_bytes"]);
-        assert_eq!(outcome.next_session, vec!["graphics storage"]);
+        graphics.graphics.texture_bytes = crate::config::TextureBytes::new(1024);
+        graphics.graphics.storage_bytes = crate::config::StorageBytes::new(1024);
+        let outcome = current.diff(&graphics);
+        assert_eq!(outcome.live, vec![crate::config::LiveChange::TextureBudget]);
+        assert_eq!(
+            outcome.next_session,
+            vec![crate::config::NextSessionChange::GraphicsStorage]
+        );
 
-        assert_eq!(classify(&current, &current), Default::default());
+        assert_eq!(current.diff(&current), Default::default());
     }
 
     #[test]
@@ -2824,9 +2755,9 @@ mod tests {
         use crate::config::Settings;
 
         let mut next = Settings::default();
-        next.font.size = 20.0;
-        next.scrollback.bytes = 4096;
-        let report = classify(&Settings::default(), &next).describe(
+        next.font.size = crate::config::FontSize::new(20.0);
+        next.scrollback.bytes = crate::config::ScrollbackBytes::new(4096);
+        let report = Settings::default().diff(&next).describe(
             std::path::Path::new("/home/someone/.config/sprite/config.toml"),
             &["cursor.style \"wobbly\" is not one of them".to_owned()],
         );
@@ -2836,7 +2767,8 @@ mod tests {
         assert!(report.contains("waiting for a new pane: scrollback"));
         assert!(report.contains("ignored: cursor.style"));
 
-        let unchanged = classify(&Settings::default(), &Settings::default())
+        let unchanged = Settings::default()
+            .diff(&Settings::default())
             .describe(std::path::Path::new("/tmp/config.toml"), &[]);
         assert!(unchanged.contains("nothing changed"));
     }

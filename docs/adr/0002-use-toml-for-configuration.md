@@ -15,7 +15,7 @@ file. The macOS Application Support path remains unimplemented.
 The implemented settings cover fonts, colors, named highlights, cursor, grid
 padding, shell launch, scrollback, graphics budgets, and pane observation.
 There is no schema version or configurable keybinding table yet. Unknown keys
-are ignored. Unusable fields generate complaints and use defaults or clamped
+are ignored with diagnostics. Unusable fields generate complaints and use defaults or clamped
 values while the remaining settings apply.
 
 Sprite exposes explicit `sprite config reload` through the containing window's
@@ -29,3 +29,30 @@ Reload never restarts an existing Terminal Session. Fonts, colors, highlights,
 cursor, grid padding, texture budget, and pane observation update live. Shell,
 scrollback, and terminal graphics storage settings affect future panes and are
 reported as waiting for a new pane.
+
+Configuration deserializes into raw typed sections before constructing validated
+settings. A malformed section keeps its defaults; a malformed field keeps its
+fallback without discarding valid siblings. Font size is finite within 6–72,
+line height within 1–2, and padding within 0–64 logical pixels. NaN uses the
+field default; infinities and out-of-range numbers clamp to the nearest bound.
+Font actions use the same constructors. Scrollback caps at 1 GiB; graphics
+budgets fit TOML's nonnegative signed-integer range and the platform byte count.
+
+Palette entries, tokens, and highlight groups are sorted and unique in memory.
+Construction resolves duplicate keys to the last supplied value. TOML palette
+aliases such as `01` and `1` are processed in lexical key order, so `1` wins.
+Printed configuration preserves section order, escapes arbitrary Unicode and
+control characters, and serializes highlight groups as TOML subtables.
+
+File preferences are UTF-8. Blank-only font names, shell paths and startup
+directories use the default; nonblank values preserve surrounding whitespace.
+Empty strings remain valid shell arguments and token/highlight names.
+CLI commands and session commands continue to use OS strings, including
+non-UTF-8 bytes on Unix; printing file settings does not transcode those commands.
+
+`Settings::diff` classifies changes as typed live or next-session effects.
+The workspace uses those effects for token and observation changes, and each
+pane applies only its changed live settings. The reload report names the same
+effects. An unchanged reload does not remeasure fonts or send color/cursor
+commands to the terminal. Next-session preferences are retained for new panes
+without changing running PTYs.

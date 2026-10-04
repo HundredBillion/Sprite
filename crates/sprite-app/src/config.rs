@@ -9,10 +9,16 @@
 //! Startup falls back to defaults if the file is unreadable or invalid TOML.
 //! Explicit reload rejects whole-file errors and preserves the active settings.
 //! Unusable fields use defaults or clamped values and produce complaints.
-//! The workspace decides which settings apply live or only to future sessions.
+//! Typed differences define which settings apply live or only to future sessions.
 //! No schema version or automatic file watcher is implemented.
 
 use std::path::{Path, PathBuf};
+
+mod changes;
+mod raw;
+mod validated;
+pub use changes::*;
+pub use validated::*;
 
 /// Everything Sprite reads from a configuration file today.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,7 +30,7 @@ pub struct Settings {
     pub highlights: Highlights,
     pub cursor: Cursor,
     pub grid: Grid,
-    pub shell: sprite_term::ShellPreference,
+    pub shell: Shell,
     pub scrollback: Scrollback,
 }
 
@@ -50,20 +56,20 @@ pub struct PaneObservation {
 }
 
 /// The text a terminal is mostly made of.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Font {
     /// The family to use, or `None` to let Sprite find a monospace one.
     ///
     /// A name that is not installed is *not* an error: Sprite falls back to its
     /// own search and says what it did. A terminal that refused to open because
     /// of a font name would be worse than one that opens in the wrong font.
-    pub family: Option<String>,
-    pub size: f32,
+    pub family: Option<NonBlank>,
+    pub size: FontSize,
     /// Line height as a ratio of the size, applied and rounded per row.
     ///
     /// A ratio rather than pixels, so one setting survives a size change: a
     /// person who likes airy lines at 14 gets airy lines at 18.
-    pub line_height: f32,
+    pub line_height: LineHeight,
 }
 
 impl Font {
@@ -88,16 +94,6 @@ impl Font {
     }
 }
 
-impl Default for Font {
-    fn default() -> Self {
-        Self {
-            family: None,
-            size: Self::DEFAULT_SIZE,
-            line_height: Self::DEFAULT_LINE_HEIGHT,
-        }
-    }
-}
-
 /// Colours a person prefers, for the parts of a terminal that have one.
 ///
 /// **A preference, not an override.** These become the pane's *default*
@@ -116,13 +112,13 @@ pub struct Colors {
     ///
     /// Sparse: someone who dislikes one shade of blue changes that one entry
     /// rather than restating the palette.
-    pub palette: Vec<(u8, sprite_term::Rgb)>,
+    pub palette: CanonicalMap<u8, sprite_term::Rgb>,
     /// Colour tokens to override by name, sorted by name.
     ///
     /// The other keys in this section override Sprite's built-in tokens
     /// (`terminal.background`, `ansi.4`, …) under their old names; this table
     /// reaches tokens a program registers, such as `scm.addedForeground`.
-    pub tokens: Vec<(String, sprite_term::Rgb)>,
+    pub tokens: CanonicalMap<String, sprite_term::Rgb>,
 }
 
 impl Colors {
@@ -166,15 +162,15 @@ pub struct Highlights {
     /// Sorted by name, so file order is not meaning. Private because the sort
     /// is the invariant `get` binary-searches on, and only
     /// [`Highlights::from_groups`] establishes it.
-    groups: Vec<(String, HighlightStyle)>,
+    groups: CanonicalMap<String, HighlightStyle>,
 }
 
 impl Highlights {
-    /// Sorted by name on the way in, which is what lets `get` binary-search;
-    /// build one this way rather than pushing onto `groups`.
-    pub fn from_groups(mut groups: Vec<(String, HighlightStyle)>) -> Self {
-        groups.sort_by(|a, b| a.0.cmp(&b.0));
-        Self { groups }
+    /// Sort by name and keep the last value for duplicate names.
+    pub fn from_groups(groups: Vec<(String, HighlightStyle)>) -> Self {
+        Self {
+            groups: groups.into(),
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&HighlightStyle> {
@@ -229,13 +225,13 @@ impl Cursor {
 }
 
 /// The grid's surroundings: what is not a cell.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Grid {
     /// Logical pixels between the grid and every edge of its pane.
     ///
     /// The smallest gap; the leftover from rounding the pane down to whole
     /// cells is added to it. Zero is allowed: some people want every pixel.
-    pub padding: f32,
+    pub padding: Padding,
 }
 
 impl Grid {
@@ -252,14 +248,6 @@ impl Grid {
     pub const MAX_PADDING: f32 = 64.0;
 }
 
-impl Default for Grid {
-    fn default() -> Self {
-        Self {
-            padding: Self::DEFAULT_PADDING,
-        }
-    }
-}
-
 /// How much output a pane remembers.
 ///
 /// Bytes, not lines, because that is what libghostty actually measures — its
@@ -268,7 +256,7 @@ impl Default for Grid {
 /// point of exposing it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Scrollback {
-    pub bytes: usize,
+    pub bytes: ScrollbackBytes,
 }
 
 impl Scrollback {
@@ -282,7 +270,7 @@ impl Scrollback {
 impl Default for Scrollback {
     fn default() -> Self {
         Self {
-            bytes: sprite_term::default_scrollback_bytes(),
+            bytes: ScrollbackBytes::new(sprite_term::default_scrollback_bytes()),
         }
     }
 }
@@ -298,17 +286,17 @@ impl Default for Scrollback {
 pub struct Graphics {
     pub enabled: bool,
     /// Decoded image bytes the terminal may hold for one pane.
-    pub storage_bytes: u64,
+    pub storage_bytes: StorageBytes,
     /// Texture bytes the renderer may hold for one pane.
-    pub texture_bytes: usize,
+    pub texture_bytes: TextureBytes,
 }
 
 impl Default for Graphics {
     fn default() -> Self {
         Self {
             enabled: true,
-            storage_bytes: sprite_term::GraphicsPolicy::DEFAULT_STORAGE_BYTES,
-            texture_bytes: crate::graphics_cache::DEFAULT_BUDGET_BYTES,
+            storage_bytes: StorageBytes::new(sprite_term::GraphicsPolicy::DEFAULT_STORAGE_BYTES),
+            texture_bytes: TextureBytes::new(crate::graphics_cache::DEFAULT_BUDGET_BYTES),
         }
     }
 }
@@ -321,7 +309,7 @@ impl Default for Settings {
             highlights: Highlights::default(),
             cursor: Cursor::default(),
             grid: Grid::default(),
-            shell: sprite_term::ShellPreference::default(),
+            shell: Shell::default(),
             scrollback: Scrollback::default(),
             graphics: Graphics::default(),
             // Observation is on by default: the PRD makes it automatically
@@ -351,7 +339,7 @@ impl Settings {
 
         out.push_str("[font]\n");
         match &self.font.family {
-            Some(family) => out.push_str(&format!("family = {family:?}\n")),
+            Some(family) => out.push_str(&format!("family = {}\n", quote(family))),
             None => out.push_str("# family is unset: Sprite finds an installed monospace font\n"),
         }
         out.push_str(&format!("size = {}\n", self.font.size));
@@ -385,36 +373,41 @@ impl Settings {
             out.push_str("# no colour tokens are overridden\n");
         } else {
             out.push_str("\n[colors.tokens]\n");
-            for (name, color) in &self.colors.tokens {
-                // Quoted: token names contain dots, which TOML would otherwise
-                // read as nested tables.
-                out.push_str(&format!("\"{name}\" = \"{}\"\n", hex(*color)));
-            }
+            let tokens: std::collections::BTreeMap<_, _> = self
+                .colors
+                .tokens
+                .iter()
+                .map(|(name, color)| (name, hex(*color)))
+                .collect();
+            out.push_str(&toml::to_string(&tokens).expect("string token map serializes"));
         }
         if self.highlights.groups.is_empty() {
             out.push_str("# no highlight groups are styled\n");
         } else {
-            out.push_str("\n[highlights]\n");
+            let mut groups = toml::Table::new();
             for (name, style) in &self.highlights.groups {
-                let mut fields = Vec::new();
+                let mut fields = toml::Table::new();
                 if let Some(color) = style.color {
-                    fields.push(format!("color = \"{}\"", hex(color)));
+                    fields.insert("color".into(), hex(color).into());
                 }
                 if let Some(color) = style.background {
-                    fields.push(format!("bg = \"{}\"", hex(color)));
+                    fields.insert("bg".into(), hex(color).into());
                 }
                 if let Some(bold) = style.bold {
-                    fields.push(format!("bold = {bold}"));
+                    fields.insert("bold".into(), bold.into());
                 }
                 if let Some(italic) = style.italic {
-                    fields.push(format!("italic = {italic}"));
+                    fields.insert("italic".into(), italic.into());
                 }
                 if let Some(underline) = style.underline {
-                    fields.push(format!("underline = \"{}\"", underline_name(underline)));
+                    fields.insert("underline".into(), underline_name(underline).into());
                 }
-                // Quoted: group names such as @lsp.type.comment contain dots.
-                out.push_str(&format!("\"{name}\" = {{ {} }}\n", fields.join(", ")));
+                groups.insert(name.clone(), fields.into());
             }
+            let mut section = toml::Table::new();
+            section.insert("highlights".into(), groups.into());
+            out.push('\n');
+            out.push_str(&toml::to_string(&section).expect("highlight tables serialize"));
         }
 
         out.push_str("\n[cursor]\n");
@@ -429,26 +422,18 @@ impl Settings {
 
         out.push_str("\n[shell]\n");
         match &self.shell.program {
-            Some(program) => {
-                out.push_str(&format!("program = {:?}\n", program.display().to_string()))
-            }
+            Some(program) => out.push_str(&format!("program = {}\n", quote(program))),
             None => out.push_str("# program is unset: the login shell is run\n"),
         }
         match &self.shell.args {
             Some(args) => {
-                let rendered: Vec<String> = args
-                    .iter()
-                    .map(|argument| format!("{:?}", argument.to_string_lossy()))
-                    .collect();
+                let rendered: Vec<String> = args.iter().map(|argument| quote(argument)).collect();
                 out.push_str(&format!("args = [{}]\n", rendered.join(", ")));
             }
             None => out.push_str("# args is unset\n"),
         }
         match &self.shell.startup_directory {
-            Some(directory) => out.push_str(&format!(
-                "startup_directory = {:?}\n",
-                directory.display().to_string()
-            )),
+            Some(directory) => out.push_str(&format!("startup_directory = {}\n", quote(directory))),
             None => {
                 out.push_str("# startup_directory is unset: panes start where Sprite did\n");
             }
@@ -471,6 +456,10 @@ impl Settings {
 
         out
     }
+}
+
+fn quote(text: &str) -> String {
+    toml::Value::String(text.to_owned()).to_string()
 }
 
 fn hex(color: sprite_term::Rgb) -> String {
@@ -496,94 +485,6 @@ fn style_name(style: sprite_term::CursorStyle) -> &'static str {
         sprite_term::CursorStyle::Underline => "underline",
         sprite_term::CursorStyle::BlockHollow => "hollow",
     }
-}
-
-/// A value inside `range`, or `default` when it is not a number at all. The
-/// one place Sprite decides what a numeric setting becomes when it cannot be
-/// used as given, whether it arrived from a file or from a keystroke.
-pub(crate) fn clamp_or_default(
-    value: f32,
-    range: std::ops::RangeInclusive<f32>,
-    default: f32,
-) -> f32 {
-    if value.is_nan() {
-        default
-    } else {
-        value.clamp(*range.start(), *range.end())
-    }
-}
-
-/// Reads a numeric setting and clamps it into range, saying so.
-///
-/// Every number setting shares this shape: an integer is a number too (TOML
-/// tells them apart and a person should not have to); a value outside
-/// `range` is clamped with a complaint naming the range; `nan` cannot be
-/// clamped, so it keeps `default` with the same complaint; a non-number
-/// keeps the default with a complaint. `None` means unset or unusable —
-/// either way the caller leaves its default alone. `setting` is the dotted
-/// name shown in complaints, such as `"font.size"`, whose last segment is
-/// the TOML key.
-fn read_clamped(
-    section: &toml::Value,
-    setting: &str,
-    range: std::ops::RangeInclusive<f32>,
-    default: f32,
-    complaints: &mut Complaints,
-) -> Option<f32> {
-    let key = setting.rsplit_once('.').map_or(setting, |(_, key)| key);
-    let value = section.get(key)?;
-    match value
-        .as_float()
-        .or_else(|| value.as_integer().map(|v| v as f64))
-    {
-        Some(number) => {
-            let asked = number as f32;
-            let clamped = clamp_or_default(asked, range.clone(), default);
-            if asked.is_nan() || (clamped - asked).abs() > f32::EPSILON {
-                // TOML spells not-a-number `nan`; `{asked}` would print `NaN`,
-                // which the complaint's `contains("nan")` check would miss.
-                let asked = if asked.is_nan() {
-                    "nan".to_owned()
-                } else {
-                    asked.to_string()
-                };
-                complaints.0.push(format!(
-                    "{setting} {asked} is outside {}..={}; using {clamped}",
-                    range.start(),
-                    range.end()
-                ));
-            }
-            Some(clamped)
-        }
-        None => {
-            complaints
-                .0
-                .push(format!("{setting} must be a number; keeping the default"));
-            None
-        }
-    }
-}
-
-/// Builds "this key is the wrong type" in the one shape a settings file
-/// complaint about a mistyped key takes.
-///
-/// `None` covers both an absent key (not a complaint) and one already
-/// handled by an earlier match arm, so a call site can fold its whole
-/// "wrong type" arm into one line whatever else that key's match does.
-/// `consequence` is spelled out by the caller rather than fixed to "keeping
-/// the default", because most of these settings fall back to something more
-/// specific — the login shell, a monospace font, the previous value.
-fn wrong_type(
-    value: Option<&toml::Value>,
-    key: &str,
-    wanted: &str,
-    consequence: &str,
-) -> Option<String> {
-    let other = value?;
-    Some(format!(
-        "{key} must be {wanted}, not {}; {consequence}",
-        other.type_str()
-    ))
 }
 
 /// What was ignored while reading a configuration file.
@@ -643,365 +544,8 @@ impl Settings {
     /// The error carries the TOML crate's own message, which names the line and
     /// column — a reload that says only "invalid" leaves somebody hunting.
     pub fn parse_candidate(text: &str) -> Result<(Self, Complaints), String> {
-        let mut settings = Self::default();
-        let mut complaints = Complaints::default();
-
-        let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
-
-        if let Some(section) = document.get("font") {
-            match section.get("family") {
-                Some(toml::Value::String(family)) if !family.trim().is_empty() => {
-                    settings.font.family = Some(family.trim().to_owned());
-                }
-                Some(toml::Value::String(_)) => complaints
-                    .0
-                    .push("font.family is empty; finding a monospace font instead".to_owned()),
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "font.family",
-                    "a name in quotes",
-                    "finding a monospace font instead",
-                )),
-            }
-            if let Some(size) = read_clamped(
-                section,
-                "font.size",
-                Font::MIN_SIZE..=Font::MAX_SIZE,
-                Font::DEFAULT_SIZE,
-                &mut complaints,
-            ) {
-                settings.font.size = size;
-            }
-            if let Some(ratio) = read_clamped(
-                section,
-                "font.line_height",
-                Font::MIN_LINE_HEIGHT..=Font::MAX_LINE_HEIGHT,
-                Font::DEFAULT_LINE_HEIGHT,
-                &mut complaints,
-            ) {
-                settings.font.line_height = ratio;
-            }
-        }
-
-        if let Some(section) = document.get("grid")
-            && let Some(padding) = read_clamped(
-                section,
-                "grid.padding",
-                0.0..=Grid::MAX_PADDING,
-                Grid::DEFAULT_PADDING,
-                &mut complaints,
-            )
-        {
-            settings.grid.padding = padding;
-        }
-
-        if let Some(section) = document.get("graphics") {
-            match section.get("enabled") {
-                Some(toml::Value::Boolean(enabled)) => settings.graphics.enabled = *enabled,
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "graphics.enabled",
-                    "true or false",
-                    "leaving images enabled",
-                )),
-            }
-            // Read as bytes rather than a friendlier unit because a wrong guess
-            // about the unit is a wrong limit, and a limit nobody notices is
-            // the one that matters.
-            if let Some(value) = section.get("storage_bytes") {
-                match value.as_integer().and_then(|v| u64::try_from(v).ok()) {
-                    Some(bytes) => settings.graphics.storage_bytes = bytes,
-                    None => complaints.0.push(
-                        "graphics.storage_bytes must be a whole number of bytes; \
-                         keeping the default"
-                            .to_owned(),
-                    ),
-                }
-            }
-            if let Some(value) = section.get("texture_bytes") {
-                match value.as_integer().and_then(|v| usize::try_from(v).ok()) {
-                    Some(bytes) => settings.graphics.texture_bytes = bytes,
-                    None => complaints.0.push(
-                        "graphics.texture_bytes must be a whole number of bytes; \
-                         keeping the default"
-                            .to_owned(),
-                    ),
-                }
-            }
-        }
-
-        if let Some(section) = document.get("colors") {
-            let mut named = |key: &str, slot: &mut Option<sprite_term::Rgb>| match section.get(key)
-            {
-                Some(toml::Value::String(text)) => match Colors::parse_hex(text) {
-                    Some(color) => *slot = Some(color),
-                    None => complaints.0.push(format!(
-                        "colors.{key} is {text:?}, which is not a #rrggbb colour; \
-                             keeping the default"
-                    )),
-                },
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    &format!("colors.{key}"),
-                    "a #rrggbb colour in quotes",
-                    "keeping the default",
-                )),
-            };
-            named("background", &mut settings.colors.background);
-            named("foreground", &mut settings.colors.foreground);
-            named("cursor", &mut settings.colors.cursor);
-
-            match section.get("palette") {
-                Some(toml::Value::Table(entries)) => {
-                    for (key, value) in entries {
-                        let Ok(index) = key.parse::<u8>() else {
-                            complaints.0.push(format!(
-                                "colors.palette key {key:?} is not an index from 0 to 255; \
-                                 ignoring it"
-                            ));
-                            continue;
-                        };
-                        match value.as_str().and_then(Colors::parse_hex) {
-                            Some(color) => settings.colors.palette.push((index, color)),
-                            None => complaints.0.push(format!(
-                                "colors.palette.{index} is not a #rrggbb colour; \
-                                 keeping that entry"
-                            )),
-                        }
-                    }
-                    // Ascending, so the order a file happens to be written in
-                    // does not change what Sprite does with it.
-                    settings.colors.palette.sort_by_key(|&(index, _)| index);
-                }
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "colors.palette",
-                    "a table of index = \"#rrggbb\"",
-                    "keeping the palette",
-                )),
-            }
-
-            match section.get("tokens") {
-                Some(toml::Value::Table(entries)) => {
-                    for (name, value) in entries {
-                        match value.as_str().and_then(Colors::parse_hex) {
-                            Some(color) => settings.colors.tokens.push((name.clone(), color)),
-                            None => complaints.0.push(format!(
-                                "colors.tokens.{name} is not a #rrggbb colour; \
-                                 keeping that token's default"
-                            )),
-                        }
-                    }
-                    // Sorted by name, so the order a file happens to be
-                    // written in does not change what Sprite does with it.
-                    // `Rgb` is not `Ord`, so the tuple can't sort itself.
-                    settings.colors.tokens.sort_by(|a, b| a.0.cmp(&b.0));
-                }
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "colors.tokens",
-                    "a table of \"name\" = \"#rrggbb\"",
-                    "keeping the tokens",
-                )),
-            }
-        }
-
-        match document.get("highlights") {
-            None => {}
-            Some(toml::Value::Table(table)) => {
-                let mut groups = Vec::new();
-                for (name, entry) in table {
-                    let Some(fields) = entry.as_table() else {
-                        complaints.0.extend(wrong_type(
-                            Some(entry),
-                            &format!("highlights.{name}"),
-                            "a table such as { color = \"#rrggbb\", bold = true }",
-                            "ignoring it",
-                        ));
-                        continue;
-                    };
-                    let mut style = HighlightStyle::default();
-                    for (key, value) in fields {
-                        let setting = format!("highlights.{name}.{key}");
-                        match (key.as_str(), value) {
-                            ("color", toml::Value::String(text)) | ("bg", toml::Value::String(text)) => {
-                                match Colors::parse_hex(text) {
-                                    Some(color) if key == "color" => style.color = Some(color),
-                                    Some(color) => style.background = Some(color),
-                                    None => complaints.0.push(format!(
-                                        "{setting} is {text:?}, which is not a #rrggbb colour; ignoring it"
-                                    )),
-                                }
-                            }
-                            ("bold", toml::Value::Boolean(flag)) => style.bold = Some(*flag),
-                            ("italic", toml::Value::Boolean(flag)) => style.italic = Some(*flag),
-                            ("underline", toml::Value::Boolean(true)) => {
-                                style.underline = Some(sprite_term::UnderlineStyle::Single);
-                            }
-                            ("underline", toml::Value::Boolean(false)) => {
-                                style.underline = Some(sprite_term::UnderlineStyle::None);
-                            }
-                            ("underline", toml::Value::String(text)) => match Highlights::parse_underline(text) {
-                                Some(kind) => style.underline = Some(kind),
-                                None => complaints.0.push(format!(
-                                    "{setting} is {text:?}; it is single, double, curly, dotted, dashed, or none; ignoring it"
-                                )),
-                            },
-                            ("color" | "bg" | "bold" | "italic" | "underline", other) => {
-                                complaints.0.extend(wrong_type(
-                                    Some(other),
-                                    &setting,
-                                    if key == "color" || key == "bg" { "a #rrggbb colour in quotes" } else { "true or false" },
-                                    "ignoring it",
-                                ));
-                            }
-                            _ => complaints.0.push(format!("{setting} is not a highlight setting; ignoring it")),
-                        }
-                    }
-                    groups.push((name.clone(), style));
-                }
-                // Sorted on the way in, so the order a file happens to be
-                // written in does not change what Sprite does with it.
-                settings.highlights = Highlights::from_groups(groups);
-            }
-            other => complaints.0.extend(wrong_type(
-                other,
-                "highlights",
-                "a table of \"Group\" = { color = \"#rrggbb\", … }",
-                "keeping the highlights",
-            )),
-        }
-
-        if let Some(section) = document.get("cursor") {
-            match section.get("style") {
-                Some(toml::Value::String(text)) => match Cursor::parse_style(text) {
-                    Some(style) => settings.cursor.style = Some(style),
-                    None => complaints.0.push(format!(
-                        "cursor.style {text:?} is not block, bar, underline or hollow; \
-                         keeping the default"
-                    )),
-                },
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "cursor.style",
-                    "a name in quotes",
-                    "keeping the default",
-                )),
-            }
-            match section.get("blink") {
-                Some(toml::Value::Boolean(blink)) => settings.cursor.blink = Some(*blink),
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "cursor.blink",
-                    "true or false",
-                    "keeping the default",
-                )),
-            }
-        }
-
-        if let Some(section) = document.get("shell") {
-            match section.get("program") {
-                Some(toml::Value::String(program)) if !program.trim().is_empty() => {
-                    settings.shell.program = Some(PathBuf::from(program.trim()));
-                }
-                Some(toml::Value::String(_)) => complaints
-                    .0
-                    .push("shell.program is empty; using the login shell".to_owned()),
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "shell.program",
-                    "a path in quotes",
-                    "using the login shell",
-                )),
-            }
-            match section.get("args") {
-                Some(toml::Value::Array(values)) => {
-                    let mut args = Vec::with_capacity(values.len());
-                    let mut usable = true;
-                    for value in values {
-                        match value.as_str() {
-                            Some(argument) => args.push(std::ffi::OsString::from(argument)),
-                            None => usable = false,
-                        }
-                    }
-                    if usable {
-                        settings.shell.args = Some(args);
-                    } else {
-                        complaints.0.push(
-                            "shell.args must be a list of strings; \
-                             running the shell with no arguments of its own"
-                                .to_owned(),
-                        );
-                    }
-                }
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "shell.args",
-                    "a list of strings",
-                    "running the shell with no arguments of its own",
-                )),
-            }
-            match section.get("startup_directory") {
-                Some(toml::Value::String(directory)) if !directory.trim().is_empty() => {
-                    settings.shell.startup_directory = Some(PathBuf::from(directory.trim()));
-                }
-                Some(toml::Value::String(_)) => complaints.0.push(
-                    "shell.startup_directory is empty; \
-                     starting where Sprite was started"
-                        .to_owned(),
-                ),
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "shell.startup_directory",
-                    "a path in quotes",
-                    "starting where Sprite was started",
-                )),
-            }
-        }
-
-        if let Some(section) = document.get("scrollback")
-            && let Some(value) = section.get("bytes")
-        {
-            match value.as_integer().and_then(|v| usize::try_from(v).ok()) {
-                Some(bytes) if bytes <= Scrollback::MAX_BYTES => {
-                    settings.scrollback.bytes = bytes;
-                }
-                Some(bytes) => {
-                    complaints.0.push(format!(
-                        "scrollback.bytes {bytes} is above the {} byte ceiling; using that",
-                        Scrollback::MAX_BYTES
-                    ));
-                    settings.scrollback.bytes = Scrollback::MAX_BYTES;
-                }
-                None => complaints.0.push(
-                    "scrollback.bytes must be a whole number of bytes; keeping the default"
-                        .to_owned(),
-                ),
-            }
-        }
-
-        if let Some(section) = document.get("pane_observation") {
-            match section.get("enabled") {
-                Some(toml::Value::Boolean(enabled)) => {
-                    settings.pane_observation.enabled = *enabled;
-                }
-                other => complaints.0.extend(wrong_type(
-                    other,
-                    "pane_observation.enabled",
-                    "true or false",
-                    &format!(
-                        "leaving observation {}",
-                        if settings.pane_observation.enabled {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        }
-                    ),
-                )),
-            }
-        }
-
-        Ok((settings, complaints))
+        let raw: raw::RawConfig = toml::from_str(text).map_err(|error| error.to_string())?;
+        Ok(raw.validate())
     }
 }
 
@@ -1151,14 +695,6 @@ mod tests {
             Font::DEFAULT_SIZE
         );
         assert!(complaints("[font]\nsize = \"large\"\n")[0].contains("must be a number"));
-    }
-
-    #[test]
-    fn clamp_or_default_holds_a_value_in_range_and_replaces_nan() {
-        assert_eq!(clamp_or_default(10.0, 6.0..=72.0, 14.0), 10.0);
-        assert_eq!(clamp_or_default(2.0, 6.0..=72.0, 14.0), 6.0);
-        assert_eq!(clamp_or_default(100.0, 6.0..=72.0, 14.0), 72.0);
-        assert_eq!(clamp_or_default(f32::NAN, 6.0..=72.0, 14.0), 14.0);
     }
 
     #[test]
@@ -1585,18 +1121,12 @@ mod tests {
             "[shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\", \"-i\"]\n\
              startup_directory = \"/tmp\"\n",
         );
-        assert_eq!(settings.shell.program, Some(PathBuf::from("/bin/zsh")));
+        assert_eq!(settings.shell.program.as_deref(), Some("/bin/zsh"));
         assert_eq!(
             settings.shell.args,
-            Some(vec![
-                std::ffi::OsString::from("-l"),
-                std::ffi::OsString::from("-i")
-            ])
+            Some(vec![String::from("-l"), String::from("-i")])
         );
-        assert_eq!(
-            settings.shell.startup_directory,
-            Some(PathBuf::from("/tmp"))
-        );
+        assert_eq!(settings.shell.startup_directory.as_deref(), Some("/tmp"));
     }
 
     /// Whether the shell *runs* is Terminal Core's business; this is only that
@@ -1605,7 +1135,7 @@ mod tests {
     fn nonsense_shell_settings_are_dropped_and_reported() {
         let text = "[shell]\nprogram = 7\nargs = \"-l\"\nstartup_directory = []\n";
         let settings = parsed(text);
-        assert_eq!(settings.shell, sprite_term::ShellPreference::default());
+        assert_eq!(settings.shell, Shell::default());
         assert_eq!(complaints(text).len(), 3);
 
         let mixed = "[shell]\nargs = [\"-l\", 3]\n";
@@ -1717,3 +1247,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod properties;

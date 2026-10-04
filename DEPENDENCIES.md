@@ -21,14 +21,15 @@ the dependency removes from Sprite.
 
 ## Current direct dependencies
 
-Ten direct external runtime crates: nine exact version requirements and
+Eleven direct external runtime crates: ten exact version requirements and
 `resvg` with a compatible `0.45.1` requirement. All resolved versions are locked
-in `Cargo.lock`. The `sprite-term` test-only dependency `flate2 =1.1.9` is
-separate from this runtime ledger.
+in `Cargo.lock`. Test-only dependencies `flate2 =1.1.9` (`sprite-term`) and
+`proptest =1.10.0` (`sprite-app`) are separate from the runtime count.
 
 ### `toml` `=0.8.23`
 
-**Capability.** Reading the user's configuration file.
+**Capability.** Reading the user's configuration file and escaping printed
+configuration strings and named tables.
 
 **Not provided.** The PRD requires "a maintained Rust TOML parser rather than
 creating a custom configuration language", and says comments and ordinary TOML
@@ -42,9 +43,13 @@ grow into a second configuration language.
 dependency; declaring it directly changed the lock file by exactly one line, an
 edge from `sprite-app`.
 
-**Features.** `parse` only, with default features off — no serialisation, and
-no `serde` derive integration. Sprite reads a `toml::Value` and takes the fields
-it knows, so a key it does not understand is ignored rather than refused.
+**Features.** Defaults off; `parse` and `display`. Serde derives the raw section
+shapes. A tolerant field wrapper deserializes each field independently, so bad
+fields or sections cannot discard valid siblings. Unknown fields are ignored
+with diagnostics. `display` supplies TOML string and table serialization,
+including key escaping; section order and unset-value comments stay explicit.
+The serialization feature enables existing `toml_edit`/`toml_write` packages,
+without adding a package or changing a resolved version.
 
 **Scope today.** Fonts, colors, highlights, cursor, grid padding, shell launch,
 scrollback, graphics budgets, and pane observation, read at window startup and
@@ -56,6 +61,51 @@ watcher is implemented.
 **License and source.** MIT OR Apache-2.0, crates.io.
 
 **Pin and updates.** Exact pin, updated deliberately.
+
+### `serde` `=1.0.229`
+
+**Capability.** Typed raw configuration sections with independent field recovery.
+The raw model is distinct from validated drawable settings; deriving the file
+schema does not expose internal settings through observation JSON.
+
+**Why not std.** The standard library has no typed TOML deserialization protocol.
+Serde is the protocol supported by the existing TOML parser, replacing a large
+manual Value walker while preserving per-field defaults and diagnostics.
+
+**Features.** Defaults (`std`) plus `derive`. Serde, serde_core and serde_derive
+already resolve to 1.0.229 in the lockfile and are compiled transitively.
+The direct declaration adds only Sprite's dependency edge.
+
+**License and source.** MIT OR Apache-2.0; crates.io,
+<https://docs.rs/serde/1.0.229/serde/trait.Deserialize.html>.
+
+**Pin and updates.** Exact pin, changed deliberately with config recovery and
+round-trip tests.
+
+### `proptest` `=1.10.0` (test only)
+
+**Capability.** Generated whole-settings round trips, numeric invariants through
+font adjustments, and malformed-field/section recovery, with automatic shrinking
+and persisted replay seeds.
+
+**Why not std.** Handwritten pseudo-random loops do not supply shrinking or replay.
+The generated domain includes Unicode, control characters, quotes, backslashes,
+empty names/arguments, duplicate map keys and nonfinite numeric representations.
+
+**Features.** Defaults off; `std` only. Forking, process timeouts, bit-set support
+and attribute macros stay disabled. Tests use 128 cases, a fixed default seed
+(overridable with `PROPTEST_RNG_SEED`), and at most 4096 shrink iterations.
+Bounded collections cap per-case work. Persisted failures run before new cases.
+
+**Supply-chain change.** Adds proptest 1.10.0, rand_xorshift 0.4.0 and unarray
+0.1.4. The remaining dependencies reuse locked versions, including rand 0.9.5.
+Its Rust 1.84 minimum is below Sprite's pinned Rust 1.97.1.
+
+**License and source.** MIT OR Apache-2.0; crates.io,
+<https://docs.rs/proptest/1.10.0/proptest/test_runner/struct.Config.html>.
+
+**Pin and updates.** Exact pin, test-only in sprite-app. Updates must retain
+shrinking/replay behavior and the generated contract partitions.
 
 ### `image` `=0.25.10`
 
@@ -162,8 +212,8 @@ out by hand rather than deriving `Serialize` on Sprite's own types. A derive
 serialises whatever a type happens to hold, so a field added to a snapshot for
 the renderer's benefit would silently appear on the wire. The PRD's exclusion
 list is enforced by construction instead: those things cannot leak because no
-line writes them. This also keeps `serde_derive` and its proc-macro chain out of
-the direct dependencies.
+line writes them. Configuration parsing separately enables `serde` derive; snapshot encoding
+continues to build its explicitly selected JSON fields by hand.
 
 **License and source.** MIT OR Apache-2.0, crates.io.
 

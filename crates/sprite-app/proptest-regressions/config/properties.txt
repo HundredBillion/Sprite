@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3b3caf876cb0fc578845a7e133a28c8002db14887af00677a58219fa2807b334 # shrinks to settings = Settings { pane_observation: PaneObservation { enabled: false }, graphics: Graphics { enabled: false, storage_bytes: StorageBytes(0), texture_bytes: TextureBytes(0) }, font: Font { family: None, size: FontSize(6.0), line_height: LineHeight(1.0) }, colors: Colors { background: None, foreground: None, cursor: None, palette: CanonicalMap([]), tokens: CanonicalMap([("\n", Rgb { r: 0, g: 0, b: 0 })]) }, highlights: Highlights { groups: CanonicalMap([]) }, cursor: Cursor { style: None, blink: None }, grid: Grid { padding: Padding(0.0) }, shell: Shell { program: None, args: None, startup_directory: None }, scrollback: Scrollback { bytes: ScrollbackBytes(0) } }

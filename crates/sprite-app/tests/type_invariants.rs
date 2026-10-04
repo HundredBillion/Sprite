@@ -163,14 +163,26 @@ fn compile_public(
     name: &str,
     body: &str,
 ) -> std::process::Output {
-    let source = scratch.join(format!("{name}.rs"));
-    std::fs::write(
-        &source,
-        format!(
+    compile_source(
+        scratch,
+        dependencies,
+        externs,
+        name,
+        &format!(
             "#![allow(unused_imports, unused_variables, dead_code)]\nfn proof() {{\n{body}\n}}"
         ),
     )
-    .unwrap();
+}
+
+fn compile_source(
+    scratch: &Path,
+    dependencies: &Path,
+    externs: &[String],
+    name: &str,
+    source_text: &str,
+) -> std::process::Output {
+    let source = scratch.join(format!("{name}.rs"));
+    std::fs::write(&source, source_text).unwrap();
     let mut command = rustc();
     command
         .args([
@@ -313,6 +325,101 @@ fn public_doctests_fail_for_the_documented_contract_and_no_other_error() {
                 "{name} accepted an additional unrelated error"
             );
         }
+    }
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
+    let scratch = std::env::temp_dir().join(format!(
+        "sprite-settings-type-proofs-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let dependencies = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    let externs: Vec<_> = ["gpui", "sprite_term", "serde", "toml", "image"]
+        .iter()
+        .map(|name| {
+            format!(
+                "{name}={}",
+                dependency(&dependencies, &scratch, name).display()
+            )
+        })
+        .collect();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut config_source = include_str!("../src/config.rs").to_owned();
+    for module in ["raw", "validated", "changes"] {
+        config_source = config_source.replace(
+            &format!("mod {module};"),
+            &format!(
+                "#[path = {:?}] mod {module};",
+                root.join(format!("src/config/{module}.rs"))
+            ),
+        );
+    }
+    let config_fixture = scratch.join("config.rs");
+    std::fs::write(&config_fixture, config_source).unwrap();
+    let prelude = format!(
+        "#![allow(dead_code, unused_imports, unused_variables)]\n#[path = {:?}] mod config;\n#[path = {:?}] mod graphics_cache;\n",
+        config_fixture,
+        root.join("src/graphics_cache.rs")
+    );
+    let compile = |name: &str, body: &str| {
+        compile_source(
+            &scratch,
+            &dependencies,
+            &externs,
+            name,
+            &format!("{prelude}\nfn proof() {{\n{body}\n}}"),
+        )
+    };
+    let control = "use config::{Settings, FontSize, LineHeight, Padding};\nlet mut settings = Settings::default();\nsettings.font.size = FontSize::new(f32::NAN);\nsettings.font.line_height = LineHeight::new(0.0);\nsettings.grid.padding = Padding::new(-1.0);";
+    let output = compile("settings_valid", control);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (index, (body, code, subject)) in [
+        (
+            "let mut settings = config::Settings::default(); settings.font.size = f32::NAN;",
+            "E0308",
+            "FontSize",
+        ),
+        (
+            "let mut settings = config::Settings::default(); settings.font.line_height = 0.0;",
+            "E0308",
+            "LineHeight",
+        ),
+        (
+            "let mut settings = config::Settings::default(); settings.grid.padding = -1.0;",
+            "E0308",
+            "Padding",
+        ),
+        (
+            "let value = config::FontSize(f32::NAN);",
+            "E0423",
+            "FontSize",
+        ),
+        (
+            "let mut settings = config::Settings::default(); settings.colors.palette = Vec::new();",
+            "E0308",
+            "CanonicalMap",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = compile(&format!("settings_invalid_{index}"), body);
+        assert!(
+            intended_public_refusal(&output, code, subject),
+            "{index}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     std::fs::remove_dir_all(scratch).unwrap();
 }

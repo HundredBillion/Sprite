@@ -99,7 +99,7 @@ fn session_defaults_pair_fallbacks_and_preserve_configured_preferences() {
     let foreground = Rgb { r: 1, g: 2, b: 3 };
     settings.colors.foreground = Some(foreground);
     settings.colors.cursor = Some(foreground);
-    settings.colors.palette = vec![(9, foreground)];
+    settings.colors.palette = vec![(9, foreground)].into();
     settings.cursor.style = Some(sprite_term::CursorStyle::Underline);
     settings.cursor.blink = Some(false);
     let defaults = theme::session_defaults(&settings);
@@ -143,7 +143,8 @@ fn startup_and_reload_apply_identical_session_defaults(cx: &mut gpui::TestAppCon
             g: 88,
             b: 99,
         },
-    )];
+    )]
+    .into();
     settings.cursor.style = Some(sprite_term::CursorStyle::Bar);
     settings.cursor.blink = Some(false);
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -178,9 +179,14 @@ fn startup_and_reload_apply_identical_session_defaults(cx: &mut gpui::TestAppCon
     assert_eq!(initial.render.cursor.style, sprite_term::CursorStyle::Bar);
     assert!(!initial.render.cursor.blinking);
     view.update_in(cx, |view, window, cx| {
-        view.apply_settings(&settings, window, cx)
+        view.apply_settings(&crate::config::Settings::default(), window, cx);
+        view.apply_settings(&settings, window, cx);
     });
-    let reloaded = wait_for_bundle(&view, cx, |bundle| bundle.generation > initial.generation);
+    let reloaded = wait_for_bundle(&view, cx, |bundle| {
+        bundle.generation > initial.generation
+            && bundle.render.default_foreground == initial.render.default_foreground
+            && bundle.render.cursor.style == initial.render.cursor.style
+    });
     assert_eq!(
         reloaded.render.default_foreground,
         initial.render.default_foreground

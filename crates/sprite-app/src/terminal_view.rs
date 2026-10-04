@@ -45,6 +45,7 @@ enum SessionState {
 }
 
 pub struct TerminalView {
+    applied_settings: crate::config::Settings,
     /// An ended pane keeps its worker handle until cleanup can join it.
     ///
     /// A pane whose configured program could not be run still has to draw the
@@ -179,6 +180,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let applied_settings = settings.clone();
         let defaults = theme::session_defaults(&settings);
         let crate::config::Settings {
             font,
@@ -192,8 +194,12 @@ impl TerminalView {
         // The cell is shaped before the session starts, so the child never
         // observes scale-1 metrics for a moment on a HiDPI display.
         let (font_family, mut complaints) = chosen_family(window, font.family.as_deref());
-        let metrics =
-            CellMetrics::measure(window, font_family.clone(), font.size, font.line_height);
+        let metrics = CellMetrics::measure(
+            window,
+            font_family.clone(),
+            font.size.get(),
+            font.line_height.get(),
+        );
         let scale_factor = window.scale_factor();
 
         // A window told what to run gives every one of its panes the same
@@ -205,7 +211,7 @@ impl TerminalView {
             }
             // A preference that cannot be honoured falls back and says so
             // rather than leaving a pane that will not open.
-            None => match SessionConfig::shell(&shell) {
+            None => match SessionConfig::shell(&shell.session_preference()) {
                 Ok((config, refused)) => {
                     complaints.extend(refused);
                     config
@@ -229,13 +235,13 @@ impl TerminalView {
         // The terminal's own limit: how much decoded image it will hold.
         config.graphics = sprite_term::GraphicsPolicy {
             enabled: graphics.enabled,
-            storage_bytes: graphics.storage_bytes,
+            storage_bytes: graphics.storage_bytes.get(),
             ..sprite_term::GraphicsPolicy::default()
         };
         let fallback_colors = defaults.fallback_colors;
         config.colors = defaults.colors;
         config.cursor = defaults.cursor;
-        config.scrollback_bytes = scrollback.bytes;
+        config.scrollback_bytes = scrollback.bytes.get();
         config.environment.extend(environment);
         let initial_size = config.size;
 
@@ -335,6 +341,7 @@ impl TerminalView {
             });
 
         Self {
+            applied_settings,
             session: SessionState::Running(session),
             observation,
             surfaces: SurfaceHost::default(),
@@ -345,7 +352,9 @@ impl TerminalView {
             status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
             bundle: None,
             // The renderer's own limit, separate from the terminal's above.
-            textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
+            textures: crate::graphics_cache::GraphicsCache::with_budget(
+                graphics.texture_bytes.get(),
+            ),
             focus: cx.focus_handle(),
             fallback_colors,
             size: Some(initial_size),
@@ -361,8 +370,8 @@ impl TerminalView {
             layout_cache: Default::default(),
             hover_request: None,
             next_link_request: 1,
-            origin: point(px(grid.padding), px(grid.padding)),
-            padding: grid.padding,
+            origin: point(px(grid.padding.get()), px(grid.padding.get())),
+            padding: grid.padding.get(),
             content_origin: None,
             pending_unsafe_paste: None,
             preedit: None,
@@ -415,6 +424,7 @@ impl TerminalView {
                 view.apply_settings(&settings, window, cx);
             });
         Self {
+            applied_settings: crate::config::Settings::default(),
             session: SessionState::NeverStarted,
             // A view that never started a session has nothing to observe.
             observation: None,

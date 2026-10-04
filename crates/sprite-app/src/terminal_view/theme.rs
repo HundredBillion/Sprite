@@ -176,7 +176,7 @@ pub(super) fn session_defaults(settings: &crate::config::Settings) -> SessionDef
         colors: sprite_term::ColorDefaults {
             base: Some(base),
             cursor: settings.colors.cursor,
-            palette: settings.colors.palette.clone(),
+            palette: settings.colors.palette.to_vec(),
         },
         cursor: sprite_term::CursorDefaults {
             style: settings.cursor.style,
@@ -210,26 +210,45 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (family, _) = chosen_family(window, settings.font.family.as_deref());
-        self.metrics = CellMetrics::measure(
-            window,
-            family,
-            settings.font.size,
-            settings.font.line_height,
-        );
-        self.padding = settings.grid.padding;
-        self.invalidate_grids();
-        self.size = None;
-        self.synchronise_size(window);
-
+        use crate::config::LiveChange;
+        let changes = self.applied_settings.diff(settings);
+        if changes.has(LiveChange::Font) {
+            let (family, _) = chosen_family(window, settings.font.family.as_deref());
+            self.metrics = CellMetrics::measure(
+                window,
+                family,
+                settings.font.size.get(),
+                settings.font.line_height.get(),
+            );
+        }
+        if changes.has(LiveChange::Font) || changes.has(LiveChange::Grid) {
+            self.padding = settings.grid.padding.get();
+            self.size = None;
+            self.synchronise_size(window);
+        }
+        if changes.has(LiveChange::Font)
+            || changes.has(LiveChange::Highlights)
+            || changes.has(LiveChange::Colors)
+        {
+            self.invalidate_grids();
+        }
         let defaults = session_defaults(settings);
-        self.fallback_colors = defaults.fallback_colors;
-        if let SessionState::Running(session) = &mut self.session {
-            let _ = session.send(TerminalCommand::SetColors(defaults.colors));
+        if changes.has(LiveChange::Colors) {
+            self.fallback_colors = defaults.fallback_colors;
+            if let SessionState::Running(session) = &mut self.session {
+                let _ = session.send(TerminalCommand::SetColors(defaults.colors));
+            }
+        }
+        if changes.has(LiveChange::Cursor)
+            && let SessionState::Running(session) = &mut self.session
+        {
             let _ = session.send(TerminalCommand::SetCursor(defaults.cursor));
         }
-
-        self.textures.set_budget(settings.graphics.texture_bytes);
+        if changes.has(LiveChange::TextureBudget) {
+            self.textures
+                .set_budget(settings.graphics.texture_bytes.get());
+        }
+        self.applied_settings = settings.clone();
         cx.notify();
     }
 
@@ -270,9 +289,10 @@ mod metric_tests {
         view.update_in(cx, |view, window, cx| {
             let initial = view.metrics.clone();
             assert_eq!(view.grid_metrics().cells, initial);
-            settings.font.family = Some("uninstalled-family-for-fallback-test".into());
-            settings.font.size = 21.0;
-            settings.font.line_height = 1.7;
+            settings.font.family =
+                crate::config::NonBlank::new("uninstalled-family-for-fallback-test".into());
+            settings.font.size = crate::config::FontSize::new(21.0);
+            settings.font.line_height = crate::config::LineHeight::new(1.7);
             view.apply_settings(&settings, window, cx);
             let expected_family = chosen_family(window, settings.font.family.as_deref()).0;
             assert_eq!(view.metrics.family(), expected_family);
@@ -303,11 +323,89 @@ mod metric_tests {
                 )
             );
             let previous = view.metrics.clone();
-            settings.font.line_height = 2.0;
+            settings.font.line_height = crate::config::LineHeight::new(2.0);
             view.apply_settings(&settings, window, cx);
             assert_eq!(view.metrics.width(), previous.width());
             assert_ne!(view.metrics.height(), previous.height());
             assert_eq!(view.grid_metrics().cells, view.metrics);
+        });
+    }
+}
+
+#[cfg(test)]
+mod settings_effect_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn reload_report_matches_live_effects_and_leaves_session_preferences_deferred(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::config::{LiveChange, NextSessionChange, Settings};
+        let mut settings = Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("reload test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        view.update_in(cx, |view, window, cx| {
+            let image = sprite_term::ImagePixels {
+                id: 1,
+                generation: 1,
+                width: 1,
+                height: 1,
+                transmitted: sprite_term::TransmittedFormat::Rgba,
+                pixels: vec![255; 4],
+            };
+            assert!(view.textures.texture(&image).is_some());
+            let metrics = view.metrics.clone();
+            let grid = view.size;
+            settings.shell.program = crate::config::NonBlank::new("/bin/zsh".into());
+            settings.scrollback.bytes = crate::config::ScrollbackBytes::new(4096);
+            settings.graphics.storage_bytes = crate::config::StorageBytes::new(0);
+            let deferred = view.applied_settings.diff(&settings);
+            assert!(deferred.live.is_empty());
+            assert_eq!(
+                deferred.next_session,
+                vec![
+                    NextSessionChange::Shell,
+                    NextSessionChange::Scrollback,
+                    NextSessionChange::GraphicsStorage
+                ]
+            );
+            assert!(
+                deferred
+                    .describe(std::path::Path::new("config.toml"), &[])
+                    .contains("waiting for a new pane: shell, scrollback, graphics storage")
+            );
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(view.metrics, metrics);
+            assert_eq!(view.size, grid);
+            assert_eq!(view.textures.used_bytes(), 4);
+
+            settings.font.size = crate::config::FontSize::new(24.0);
+            settings.grid.padding = crate::config::Padding::new(16.0);
+            settings.graphics.texture_bytes = crate::config::TextureBytes::new(0);
+            let live = view.applied_settings.diff(&settings);
+            assert_eq!(
+                live.live,
+                vec![
+                    LiveChange::Font,
+                    LiveChange::Grid,
+                    LiveChange::TextureBudget
+                ]
+            );
+            assert!(
+                live.describe(std::path::Path::new("config.toml"), &[])
+                    .contains("applied now: font, grid, graphics.texture_bytes")
+            );
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(view.metrics.font_size(), px(24.0));
+            assert_eq!(view.padding, 16.0);
+            assert_eq!(view.textures.used_bytes(), 0);
+            assert!(view.textures.texture(&image).is_none());
+            let size = view.size;
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(view.size, size);
+            assert!(view.applied_settings.diff(&settings).live.is_empty());
         });
     }
 }

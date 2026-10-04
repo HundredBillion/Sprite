@@ -21,6 +21,7 @@ name = "sprite-paint-bench"
 path = "src/bin/sprite-paint-bench.rs"
 
 [dependencies]
+serde = { workspace = true }
 async-channel = { workspace = true }
 image = { workspace = true }
 resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
@@ -30,6 +31,7 @@ sprite-pane = { workspace = true }
 sprite-term = { workspace = true }
 
 [dev-dependencies]
+proptest = { version = "=1.10.0", default-features = false, features = ["std"] }
 serde_json = { workspace = true }
 gpui = { workspace = true, features = ["test-support"] }
 
