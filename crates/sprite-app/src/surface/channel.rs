@@ -202,6 +202,17 @@ impl Placement {
     }
 }
 
+pub(crate) const EVENT_BUFFER_BYTES: usize = 64 * 1024;
+
+fn append_event_line(buffer: &mut Vec<u8>, line: &str) {
+    let needed = buffer.len() + line.len() + 1;
+    if needed > buffer.capacity() {
+        buffer.reserve_exact(needed.next_power_of_two() - buffer.len());
+    }
+    buffer.extend_from_slice(line.as_bytes());
+    buffer.push(b'\n');
+}
+
 /// The stream a [`SurfaceConnection`] writes to, plus whatever a program has
 /// sent before the connection thread answered the open. All of it lives
 /// behind the one lock, so nothing here ever waits on anything else that
@@ -224,17 +235,43 @@ struct Wire {
 }
 
 impl Wire {
+    fn fail(&mut self) -> bool {
+        self.dead = true;
+        self.buffer.clear();
+        self.queued.clear();
+        let _ = self.stream.shutdown(Shutdown::Both);
+        false
+    }
+
     fn write_buffer(&mut self) -> bool {
         let ok = self
             .stream
             .write_all(&self.buffer)
             .and_then(|_| self.stream.flush())
             .is_ok();
-        if !ok {
-            self.dead = true;
-            let _ = self.stream.shutdown(Shutdown::Both);
+        self.buffer.clear();
+        ok || self.fail()
+    }
+
+    fn buffer_line(&mut self, line: &str) -> bool {
+        if line.len() >= EVENT_BUFFER_BYTES {
+            if !self.write_buffer() {
+                return false;
+            }
+            // Large caller-owned lines need no equally large transport allocation.
+            let ok = self
+                .stream
+                .write_all(line.as_bytes())
+                .and_then(|_| self.stream.write_all(b"\n"))
+                .and_then(|_| self.stream.flush())
+                .is_ok();
+            return ok || self.fail();
         }
-        ok
+        if self.buffer.len() + line.len() + 1 > EVENT_BUFFER_BYTES && !self.write_buffer() {
+            return false;
+        }
+        append_event_line(&mut self.buffer, line);
+        self.buffer.len() != EVENT_BUFFER_BYTES || self.write_buffer()
     }
 }
 
@@ -250,6 +287,8 @@ impl Wire {
 /// `true` immediately; [`establish`](Self::establish) writes `opened`, then
 /// the queue, in order, so nothing a program sent ever arrives ahead of the
 /// confirmation that let it.
+/// Before acceptance, exceeding 64 KiB of queued events closes the connection:
+/// the queue cannot flush without putting events ahead of `opened`.
 #[derive(Clone)]
 pub struct SurfaceConnection {
     wire: Arc<Mutex<Wire>>,
@@ -272,7 +311,7 @@ impl SurfaceConnection {
 
     /// Sends one event line, or queues it if `opened` has not gone out yet.
     /// `false` means the client is gone — refused, timed out, or the
-    /// connection has already closed — and nothing was queued or written.
+    /// connection has already closed. A write failure can leave a sent prefix.
     /// A failed write marks the connection dead: the socket is shut down so
     /// the connection thread's blocked read notices at once and reports the
     /// Surface closed, rather than every later `send` paying the write
@@ -281,7 +320,8 @@ impl SurfaceConnection {
         self.send_batch([line])
     }
 
-    /// Keeps a complete event gesture contiguous with respect to other senders.
+    /// Keeps a complete gesture under one lock, flushing at most 64 KiB at a time.
+    /// A write failure stops consuming the event iterator immediately.
     pub fn send_batch<'a>(&self, lines: impl IntoIterator<Item = &'a str>) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
@@ -291,15 +331,18 @@ impl SurfaceConnection {
         }
         wire.buffer.clear();
         for line in lines {
-            wire.buffer.extend_from_slice(line.as_bytes());
-            wire.buffer.push(b'\n');
+            if wire.ready {
+                if !wire.buffer_line(line) {
+                    return false;
+                }
+            } else {
+                if line.len() >= EVENT_BUFFER_BYTES - wire.queued.len() {
+                    return wire.fail();
+                }
+                append_event_line(&mut wire.queued, line);
+            }
         }
-        if !wire.ready {
-            let Wire { queued, buffer, .. } = &mut *wire;
-            queued.extend_from_slice(buffer);
-            return true;
-        }
-        wire.write_buffer()
+        !wire.ready || wire.write_buffer()
     }
 
     /// Writes the connection's first line, then every line a program queued
@@ -314,13 +357,19 @@ impl SurfaceConnection {
         if wire.dead {
             return false;
         }
-        wire.buffer.clear();
-        wire.buffer.extend_from_slice(line.as_bytes());
-        wire.buffer.push(b'\n');
-        let Wire { queued, buffer, .. } = &mut *wire;
-        buffer.append(queued);
         wire.ready = true;
+        if !wire.buffer_line(line) || !wire.write_buffer() {
+            return false;
+        }
+        let Wire { queued, buffer, .. } = &mut *wire;
+        std::mem::swap(buffer, queued);
         wire.write_buffer()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_buffer_state(&self) -> (bool, usize, usize) {
+        let wire = self.wire.lock().unwrap();
+        (wire.dead, wire.buffer.capacity(), wire.queued.capacity())
     }
 
     #[cfg(test)]
@@ -777,6 +826,143 @@ mod tests {
             "type": "capabilities", "version": VERSION, "pane": pane,
             "owner_pid": owner_pid, "return_target": return_target
         })
+    }
+
+    #[test]
+    fn a_huge_batch_stops_consuming_when_the_peer_stops_reading() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        let line = "x".repeat(1023);
+        let consumed = std::cell::Cell::new(0usize);
+        let lines = std::iter::repeat_n(line.as_str(), 1_000_000_000).inspect(|_| {
+            consumed.set(consumed.get() + 1);
+            assert!(
+                consumed.get() <= 4096,
+                "iterator consumed past the bounded transport window"
+            );
+        });
+        assert!(!connection.send_batch(lines));
+        assert!(connection.is_dead());
+        let (_, buffer, queued) = connection.test_buffer_state();
+        assert!(buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
+        println!(
+            "backpressured batch consumed {} of 1000000000 lines",
+            consumed.get()
+        );
+    }
+
+    #[test]
+    fn a_failed_chunk_does_not_consume_the_remaining_iterator() {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        drop(peer);
+        let line = "x".repeat(1023);
+        let consumed = std::cell::Cell::new(0);
+        assert!(
+            !connection.send_batch(
+                std::iter::repeat_n(line.as_str(), 1_000_000_000)
+                    .inspect(|_| consumed.set(consumed.get() + 1))
+            )
+        );
+        assert_eq!(consumed.get(), EVENT_BUFFER_BYTES / 1024);
+        assert!(connection.is_dead());
+    }
+
+    #[test]
+    fn pre_open_overflow_discards_the_queue_and_cannot_establish_later() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let line = "x".repeat(1023);
+        assert!(connection.send_batch(std::iter::repeat_n(
+            line.as_str(),
+            EVENT_BUFFER_BYTES / 1024
+        )));
+        assert_eq!(
+            connection.wire.lock().unwrap().queued.len(),
+            EVENT_BUFFER_BYTES
+        );
+        assert!(!connection.send("overflow"));
+        assert_eq!(connection.wire.lock().unwrap().queued.len(), 0);
+        assert!(!connection.establish(&event_opened(SurfaceId(1))));
+        let (dead, buffer, queued) = connection.test_buffer_state();
+        assert!(dead && buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).unwrap();
+        assert!(
+            received.is_empty(),
+            "neither opened nor queued suffix may escape"
+        );
+    }
+
+    #[test]
+    fn pre_open_gestures_stop_at_the_queue_limit_without_collecting_the_iterator() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let line = "x".repeat(1023);
+        let consumed = std::cell::Cell::new(0);
+        assert!(
+            !connection.send_batch(
+                std::iter::repeat_n(line.as_str(), 1_000_000_000)
+                    .inspect(|_| consumed.set(consumed.get() + 1))
+            )
+        );
+        assert_eq!(consumed.get(), EVENT_BUFFER_BYTES / 1024 + 1);
+        assert!(connection.is_dead());
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(!connection.send(&"x".repeat(EVENT_BUFFER_BYTES)));
+        assert_eq!(connection.test_buffer_state(), (true, 0, 0));
+    }
+
+    #[test]
+    fn chunked_batches_keep_the_gesture_lock_across_every_flush() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        let reader = std::thread::spawn(move || {
+            let mut wire = String::new();
+            peer.read_to_string(&mut wire).unwrap();
+            wire.lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        });
+        std::thread::scope(|scope| {
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            for sender in 0..4 {
+                let connection = connection.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    let line = json!({"sender":sender,"payload":"x".repeat(1024)}).to_string();
+                    barrier.wait();
+                    assert!(connection.send_batch(std::iter::repeat_n(line.as_str(), 128)));
+                });
+            }
+        });
+        connection
+            .wire
+            .lock()
+            .unwrap()
+            .stream
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        let events = reader.join().unwrap();
+        assert_eq!(events.len(), 513);
+        assert_eq!(events[0]["type"], "opened");
+        let mut senders = std::collections::HashSet::new();
+        for chunk in events[1..].chunks_exact(128) {
+            assert!(senders.insert(chunk[0]["sender"].as_u64().unwrap()));
+            assert!(
+                chunk
+                    .iter()
+                    .all(|event| event["sender"] == chunk[0]["sender"])
+            );
+        }
+        let (dead, buffer, queued) = connection.test_buffer_state();
+        assert!(!dead && buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
     }
 
     #[test]

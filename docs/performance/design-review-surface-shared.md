@@ -47,9 +47,15 @@ clear and shrink reclamation. A 64-seed, 100-transition-per-seed oracle checks
 writes, scroll copies, clear, resize, malformed dimensions and Unicode/spacers.
 Failure messages name the seed and shortest failing operation prefix.
 
-The wire buffer lives under the same mutex as the stream. `send_batch` appends
-all newline-delimited messages before `write_all`; queued batches follow
-`opened`. The normal five-event gesture is 399 bytes in one `sendto`. Partial
+The wire buffer lives under the same mutex as the stream. `send_batch` accumulates
+newline-delimited messages in chunks of at most 64 KiB before `write_all`, keeping
+the gesture-wide lock across chunk flushes. Caller-owned individual lines larger
+than the chunk stream directly without an equally large transport allocation.
+Queued batches follow `opened`. Before acceptance, the aggregate queued event
+bytes are capped at 64 KiB; overflow closes the connection and clears the queue,
+and a later establish cannot emit `opened` or a stale queued suffix. This is an
+explicit resource limit for the pre-open state, where flushing would break the
+opened-first contract. The normal five-event gesture is 399 bytes in one `sendto`. Partial
 writes still retry through Rust's `write_all`; errors preserve the already-sent
 prefix, mark the connection dead and shut it down. Tests cover four concurrent
 senders, queued opening, buffer reuse, closed peers, a 4 MB batch drained in
@@ -97,3 +103,15 @@ restoring the implementation passed the 125-test Surface filter.
   and implements `write_all` retrying partial writes and interruptions;
   `std/src/os/unix/net/stream.rs:656` delegates UnixStream writes to the socket.
   No new dependency or undocumented GPUI API was introduced.
+
+
+Review hardening adds bounded iterator-consumption and buffer-capacity tests.
+An actual `report_grid_wheel` call with finite `Lines(0, 1e9)` and a non-reading
+peer terminates through the existing write timeout with a 65,536-byte buffer.
+The 1-billion-line transport test consumes 256 lines on this Linux socket pair
+before backpressure failure; a closed peer consumes exactly the first 64-line
+chunk. A pre-open iterator stops at line 65 instead of collecting the gesture.
+Those observed counts depend on the fixture; the enforced properties are bounded
+storage, early termination at write failure, no iteration after that failure,
+and no cross-gesture interleaving across chunk flushes. Wheel counts themselves
+are unchanged, and a peer that keeps draining still receives the entire gesture.

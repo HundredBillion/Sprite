@@ -1816,6 +1816,94 @@ mod tests {
     }
 
     #[gpui::test]
+    fn surface_resize_events_dedupe_pixels_and_track_cell_metric_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(990),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        let registry = TokenRegistry::new(&settings.colors);
+        host.update(cx, |host, cx| {
+            for (width, cell_width) in [(160.0, 8.0), (160.0, 8.0), (240.0, 8.0), (240.0, 10.0)] {
+                let metrics = crate::surface::render::GridMetrics {
+                    cells: super::super::CellMetrics::fixture(cell_width, 16.0),
+                    ..host.grid_metrics()
+                };
+                let surface = host.surfaces.fill.as_mut().unwrap();
+                let _ = TerminalView::surface_element(
+                    surface,
+                    gpui::size(px(width), px(160.0)),
+                    &registry,
+                    &metrics,
+                    &settings.highlights,
+                    None,
+                    None,
+                    cx,
+                    true,
+                );
+            }
+        });
+        let messages = events(&mut peer);
+        assert_eq!(
+            messages,
+            vec![
+                serde_json::json!({"type":"resize","width":160,"height":160,"cols":20,"rows":10}),
+                serde_json::json!({"type":"resize","width":240,"height":160,"cols":30,"rows":10}),
+                serde_json::json!({"type":"resize","width":240,"height":160,"cols":24,"rows":10}),
+            ]
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn a_huge_finite_grid_wheel_stops_at_backpressure_with_bounded_storage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(989),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update(cx, |host, _| {
+            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0),px(0.0)));
+            let started = std::time::Instant::now();
+            host.report_grid_wheel(SurfaceId(989), &ScrollWheelEvent {position:gpui::point(px(1.0),px(1.0)),delta:gpui::ScrollDelta::Lines(gpui::point(0.0,1_000_000_000.0)),..Default::default()});
+            let elapsed = started.elapsed();
+            let (dead, buffer, queued) = host.surfaces.fill.as_ref().unwrap().connection.test_buffer_state();
+            println!("huge wheel: elapsed={elapsed:?} buffer_capacity={buffer} queued_capacity={queued} dead={dead}");
+            assert!(dead);
+            assert!(buffer <= crate::surface::channel::EVENT_BUFFER_BYTES);
+            assert!(queued <= crate::surface::channel::EVENT_BUFFER_BYTES);
+            assert!(elapsed < std::time::Duration::from_secs(5));
+        });
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
     fn surface_list_100k_virtualization_probe(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
