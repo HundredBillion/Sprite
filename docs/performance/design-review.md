@@ -281,3 +281,8 @@ breaches remain unresolved carried gates, not evidence of a measured improvement
 from row caching. No timing budget was changed and no repeated run was selected
 to make these gates green. Parent review tracks this limited historical-budget
 exception separately from the passing new allocation gates.
+
+## Complete issue coverage
+
+The [issue-item proof record](design-review-coverage.md) maps all three waves to
+source, executable tests, final gate results and unresolved measurement limits.
