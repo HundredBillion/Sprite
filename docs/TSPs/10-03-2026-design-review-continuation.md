@@ -260,19 +260,19 @@ highlight identity. Grid rendering exposes shared rows invalidated by operations
 or theme changes. ListConfig/visible row strings are shared; list op index built
 once. SurfaceConnection supports a single-buffer batch write.
 
-- [ ] Record current size_of<Cell>, grid/list allocations and outgoing write count.
+- [x] Record current size_of<Cell>, grid/list allocations and outgoing write count.
   Add regression checks for scroll/copy/clear/resize, graphemes and highlight/theme
   updates, large-list stable IDs and view virtualization.
-- [ ] Compact grid cells, share immutable render rows, track dirty rows, and reuse
+- [x] Compact grid cells, share immutable render rows, track dirty rows, and reuse
   unchanged rows without cloning the entire grid. Preserve operation ordering and
   bounds/refusal behavior. Reclaim overwritten interned text so repeated distinct
   writes cannot grow storage without bound; test this against the live grid size.
-- [ ] Arc ListConfig and shared row text; construct id_index once per operation.
+- [x] Arc ListConfig and shared row text; construct id_index once per operation.
   On a 100k-row list, instrument truncate_line to prove <=visible+16 calls/frame.
-- [ ] Batch one wheel gesture's events into a reusable buffer with one write;
+- [x] Batch one wheel gesture's events into a reusable buffer with one write;
   preserve JSON line boundaries and ordering. Dedupe resize with a tuple, not a
   newly serialized string. Test writing to a closed/slow peer and concurrent sends.
-- [ ] Run Surface/list/grid/wire/GPUI suites and benchmark checks; prove the compact
+- [x] Run Surface/list/grid/wire/GPUI suites and benchmark checks; prove the compact
   cell size, bounded list work and single write. Commit code + measured evidence.
 
 ### Task 9: Make the pane tree own its payloads
