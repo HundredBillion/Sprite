@@ -96,7 +96,7 @@ fn report_refused_input(events: &async_channel::Sender<TerminalEvent>, error: Se
 pub(crate) enum Message {
     Command(TerminalCommand),
     /// One chunk of PTY output, carrying one output permit.
-    PtyOutput(Vec<u8>),
+    PtyOutput(crate::pty_unix::OutputChunk),
     /// The consumer took a snapshot and is ready for the next one.
     CaptureRequested,
     PumpStopped(PumpOutcome),
@@ -459,9 +459,9 @@ pub(crate) fn run(
         match message {
             Message::PtyOutput(chunk) => {
                 // One chunk, one mutation batch, one generation.
-                terminal.vt_write(&chunk);
+                terminal.vt_write(chunk.as_bytes());
                 pending.mutated();
-                pump.return_permit();
+                drop(chunk);
 
                 // The reply callback cannot speak for itself, so a reply the
                 // pump refused to queue is reported from here rather than
@@ -910,9 +910,6 @@ pub(crate) fn run(
                 }
                 pump_stopped = true;
             }
-            // Discarded, but the permit still goes back: a pump blocked on the
-            // bounded queue has to be able to reach its own stop report.
-            Ok(Message::PtyOutput(_)) => pump.return_permit(),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -924,9 +921,8 @@ pub(crate) fn run(
     // and joining it while nothing drains would deadlock: its send waits for
     // room, our join waits for its send.
     //
-    // Joining is not optional — the pump borrows the PTY descriptor, so it must
-    // finish before the master is dropped — which is exactly why the queue has
-    // to be drained first rather than the thread detached.
+    // Joining ensures no I/O helper outlives the session's shutdown report.
+    // The queue must be drained before joining so the pump can finish its send.
     if !pump_stopped {
         pump.cancel();
         let drain_deadline = Instant::now() + GIVE_UP_AFTER;
@@ -938,9 +934,6 @@ pub(crate) fn run(
                     }
                     pump_stopped = true;
                 }
-                // Returning the permit is what lets a blocked pump proceed to
-                // its next poll, where it sees the cancellation and stops.
-                Ok(Message::PtyOutput(_)) => pump.return_permit(),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,

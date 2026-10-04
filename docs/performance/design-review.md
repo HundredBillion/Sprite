@@ -119,3 +119,33 @@ A separate release run with `whole_same_generation_blink.allocations.budget = 0`
 failed with `allocation budget exceeded (11463 > 0)`. The unmodified baseline
 then passed. This confirms the executable gate can reject an actual over-budget
 measurement rather than merely accepting its own report.
+
+## PTY output allocation measurement
+
+The pump allocates sixteen 16 KiB output buffers at startup (262,144 payload
+bytes). Each output message owns its buffer until it is parsed or discarded;
+Drop returns that allocation and its read permit together. Poll descriptors use
+a stack array, removing the polling loop's previous temporary vector allocations.
+
+`steady_state_pump_delivers_sixty_four_chunks_without_allocating` measures actual
+`System` allocator calls around the production pump's `run` loop, including its
+polling, reading, and message sends. Socket/channel/thread and pool setup happen
+before measurement. A separate consumer writes and drops 64 messages, with one
+15-byte write per delivery; its allocations are excluded by thread-local counting.
+No terminal parser, snapshot work, or application rendering is included.
+The measured pump loop performs **0 allocations and requests 0 allocated bytes**
+over all 64 deliveries. This is an allocator measurement, independent of the
+separate pointer-reuse assertion. Temporarily restoring the old per-read `to_vec`
+copy made the check fail at **64 allocations / 960 bytes**; removing that copy
+restored the zero-allocation result.
+
+```sh
+TERM=xterm-ghostty cargo test -p sprite-term --lib \
+  steady_state_pump_delivers_sixty_four_chunks_without_allocating -- --nocapture
+```
+
+The drop-only ownership regression previously stopped after 16 of 64 deliveries
+because dropping a plain byte vector did not return a permit. The ordinary
+worker already returned permits explicitly; this test does not demonstrate that
+normal worker consumption previously stalled. The new ownership contract makes
+both normal consumption and discarded messages return permits automatically.

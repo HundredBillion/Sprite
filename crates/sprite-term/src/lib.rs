@@ -16,6 +16,9 @@ mod shell;
 mod snapshot;
 mod worker;
 
+#[cfg(test)]
+mod test_allocations;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;

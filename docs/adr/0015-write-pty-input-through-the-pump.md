@@ -21,3 +21,14 @@ error the application shows, because that much unread input means the program
 has stopped reading and hoarding more would only hide that from the person
 typing. This keeps one helper thread per pane (ADR 0008), the pump joinable
 without periodic polling (ADR 0011), and input ordered exactly as before.
+
+Output now owns one of sixteen 16 KiB buffers allocated when the pump starts.
+Reading moves that buffer into an `OutputChunk`; its private permit returns the
+same allocation when the chunk is dropped after parsing, discarding, a rejected
+send, or inbox teardown. The pump reads only with an available buffer, so output
+still occupies at most sixteen slots in the seventeen-slot worker inbox.
+Returning the buffer uses a bounded nonblocking channel before a nonblocking
+wake; dropping output after the pump has stopped simply frees the allocation.
+The pool owns no thread or receiver, so queued chunks cannot keep a pump alive.
+This replaces the worker's explicit permit returns without changing input
+ordering or the cancellation and drain-before-join policy.
