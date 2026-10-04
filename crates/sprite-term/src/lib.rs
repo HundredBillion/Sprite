@@ -8,6 +8,9 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("Sprite Terminal Core supports Linux and macOS only");
 
+#[doc(hidden)]
+pub mod capture_benchmark;
+
 mod foreground;
 mod graphics;
 mod png_decoder;

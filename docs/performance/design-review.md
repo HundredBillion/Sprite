@@ -149,3 +149,26 @@ because dropping a plain byte vector did not return a permit. The ordinary
 worker already returned permits explicitly; this test does not demonstrate that
 normal worker consumption previously stalled. The new ownership contract makes
 both normal consumption and discarded messages return permits automatically.
+
+## Isolated capture baseline
+
+`design-review-capture-baseline.json` adds a direct synchronous call to the actual
+`Projector::capture`, through `capture_benchmark::CaptureBenchmark`. Each sample
+creates and primes a fresh 100×100 mixed-text terminal outside measurement, then
+counts the second capture, including bundle destruction, on the measuring thread.
+There is no PTY or worker. Rust `GlobalAlloc` counts exclude libghostty's native
+allocations. The fixture includes ASCII, blanks, accented scalars, combining
+marks, wide characters/spacers and background fills. Thirty release samples before
+row optimization measured 10,206 allocations / 527,832 requested Rust bytes on
+every sample, with 0.732 ms median / 1.188 ms p95 capture time.
+
+The original eight session timings remain separate. In particular,
+`capture_100x100_grid` is a public session roundtrip that can consume a pending
+same-generation snapshot; it does not isolate projection work and is not used to
+claim capture allocation savings.
+
+```sh
+TERM=xterm-ghostty cargo run -p sprite-term --bin sprite-term-bench \
+  --release --locked --offline -- --samples 30 \
+  --output docs/performance/design-review-capture-baseline.json
+```

@@ -1,10 +1,13 @@
 //! The Checkpoint 1 benchmark harness.
 //!
-//! It measures only through the public `TerminalSession` interface, so the
+//! Session timings measure through the public `TerminalSession` interface, so the
 //! numbers describe what an application actually experiences rather than the
 //! cost of some internal call. Output is stable JSON written with the standard
 //! library alone: these values become committed regression budgets, so the
 //! report must not depend on a serialization crate's formatting choices.
+
+#[path = "../test_allocations.rs"]
+mod allocations;
 
 use std::ffi::OsString;
 use std::fs;
@@ -40,7 +43,7 @@ fn main() {
         }
     };
 
-    let measurements: Vec<Measurement> = vec![
+    let mut measurements: Vec<Measurement> = vec![
         Measurement::collect("spawn_to_ready", options.samples, spawn_to_ready),
         Measurement::collect(
             "input_to_snapshot_idle",
@@ -69,6 +72,8 @@ fn main() {
         Measurement::collect("select_full_screen", options.samples, select_full_screen),
     ];
 
+    measurements.extend(isolated_capture(options.samples));
+
     if let Err(error) = write_report(&options.output, options.samples, &measurements) {
         eprintln!(
             "sprite-term-bench: writing {}: {error}",
@@ -79,8 +84,12 @@ fn main() {
 
     for measurement in &measurements {
         println!(
-            "{:<32} median {:>8.3} ms  p95 {:>8.3} ms  budget {:>8.3} ms",
-            measurement.name, measurement.median, measurement.p95, measurement.budget
+            "{:<32} median {:>8.3} {}  p95 {:>8.3}  budget {:>8.3}",
+            measurement.name,
+            measurement.median,
+            measurement.unit,
+            measurement.p95,
+            measurement.budget
         );
     }
 }
@@ -140,6 +149,7 @@ impl Options {
 }
 
 struct Measurement {
+    unit: &'static str,
     name: &'static str,
     median: f64,
     p95: f64,
@@ -164,6 +174,7 @@ impl Measurement {
         let max = milliseconds.last().copied().unwrap_or(0.0);
 
         Self {
+            unit: "ms",
             name,
             median,
             p95,
@@ -204,7 +215,7 @@ fn write_report(path: &PathBuf, samples: usize, measurements: &[Measurement]) ->
             ","
         };
         writeln!(file, "    \"{}\": {{", measurement.name)?;
-        writeln!(file, "      \"unit\": \"ms\",")?;
+        writeln!(file, "      \"unit\": \"{}\",", measurement.unit)?;
         writeln!(file, "      \"samples\": {},", measurement.samples)?;
         writeln!(file, "      \"median\": {:.6},", measurement.median)?;
         writeln!(file, "      \"p95\": {:.6},", measurement.p95)?;
@@ -573,4 +584,42 @@ fn wait_for_text(
             fatal(&format!("timed out waiting for {needle}"));
         }
     }
+}
+
+fn isolated_capture(samples: usize) -> Vec<Measurement> {
+    let mut counts = Vec::with_capacity(samples);
+    let mut bytes = Vec::with_capacity(samples);
+    let mut times = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let mut driver = sprite_term::capture_benchmark::CaptureBenchmark::new().unwrap();
+        std::hint::black_box(driver.capture().unwrap());
+        let (elapsed, sample) = allocations::measure(|| {
+            let started = Instant::now();
+            std::hint::black_box(driver.capture().unwrap());
+            started.elapsed().as_secs_f64() * 1000.0
+        });
+        counts.push(sample.allocations as f64);
+        bytes.push(sample.bytes as f64);
+        times.push(elapsed);
+    }
+    [
+        ("allocations_per_capture", "Rust allocations", counts),
+        ("rust_bytes_per_capture", "requested Rust bytes", bytes),
+        ("isolated_projector_capture", "ms", times),
+    ]
+    .into_iter()
+    .map(|(name, unit, mut values)| {
+        values.sort_by(f64::total_cmp);
+        let p95 = percentile(&values, 0.95);
+        Measurement {
+            name,
+            unit,
+            samples,
+            median: percentile(&values, 0.5),
+            p95,
+            max: *values.last().unwrap(),
+            budget: p95 * BUDGET_MULTIPLIER,
+        }
+    })
+    .collect()
 }
