@@ -361,12 +361,16 @@ fn output_to_final_snapshot(output_bytes: usize) -> Duration {
 /// projections.
 fn capture_100x100_grid() -> Duration {
     let mut config = shell("stty -icanon -echo min 1 time 0; cat");
-    config.size = TerminalSize {
-        rows: 100,
-        cols: 100,
-        cell_width_px: 8,
-        cell_height_px: 16,
-    };
+    config.size = sprite_term::ValidTerminalSize::new(
+        TerminalSize {
+            rows: 100,
+            cols: 100,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        },
+        "resize",
+    )
+    .expect("valid terminal size");
 
     let sprite_term::Spawned {
         mut session,
@@ -487,15 +491,15 @@ fn select_full_screen() -> Duration {
     let generation = wait_for_predicate(&mut snapshots, warmup, |bundle| {
         bundle.render.rows.iter().any(|row| !row.cells.is_empty())
     });
-    let size = TerminalSize::DEFAULT;
+    let size = sprite_term::ValidTerminalSize::DEFAULT;
 
     let started = Instant::now();
     session
         .send(TerminalCommand::Select {
             anchor: CellPosition { row: 0, column: 0 },
             head: CellPosition {
-                row: size.rows - 1,
-                column: size.cols - 1,
+                row: size.rows() - 1,
+                column: size.cols() - 1,
             },
             mode: SelectionMode::Character,
             rectangle: false,

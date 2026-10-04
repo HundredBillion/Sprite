@@ -1,6 +1,6 @@
 //! Surface grammar and event encoding, independent of socket and reply plumbing.
 
-use super::channel::{FocusTarget, Open, Position, ReturnTarget, Side};
+use super::channel::{FocusTarget, Open, Ownership, Placement, Position, ReturnTarget, Side};
 use super::{DockSize, Refusal, SurfaceId};
 use crate::config::Colors;
 use crate::pane_tree::PaneId;
@@ -211,14 +211,12 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
             .ok_or_else(|| Refusal::Malformed("side is left or right".to_owned()))?,
     };
     let size = match message.get("size") {
-        None => DockSize::default().pixels(),
+        None => DockSize::default(),
         Some(value) => {
             let size = value
                 .as_f64()
                 .ok_or_else(|| Refusal::Malformed("size is a number of pixels".to_owned()))?;
-            DockSize::try_from(size as f32)
-                .map_err(|why| Refusal::Malformed(why.to_owned()))?
-                .pixels()
+            DockSize::try_from(size as f32).map_err(|why| Refusal::Malformed(why.to_owned()))?
         }
     };
     let focus = match message.get("focus") {
@@ -259,20 +257,25 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
         Some(Value::Bool(resizable)) => *resizable,
         Some(_) => return Err(Refusal::Malformed("resizable is true or false".to_owned())),
     };
-    let ownership_is_valid = match position {
-        Position::Fill => return_target.is_none() && !resizable,
-        Position::Dock => {
-            let legacy = owner_pid.is_none() && return_target.is_none() && !resizable;
-            let owned = owner_pid.is_some() && return_target.is_some() && resizable;
-            legacy || owned
+    let placement = match (position, owner_pid, return_target, resizable) {
+        (Position::Fill, owner_pid, None, false) => Placement::Fill { owner_pid },
+        (Position::Dock, None, None, false) => Placement::Dock {
+            side,
+            size,
+            ownership: Ownership::Unowned,
+        },
+        (Position::Dock, Some(pid), Some(return_target), true) => Placement::Dock {
+            side,
+            size,
+            ownership: Ownership::Owned { pid, return_target },
+        },
+        (Position::Overlay, None, None, false) => Placement::Overlay,
+        _ => {
+            return Err(Refusal::Malformed(
+                "owned docks need owner_pid, return_target, and resizable true".to_owned(),
+            ));
         }
-        Position::Overlay => owner_pid.is_none() && return_target.is_none() && !resizable,
     };
-    if !ownership_is_valid {
-        return Err(Refusal::Malformed(
-            "owned docks need owner_pid, return_target, and resizable true".to_owned(),
-        ));
-    }
     let description = message
         .get("description")
         .cloned()
@@ -280,13 +283,8 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
     Ok((
         pane,
         Open {
-            position,
-            side,
-            size,
+            placement,
             focus,
-            owner_pid,
-            return_target,
-            resizable,
             description,
         },
     ))
@@ -617,7 +615,9 @@ mod tests {
             let mut message = open_message(3);
             message["position"] = json!(position);
             message.as_object_mut().unwrap().remove("size");
-            assert_eq!(parse_open(&message).unwrap().1.size, 240.0);
+            if let Placement::Dock { size, .. } = parse_open(&message).unwrap().1.placement {
+                assert_eq!(size.pixels(), 240.0);
+            }
         }
     }
 
@@ -643,7 +643,9 @@ mod tests {
         }
         let mut message = open_message(3);
         message["size"] = json!(240.5);
-        assert_eq!(parse_open(&message).unwrap().1.size, 240.5);
+        assert!(
+            matches!(parse_open(&message).unwrap().1.placement, Placement::Dock { size, .. } if size.pixels() == 240.5)
+        );
     }
 
     #[test]
@@ -655,12 +657,16 @@ mod tests {
 
         let (pane, open) = parse_open(&message).expect("owned open");
         assert_eq!(pane, PaneId(3));
-        assert_eq!(open.owner_pid, Some(41));
-        assert_eq!(
-            open.return_target,
-            Some(ReturnTarget::Surface(SurfaceId(7)))
-        );
-        assert!(open.resizable);
+        assert!(matches!(
+            open.placement,
+            Placement::Dock {
+                ownership: Ownership::Owned {
+                    pid: 41,
+                    return_target: ReturnTarget::Surface(SurfaceId(7))
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -693,9 +699,28 @@ mod tests {
             parse_open(&registered_fill)
                 .expect("registered fill")
                 .1
-                .owner_pid,
-            Some(41)
+                .placement,
+            Placement::Fill {
+                owner_pid: Some(41)
+            }
         );
+    }
+
+    #[test]
+    fn fill_return_targets_and_resize_flags_keep_the_ownership_refusal() {
+        for (key, value) in [
+            ("return_target", json!("terminal")),
+            ("resizable", json!(true)),
+        ] {
+            let mut message = open_message(3);
+            message["position"] = json!("fill");
+            message["owner_pid"] = json!(41);
+            message[key] = value;
+            assert_eq!(
+                parse_open(&message).unwrap_err().reason(),
+                "malformed: owned docks need owner_pid, return_target, and resizable true"
+            );
+        }
     }
 
     #[test]

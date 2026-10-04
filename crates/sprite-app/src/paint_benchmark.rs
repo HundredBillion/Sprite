@@ -8,8 +8,7 @@ use sprite_term::{
 };
 
 use crate::grid::prepare_rows;
-use crate::grid_paint::GridPaint;
-use crate::surface::render::GridMetrics;
+use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scenario {
@@ -40,7 +39,6 @@ impl Scenario {
 pub struct PaintBenchmark {
     snapshot: RenderSnapshot,
     changed: RenderSnapshot,
-    metrics: GridMetrics,
 }
 
 impl Default for PaintBenchmark {
@@ -56,19 +54,7 @@ impl PaintBenchmark {
         let mut changed = snapshot.clone();
         changed.generation += 1;
         changed.rows[30].cells[10].text = "Z".to_owned();
-        let metrics = GridMetrics {
-            cell_width: px(8.4),
-            cell_height: px(18.0),
-            font_family: "monospace".into(),
-            font_size: px(14.0),
-            defaults: (snapshot.default_foreground, snapshot.default_background),
-            blink_on: true,
-        };
-        Self {
-            snapshot,
-            changed,
-            metrics,
-        }
+        Self { snapshot, changed }
     }
 
     pub fn run(&mut self, scenario: Scenario, split: bool) {
@@ -89,7 +75,6 @@ impl PaintBenchmark {
             Scenario::OneRowChange => &self.changed,
             _ => &self.snapshot,
         };
-        self.metrics.blink_on = scenario != Scenario::SameGenerationBlink;
         let hover = (scenario == Scenario::Hover).then_some((
             snapshot.generation,
             HyperlinkSpan {
@@ -99,7 +84,23 @@ impl PaintBenchmark {
             },
         ));
         let rows = prepare_rows(Some(snapshot), hover);
-        GridPaint::prepare(Some(snapshot), rows, &self.metrics, split)
+        GridPaint::prepare_spec(
+            GridPaintSpec {
+                rows,
+                pass: RowPass::Whole,
+                cursor: Some(snapshot.cursor)
+                    .filter(|cursor| scenario != Scenario::SameGenerationBlink || !cursor.blinking),
+                cursor_color: snapshot.cursor_color,
+                palette: Some(std::sync::Arc::new(*snapshot.palette.clone())),
+                default_fg: snapshot.default_foreground,
+                default_bg: snapshot.default_background,
+                cell_width: px(8.4),
+                cell_height: px(18.0),
+                font_family: "monospace".into(),
+                font_size: px(14.0),
+            },
+            split,
+        )
     }
 }
 
@@ -153,12 +154,16 @@ fn fixture() -> RenderSnapshot {
         .collect();
     RenderSnapshot {
         generation: 1,
-        size: TerminalSize {
-            rows: 60,
-            cols: 200,
-            cell_width_px: 8,
-            cell_height_px: 18,
-        },
+        size: sprite_term::ValidTerminalSize::new(
+            TerminalSize {
+                rows: 60,
+                cols: 200,
+                cell_width_px: 8,
+                cell_height_px: 18,
+            },
+            "resize",
+        )
+        .expect("valid terminal size"),
         viewport: Viewport {
             total_rows: 60,
             offset: 0,

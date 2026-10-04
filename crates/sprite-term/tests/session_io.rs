@@ -213,12 +213,16 @@ fn resize_updates_pty_and_snapshot() {
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
-    let resized = sprite_term::TerminalSize {
-        rows: 40,
-        cols: 100,
-        cell_width_px: 9,
-        cell_height_px: 18,
-    };
+    let resized = sprite_term::ValidTerminalSize::new(
+        sprite_term::TerminalSize {
+            rows: 40,
+            cols: 100,
+            cell_width_px: 9,
+            cell_height_px: 18,
+        },
+        "resize",
+    )
+    .expect("valid terminal size");
     session
         .send(TerminalCommand::Resize(resized))
         .expect("send resize");
@@ -275,19 +279,23 @@ fn degenerate_and_oversized_resizes_are_refused() {
             },
         ),
     ] {
-        let error = session
-            .send(TerminalCommand::Resize(size))
-            .expect_err(label);
+        let error = sprite_term::ValidTerminalSize::new(size, "resize").expect_err(label);
         assert_eq!(error.operation, "resize", "{label} is refused at the seam");
     }
 
     // The exact acceptance boundary is one million cells.
     session
-        .send(TerminalCommand::Resize(sprite_term::TerminalSize {
-            rows: 1000,
-            cols: 1000,
-            ..base
-        }))
+        .send(TerminalCommand::Resize(
+            sprite_term::ValidTerminalSize::new(
+                sprite_term::TerminalSize {
+                    rows: 1000,
+                    cols: 1000,
+                    ..base
+                },
+                "resize",
+            )
+            .unwrap(),
+        ))
         .expect("a one-million-cell grid is allowed");
 }
 

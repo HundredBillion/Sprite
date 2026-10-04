@@ -24,7 +24,7 @@ use sprite_app::{
     Report, TabId, collect_panes, render_schema,
 };
 use sprite_term::{
-    CursorSnapshot, HistorySnapshot, PaneRow, PromptKind, ScreenKind, TerminalSize, Viewport,
+    CursorSnapshot, HistorySnapshot, PaneRow, PromptKind, ScreenKind, ValidTerminalSize, Viewport,
 };
 
 /// A regression budget leaves this much headroom above today's p95.
@@ -138,7 +138,7 @@ fn snapshot(history: usize, width: usize) -> Arc<HistorySnapshot> {
         .collect();
     Arc::new(HistorySnapshot {
         generation: 1,
-        size: TerminalSize::DEFAULT,
+        size: ValidTerminalSize::DEFAULT,
         screen: ScreenKind::Primary,
         rows,
         history_rows: history,

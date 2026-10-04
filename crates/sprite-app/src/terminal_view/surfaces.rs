@@ -17,10 +17,10 @@ use gpui::{
 use super::list_view::VirtualListView;
 use crate::config::Highlights;
 use crate::surface::channel::{
-    FocusTarget, Open, Position, ReturnTarget, Side, SurfaceConnection, SurfaceRequest,
-    event_applied, event_blur, event_closed, event_dock_size, event_focus, event_grid_resize,
-    event_input, event_mouse, event_paste, event_refused, event_resize, event_warning,
-    neovim_modifiers,
+    FocusTarget, Open, Ownership, Placement, Position, ReturnTarget, Side, SurfaceConnection,
+    SurfaceRequest, event_applied, event_blur, event_closed, event_dock_size, event_focus,
+    event_grid_resize, event_input, event_mouse, event_paste, event_refused, event_resize,
+    event_warning, neovim_modifiers,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -56,8 +56,7 @@ pub(super) struct HostedSurface {
     pub(super) body: Body,
     connection: SurfaceConnection,
     focus: FocusHandle,
-    /// A dock's requested width in logical pixels; unused elsewhere.
-    pub(super) size: f32,
+    placement: HostedPlacement,
     /// The last `resize` event this Surface was sent, so the next frame sends
     /// one only when the text would differ: a font change changes the cell
     /// count in it, a colour-only reload changes nothing.
@@ -80,9 +79,41 @@ pub(super) struct HostedSurface {
     /// become whole cells exactly as they do for the terminal.
     wheel_rows: crate::grid::ScrollAccumulator,
     wheel_cols: crate::grid::ScrollAccumulator,
-    owner: Option<Owner>,
-    registered_owner: Option<(u32, i32)>,
-    resizable: bool,
+}
+
+enum HostedPlacement {
+    Fill {
+        registered_owner: Option<(u32, i32)>,
+    },
+    Dock {
+        width: f32,
+        owner: Option<Owner>,
+    },
+    Overlay,
+}
+
+impl HostedSurface {
+    pub(super) fn size(&self) -> f32 {
+        match self.placement {
+            HostedPlacement::Dock { width, .. } => width,
+            HostedPlacement::Fill { .. } | HostedPlacement::Overlay => 0.0,
+        }
+    }
+    fn owner(&self) -> Option<Owner> {
+        match self.placement {
+            HostedPlacement::Dock { owner, .. } => owner,
+            HostedPlacement::Fill { .. } | HostedPlacement::Overlay => None,
+        }
+    }
+    fn registered_owner(&self) -> Option<(u32, i32)> {
+        match self.placement {
+            HostedPlacement::Fill { registered_owner } => registered_owner,
+            HostedPlacement::Dock { .. } | HostedPlacement::Overlay => None,
+        }
+    }
+    fn resizable(&self) -> bool {
+        self.owner().is_some()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -243,15 +274,17 @@ impl TerminalView {
     fn resize_dock(&mut self, id: SurfaceId, width: f32, cx: &mut Context<Self>) {
         let Some(surface) = self
             .surfaces
-            .get_mut(|surface| surface.id == id && surface.resizable)
+            .get_mut(|surface| surface.id == id && surface.resizable())
         else {
             return;
         };
-        if surface.size == width {
+        if surface.size() == width {
             return;
         }
-        let old_reported = surface.size.round() as u32;
-        surface.size = width;
+        let old_reported = surface.size().round() as u32;
+        if let HostedPlacement::Dock { width: current, .. } = &mut surface.placement {
+            *current = width;
+        }
         let reported = width.round() as u32;
         if reported != old_reported {
             surface.connection.send(&event_dock_size(reported));
@@ -327,7 +360,7 @@ impl TerminalView {
             .surfaces
             .fill
             .as_ref()
-            .map(|fill| (fill.id, fill.registered_owner));
+            .map(|fill| (fill.id, fill.registered_owner()));
         eligible_owner_group(owner_pid, return_target, fill, |pid| {
             self.foreground_owner_group(pid)
         })
@@ -338,7 +371,7 @@ impl TerminalView {
             FocusTarget::Terminal => self.surfaces.fill.is_none().then(|| self.focus.clone()),
             FocusTarget::Surface(id) => {
                 let fill = self.surfaces.fill.as_ref().filter(|fill| fill.id == id)?;
-                let (pid, group) = fill.registered_owner?;
+                let (pid, group) = fill.registered_owner()?;
                 (group == owner.group && self.foreground_owner_group(pid) == Some(group))
                     .then(|| fill.focus.clone())
             }
@@ -351,8 +384,8 @@ impl TerminalView {
             .iter()
             .find(|surface| surface.id == id)
             .ok_or(Refusal::Ineligible)?;
-        let Some(owner) = surface.owner else {
-            return match surface.registered_owner {
+        let Some(owner) = surface.owner() else {
+            return match surface.registered_owner() {
                 Some((pid, group)) if self.foreground_owner_group(pid) != Some(group) => {
                     Err(Refusal::Ineligible)
                 }
@@ -406,27 +439,33 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), Refusal> {
-        let registered_owner = match open.owner_pid {
-            Some(pid) if open.position == Position::Fill => Some((
-                pid,
-                self.foreground_owner_group(pid)
-                    .ok_or(Refusal::Ineligible)?,
-            )),
-            _ => None,
-        };
-        let owner = match (open.owner_pid, open.return_target) {
-            (Some(pid), Some(return_target)) => {
-                let group = self.capability_owner_group(pid, return_target)?;
-                Some(Owner {
-                    pid,
-                    group,
-                    return_target: match return_target {
-                        ReturnTarget::Terminal => FocusTarget::Terminal,
-                        ReturnTarget::Surface(id) => FocusTarget::Surface(id),
-                    },
-                })
-            }
-            _ => None,
+        let placement = match open.placement {
+            Placement::Fill { owner_pid } => HostedPlacement::Fill {
+                registered_owner: owner_pid
+                    .map(|pid| {
+                        self.foreground_owner_group(pid)
+                            .map(|group| (pid, group))
+                            .ok_or(Refusal::Ineligible)
+                    })
+                    .transpose()?,
+            },
+            Placement::Dock {
+                size, ownership, ..
+            } => HostedPlacement::Dock {
+                width: size.pixels(),
+                owner: match ownership {
+                    Ownership::Unowned => None,
+                    Ownership::Owned { pid, return_target } => Some(Owner {
+                        pid,
+                        group: self.capability_owner_group(pid, return_target)?,
+                        return_target: match return_target {
+                            ReturnTarget::Terminal => FocusTarget::Terminal,
+                            ReturnTarget::Surface(id) => FocusTarget::Surface(id),
+                        },
+                    }),
+                },
+            },
+            Placement::Overlay => HostedPlacement::Overlay,
         };
         let parsed = description::parse(&open.description, cx.global::<TokenRegistry>())?;
         let focus = cx.focus_handle();
@@ -440,26 +479,30 @@ impl TerminalView {
                 view.dispatch_surface_event(id, &event_blur(), window, cx);
             }
         });
-        let previous_focus = match open.position {
+        let previous_focus = match open.placement.position() {
             Position::Overlay => window.focused(cx),
             Position::Fill | Position::Dock => None,
         };
         let warnings = parsed.warnings;
         let root = parsed.description.root;
-        let body = match root.grid {
-            Some(size) => Body::Grid {
+        let body = match &root {
+            Element::Grid { size, .. } => Body::Grid {
                 grid: GridSurface::new(size.cols, size.rows),
                 root,
             },
-            None if root.list.is_some() => {
-                let config = root.list.as_ref().expect("checked").clone();
+            Element::VirtualList { config } => {
+                let config = config.as_ref().clone();
                 let host = cx.entity().downgrade();
                 Body::List {
                     root,
                     view: cx.new(|_| VirtualListView::new(config, id, host)),
                 }
             }
-            None => Body::Elements {
+            Element::Box { .. }
+            | Element::List { .. }
+            | Element::Text { .. }
+            | Element::Button { .. }
+            | Element::Image { .. } => Body::Elements {
                 description: Description { root },
                 images: Default::default(),
             },
@@ -469,7 +512,7 @@ impl TerminalView {
             body,
             connection: connection.clone(),
             focus: focus.clone(),
-            size: open.size,
+            placement,
             told: None,
             previous_focus,
             _focus_events: [on_focus, on_blur],
@@ -477,11 +520,9 @@ impl TerminalView {
             pressed: None,
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
-            owner,
-            registered_owner,
-            resizable: open.resizable,
         };
-        self.surfaces.place(open.position, open.side, hosted)?;
+        self.surfaces
+            .place(open.placement.position(), open.placement.side(), hosted)?;
         for warning in warnings {
             connection.send(&event_warning(&warning));
         }
@@ -586,12 +627,12 @@ impl TerminalView {
         let (dx, dy) = match event.delta {
             gpui::ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
             gpui::ScrollDelta::Lines(delta) => (
-                delta.x * f32::from(metrics.cell_width),
-                delta.y * f32::from(metrics.cell_height),
+                delta.x * f32::from(metrics.cells.width()),
+                delta.y * f32::from(metrics.cells.height()),
             ),
         };
-        let rows = surface.wheel_rows.accumulate(dy, metrics.cell_height);
-        let cols = surface.wheel_cols.accumulate(dx, metrics.cell_width);
+        let rows = surface.wheel_rows.accumulate(dy, metrics.cells.height());
+        let cols = surface.wheel_cols.accumulate(dx, metrics.cells.width());
         let turns = [
             crate::surface::render::wheel_turns(rows, "up", "down"),
             crate::surface::render::wheel_turns(cols, "left", "right"),
@@ -627,7 +668,7 @@ impl TerminalView {
         match parsed {
             Ok(parsed) => {
                 if let Body::List { root, view } = &mut surface.body {
-                    if parsed.description.root.list.is_none() {
+                    if parsed.description.root.list().is_none() {
                         surface.connection.send(&event_refused(
                             &Refusal::Malformed(
                                 "a virtual_list update keeps kind virtual_list".to_owned(),
@@ -636,16 +677,10 @@ impl TerminalView {
                         ));
                         return;
                     }
-                    let config = parsed
-                        .description
-                        .root
-                        .list
-                        .as_ref()
-                        .expect("checked")
-                        .clone();
+                    let config = parsed.description.root.list().expect("checked").clone();
                     *root = parsed.description.root;
                     view.update(cx, |view, cx| view.reconfigure(config, cx));
-                } else if parsed.description.root.list.is_some() {
+                } else if parsed.description.root.list().is_some() {
                     surface.connection.send(&event_refused(
                         &Refusal::Malformed(
                             "a virtual_list update needs a virtual_list Surface".to_owned(),
@@ -662,7 +697,7 @@ impl TerminalView {
                 for warning in parsed.warnings {
                     surface.connection.send(&event_warning(&warning));
                 }
-                if surface.owner.is_some() {
+                if surface.owner().is_some() {
                     surface.connection.send(&event_applied("update", None));
                 }
                 cx.notify();
@@ -791,7 +826,7 @@ impl TerminalView {
             closes_fill,
             self.surfaces
                 .iter()
-                .map(|surface| (surface.id, surface.owner.map(|owner| owner.return_target))),
+                .map(|surface| (surface.id, surface.owner().map(|owner| owner.return_target))),
         );
         for dependent in plan.dependents {
             self.close_surface(dependent, window, cx);
@@ -808,7 +843,7 @@ impl TerminalView {
             // else — or a previous holder that has since closed — falls back to
             // the terminal, which is always there.
             let previous = surface
-                .owner
+                .owner()
                 .and_then(|owner| self.valid_return_handle(owner))
                 .or_else(|| match position {
                     Position::Overlay => surface.previous_focus.filter(|handle| {
@@ -831,7 +866,7 @@ impl TerminalView {
         let invalid = self
             .surfaces
             .iter()
-            .filter(|surface| surface.owner.is_some() || surface.registered_owner.is_some())
+            .filter(|surface| surface.owner().is_some() || surface.registered_owner().is_some())
             .filter_map(|surface| {
                 self.validate_surface_owner(surface.id)
                     .is_err()
@@ -888,7 +923,7 @@ impl TerminalView {
             .surfaces
             .left
             .as_ref()
-            .filter(|surface| surface.resizable)
+            .filter(|surface| surface.resizable())
         {
             dock_edges.push(self.dock_edge(surface.id, Side::Left, left_width, allocated, cx));
         }
@@ -896,7 +931,7 @@ impl TerminalView {
             .surfaces
             .right
             .as_ref()
-            .filter(|surface| surface.resizable)
+            .filter(|surface| surface.resizable())
         {
             dock_edges.push(self.dock_edge(surface.id, Side::Right, right_width, allocated, cx));
         }
@@ -1076,9 +1111,11 @@ impl TerminalView {
                 Some(
                     div()
                         .absolute()
-                        .top(px(f32::from(cursor.row) * f32::from(metrics.cell_height)))
-                        .left(px(f32::from(cursor.column) * f32::from(metrics.cell_width)))
-                        .h(metrics.cell_height)
+                        .top(px(f32::from(cursor.row) * f32::from(metrics.cells.height())))
+                        .left(px(
+                            f32::from(cursor.column) * f32::from(metrics.cells.width())
+                        ))
+                        .h(metrics.cells.height())
                         .bg(rgb(crate::grid_paint::pack(default_fg)))
                         .text_color(rgb(crate::grid_paint::pack(default_bg)))
                         .underline()
@@ -1524,13 +1561,8 @@ mod tests {
             view.open_surface(
                 SurfaceId(1),
                 Open {
-                    position: Position::Fill,
-                    side: Side::Left,
-                    size: 0.0,
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None },
                     focus: false,
-                    owner_pid: None,
-                    return_target: None,
-                    resizable: false,
                     description: fixture["description"].clone(),
                 },
                 connection,
@@ -1577,13 +1609,8 @@ mod tests {
             view.open_surface(
                 SurfaceId(2),
                 Open {
-                    position: Position::Fill,
-                    side: Side::Left,
-                    size: 0.0,
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None },
                     focus: false,
-                    owner_pid: None,
-                    return_target: None,
-                    resizable: false,
                     description: document("blue"),
                 },
                 connection,
@@ -1704,13 +1731,8 @@ mod tests {
 
     fn open_description(description: serde_json::Value) -> Open {
         Open {
-            position: Position::Fill,
-            side: Side::Left,
-            size: 0.0,
+            placement: crate::surface::channel::Placement::Fill { owner_pid: None },
             focus: false,
-            owner_pid: None,
-            return_target: None,
-            resizable: false,
             description,
         }
     }
@@ -1769,7 +1791,9 @@ mod tests {
         let mut owned = open_description(
             serde_json::json!({"version":1,"root":{"kind":"text","text":"owned"}}),
         );
-        owned.owner_pid = Some(std::process::id());
+        owned.placement = Placement::Fill {
+            owner_pid: Some(std::process::id()),
+        };
         assert_eq!(
             open_request(&host, cx, SurfaceId(100), owned).0,
             Err(Refusal::Ineligible)
@@ -1792,7 +1816,7 @@ mod tests {
             else {
                 panic!("element Surface")
             };
-            assert_eq!(description.root.text.as_deref(), Some("after"));
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
         });
         dispatch(
             &host,
@@ -1809,7 +1833,7 @@ mod tests {
             else {
                 panic!("element Surface")
             };
-            assert_eq!(description.root.text.as_deref(), Some("after"));
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
         });
         dispatch(
             &host,
@@ -2011,9 +2035,14 @@ mod tests {
             let mut open = open_description(
                 serde_json::json!({"version":1,"root":{"kind":"text","text":"owned"}}),
             );
-            open.position = Position::Dock;
-            open.owner_pid = Some(pid);
-            open.return_target = Some(ReturnTarget::Terminal);
+            open.placement = Placement::Dock {
+                side: Side::Left,
+                size: crate::surface::DockSize::default(),
+                ownership: Ownership::Owned {
+                    pid,
+                    return_target: ReturnTarget::Terminal,
+                },
+            };
             open
         };
         assert_eq!(

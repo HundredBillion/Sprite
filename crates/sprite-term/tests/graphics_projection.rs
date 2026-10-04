@@ -348,12 +348,18 @@ fn resizing_re_places_without_re_copying_the_pixels() {
         .expect("a placement");
 
     session
-        .send(TerminalCommand::Resize(sprite_term::TerminalSize {
-            rows: 30,
-            cols: 100,
-            cell_width_px: 10,
-            cell_height_px: 20,
-        }))
+        .send(TerminalCommand::Resize(
+            sprite_term::ValidTerminalSize::new(
+                sprite_term::TerminalSize {
+                    rows: 30,
+                    cols: 100,
+                    cell_width_px: 10,
+                    cell_height_px: 20,
+                },
+                "resize",
+            )
+            .expect("valid terminal size"),
+        ))
         .expect("resize");
     let after = feed(&mut session, &snapshots, "resized\\n".to_owned());
 

@@ -35,7 +35,8 @@ use input::Drag;
 use render::BLINK_INTERVAL;
 use surfaces::DockDrag;
 use surfaces::HostedSurface;
-use theme::{chosen_family, measure_cell_width, unpack};
+pub(crate) use theme::CellMetrics;
+use theme::{chosen_family, unpack};
 
 enum SessionState {
     NeverStarted,
@@ -57,18 +58,9 @@ pub struct TerminalView {
     /// forget to call.
     textures: crate::graphics_cache::GraphicsCache,
     focus: FocusHandle,
-    /// The configured text size, which the cell metrics follow.
-    font_size: Pixels,
-    /// Measured from the font actually rendered, in logical pixels.
-    cell_width: Pixels,
-    cell_height: Pixels,
-    /// The configured line-height ratio, kept so a size change re-derives the
-    /// cell height from the same ratio the theme asked for.
-    line_height: f32,
+    metrics: CellMetrics,
     /// The configured gap around the grid, in logical pixels.
     padding: f32,
-    /// Resolved once, then used for both measuring and drawing.
-    font_family: SharedString,
     /// Foreground and background to use before the first snapshot arrives.
     ///
     /// Configured colours are held here as well as sent to the terminal, so a
@@ -76,7 +68,7 @@ pub struct TerminalView {
     /// dark.
     fallback_colors: (Rgb, Rgb),
     /// The last size successfully sent, so an unchanged layout sends nothing.
-    size: Option<TerminalSize>,
+    size: Option<sprite_term::ValidTerminalSize>,
     /// How this pane is reached by observation, if the window has an endpoint.
     observation: Option<crate::observation::panes::PaneLink>,
     /// What programs have asked this pane to draw beside or over its grid.
@@ -190,9 +182,9 @@ impl TerminalView {
 
         // The cell is shaped before the session starts, so the child never
         // observes scale-1 metrics for a moment on a HiDPI display.
-        let font_size = px(font.size);
         let (font_family, mut complaints) = chosen_family(window, font.family.as_deref());
-        let cell_width = measure_cell_width(window, &font_family, font_size);
+        let metrics =
+            CellMetrics::measure(window, font_family.clone(), font.size, font.line_height);
         let scale_factor = window.scale_factor();
 
         // A window told what to run gives every one of its panes the same
@@ -214,16 +206,16 @@ impl TerminalView {
         };
         // The initial 24x80 grid is kept; only the physical cell metrics are
         // corrected for the display this window opened on.
-        config.size = TerminalSize {
-            cell_width_px: physical(cell_width, scale_factor),
-            cell_height_px: physical(
-                px(crate::config::Font::cell_height(
-                    font.size,
-                    font.line_height,
-                )),
-                scale_factor,
-            ),
-            ..config.size
+        config.size = match sprite_term::ValidTerminalSize::new(
+            TerminalSize {
+                cell_width_px: physical(metrics.width(), scale_factor),
+                cell_height_px: physical(metrics.height(), scale_factor),
+                ..config.size.dimensions()
+            },
+            "resize",
+        ) {
+            Ok(size) => size,
+            Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
         };
         // The terminal's own limit: how much decoded image it will hold.
         config.graphics = sprite_term::GraphicsPolicy {
@@ -336,7 +328,7 @@ impl TerminalView {
             observation,
             surfaces: SurfaceHost::default(),
             dock_drag: None,
-            font_size,
+            metrics,
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
             status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
@@ -344,13 +336,6 @@ impl TerminalView {
             // The renderer's own limit, separate from the terminal's above.
             textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
             focus: cx.focus_handle(),
-            cell_width,
-            cell_height: px(crate::config::Font::cell_height(
-                font.size,
-                font.line_height,
-            )),
-            line_height: font.line_height,
-            font_family,
             fallback_colors,
             size: Some(initial_size),
             allocated: None,
@@ -422,17 +407,15 @@ impl TerminalView {
             observation: None,
             surfaces: SurfaceHost::default(),
             dock_drag: None,
-            font_size: px(crate::config::Font::DEFAULT_SIZE),
+            metrics: CellMetrics::measure(
+                window,
+                font_family,
+                crate::config::Font::DEFAULT_SIZE,
+                crate::config::Font::DEFAULT_LINE_HEIGHT,
+            ),
             bundle: None,
             textures: crate::graphics_cache::GraphicsCache::default(),
             focus: cx.focus_handle(),
-            cell_width: px(8.0),
-            cell_height: px(crate::config::Font::cell_height(
-                crate::config::Font::DEFAULT_SIZE,
-                crate::config::Font::DEFAULT_LINE_HEIGHT,
-            )),
-            line_height: crate::config::Font::DEFAULT_LINE_HEIGHT,
-            font_family,
             fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
             allocated: None,

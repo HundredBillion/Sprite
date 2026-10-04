@@ -318,7 +318,7 @@ fn pane(report: &PaneReport, dropped: usize) -> Value {
 
     object.insert(
         "size".to_owned(),
-        json!({ "columns": snapshot.size.cols, "rows": snapshot.size.rows }),
+        json!({ "columns": snapshot.size.cols(), "rows": snapshot.size.rows() }),
     );
     object.insert(
         "cursor".to_owned(),
@@ -470,14 +470,15 @@ mod tests {
     use crate::pane_tree::{PaneId, Rect};
     use crate::tabs::TabId;
     use sprite_term::{
-        CursorSnapshot, HistorySnapshot, PaneRow, PromptKind, ScreenKind, TerminalSize, Viewport,
+        CursorSnapshot, HistorySnapshot, PaneRow, PromptKind, ScreenKind, ValidTerminalSize,
+        Viewport,
     };
     use std::sync::Arc;
 
     fn snapshot(text: &str) -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 7,
-            size: TerminalSize::DEFAULT,
+            size: ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
                 text: text.to_owned(),

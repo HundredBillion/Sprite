@@ -46,3 +46,7 @@ pub use surface::channel::{
 pub use surface::client::{run_surface_focus, run_surface_open, run_token_register};
 pub use tabs::TabId;
 pub use workspace::Workspace;
+
+pub use surface::channel::{
+    Open as SurfaceOpen, Ownership as SurfaceOwnership, Placement as SurfacePlacement,
+};

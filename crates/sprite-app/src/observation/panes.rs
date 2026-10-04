@@ -229,7 +229,7 @@ mod tests {
     fn snapshot() -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 1,
-            size: sprite_term::TerminalSize::DEFAULT,
+            size: sprite_term::ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
                 text: "answer".to_owned(),
@@ -417,7 +417,9 @@ mod tests {
         assert!(
             session
                 .session
-                .send(TerminalCommand::Resize(sprite_term::TerminalSize::DEFAULT))
+                .send(TerminalCommand::Resize(
+                    sprite_term::ValidTerminalSize::DEFAULT
+                ))
                 .is_ok(),
             "the session is alive and accepting commands"
         );

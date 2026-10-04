@@ -1965,7 +1965,7 @@ mod tests {
 
     #[gpui::test]
     fn repaint_preserves_a_hosted_surfaces_keyboard_focus(cx: &mut gpui::TestAppContext) {
-        use crate::surface::channel::{Open, Position, Side, SurfaceConnection};
+        use crate::surface::channel::{Open, SurfaceConnection};
         let (workspace, cx) = test_workspace(cx);
         draw_workspace(cx);
         let terminal_focus = focused_handle(&workspace, cx);
@@ -1975,8 +1975,7 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.serve_surface_request(crate::surface::channel::SurfaceRequest::Open {
                 id: crate::surface::SurfaceId(1), pane, open: Open {
-                    position: Position::Fill, side: Side::Left, size: 0.0, focus: true,
-                    owner_pid: None, return_target: None, resizable: false,
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None }, focus: true,
                     description: serde_json::json!({"version":1,"root":{"kind":"text","text":"Surface"}}),
                 }, connection: SurfaceConnection::new(&stream).unwrap(), reply,
             }, window, cx);
@@ -2040,7 +2039,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::surface::channel::{
-            FocusTarget, Open, Position, ReturnTarget, Side, SurfaceConnection, SurfaceRequest,
+            FocusTarget, Open, ReturnTarget, SurfaceConnection, SurfaceRequest,
         };
         use crate::surface::{Refusal, SurfaceId};
         use gpui::AppContext;
@@ -2066,13 +2065,8 @@ mod tests {
                         pane,
                         id: SurfaceId(1),
                         open: Open {
-                            position: Position::Fill,
-                            side: Side::Left,
-                            size: 0.0,
+                            placement: crate::surface::channel::Placement::Fill { owner_pid: None },
                             focus: false,
-                            owner_pid: None,
-                            return_target: None,
-                            resizable: false,
                             description: serde_json::Value::Null,
                         },
                         connection: SurfaceConnection::new(&stream).unwrap(),

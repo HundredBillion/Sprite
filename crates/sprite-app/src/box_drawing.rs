@@ -91,10 +91,26 @@ impl Outline {
 /// The cell a character is drawn into, in logical pixels, already snapped.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Cell {
-    pub left: f32,
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl Cell {
+    pub(crate) fn new(
+        left: crate::grid::Snapped,
+        top: crate::grid::Snapped,
+        right: crate::grid::Snapped,
+        bottom: crate::grid::Snapped,
+    ) -> Self {
+        Self {
+            left: f32::from(left.pixels()),
+            top: f32::from(top.pixels()),
+            right: f32::from(right.pixels()),
+            bottom: f32::from(bottom.pixels()),
+        }
+    }
 }
 
 /// Stroke widths for one cell size, in logical pixels.
@@ -946,5 +962,70 @@ mod tests {
             collect('\u{2571}', c, strokes()).is_empty(),
             "a diagonal has no rectangles"
         );
+    }
+}
+
+#[cfg(test)]
+mod geometry_properties {
+    use super::*;
+    use crate::grid::{Col, Row, column_edge, row_edge};
+    use gpui::px;
+
+    #[test]
+    fn generated_fractional_grids_tile_narrow_and_wide_box_cells() {
+        let glyph = box_glyph('─').unwrap();
+        // Ordered domains make the first reported counterexample reproducible and minimal in this domain.
+        for scale_step in 3..=12 {
+            let scale = scale_step as f32 / 4.0;
+            for offset_step in -4..=4 {
+                let origin = px(offset_step as f32 / 7.0);
+                for width_step in 4..=32 {
+                    let width = px(width_step as f32 / 3.0);
+                    let top = row_edge(origin, px(16.8), Row(0), scale);
+                    let bottom = row_edge(origin, px(16.8), Row(1), scale);
+                    for span in 1..=2 {
+                        let mut previous_right = None;
+                        for index in 0..64 {
+                            let left = column_edge(origin, width, Col(index * span), scale);
+                            let right = column_edge(origin, width, Col((index + 1) * span), scale);
+                            let context = (scale_step, offset_step, width_step, span, index);
+                            assert!(right > left, "collapsed {context:?}");
+                            if let Some(previous) = previous_right {
+                                assert_eq!(left, previous, "gap {context:?}");
+                            }
+                            for edge in [left, right, top, bottom] {
+                                let device = f32::from(edge.pixels()) * scale;
+                                assert!(
+                                    (device - device.round()).abs() < 0.001,
+                                    "off device grid {context:?}: {device}"
+                                );
+                            }
+                            let mut rectangles = Vec::new();
+                            box_rects(
+                                &glyph,
+                                Cell::new(left, top, right, bottom),
+                                Strokes {
+                                    light: 1.0 / scale,
+                                    heavy: 2.0 / scale,
+                                },
+                                |rect| rectangles.push(rect),
+                            );
+                            assert_eq!(rectangles.len(), 1, "{context:?}");
+                            assert_eq!(
+                                rectangles[0].0,
+                                f32::from(left.pixels()),
+                                "left {context:?}"
+                            );
+                            assert_eq!(
+                                rectangles[0].2,
+                                f32::from(right.pixels()),
+                                "right {context:?}"
+                            );
+                            previous_right = Some(right);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

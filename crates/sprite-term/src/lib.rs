@@ -143,36 +143,74 @@ impl TerminalSize {
         let total = u64::from(self.rows) * u64::from(self.cell_height_px);
         u16::try_from(total).unwrap_or(u16::MAX)
     }
+}
 
-    /// Rejects degenerate and oversized grids before either backend allocates
-    /// or mutates anything.
-    pub(crate) fn validate(self, operation: &'static str) -> Result<(), SessionError> {
-        if self.rows == 0 || self.cols == 0 {
+/// Dimensions accepted by both terminal backends.
+///
+/// ```
+/// use sprite_term::{TerminalSize, ValidTerminalSize, TerminalCommand};
+/// let size = ValidTerminalSize::new(TerminalSize::DEFAULT, "resize").unwrap();
+/// let command = TerminalCommand::Resize(size);
+/// ```
+///
+/// ```compile_fail,E0308
+/// use sprite_term::{TerminalSize, ValidTerminalSize, TerminalCommand};
+/// let command = TerminalCommand::Resize(TerminalSize::DEFAULT);
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValidTerminalSize(TerminalSize);
+
+impl ValidTerminalSize {
+    pub const DEFAULT: Self = Self(TerminalSize::DEFAULT);
+
+    pub fn new(size: TerminalSize, operation: &'static str) -> Result<Self, SessionError> {
+        if size.rows == 0 || size.cols == 0 {
             return Err(SessionError::new(
                 operation,
                 format!(
                     "terminal size needs a nonzero grid, got {}x{}",
-                    self.rows, self.cols
+                    size.rows, size.cols
                 ),
             ));
         }
-        if self.cell_width_px == 0 || self.cell_height_px == 0 {
+        if size.cell_width_px == 0 || size.cell_height_px == 0 {
             return Err(SessionError::new(
                 operation,
                 format!(
                     "terminal size needs nonzero cell metrics, got {}x{} px",
-                    self.cell_width_px, self.cell_height_px
+                    size.cell_width_px, size.cell_height_px
                 ),
             ));
         }
-        let cells = u64::from(self.rows) * u64::from(self.cols);
+        let cells = u64::from(size.rows) * u64::from(size.cols);
         if cells > MAX_CELLS {
             return Err(SessionError::new(
                 operation,
                 format!("terminal grid of {cells} cells exceeds the {MAX_CELLS} cell limit"),
             ));
         }
-        Ok(())
+        Ok(Self(size))
+    }
+    pub fn rows(self) -> u16 {
+        self.0.rows
+    }
+    pub fn cols(self) -> u16 {
+        self.0.cols
+    }
+    pub fn cell_width_px(self) -> u32 {
+        self.0.cell_width_px
+    }
+    pub fn cell_height_px(self) -> u32 {
+        self.0.cell_height_px
+    }
+    pub fn dimensions(self) -> TerminalSize {
+        self.0
+    }
+    pub fn pixel_width(self) -> u16 {
+        self.0.pixel_width()
+    }
+    pub fn pixel_height(self) -> u16 {
+        self.0.pixel_height()
     }
 }
 
@@ -182,7 +220,7 @@ pub struct SessionConfig {
     pub args: Vec<OsString>,
     pub working_directory: Option<PathBuf>,
     pub environment: Vec<(OsString, OsString)>,
-    pub size: TerminalSize,
+    pub size: ValidTerminalSize,
     /// What this pane will accept in the way of images.
     pub graphics: GraphicsPolicy,
     /// The colours this pane starts with, before any program says otherwise.
@@ -207,7 +245,7 @@ impl SessionConfig {
             args,
             working_directory: None,
             environment: Vec::new(),
-            size: TerminalSize::DEFAULT,
+            size: ValidTerminalSize::DEFAULT,
             graphics: GraphicsPolicy::default(),
             colors: ColorDefaults::default(),
             cursor: CursorDefaults::default(),
@@ -346,7 +384,7 @@ pub enum TerminalCommand {
     /// viewport": a wheel event may instead belong to the child.
     Wheel(WheelEvent),
     Input(Vec<u8>),
-    Resize(TerminalSize),
+    Resize(ValidTerminalSize),
     Scroll(Scroll),
     /// Replace the selection. Selection lives here rather than in the
     /// application because libghostty models it over the whole screen including
@@ -740,7 +778,7 @@ pub struct CursorSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderSnapshot {
     pub generation: u64,
-    pub size: TerminalSize,
+    pub size: ValidTerminalSize,
     pub viewport: Viewport,
     /// Whether the child has mouse reporting on.
     ///
@@ -794,7 +832,7 @@ pub struct PaneRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaneSnapshot {
     pub generation: u64,
-    pub size: TerminalSize,
+    pub size: ValidTerminalSize,
     pub viewport: Viewport,
     pub screen: ScreenKind,
     pub rows: Vec<PaneRow>,
@@ -816,7 +854,7 @@ pub struct PaneSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistorySnapshot {
     pub generation: u64,
-    pub size: TerminalSize,
+    pub size: ValidTerminalSize,
     /// Which screen this came from. When an alternate-screen application is
     /// running this is its screen and its history — never the normal screen
     /// hidden behind it.
@@ -1066,11 +1104,6 @@ fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
             ),
         ));
     }
-    // Validated at the seam, so neither the PTY nor libghostty is asked to
-    // allocate or mutate for a grid Sprite would refuse anyway.
-    if let TerminalCommand::Resize(size) = command {
-        size.validate("resize")?;
-    }
     Ok(())
 }
 
@@ -1092,8 +1125,6 @@ impl TerminalSession {
     /// Starts the worker. Returns once the worker is running; `Ready` means the
     /// PTY, child, and terminal are live.
     pub fn spawn(config: SessionConfig) -> Result<Spawned, SessionError> {
-        config.size.validate("spawn")?;
-
         let (commands, command_rx) = mpsc::sync_channel(WORKER_QUEUE_CAPACITY);
         let (event_tx, event_rx) = async_channel::bounded(EVENT_CAPACITY);
         let (snapshot_tx, snapshot_rx) = async_channel::bounded(SNAPSHOT_CAPACITY);
@@ -1231,22 +1262,50 @@ mod tests {
 
     #[test]
     fn degenerate_dimensions_are_rejected() {
-        assert!(size(0, 80, 8, 16).validate("test").is_err());
-        assert!(size(24, 0, 8, 16).validate("test").is_err());
-        assert!(size(24, 80, 0, 16).validate("test").is_err());
-        assert!(size(24, 80, 8, 0).validate("test").is_err());
+        assert!(ValidTerminalSize::new(size(0, 80, 8, 16), "test").is_err());
+        assert!(ValidTerminalSize::new(size(24, 0, 8, 16), "test").is_err());
+        assert!(ValidTerminalSize::new(size(24, 80, 0, 16), "test").is_err());
+        assert!(ValidTerminalSize::new(size(24, 80, 8, 0), "test").is_err());
     }
 
     #[test]
     fn the_cell_limit_is_inclusive() {
         // 1,000,000 cells exactly is the largest accepted grid.
-        assert!(size(1_000, 1_000, 8, 16).validate("test").is_ok());
-        assert!(size(1_000, 1_001, 8, 16).validate("test").is_err());
+        assert!(ValidTerminalSize::new(size(1_000, 1_000, 8, 16), "test").is_ok());
+        assert!(ValidTerminalSize::new(size(1_000, 1_001, 8, 16), "test").is_err());
+    }
+
+    #[test]
+    fn generated_dimensions_are_accepted_exactly_within_the_contract() {
+        for rows in [0, 1, 24, 999, 1000, 1001, u16::MAX] {
+            for cols in [0, 1, 80, 999, 1000, 1001, u16::MAX] {
+                for (width, height) in [
+                    (0, 0),
+                    (0, 1),
+                    (1, 0),
+                    (1, 1),
+                    (8, 16),
+                    (u32::MAX, u32::MAX),
+                ] {
+                    let raw = size(rows, cols, width, height);
+                    let expected = rows != 0
+                        && cols != 0
+                        && width != 0
+                        && height != 0
+                        && u64::from(rows) * u64::from(cols) <= MAX_CELLS;
+                    let result = ValidTerminalSize::new(raw, "resize");
+                    assert_eq!(result.is_ok(), expected, "{raw:?}");
+                    if let Ok(valid) = result {
+                        assert_eq!(valid.dimensions(), raw);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     fn the_default_size_is_valid() {
-        assert!(TerminalSize::DEFAULT.validate("test").is_ok());
+        assert!(ValidTerminalSize::new(TerminalSize::DEFAULT, "test").is_ok());
         assert_eq!(TerminalSize::DEFAULT.pixel_width(), 640);
         assert_eq!(TerminalSize::DEFAULT.pixel_height(), 384);
     }

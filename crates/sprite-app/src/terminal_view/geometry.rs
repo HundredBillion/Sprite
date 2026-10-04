@@ -6,7 +6,7 @@
 use super::*;
 
 use gpui::{Pixels, Size, Window, px};
-use sprite_term::{MAX_CELLS, TerminalCommand, TerminalSize};
+use sprite_term::{TerminalCommand, TerminalSize, ValidTerminalSize};
 
 use crate::grid::{content_area, grid_origin};
 
@@ -24,13 +24,20 @@ pub(super) fn grid_room(allocated: Size<Pixels>, left: f32, right: f32) -> (Size
     )
 }
 
-/// Converts a logical cell metric to whole device pixels, never below one.
+/// Valid subpixel cells occupy one device pixel; invalid measurements stay invalid.
 pub(super) fn physical(logical: Pixels, scale_factor: f32) -> u32 {
-    let pixels = (f32::from(logical) * scale_factor).round();
-    if pixels.is_finite() && pixels >= 1.0 {
-        pixels as u32
+    let logical = f32::from(logical);
+    let pixels = (logical * scale_factor).round();
+    if logical.is_finite()
+        && logical > 0.0
+        && scale_factor.is_finite()
+        && scale_factor > 0.0
+        && pixels.is_finite()
+        && pixels < u32::MAX as f32
+    {
+        pixels.max(1.0) as u32
     } else {
-        1
+        0
     }
 }
 
@@ -44,7 +51,7 @@ pub(crate) fn grid_size(
     cell_width: Pixels,
     cell_height: Pixels,
     scale_factor: f32,
-) -> Option<TerminalSize> {
+) -> Option<ValidTerminalSize> {
     let width = f32::from(content.width);
     let height = f32::from(content.height);
     let cell_width_logical = f32::from(cell_width);
@@ -69,26 +76,22 @@ pub(crate) fn grid_size(
         return None;
     }
 
-    let mut columns = columns.min(f32::from(u16::MAX)) as u16;
-    let mut rows = rows.min(f32::from(u16::MAX)) as u16;
-
-    // Terminal Core refuses anything larger, so the view clamps rather than
-    // sending a command it knows will fail.
-    if u64::from(rows) * u64::from(columns) > MAX_CELLS {
-        let limit = MAX_CELLS / u64::from(columns).max(1);
-        rows = u16::try_from(limit.max(1)).unwrap_or(u16::MAX);
-        if u64::from(rows) * u64::from(columns) > MAX_CELLS {
-            columns =
-                u16::try_from((MAX_CELLS / u64::from(rows).max(1)).max(1)).unwrap_or(u16::MAX);
-        }
+    if rows > f32::from(u16::MAX) || columns > f32::from(u16::MAX) {
+        return None;
     }
+    let columns = columns as u16;
+    let rows = rows as u16;
 
-    Some(TerminalSize {
-        rows,
-        cols: columns,
-        cell_width_px: physical(cell_width, scale_factor),
-        cell_height_px: physical(cell_height, scale_factor),
-    })
+    ValidTerminalSize::new(
+        TerminalSize {
+            rows,
+            cols: columns,
+            cell_width_px: physical(cell_width, scale_factor),
+            cell_height_px: physical(cell_height, scale_factor),
+        },
+        "resize",
+    )
+    .ok()
 }
 
 impl TerminalView {
@@ -108,8 +111,8 @@ impl TerminalView {
         let (available, shift) = grid_room(allocated, left, right);
         let Some(size) = grid_size(
             content_area(available, self.padding),
-            self.cell_width,
-            self.cell_height,
+            self.metrics.width(),
+            self.metrics.height(),
             window.scale_factor(),
         ) else {
             return;
@@ -121,8 +124,8 @@ impl TerminalView {
         self.origin = grid_origin(
             available,
             size,
-            self.cell_width,
-            self.cell_height,
+            self.metrics.width(),
+            self.metrics.height(),
             self.padding,
         );
         self.origin.x += shift;
@@ -138,7 +141,8 @@ impl TerminalView {
     /// than half the pane, so two docks always leave a grid between them.
     pub(super) fn dock_widths(&self, allocated: Size<Pixels>) -> (f32, f32) {
         let half = f32::from(allocated.width) / 2.0;
-        self.surfaces.dock_widths(|surface| surface.size.min(half))
+        self.surfaces
+            .dock_widths(|surface| surface.size().min(half))
     }
 }
 
@@ -156,10 +160,10 @@ mod tests {
         // 800/8 = 100 columns exactly; 604/16 = 37.75 rows, truncated to 37.
         let grid = grid_size(content(800.0, 604.0), px(8.0), px(16.0), 1.0).expect("a valid grid");
 
-        assert_eq!(grid.cols, 100);
-        assert_eq!(grid.rows, 37);
-        assert_eq!(grid.cell_width_px, 8);
-        assert_eq!(grid.cell_height_px, 16);
+        assert_eq!(grid.cols(), 100);
+        assert_eq!(grid.rows(), 37);
+        assert_eq!(grid.cell_width_px(), 8);
+        assert_eq!(grid.cell_height_px(), 16);
     }
 
     /// Scale changes the cell's device-pixel metrics, never the row or column
@@ -171,10 +175,14 @@ mod tests {
         for (scale, expected_width, expected_height) in [(1.25, 10, 20), (2.0, 16, 32)] {
             let scaled = grid_size(content(800.0, 640.0), px(8.0), px(16.0), scale).expect("grid");
 
-            assert_eq!(scaled.rows, logical.rows, "rows are scale-independent");
-            assert_eq!(scaled.cols, logical.cols, "columns are scale-independent");
-            assert_eq!(scaled.cell_width_px, expected_width);
-            assert_eq!(scaled.cell_height_px, expected_height);
+            assert_eq!(scaled.rows(), logical.rows(), "rows are scale-independent");
+            assert_eq!(
+                scaled.cols(),
+                logical.cols(),
+                "columns are scale-independent"
+            );
+            assert_eq!(scaled.cell_width_px(), expected_width);
+            assert_eq!(scaled.cell_height_px(), expected_height);
         }
     }
 
@@ -182,15 +190,15 @@ mod tests {
     fn fractional_cell_metrics_round_to_the_nearest_device_pixel() {
         // A measured 8.4 logical pixels at 1.25 scale is 10.5 device pixels.
         let grid = grid_size(content(840.0, 640.0), px(8.4), px(16.0), 1.25).expect("grid");
-        assert_eq!(grid.cell_width_px, 11);
-        assert_eq!(grid.cols, 100);
+        assert_eq!(grid.cell_width_px(), 11);
+        assert_eq!(grid.cols(), 100);
     }
 
     #[test]
     fn a_cell_is_never_smaller_than_one_device_pixel() {
         let grid = grid_size(content(800.0, 640.0), px(8.0), px(16.0), 0.01).expect("grid");
-        assert_eq!(grid.cell_width_px, 1);
-        assert_eq!(grid.cell_height_px, 1);
+        assert_eq!(grid.cell_width_px(), 1);
+        assert_eq!(grid.cell_height_px(), 1);
     }
 
     #[test]
@@ -208,19 +216,17 @@ mod tests {
     }
 
     #[test]
-    fn the_cell_cap_is_respected() {
-        // A pathologically large window must still stay inside the limit
-        // Terminal Core enforces.
-        let grid = grid_size(content(100_000.0, 100_000.0), px(1.0), px(1.0), 1.0).expect("grid");
+    fn overflowing_physical_metrics_are_refused_instead_of_clamped() {
+        assert!(grid_size(content(800.0, 640.0), px(8.0), px(16.0), f32::MAX).is_none());
+        assert!(grid_size(content(f32::MAX, 640.0), px(f32::MAX), px(16.0), 2.0).is_none());
+    }
 
-        let cells = u64::from(grid.rows) * u64::from(grid.cols);
-        assert!(
-            cells <= MAX_CELLS,
-            "{} by {} is {cells} cells, over the cap",
-            grid.rows,
-            grid.cols
-        );
-        assert!(grid.rows >= 1 && grid.cols >= 1);
+    #[test]
+    fn the_cell_cap_is_respected() {
+        assert!(grid_size(content(100_000.0, 100_000.0), px(1.0), px(1.0), 1.0).is_none());
+        assert!(grid_size(content(1001.0, 1000.0), px(1.0), px(1.0), 1.0).is_none());
+        let grid = grid_size(content(1000.0, 1000.0), px(1.0), px(1.0), 1.0).unwrap();
+        assert_eq!((grid.cols(), grid.rows()), (1000, 1000));
     }
 
     #[test]
@@ -265,6 +271,6 @@ mod tests {
         let (room, shift) = grid_room(content(940.0, 600.0), 300.0, 190.0);
         assert_eq!(shift, px(300.0));
         assert_eq!(room, content(450.0, 600.0));
-        assert_eq!(grid_size(room, px(8.0), px(16.0), 1.0).unwrap().cols, 56);
+        assert_eq!(grid_size(room, px(8.0), px(16.0), 1.0).unwrap().cols(), 56);
     }
 }

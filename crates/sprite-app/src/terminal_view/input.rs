@@ -135,9 +135,9 @@ impl TerminalView {
         cell_at(
             position,
             self.content_origin.unwrap_or(self.origin),
-            self.cell_width,
-            self.cell_height,
-            size,
+            self.metrics.width(),
+            self.metrics.height(),
+            size.dimensions(),
         )
     }
 
@@ -322,10 +322,10 @@ impl EntityInputHandler for TerminalView {
         };
         Some(Bounds {
             origin: point(
-                element_bounds.origin.x + px(f32::from(column) * f32::from(self.cell_width)),
-                element_bounds.origin.y + px(f32::from(row) * f32::from(self.cell_height)),
+                element_bounds.origin.x + px(f32::from(column) * f32::from(self.metrics.width())),
+                element_bounds.origin.y + px(f32::from(row) * f32::from(self.metrics.height())),
             ),
-            size: gpui::size(self.cell_width, self.cell_height),
+            size: gpui::size(self.metrics.width(), self.metrics.height()),
         })
     }
 

@@ -9,7 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{SessionConfig, SessionError, TerminalSize};
+use crate::{SessionConfig, SessionError, ValidTerminalSize};
 
 /// The terminfo entry generated from the pinned Ghostty source.
 const TERM: &str = "xterm-ghostty";
@@ -92,7 +92,7 @@ pub(crate) fn configured_shell(
             args,
             working_directory,
             environment: identity_environment(),
-            size: TerminalSize::DEFAULT,
+            size: ValidTerminalSize::DEFAULT,
             scrollback_bytes: crate::default_scrollback_bytes(),
             graphics: crate::GraphicsPolicy::default(),
             colors: crate::ColorDefaults::default(),
@@ -463,7 +463,7 @@ mod tests {
 
         assert!(config.program.is_absolute());
         assert_eq!(config.args, vec![OsString::from("-l")]);
-        assert_eq!(config.size, TerminalSize::DEFAULT);
+        assert_eq!(config.size, ValidTerminalSize::DEFAULT);
         assert!(config.scrollback_bytes > 0);
 
         let names: Vec<&OsStr> = config

@@ -309,7 +309,7 @@ pub fn order_for_schema(report: &mut Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sprite_term::{PaneRow, ScreenKind, TerminalSize};
+    use sprite_term::{PaneRow, ScreenKind, ValidTerminalSize};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::mpsc::{Sender, channel};
@@ -324,7 +324,7 @@ mod tests {
     fn snapshot(text: &str) -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 1,
-            size: TerminalSize::DEFAULT,
+            size: ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
                 text: text.to_owned(),

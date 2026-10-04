@@ -112,8 +112,8 @@ fn a_silent_child_still_publishes_dimensions() {
 
     let bundle = snapshots.next();
     assert_eq!(bundle.generation, 0, "the blank projection is generation 0");
-    assert_eq!(bundle.render.size.rows, 24);
-    assert_eq!(bundle.render.size.cols, 80);
+    assert_eq!(bundle.render.size.rows(), 24);
+    assert_eq!(bundle.render.size.cols(), 80);
     assert_eq!(bundle.render.rows.len(), 24);
     assert_eq!(bundle.pane.rows.len(), 24);
     assert!(bundle.render.cursor.visible);
@@ -188,7 +188,7 @@ fn scrollback_history_is_reachable_by_scrolling() {
     );
     assert_eq!(
         history.render.rows.len(),
-        usize::from(history.render.size.rows),
+        usize::from(history.render.size.rows()),
         "a history view is still exactly one screen tall"
     );
 

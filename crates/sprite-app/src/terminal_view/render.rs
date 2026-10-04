@@ -262,8 +262,8 @@ impl Render for TerminalView {
         // so a grid cannot end up a font behind the text beside it.
         let metrics = self.grid_metrics();
         let (default_fg, default_bg) = metrics.defaults;
-        let cell_width = metrics.cell_width;
-        let cell_height = metrics.cell_height;
+        let cell_width = metrics.cells.width();
+        let cell_height = metrics.cells.height();
         // A blinking cursor is simply absent for half of each blink, which is
         // the whole of what blinking is; a steady one ignores the phase.
         let cursor = self
@@ -291,8 +291,8 @@ impl Render for TerminalView {
         let origin = self.origin;
         let extent = self.size.map(|size| {
             gpui::size(
-                px(f32::from(size.cols) * f32::from(cell_width)),
-                px(f32::from(size.rows) * f32::from(cell_height)),
+                px(f32::from(size.cols()) * f32::from(cell_width)),
+                px(f32::from(size.rows()) * f32::from(cell_height)),
             )
         });
 
@@ -416,9 +416,9 @@ impl Render for TerminalView {
             // different colour below its last row than inside it.
             .bg(rgb(pack(default_bg)))
             .text_color(rgb(pack(default_fg)))
-            .font_family(metrics.font_family.clone())
-            .text_size(metrics.font_size)
-            .line_height(metrics.cell_height)
+            .font_family(metrics.cells.family().clone())
+            .text_size(metrics.cells.font_size())
+            .line_height(metrics.cells.height())
             .track_focus(&self.focus)
             .on_drop(cx.listener(|view, paths: &ExternalPaths, _window, _cx| {
                 let text = dropped_paths_text(paths.paths());
@@ -565,9 +565,9 @@ impl Render for TerminalView {
                 // Both become whole terminal rows through the same accumulator.
                 let pixels = match event.delta {
                     ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                    ScrollDelta::Lines(delta) => delta.y * f32::from(view.cell_height),
+                    ScrollDelta::Lines(delta) => delta.y * f32::from(view.metrics.height()),
                 };
-                let rows = view.scroll.accumulate(pixels, view.cell_height);
+                let rows = view.scroll.accumulate(pixels, view.metrics.height());
                 if rows == 0 {
                     return;
                 }

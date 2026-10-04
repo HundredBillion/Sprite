@@ -26,7 +26,7 @@ use crate::snapshot::Projector;
 use crate::{
     CellPosition, ChildExit, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton,
     MouseEvent, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle,
-    TerminalCommand, TerminalEvent, TerminalSize, WheelEvent,
+    TerminalCommand, TerminalEvent, ValidTerminalSize, WheelEvent,
 };
 
 /// The most rows one wheel turn is allowed to send to a child.
@@ -216,8 +216,8 @@ pub(crate) fn run(
 
     let mut size = config.size;
     let mut terminal = match Terminal::new(TerminalOptions {
-        cols: size.cols,
-        rows: size.rows,
+        cols: size.cols(),
+        rows: size.rows(),
         max_scrollback: config.scrollback_bytes,
     }) {
         Ok(terminal) => terminal,
@@ -236,10 +236,10 @@ pub(crate) fn run(
     // resizes it. A pane's first frame should not be the one frame with the
     // wrong geometry, so the configured size is applied immediately.
     if let Err(error) = terminal.resize(
-        size.cols,
-        size.rows,
-        size.cell_width_px,
-        size.cell_height_px,
+        size.cols(),
+        size.rows(),
+        size.cell_width_px(),
+        size.cell_height_px(),
     ) {
         let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
             "initial_resize",
@@ -1203,8 +1203,8 @@ fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Start
     let size = config.size;
     let pair = native_pty_system()
         .openpty(PtySize {
-            rows: size.rows,
-            cols: size.cols,
+            rows: size.rows(),
+            cols: size.cols(),
             pixel_width: size.pixel_width(),
             pixel_height: size.pixel_height(),
         })
@@ -1610,7 +1610,7 @@ fn encode_wheel(
     key_encoder: &mut key::Encoder<'_>,
     terminal: &Terminal<'_, '_>,
     event: &WheelEvent,
-    size: TerminalSize,
+    size: ValidTerminalSize,
 ) -> Result<Vec<u8>, SessionError> {
     let up = event.rows < 0;
     let turns = event.rows.unsigned_abs().min(MAX_WHEEL_TURNS);
@@ -1650,7 +1650,7 @@ fn encode_wheel_report(
     encoder: &mut libghostty_vt::mouse::Encoder<'_>,
     terminal: &Terminal<'_, '_>,
     event: &WheelEvent,
-    size: TerminalSize,
+    size: ValidTerminalSize,
     up: bool,
     out: &mut Vec<u8>,
 ) -> Result<(), SessionError> {
@@ -1668,16 +1668,16 @@ fn encode_wheel_report(
     encoded.set_mods(mods);
 
     encoded.set_position(Position {
-        x: f32::from(event.position.column) * size.cell_width_px as f32,
-        y: f32::from(event.position.row) * size.cell_height_px as f32,
+        x: f32::from(event.position.column) * size.cell_width_px() as f32,
+        y: f32::from(event.position.row) * size.cell_height_px() as f32,
     });
 
     encoder.set_options_from_terminal(terminal);
     encoder.set_size(EncoderSize {
-        screen_width: u32::from(size.cols) * size.cell_width_px,
-        screen_height: u32::from(size.rows) * size.cell_height_px,
-        cell_width: size.cell_width_px,
-        cell_height: size.cell_height_px,
+        screen_width: u32::from(size.cols()) * size.cell_width_px(),
+        screen_height: u32::from(size.rows()) * size.cell_height_px(),
+        cell_width: size.cell_width_px(),
+        cell_height: size.cell_height_px(),
         padding_top: 0,
         padding_bottom: 0,
         padding_right: 0,
@@ -1699,7 +1699,7 @@ fn encode_mouse(
     encoder: &mut libghostty_vt::mouse::Encoder<'_>,
     terminal: &Terminal<'_, '_>,
     event: &MouseEvent,
-    size: TerminalSize,
+    size: ValidTerminalSize,
 ) -> Result<Option<Vec<u8>>, SessionError> {
     use libghostty_vt::mouse::{Action, Button, EncoderSize, Event, Position};
 
@@ -1732,16 +1732,16 @@ fn encode_mouse(
     // The seam speaks in cells; libghostty wants surface pixels, so the cell is
     // converted here using the same metrics the PTY was told about.
     encoded.set_position(Position {
-        x: f32::from(event.position.column) * size.cell_width_px as f32,
-        y: f32::from(event.position.row) * size.cell_height_px as f32,
+        x: f32::from(event.position.column) * size.cell_width_px() as f32,
+        y: f32::from(event.position.row) * size.cell_height_px() as f32,
     });
 
     encoder.set_options_from_terminal(terminal);
     encoder.set_size(EncoderSize {
-        screen_width: u32::from(size.cols) * size.cell_width_px,
-        screen_height: u32::from(size.rows) * size.cell_height_px,
-        cell_width: size.cell_width_px,
-        cell_height: size.cell_height_px,
+        screen_width: u32::from(size.cols()) * size.cell_width_px(),
+        screen_height: u32::from(size.rows()) * size.cell_height_px(),
+        cell_width: size.cell_width_px(),
+        cell_height: size.cell_height_px(),
         padding_top: 0,
         padding_bottom: 0,
         padding_right: 0,
@@ -1836,12 +1836,12 @@ fn return_to_bottom(terminal: &mut Terminal<'_, '_>) -> bool {
 fn apply_resize(
     master: &(dyn MasterPty + Send),
     terminal: &mut Terminal<'_, '_>,
-    size: TerminalSize,
+    size: ValidTerminalSize,
 ) -> Result<(), SessionError> {
     master
         .resize(PtySize {
-            rows: size.rows,
-            cols: size.cols,
+            rows: size.rows(),
+            cols: size.cols(),
             pixel_width: size.pixel_width(),
             pixel_height: size.pixel_height(),
         })
@@ -1849,10 +1849,10 @@ fn apply_resize(
 
     terminal
         .resize(
-            size.cols,
-            size.rows,
-            size.cell_width_px,
-            size.cell_height_px,
+            size.cols(),
+            size.rows(),
+            size.cell_width_px(),
+            size.cell_height_px(),
         )
         .map_err(|error| SessionError::new("resize_terminal", error))
 }

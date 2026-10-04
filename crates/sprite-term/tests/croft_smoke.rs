@@ -92,12 +92,16 @@ fn croft_checkpoint_one_capabilities() {
     });
 
     // A resize is reflected in a newer, still-coherent snapshot.
-    let resized = TerminalSize {
-        rows: 40,
-        cols: 100,
-        cell_width_px: 8,
-        cell_height_px: 16,
-    };
+    let resized = sprite_term::ValidTerminalSize::new(
+        TerminalSize {
+            rows: 40,
+            cols: 100,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        },
+        "resize",
+    )
+    .expect("valid terminal size");
     session
         .send(TerminalCommand::Resize(resized))
         .expect("send the resize");

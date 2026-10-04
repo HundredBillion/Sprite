@@ -134,16 +134,72 @@ pub enum ReturnTarget {
 /// on the GPUI thread, where the token registry lives.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Open {
-    pub position: Position,
-    pub side: Side,
-    /// A dock's width in logical pixels; ignored for the other positions.
-    pub size: f32,
+    pub placement: Placement,
     pub focus: bool,
-    /// A fill may register its process; a dock supplies all ownership fields.
-    pub owner_pid: Option<u32>,
-    pub return_target: Option<ReturnTarget>,
-    pub resizable: bool,
     pub description: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ownership {
+    Unowned,
+    Owned {
+        pid: u32,
+        return_target: ReturnTarget,
+    },
+}
+
+/// Placement constrains ownership to the positions that support it.
+///
+/// ```
+/// use sprite_app::{SurfacePlacement, SurfaceOwnership, SurfaceReturnTarget, SurfaceSide};
+/// let fill = SurfacePlacement::Fill { owner_pid: Some(41) };
+/// let dock = SurfacePlacement::Dock {
+///     side: SurfaceSide::Left, size: Default::default(),
+///     ownership: SurfaceOwnership::Owned { pid: 41, return_target: SurfaceReturnTarget::Terminal },
+/// };
+/// ```
+///
+/// ```compile_fail,E0559
+/// use sprite_app::{SurfacePlacement, SurfaceOwnership, SurfaceReturnTarget, SurfaceSide};
+/// let fill = SurfacePlacement::Fill {
+///     owner_pid: Some(41), return_target: SurfaceReturnTarget::Terminal,
+/// };
+/// ```
+///
+/// ```compile_fail,E0063
+/// use sprite_app::{SurfacePlacement, SurfaceOwnership, SurfaceReturnTarget, SurfaceSide};
+/// let dock = SurfacePlacement::Dock {
+///     side: SurfaceSide::Left, size: Default::default(),
+///     ownership: SurfaceOwnership::Owned { pid: 41 },
+/// };
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Placement {
+    Fill {
+        owner_pid: Option<u32>,
+    },
+    Dock {
+        side: Side,
+        size: super::DockSize,
+        ownership: Ownership,
+    },
+    Overlay,
+}
+
+impl Placement {
+    pub fn position(self) -> Position {
+        match self {
+            Self::Fill { .. } => Position::Fill,
+            Self::Dock { .. } => Position::Dock,
+            Self::Overlay => Position::Overlay,
+        }
+    }
+    pub fn side(self) -> Side {
+        match self {
+            Self::Dock { side, .. } => side,
+            Self::Fill { .. } | Self::Overlay => Side::Left,
+        }
+    }
 }
 
 /// The stream a [`SurfaceConnection`] writes to, plus whatever a program has
@@ -952,9 +1008,11 @@ mod tests {
                 reply,
             } => {
                 assert_eq!(pane, PaneId(3));
-                assert_eq!(open.position, Position::Dock);
-                assert_eq!(open.side, Side::Left);
-                assert_eq!(open.size, 200.0);
+                assert_eq!(open.placement.position(), Position::Dock);
+                assert_eq!(open.placement.side(), Side::Left);
+                assert!(
+                    matches!(open.placement, Placement::Dock { size, .. } if size.pixels() == 200.0)
+                );
                 assert!(!open.focus);
                 reply.send(Ok(())).expect("reply");
                 assert!(connection.send(&event_focus()));

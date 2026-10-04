@@ -162,23 +162,71 @@ pub struct ListConfig {
     pub colors: ListColors,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Element {
-    pub kind: Kind,
-    /// Utility tokens, each already checked against the style table.
-    pub style: Vec<String>,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ElementStyle {
+    pub utilities: Vec<style::Utility>,
     pub color: Option<ColorRef>,
     pub background: Option<ColorRef>,
     pub border: Option<ColorRef>,
-    pub text: Option<String>,
-    pub svg: Option<String>,
-    /// The event name a click sends, when the element is clickable.
-    pub on_click: Option<String>,
-    pub children: Vec<Element>,
-    /// The grid this element opens, set only for `Kind::Grid`.
-    pub grid: Option<GridSize>,
-    /// The layout and colour roles for a root-only virtual list.
-    pub list: Option<ListConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Element {
+    Box {
+        style: ElementStyle,
+        text: Option<String>,
+        on_click: Option<String>,
+        children: Vec<Element>,
+    },
+    List {
+        style: ElementStyle,
+        text: Option<String>,
+        on_click: Option<String>,
+        children: Vec<Element>,
+    },
+    Text {
+        style: ElementStyle,
+        text: String,
+        on_click: Option<String>,
+    },
+    Button {
+        style: ElementStyle,
+        text: String,
+        on_click: Option<String>,
+    },
+    Image {
+        style: ElementStyle,
+        svg: String,
+    },
+    Grid {
+        size: GridSize,
+        color: Option<ColorRef>,
+        background: Option<ColorRef>,
+    },
+    VirtualList {
+        config: Box<ListConfig>,
+    },
+}
+
+impl Element {
+    #[cfg(test)]
+    pub fn kind(&self) -> Kind {
+        match self {
+            Self::Box { .. } => Kind::Box,
+            Self::List { .. } => Kind::List,
+            Self::Text { .. } => Kind::Text,
+            Self::Button { .. } => Kind::Button,
+            Self::Image { .. } => Kind::Image,
+            Self::Grid { .. } => Kind::Grid,
+            Self::VirtualList { .. } => Kind::VirtualList,
+        }
+    }
+    pub fn list(&self) -> Option<&ListConfig> {
+        match self {
+            Self::VirtualList { config } => Some(config),
+            _ => None,
+        }
+    }
 }
 
 /// A description that parsed, and the colour names in it that nobody knows.
@@ -245,10 +293,9 @@ fn element(
         Some(Value::String(text)) => {
             let mut tokens = Vec::new();
             for token in text.split_whitespace() {
-                if !style::is_known(token) {
-                    return Err(Refusal::UnknownStyle(token.to_owned()));
-                }
-                tokens.push(token.to_owned());
+                tokens.push(
+                    style::parse(token).ok_or_else(|| Refusal::UnknownStyle(token.to_owned()))?,
+                );
             }
             tokens
         }
@@ -357,18 +404,47 @@ fn element(
         }
     };
 
-    Ok(Element {
-        kind,
-        style,
+    let style = ElementStyle {
+        utilities: style,
         color,
         background,
         border,
-        text,
-        svg,
-        on_click,
-        children,
-        grid,
-        list,
+    };
+    Ok(match kind {
+        Kind::Box => Element::Box {
+            style,
+            text,
+            on_click,
+            children,
+        },
+        Kind::List => Element::List {
+            style,
+            text,
+            on_click,
+            children,
+        },
+        Kind::Text => Element::Text {
+            style,
+            text: text.expect("validated text"),
+            on_click,
+        },
+        Kind::Button => Element::Button {
+            style,
+            text: text.expect("validated text"),
+            on_click,
+        },
+        Kind::Image => Element::Image {
+            style,
+            svg: svg.expect("validated image"),
+        },
+        Kind::Grid => Element::Grid {
+            size: grid.expect("validated grid"),
+            color: style.color,
+            background: style.background,
+        },
+        Kind::VirtualList => Element::VirtualList {
+            config: Box::new(list.expect("validated list")),
+        },
     })
 }
 
@@ -624,33 +700,51 @@ mod tests {
                 ] }
         }));
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
-        let root = &parsed.description.root;
-        assert_eq!(root.kind, Kind::Box);
-        assert_eq!(root.style, vec!["flex", "flex_col", "gap_2"]);
+        let Element::Box {
+            style, children, ..
+        } = &parsed.description.root
+        else {
+            panic!("box")
+        };
         assert_eq!(
-            root.background,
+            style.utilities,
+            ["flex", "flex_col", "gap_2"].map(|token| style::parse(token).unwrap())
+        );
+        assert_eq!(
+            style.background,
             Some(ColorRef::Token("terminal.background".into()))
         );
-        assert_eq!(root.children.len(), 3);
-        assert_eq!(root.children[0].kind, Kind::Text);
+        assert_eq!(children.len(), 3);
+        let Element::Text { style, .. } = &children[0] else {
+            panic!("text")
+        };
         assert_eq!(
-            root.children[0].color,
+            style.color,
             Some(ColorRef::Literal(sprite_term::Rgb {
                 r: 0xc0,
                 g: 0xca,
                 b: 0xf5
             }))
         );
-        let list = &root.children[1];
-        assert_eq!(list.kind, Kind::List);
-        let row = &list.children[0];
-        assert_eq!(row.on_click.as_deref(), Some("row-1"));
-        assert_eq!(row.children[0].kind, Kind::Image);
-        assert_eq!(row.children[0].svg.as_deref(), Some("<svg/>"));
-        let button = &root.children[2];
-        assert_eq!(button.kind, Kind::Button);
-        assert_eq!(button.text.as_deref(), Some("Refresh"));
-        assert_eq!(button.border, Some(ColorRef::Token("ansi.4".into())));
+        let Element::List { children, .. } = &children[1] else {
+            panic!("list")
+        };
+        let Element::Box {
+            on_click, children, ..
+        } = &children[0]
+        else {
+            panic!("row")
+        };
+        assert_eq!(on_click.as_deref(), Some("row-1"));
+        assert!(matches!(&children[0], Element::Image { svg, .. } if svg == "<svg/>"));
+        let Element::Box { children, .. } = &parsed.description.root else {
+            unreachable!()
+        };
+        let Element::Button { text, style, .. } = &children[2] else {
+            panic!("button")
+        };
+        assert_eq!(text, "Refresh");
+        assert_eq!(style.border, Some(ColorRef::Token("ansi.4".into())));
     }
 
     #[test]
@@ -703,6 +797,33 @@ mod tests {
     }
 
     #[test]
+    fn contradictory_payloads_preserve_their_exact_refusals() {
+        for (root, expected) in [
+            (
+                json!({"kind":"image", "svg":"<svg/>", "on_click":"click"}),
+                "malformed: an image is not clickable; put it in a box with on_click",
+            ),
+            (
+                json!({"kind":"text", "text":"label", "children":[]}),
+                "malformed: a text has no children",
+            ),
+            (
+                json!({"kind":"grid", "cols":8, "rows":2, "text":"label"}),
+                "malformed: a grid has no text or svg; its cells arrive as rows",
+            ),
+            (
+                json!({"kind":"virtual_list", "style":"flex"}),
+                "malformed: a virtual_list root takes list configuration, not element payloads",
+            ),
+        ] {
+            assert_eq!(
+                refused(json!({"version":1, "root":root})).reason(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_colour_token_is_a_warning_that_names_the_fallback_not_a_refusal() {
         let parsed = parsed(json!({
             "version": 1,
@@ -716,9 +837,12 @@ mod tests {
             ]
         );
         let registry = registry();
-        let root = &parsed.description.root;
+        let Element::Text { style, .. } = &parsed.description.root else {
+            panic!("text")
+        };
         assert_eq!(
-            root.color
+            style
+                .color
                 .as_ref()
                 .expect("color")
                 .resolve(&registry, crate::tokens::Role::Text),
@@ -731,20 +855,12 @@ mod tests {
         let grid = parsed(
             json!({ "version": 1, "root": { "kind": "grid", "cols": 80, "rows": 24, "bg": "terminal.background" } }),
         );
-        assert_eq!(grid.description.root.kind, Kind::Grid);
-        assert_eq!(
-            grid.description.root.grid,
-            Some(GridSize { cols: 80, rows: 24 })
+        assert_eq!(grid.description.root.kind(), Kind::Grid);
+        assert!(
+            matches!(grid.description.root, Element::Grid { size: GridSize { cols: 80, rows: 24 }, background: Some(ColorRef::Token(ref name)), .. } if name == "terminal.background")
         );
-        // A grid root's bg is kept, not dropped for being a grid: it dresses
-        // the wrapper the cell box sits in.
-        assert_eq!(
-            grid.description.root.background,
-            Some(ColorRef::Token("terminal.background".into()))
-        );
-
         let no_grid = parsed(json!({ "version": 1, "root": { "kind": "box" } }));
-        assert_eq!(no_grid.description.root.grid, None);
+        assert!(matches!(no_grid.description.root, Element::Box { .. }));
 
         for (root, needle) in [
             (json!({ "kind": "grid", "rows": 24 }), "cols"),
@@ -778,15 +894,9 @@ mod tests {
         ))
         .expect("shared fixture");
         let shared = parsed(fixture["description"].clone());
-        assert_eq!(shared.description.root.kind, Kind::VirtualList);
+        assert_eq!(shared.description.root.kind(), Kind::VirtualList);
         assert_eq!(
-            shared
-                .description
-                .root
-                .list
-                .as_ref()
-                .expect("list")
-                .row_height,
+            shared.description.root.list().expect("list").row_height,
             22.0
         );
         let list = parsed(json!({"version":1,"root":{"kind":"virtual_list",
@@ -794,7 +904,7 @@ mod tests {
             "heading":{"text":"EXPLORER","height":35,"font_size":11,"font_weight":"normal","left_padding":20,"icon_gap":2},
             "section":{"text":"PROJECT","height":22,"font_size":11,"font_weight":"bold","left_padding":20,"icon_gap":2},
             "colors":{"background":"terminal.background","foreground":"terminal.foreground","hover":"terminal.background","selected":"terminal.background","inactive_selected":"terminal.background","selected_foreground":"terminal.foreground","focus":"terminal.background","guide":"terminal.background","border":"terminal.background","scrollbar":"terminal.background"}}}));
-        let config = list.description.root.list.expect("list config");
+        let config = list.description.root.list().expect("list config");
         assert_eq!(config.row_height, 22.0);
         assert_eq!(config.scrollbar_width, 6.0);
         assert_eq!(config.guide_visibility, GuideVisibility::Always);
@@ -803,13 +913,13 @@ mod tests {
         assert_eq!(config.colors.scrollbar_active, config.colors.scrollbar);
         assert_eq!(config.colors.inactive_guide, config.colors.guide);
         assert_eq!(config.scrollbar_opacity, 1.0);
-        let styled = shared.description.root.list.expect("styled list");
+        let styled = shared.description.root.list().expect("styled list");
         assert_eq!(styled.scrollbar_width, 10.0);
         assert_eq!(styled.guide_visibility, GuideVisibility::Hover);
         assert_eq!(styled.border_side, ListBorderSide::Right);
         assert_eq!(styled.scrollbar_hover_opacity, 0.7);
         assert_eq!(
-            config.section.expect("section").font_weight,
+            config.section.as_ref().expect("section").font_weight,
             Some(ListFontWeight::Bold)
         );
         for key in [
@@ -852,7 +962,7 @@ mod tests {
                 parsed(description)
                     .description
                     .root
-                    .list
+                    .list()
                     .unwrap()
                     .border_side,
                 expected
@@ -898,8 +1008,14 @@ mod tests {
         let grid = parsed(
             json!({ "version": 1, "root": { "kind": "grid", "cols": 8, "rows": 2, "bg": "terminal.background", "color": "terminal.foreground" } }),
         );
-        assert!(grid.description.root.background.is_some());
-        assert!(grid.description.root.color.is_some());
+        assert!(matches!(
+            grid.description.root,
+            Element::Grid {
+                background: Some(_),
+                color: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -12,6 +12,57 @@ use sprite_term::Rgb;
 use crate::grid_paint::terminal_font;
 use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FOREGROUND};
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CellMetrics {
+    family: SharedString,
+    font_size: Pixels,
+    width: Pixels,
+    height: Pixels,
+    line_height: f32,
+}
+
+impl CellMetrics {
+    pub(crate) fn measure(
+        window: &Window,
+        family: SharedString,
+        size: f32,
+        line_height: f32,
+    ) -> Self {
+        let font_size = px(size);
+        let width = measure_cell_width(window, &family, font_size);
+        Self {
+            family,
+            font_size,
+            width,
+            height: px(crate::config::Font::cell_height(size, line_height)),
+            line_height,
+        }
+    }
+    pub(crate) fn family(&self) -> SharedString {
+        self.family.clone()
+    }
+    pub(crate) fn font_size(&self) -> Pixels {
+        self.font_size
+    }
+    pub(crate) fn width(&self) -> Pixels {
+        self.width
+    }
+    pub(crate) fn height(&self) -> Pixels {
+        self.height
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(width: f32, height: f32) -> Self {
+        Self {
+            family: "monospace".into(),
+            font_size: px(14.0),
+            width: px(width),
+            height: px(height),
+            line_height: 1.0,
+        }
+    }
+}
+
 /// Real monospace families, most preferred first.
 ///
 /// GPUI's own fallback stack is entirely proportional, and its text system does
@@ -88,7 +139,7 @@ fn monospace_family(window: &Window) -> SharedString {
 
 /// Shapes `M` with the exact font run the view renders, so grid geometry and
 /// drawn text can never disagree.
-pub(super) fn measure_cell_width(window: &Window, family: &SharedString, size: Pixels) -> Pixels {
+fn measure_cell_width(window: &Window, family: &SharedString, size: Pixels) -> Pixels {
     let text: SharedString = "M".into();
     let run = TextRun {
         len: text.len(),
@@ -160,15 +211,16 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let (family, _) = chosen_family(window, settings.font.family.as_deref());
-        if family != self.font_family {
-            self.font_family = family;
-        }
-        self.line_height = settings.font.line_height;
+        self.metrics = CellMetrics::measure(
+            window,
+            family,
+            settings.font.size,
+            settings.font.line_height,
+        );
         self.padding = settings.grid.padding;
         self.invalidate_grids();
-        // Unconditional: the family may have changed under the same size, and
-        // re-measuring a cell costs one text layout.
-        self.set_font_size(settings.font.size, window, cx);
+        self.size = None;
+        self.synchronise_size(window);
 
         let defaults = session_defaults(settings);
         self.fallback_colors = defaults.fallback_colors;
@@ -178,22 +230,6 @@ impl TerminalView {
         }
 
         self.textures.set_budget(settings.graphics.texture_bytes);
-        cx.notify();
-    }
-
-    /// Re-measures the cell at a new text size and tells the child.
-    ///
-    /// The measurement has to be redone rather than scaled: a font's advance
-    /// width is not linear in its size, and a grid computed from a guess drifts
-    /// away from what is drawn.
-    pub fn set_font_size(&mut self, size: f32, window: &Window, cx: &mut Context<Self>) {
-        self.font_size = px(size);
-        self.cell_height = px(crate::config::Font::cell_height(size, self.line_height));
-        self.cell_width = measure_cell_width(window, &self.font_family, self.font_size);
-        // Forces `synchronise_size` to recompute rather than compare against a
-        // grid measured with the old cell.
-        self.size = None;
-        self.synchronise_size(window);
         cx.notify();
     }
 
@@ -211,12 +247,67 @@ impl TerminalView {
     /// What a grid Surface borrows from this pane to draw like its terminal.
     pub(super) fn grid_metrics(&self) -> crate::surface::render::GridMetrics {
         crate::surface::render::GridMetrics {
-            cell_width: self.cell_width,
-            cell_height: self.cell_height,
-            font_family: self.font_family.clone(),
-            font_size: self.font_size,
+            cells: self.metrics.clone(),
             defaults: self.default_colors(),
             blink_on: self.blink_on,
         }
+    }
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn reload_replaces_the_measured_font_and_surface_metrics_together(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("metrics test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        view.update_in(cx, |view, window, cx| {
+            let initial = view.metrics.clone();
+            assert_eq!(view.grid_metrics().cells, initial);
+            settings.font.family = Some("uninstalled-family-for-fallback-test".into());
+            settings.font.size = 21.0;
+            settings.font.line_height = 1.7;
+            view.apply_settings(&settings, window, cx);
+            let expected_family = chosen_family(window, settings.font.family.as_deref()).0;
+            assert_eq!(view.metrics.family(), expected_family);
+            assert_ne!(view.metrics.family(), initial.family());
+            assert_eq!(view.metrics.font_size(), px(21.0));
+            assert_eq!(
+                view.metrics.height(),
+                px(crate::config::Font::cell_height(21.0, 1.7))
+            );
+            assert_eq!(
+                view.metrics.width(),
+                measure_cell_width(window, &expected_family, px(21.0))
+            );
+            assert_eq!(view.grid_metrics().cells, view.metrics);
+            let grid = view.size.expect("measured terminal grid");
+            assert_eq!(
+                grid.cell_width_px(),
+                super::super::geometry::physical(
+                    view.grid_metrics().cells.width(),
+                    window.scale_factor()
+                )
+            );
+            assert_eq!(
+                grid.cell_height_px(),
+                super::super::geometry::physical(
+                    view.grid_metrics().cells.height(),
+                    window.scale_factor()
+                )
+            );
+            let previous = view.metrics.clone();
+            settings.font.line_height = 2.0;
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(view.metrics.width(), previous.width());
+            assert_ne!(view.metrics.height(), previous.height());
+            assert_eq!(view.grid_metrics().cells, view.metrics);
+        });
     }
 }

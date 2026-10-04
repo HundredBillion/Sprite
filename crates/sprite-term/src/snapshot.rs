@@ -19,7 +19,7 @@ use libghostty_vt::terminal::{Point, PointCoordinate};
 use crate::{
     CellStyle, CellWidth, CursorSnapshot, CursorStyle, HistorySnapshot, PaneRow, PaneSnapshot,
     PromptKind, RenderCell, RenderRow, RenderSnapshot, Rgb, ScreenKind, SessionError,
-    SnapshotBundle, SnapshotColor, TerminalSize, UnderlineStyle, Viewport,
+    SnapshotBundle, SnapshotColor, UnderlineStyle, ValidTerminalSize, Viewport,
 };
 
 /// The scratch state a projection needs, owned in one place.
@@ -76,7 +76,7 @@ impl<'vt> Projector<'vt> {
     pub(crate) fn capture_history(
         &mut self,
         generation: u64,
-        size: TerminalSize,
+        size: ValidTerminalSize,
         lines: usize,
         foreground: Option<String>,
         terminal: &Terminal<'vt, '_>,
@@ -114,7 +114,7 @@ impl<'vt> Projector<'vt> {
         let viewport = Viewport {
             total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),
             offset: usize::try_from(scrollbar.offset).unwrap_or(0),
-            visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows)),
+            visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows())),
         };
         let title = terminal
             .title()
@@ -163,7 +163,7 @@ impl<'vt> Projector<'vt> {
     pub(crate) fn capture(
         &mut self,
         generation: u64,
-        size: TerminalSize,
+        size: ValidTerminalSize,
         has_selection: bool,
         terminal: &Terminal<'vt, '_>,
     ) -> Result<SnapshotBundle, SessionError> {
@@ -204,7 +204,7 @@ impl<'vt> Projector<'vt> {
         let viewport = Viewport {
             total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),
             offset: usize::try_from(scrollbar.offset).unwrap_or(0),
-            visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows)),
+            visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows())),
         };
 
         let snapshot = render_state.update(terminal).map_err(vt("render_update"))?;
@@ -223,8 +223,8 @@ impl<'vt> Projector<'vt> {
         let live_cursor = terminal.cursor_color().map_err(vt("cursor_color"))?;
         let live_palette = terminal.color_palette().map_err(vt("color_palette"))?;
 
-        let mut render_rows: Vec<RenderRow> = Vec::with_capacity(usize::from(size.rows));
-        let mut pane_rows: Vec<PaneRow> = Vec::with_capacity(usize::from(size.rows));
+        let mut render_rows: Vec<RenderRow> = Vec::with_capacity(usize::from(size.rows()));
+        let mut pane_rows: Vec<PaneRow> = Vec::with_capacity(usize::from(size.rows()));
 
         {
             let mut row_iteration = rows.update(&snapshot).map_err(vt("row_iterator"))?;
@@ -244,8 +244,8 @@ impl<'vt> Projector<'vt> {
                     }
                 };
 
-                let mut row_cells: Vec<RenderCell> = Vec::with_capacity(usize::from(size.cols));
-                let mut row_text = String::with_capacity(usize::from(size.cols));
+                let mut row_cells: Vec<RenderCell> = Vec::with_capacity(usize::from(size.cols()));
+                let mut row_text = String::with_capacity(usize::from(size.cols()));
 
                 {
                     let mut cell_iteration =
@@ -403,7 +403,7 @@ impl<'vt> Projector<'vt> {
 /// One row of the active screen in screen coordinates, history included.
 fn history_row(
     terminal: &Terminal<'_, '_>,
-    size: TerminalSize,
+    size: ValidTerminalSize,
     y: usize,
 ) -> Result<PaneRow, SessionError> {
     let y = u32::try_from(y).unwrap_or(u32::MAX);
@@ -412,7 +412,7 @@ fn history_row(
         .map_err(vt("history_grid_ref"))?;
     let end = terminal
         .grid_ref(Point::Screen(PointCoordinate {
-            x: size.cols.saturating_sub(1),
+            x: size.cols().saturating_sub(1),
             y,
         }))
         .map_err(vt("history_grid_ref_end"))?;

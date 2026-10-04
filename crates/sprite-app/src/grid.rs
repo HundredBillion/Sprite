@@ -11,9 +11,43 @@
 
 use gpui::{Pixels, Point, Size, px, size};
 use sprite_term::{
-    CellStyle, CellWidth, HyperlinkSpan, RenderRow, RenderSnapshot, SnapshotColor, TerminalSize,
-    UnderlineStyle,
+    CellStyle, CellWidth, HyperlinkSpan, RenderRow, RenderSnapshot, SnapshotColor, UnderlineStyle,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub(crate) struct Snapped(Pixels);
+
+impl Snapped {
+    pub(crate) fn snap(value: Pixels, scale: f32) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        Self(px((f32::from(value) * scale).round() / scale))
+    }
+    pub(crate) fn pixels(self) -> Pixels {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Col(pub u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Row(pub usize);
+
+pub(crate) fn column_edge(origin: Pixels, width: Pixels, column: Col, scale: f32) -> Snapped {
+    Snapped::snap(
+        px(f32::from(origin) + column.0 as f32 * f32::from(width)),
+        scale,
+    )
+}
+pub(crate) fn row_edge(origin: Pixels, height: Pixels, row: Row, scale: f32) -> Snapped {
+    Snapped::snap(
+        px(f32::from(origin) + row.0 as f32 * f32::from(height)),
+        scale,
+    )
+}
 
 /// One drawable cell, positioned in grid columns.
 #[derive(Clone, Debug, PartialEq)]
@@ -398,7 +432,7 @@ pub(crate) fn content_area(available: Size<Pixels>, padding: f32) -> Size<Pixels
 /// left can match the gap on the right at every window width.
 pub(crate) fn grid_origin(
     available: Size<Pixels>,
-    grid: TerminalSize,
+    grid: sprite_term::ValidTerminalSize,
     cell_width: Pixels,
     cell_height: Pixels,
     padding: f32,
@@ -414,8 +448,8 @@ pub(crate) fn grid_origin(
     };
 
     Point {
-        x: centre(available.width, grid.cols, cell_width),
-        y: centre(available.height, grid.rows, cell_height),
+        x: centre(available.width, grid.cols(), cell_width),
+        y: centre(available.height, grid.rows(), cell_height),
     }
 }
 
@@ -458,13 +492,17 @@ mod padding_tests {
     use crate::config::Grid;
     use gpui::size;
 
-    fn grid(cols: u16, rows: u16) -> TerminalSize {
-        TerminalSize {
-            rows,
-            cols,
-            cell_width_px: 8,
-            cell_height_px: 16,
-        }
+    fn grid(cols: u16, rows: u16) -> sprite_term::ValidTerminalSize {
+        sprite_term::ValidTerminalSize::new(
+            sprite_term::TerminalSize {
+                rows,
+                cols,
+                cell_width_px: 8,
+                cell_height_px: 16,
+            },
+            "resize",
+        )
+        .expect("valid terminal size")
     }
 
     #[test]
@@ -576,10 +614,9 @@ mod padding_tests {
 mod hit_tests {
     use super::*;
     use gpui::point;
-    use sprite_term::TerminalSize;
 
-    fn size() -> TerminalSize {
-        TerminalSize {
+    fn size() -> sprite_term::TerminalSize {
+        sprite_term::TerminalSize {
             rows: 24,
             cols: 80,
             cell_width_px: 8,
