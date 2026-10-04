@@ -2,6 +2,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn dependency(directory: &Path, scratch: &Path, name: &str) -> PathBuf {
+    dependency_for_source(
+        directory,
+        scratch,
+        name,
+        &[],
+        &format!("extern crate {name};"),
+    )
+}
+
+fn dependency_for_source(
+    directory: &Path,
+    scratch: &Path,
+    name: &str,
+    companions: &[String],
+    source: &str,
+) -> PathBuf {
     let mut candidates: Vec<_> = std::fs::read_dir(directory)
         .unwrap()
         .map(Result::unwrap)
@@ -13,21 +29,17 @@ fn dependency(directory: &Path, scratch: &Path, name: &str) -> PathBuf {
         .collect();
     candidates
         .sort_by_key(|entry| std::cmp::Reverse(entry.metadata().unwrap().modified().unwrap()));
-    let source = scratch.join(format!("dependency_{name}.rs"));
-    std::fs::write(&source, format!("extern crate {name};")).unwrap();
     let mut diagnostics = Vec::new();
     for candidate in candidates {
-        let output = rustc()
-            .args(["--edition=2024", "--crate-type=lib", "--emit=metadata"])
-            .arg(&source)
-            .arg("--out-dir")
-            .arg(scratch)
-            .arg("-L")
-            .arg(format!("dependency={}", directory.display()))
-            .arg("--extern")
-            .arg(format!("{name}={}", candidate.path().display()))
-            .output()
-            .unwrap();
+        let mut externs = companions.to_vec();
+        externs.push(format!("{name}={}", candidate.path().display()));
+        let output = compile_source(
+            scratch,
+            directory,
+            &externs,
+            &format!("dependency_{name}"),
+            source,
+        );
         if output.status.success() {
             return candidate.path();
         }
@@ -341,7 +353,7 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
         .parent()
         .unwrap()
         .to_owned();
-    let externs: Vec<_> = ["gpui", "sprite_term", "serde", "toml", "image"]
+    let mut externs: Vec<_> = ["gpui", "sprite_term", "toml", "image"]
         .iter()
         .map(|name| {
             format!(
@@ -350,6 +362,16 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
             )
         })
         .collect();
+    // Cargo feature variants can load independently while having incompatible Serde traits.
+    let serde = dependency_for_source(
+        &dependencies,
+        &scratch,
+        "serde",
+        &externs,
+        "#[derive(serde::Deserialize)] struct Probe { value: toml::Value }
+         fn probe() { let _: Probe = toml::from_str(\"value = 1\").unwrap(); }",
+    );
+    externs.push(format!("serde={}", serde.display()));
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut config_source = include_str!("../src/config.rs").to_owned();
     for module in ["raw", "validated", "changes"] {

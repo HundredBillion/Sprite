@@ -705,12 +705,13 @@ mod tests {
         .unwrap();
         let path = socket.socket_path().to_owned();
         let mut client = UnixStream::connect(&path).unwrap();
-        wait_for_count(&socket, 1);
-        socket.close();
-        socket.close();
+        // macOS can reject changing the read timeout after the peer has shut down.
         client
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
+        wait_for_count(&socket, 1);
+        socket.close();
+        socket.close();
         let mut result = String::new();
         client.read_to_string(&mut result).unwrap();
         assert!(result.is_empty() || result == "denied\n");
