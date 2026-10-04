@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "sample_count": 300,
+  "metrics": {
+    "allocations_per_capture": {
+      "unit": "Rust allocations",
+      "samples": 300,
+      "median": 606.000000,
+      "p95": 606.000000,
+      "max": 606.000000,
+      "budget": 666.600000
+    },
+    "rust_bytes_per_capture": {
+      "unit": "requested Rust bytes",
+      "samples": 300,
+      "median": 453448.000000,
+      "p95": 453448.000000,
+      "max": 453448.000000,
+      "budget": 498792.800000
+    },
+    "isolated_projector_capture": {
+      "unit": "ms",
+      "samples": 300,
+      "median": 0.461060,
+      "p95": 0.484960,
+      "max": 0.672382,
+      "budget": 0.533456
+    }
+  }
+}

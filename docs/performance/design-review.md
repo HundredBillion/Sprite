@@ -1,5 +1,9 @@
 # Design review paint baseline
 
+Latest follow-up: [observation-row sharing resolves the capture timing gate](design-review-capture-row-sharing/README.md).
+The original measurements below are retained as historical evidence.
+
+
 `design-review-paint-baseline.json` records the terminal's existing allocations
 before row/text sharing or paint caching. The benchmark is a separate process
 with `System` behind its counting allocator. It creates no application, Window,

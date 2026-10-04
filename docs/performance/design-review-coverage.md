@@ -320,8 +320,31 @@ Independent review covered all 150 changed paths from `cee803a` through
 actionable Critical or Important code defect. The functional, static and scoped
 allocation evidence supports opening a draft PR for all three waves.
 
-The branch is **not ready to merge**. Capture timing acceptance remains an
-Important unresolved gate: the controlled comparison reports a median paired
+At that review the branch was **not ready to merge**. Capture timing acceptance
+was an Important unresolved gate: the controlled comparison reports a median paired
 p95 ratio of 1.3667, and three of four final runs exceed the unchanged shared
-budget. No source-level cause or accepted exception has been established.
-Opening a draft PR does not waive that gate or claim native-platform acceptance.
+budget. No source-level cause or accepted exception had been established.
+Opening the draft PR did not waive that gate or claim native-platform acceptance.
+
+
+## Capture follow-up after draft PR
+
+The [observation-row sharing follow-up](design-review-capture-row-sharing/README.md)
+resolves the isolated capture gate without raising its 0.017937 ms threshold.
+All four corrected runs pass at p95 0.006758–0.007946 ms; each allocates four
+Rust objects / 3,456 requested bytes. An allocation regression failed before
+(104 / 14,656) and passes after. Cold-row costs, all controlled results, the
+773-test workspace run, and independent bounded review are in that record.
+The earlier reports remain historical evidence, not current gate failures.
+Unrelated legacy timing limits and native-platform limitations remain disclosed.
+
+The previous PR CI run additionally exposed two test portability defects:
+a macOS test changed a socket timeout after peer shutdown, and the compile-proof
+helper chose Serde/TOML artifacts that loaded independently but used different
+Serde trait identities. The test now sets its deadline before shutdown; the
+helper compiles a joint derive/parse probe before choosing Serde. The actual
+mixed-artifact proof was reproduced locally (exit 101) and passes after the fix;
+all three proof tests and eleven socket tests pass locally. The macOS run also
+reported a five-second snapshot watchdog in the image steady-state test; no
+speculative production fix or timeout increase was made for that observation.
+Remote CI verification remains separate from the Linux capture result.

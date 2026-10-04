@@ -361,12 +361,16 @@ logic remains Window-free. Avoid pass-through wrappers around moved code.
 - [x] Obtain independent whole-branch review and commit the final evidence.
   Review of `cee803a..69bcea3` found no actionable Critical or Important code
   defect. Functional/static/allocation checks pass within their documented scopes.
-- [ ] Resolve capture timing acceptance before merge. The controlled comparison
-  retains a +36.7% median paired p95 ratio and three of four final shared-budget
-  misses. Cause and acceptance remain unresolved; opening a draft is not a waiver.
+- [x] Resolve capture timing acceptance before merge. The observation-row sharing
+  fix `e47049e` passes all four corrected runs against the unchanged 0.017937 ms
+  limit (p95 0.006758–0.007946 ms), with 4 allocations / 3,456 bytes per capture.
+  The [follow-up record](../performance/design-review-capture-row-sharing/README.md)
+  retains prior failures, describes the cold-row tradeoff and independent review,
+  and distinguishes removed copying from unexplained historical timing variation.
 - [x] Push the branch and open one draft PR for #48 using creating-a-pull-request,
   with measured evidence and native-platform limits. Preserve the worktree.
   Do not merge or publish a release.
 
 Draft PR: https://github.com/HundredBillion/Sprite/pull/49.
-Capture timing acceptance remains open above; no merge or release was performed.
+Capture timing acceptance is resolved above; no merge or release was performed.
+CI portability follow-ups and remote verification are separate from that timing gate.
