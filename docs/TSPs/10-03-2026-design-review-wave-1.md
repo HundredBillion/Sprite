@@ -71,10 +71,10 @@ crates/sprite-term/tests/session_output.rs; crates/sprite-term/tests/lifecycle.r
 Produce per-chunk bell coalescing, owned PTY descriptor and structurally ordered
 libghostty state destruction.
 
-- [ ] Reproduce a chunk of 16 KiB BEL bytes stalling progress while lifecycle
+- [x] Reproduce a chunk of 16 KiB BEL bytes stalling progress while lifecycle
   consumer is slow. Assert one Bell for a controlled chunk and progress to the next
   snapshot. Use an internal worker seam for chunk identity, public tests for liveness.
-- [ ] Replace bell counting with a boolean pending signal, drained once per chunk:
+- [x] Replace bell counting with a boolean pending signal, drained once per chunk:
 
 ```rust
 if bell_pending.replace(false) {
@@ -83,18 +83,18 @@ if bell_pending.replace(false) {
 ```
 
   Adapt the existing callback's ownership primitive rather than adding another.
-- [ ] Make the pump thread own a duplicated OwnedFd for the PTY master. Prefer the
+- [x] Make the pump thread own a duplicated OwnedFd for the PTY master. Prefer the
   pinned nix stdlib-compatible ownership interface; use AsFd for safe reads/writes
   and polls. Remove the borrowed-raw-fd lifetime contract. Preserve nonblocking
   operation, cancellation, EIO/EOF handling and shutdown joining.
-- [ ] Inspect pinned libghostty wrapper handle lifetimes, then store projector,
+- [x] Inspect pinned libghostty wrapper handle lifetimes, then store projector,
   encoder and terminal in a private Owned struct in declaration/drop order. Avoid
   self-referential borrows; if the existing API prevents this, document evidence
   and resolve the ownership representation before proceeding.
-- [ ] Run `cargo test -p sprite-term --locked --offline --test lifecycle
+- [x] Run `cargo test -p sprite-term --locked --offline --test lifecycle
   --test session_output --test input_backpressure` and pump unit tests. Verify
   no unsafe operations remain in pty_unix except required proc-name/dup boundary.
-- [ ] Commit resource and bell changes with evidence.
+- [x] Commit resource and bell changes with evidence.
 
 ### Task 3: Typed terminal defaults, spawn result and application session state
 
@@ -118,23 +118,23 @@ pub struct Spawned {
 // ColorDefaults uses pub base: Option<BaseColors>, retains cursor and palette.
 ```
 
-- [ ] Add a compile-fail doctest for incomplete BaseColors and verify existing
+- [x] Add a compile-fail doctest for incomplete BaseColors and verify existing
   colour precedence/reset tests will retain their coverage with paired colours.
-- [ ] Change ColorDefaults and all consumers. Delete the independently optional
+- [x] Change ColorDefaults and all consumers. Delete the independently optional
   foreground/background fields; use the pair in apply_color_defaults.
-- [ ] Return Spawned, remove stream Options and take methods from TerminalSession,
+- [x] Return Spawned, remove stream Options and take methods from TerminalSession,
   migrate every production/test/benchmark caller, delete take-once runtime tests.
   Destructure at callers: `let Spawned { session, events, snapshots } =
   TerminalSession::spawn(config)?;` with each caller's existing error handling.
-- [ ] Introduce application SessionState with NeverStarted, Running(session), and
+- [x] Introduce application SessionState with NeverStarted, Running(session), and
   Ended(session) variants so the ended handle remains owned until pane cleanup.
   Adapt send, foreground and shutdown consumers with explicit matches.
-- [ ] Centralise Settings-to-colour/cursor mapping in one session_defaults adapter
+- [x] Centralise Settings-to-colour/cursor mapping in one session_defaults adapter
   used at startup and reload. Test identical mappings and fallback colours.
-- [ ] Run `cargo test --workspace --locked --offline --no-fail-fast`, recording the
+- [x] Run `cargo test --workspace --locked --offline --no-fail-fast`, recording the
   baseline tmux result separately. Run `cargo clippy --workspace --all-targets
   --locked --offline -- -D warnings` for migrated call sites.
-- [ ] Commit the typed interface and its complete caller migration.
+- [x] Commit the typed interface and its complete caller migration.
 
 ### Task 4: Tree-derived focus, safe empty tabs and exclusive workspace modes
 
@@ -155,20 +155,20 @@ enum Mode {
 }
 ```
 
-- [ ] Add tests for closing the last tab then accessing/rendering it, closing tabs
+- [x] Add tests for closing the last tab then accessing/rendering it, closing tabs
   before and after active identity, and opening a new tab after empty.
-- [ ] Replace active index with TabId (or Option<TabId> for explicit empty state),
+- [x] Replace active index with TabId (or Option<TabId> for explicit empty state),
   return Options from accessors, migrate all workspace consumers. Empty render
   returns an empty element, never indexing after quit. Preserve neighbour choice.
-- [ ] Delete pending_focus and request_focus. In render derive the focused handle
+- [x] Delete pending_focus and request_focus. In render derive the focused handle
   from the active tree; call the PaneHandle interface so a focused Surface stays
   focused. Only focus when the selected handle differs from window focus.
-- [ ] Merge modal Options into Mode, handling cancellation/transition explicitly.
+- [x] Merge modal Options into Mode, handling cancellation/transition explicitly.
   Test rename to divider gesture, confirmation cancellation, and no simultaneous
   states. Preserve existing keyboard semantics and close safety.
-- [ ] Add GPUI tests for pane focus after split/tab change/close and empty render.
+- [x] Add GPUI tests for pane focus after split/tab change/close and empty render.
   Run `cargo test -p sprite-app --locked --offline`.
-- [ ] Commit the workspace state changes.
+- [x] Commit the workspace state changes.
 
 ### Task 5: Precise token refusals and shared dock size validation
 
@@ -182,17 +182,17 @@ crates/sprite-app/src/cli.rs; dock-size consumers.
 newtype with TryFrom<f32> owns the existing CLI accepted range; CLI and wire reject
 out-of-range/non-finite values identically.
 
-- [ ] Test duplicate token registration as Same without repaint and conflicting
+- [x] Test duplicate token registration as Same without repaint and conflicting
   registration preserving the first colour with a wire refusal naming it in hex.
-- [ ] Propagate TokenConflict data through the request and serialisation path;
+- [x] Propagate TokenConflict data through the request and serialisation path;
   call repaint_terminals only for Registration::New. Remove obsolete dead_code
   allowances only where the values now have consumers.
-- [ ] Test a shared DockSize table at min/max, below/above, NaN and infinities;
+- [x] Test a shared DockSize table at min/max, below/above, NaN and infinities;
   verify CLI and wire both reject size 1, preserving omission defaults and fill
   handling. Replace wire clamping and CLI independent range checks with TryFrom.
-- [ ] Run `cargo test -p sprite-app --locked --offline` and commit.
+- [x] Run `cargo test -p sprite-app --locked --offline` and commit.
 
-### Task 6: Align documentation and shared limits; verify the whole PR
+### Task 6: Align documentation and shared limits; verify Wave 1
 
 **Blocked by:** Task 5
 
@@ -202,15 +202,15 @@ crates/sprite-term/src/lib.rs; crates/sprite-app/src/terminal_view/geometry.rs.
 **Interfaces:** One exported MAX_CELLS constant used by engine and geometry.
 No new config discovery, schema version or file watcher.
 
-- [ ] Correct dependency feature and CI claims to match Cargo and workflows.
+- [x] Correct dependency feature and CI claims to match Cargo and workflows.
   Amend ADR 0002 to describe implemented paths and explicit config reload; fix
   config module documentation. Share MAX_CELLS. Replace decorative Unix cfg with
   a clear supported-platform compile guard or consistently gated modules.
-- [ ] Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+- [x] Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --locked --offline -- -D warnings`, `cargo test --workspace --locked --offline
   --no-fail-fast`, `cargo build --workspace --locked --offline`, and both cargo
   tree checks from CI. Execute the forbidden-states commands from ci.yml.
-- [ ] Review the complete diff independently, resolve important findings, update
+- [x] Review the complete diff independently, resolve important findings, update
   this task checklist with commands/results, and commit final documentation.
-- [ ] Continue with docs/TSPs/10-03-2026-design-review-continuation.md.
+- [x] Continue with docs/TSPs/10-03-2026-design-review-continuation.md.
   The user selected all three waves; do not open a partial Wave 1 PR.

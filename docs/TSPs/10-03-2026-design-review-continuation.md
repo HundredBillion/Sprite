@@ -26,6 +26,8 @@ identity allows capture and paint work to be reused. Measure before optimising.
   No persisted-data backfill or mixed-version process rollout applies here.
 - Run meaningful interface tests, red→green for confirmed bugs, independent review
   per task, and record measurements instead of inferred allocation counts.
+- Every compile-fail doctest needs a compiling positive control with the same
+  imports; missing/private imports are not evidence of the intended invariant.
 - Update docs/performance and relevant ADRs when contract changes need explanation.
 - Do not open a partial PR. Final task opens the one complete PR requested.
 
@@ -76,6 +78,9 @@ slice only. No manual return_permit call remains outside Drop.
 - [ ] Write a pump test consuming/dropping >=40 chunks without calling a return
   method; verify all bytes arrive and cancellation joins. Cover inbox rejection
   and unread queued messages dropped during shutdown. Observe old behavior fail.
+- [ ] Enforce the Unix pump safety boundary with `#![deny(unsafe_code)]` and
+  narrowly scoped allowances for the descriptor-duplication and macOS process-name
+  FFI boundaries; the pump otherwise uses owned safe descriptor APIs.
 - [ ] Pool the existing fixed number of 16 KiB buffers at startup. Read directly
   into a checked-out buffer; send ownership rather than to_vec().
 
@@ -249,7 +254,8 @@ once. SurfaceConnection supports a single-buffer batch write.
   updates, large-list stable IDs and view virtualization.
 - [ ] Compact grid cells, share immutable render rows, track dirty rows, and reuse
   unchanged rows without cloning the entire grid. Preserve operation ordering and
-  bounds/refusal behavior.
+  bounds/refusal behavior. Reclaim overwritten interned text so repeated distinct
+  writes cannot grow storage without bound; test this against the live grid size.
 - [ ] Arc ListConfig and shared row text; construct id_index once per operation.
   On a 100k-row list, instrument truncate_line to prove <=visible+16 calls/frame.
 - [ ] Batch one wheel gesture's events into a reusable buffer with one write;
