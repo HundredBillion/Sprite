@@ -116,6 +116,18 @@ struct Started {
     waiter: JoinHandle<()>,
 }
 
+struct Pending {
+    generation: u64,
+    dirty: bool,
+}
+
+impl Pending {
+    fn mutated(&mut self) {
+        self.generation += 1;
+        self.dirty = true;
+    }
+}
+
 pub(crate) fn run(
     config: SessionConfig,
     commands: SyncSender<Message>,
@@ -375,7 +387,10 @@ pub(crate) fn run(
 
     // A silent long-running child must still give the application dimensions
     // and cursor state, so generation 0 is published before any output.
-    let mut generation = 0_u64;
+    let mut pending = Pending {
+        generation: 0,
+        dirty: false,
+    };
     // Skips a per-cell FFI query on every capture while nothing is selected.
     let mut has_selection = false;
     // The child waiter and the PTY pump stop independently; the session closes
@@ -383,7 +398,7 @@ pub(crate) fn run(
     let mut exit_status: Option<Result<ExitStatus, String>> = None;
     let mut pump_stopped = false;
     let mut fatal: Option<SessionError> = None;
-    let mut dirty = match projector.capture(generation, size, has_selection, &terminal) {
+    pending.dirty = match projector.capture(pending.generation, size, has_selection, &terminal) {
         Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));
@@ -404,8 +419,7 @@ pub(crate) fn run(
             Message::PtyOutput(chunk) => {
                 // One chunk, one mutation batch, one generation.
                 terminal.vt_write(&chunk);
-                generation += 1;
-                dirty = true;
+                pending.mutated();
                 pump.return_permit();
 
                 // The reply callback cannot speak for itself, so a reply the
@@ -454,8 +468,7 @@ pub(crate) fn run(
                     // Typing returns the Pane to live output, so the result of
                     // the keystroke is visible rather than scrolled off above.
                     if return_to_bottom(&mut terminal) {
-                        generation += 1;
-                        dirty = true;
+                        pending.mutated();
                     }
                     match encode_key(&mut encoder, &terminal, &event) {
                         Ok(bytes) => {
@@ -478,8 +491,7 @@ pub(crate) fn run(
                             // Published only once both backends agree, so the
                             // application never sees a size one of them refused.
                             size = requested;
-                            generation += 1;
-                            dirty = true;
+                            pending.mutated();
                         }
                         // The two external mutations cannot be rolled back
                         // together, so an uncertain pair is never presented as
@@ -500,8 +512,7 @@ pub(crate) fn run(
                             libghostty_vt::terminal::ScrollViewport::Delta(rows as isize)
                         }
                     });
-                    generation += 1;
-                    dirty = true;
+                    pending.mutated();
                 }
                 TerminalCommand::Wheel(event) => {
                     // Where a wheel turn goes depends on terminal state the
@@ -533,8 +544,7 @@ pub(crate) fn run(
                             terminal.scroll_viewport(
                                 libghostty_vt::terminal::ScrollViewport::Delta(event.rows as isize),
                             );
-                            generation += 1;
-                            dirty = true;
+                            pending.mutated();
                         }
                         Err(error) => {
                             if events.send_blocking(TerminalEvent::Error(error)).is_err() {
@@ -552,8 +562,7 @@ pub(crate) fn run(
                     match apply_selection(&terminal, anchor, head, mode, rectangle) {
                         Ok(()) => {
                             has_selection = true;
-                            generation += 1;
-                            dirty = true;
+                            pending.mutated();
                         }
                         // A selection that cannot be resolved is reported, but
                         // it does not end the session: the next gesture may
@@ -573,8 +582,7 @@ pub(crate) fn run(
                     {
                         let _ = events.send_blocking(TerminalEvent::Error(error));
                     }
-                    generation += 1;
-                    dirty = true;
+                    pending.mutated();
                 }
                 TerminalCommand::CopySelection => {
                     let event = match selection_text(&terminal) {
@@ -649,8 +657,7 @@ pub(crate) fn run(
                     // Typing, so it returns the reader to where the result will
                     // appear, exactly as a keystroke does.
                     if return_to_bottom(&mut terminal) {
-                        generation += 1;
-                        dirty = true;
+                        pending.mutated();
                     }
                     if let Err(error) = input.write(text.into_bytes()) {
                         report_refused_input(&events, error);
@@ -682,7 +689,7 @@ pub(crate) fn run(
                         .send_blocking(TerminalEvent::Hyperlink {
                             position,
                             request_id,
-                            generation,
+                            generation: pending.generation,
                             uri: resolved.as_ref().map(|link| link.uri.clone()),
                             span: resolved.map(|link| link.span),
                         })
@@ -691,7 +698,7 @@ pub(crate) fn run(
                         break;
                     }
                 }
-                TerminalCommand::Capture => dirty = true,
+                TerminalCommand::Capture => pending.dirty = true,
                 TerminalCommand::SetColors(colors) => {
                     // Applied on this thread, against this pane's own terminal,
                     // so a reload cannot interleave with the parser.
@@ -702,7 +709,7 @@ pub(crate) fn run(
                     }
                     // The colours live in the render state, so a frame has to be
                     // taken for anyone to see them.
-                    dirty = true;
+                    pending.mutated();
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
                 TerminalCommand::SetCursor(cursor) => {
@@ -711,7 +718,7 @@ pub(crate) fn run(
                     {
                         break;
                     }
-                    dirty = true;
+                    pending.mutated();
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
                 TerminalCommand::CaptureGraphics => match projector.capture_graphics(&terminal) {
@@ -735,7 +742,7 @@ pub(crate) fn run(
                     // belong to one generation rather than a moving target.
                     let foreground = foreground_executable(master.as_ref());
                     match projector.capture_history(
-                        generation,
+                        pending.generation,
                         size,
                         lines.get(),
                         foreground,
@@ -787,20 +794,23 @@ pub(crate) fn run(
         // Capture only against an empty slot: building a projection that a
         // newer generation would immediately replace wastes the terminal
         // owner's time and delivers nothing.
-        if dirty && snapshots.is_empty() {
-            dirty = match projector.capture(generation, size, has_selection, &terminal) {
-                Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
-                Err(error) => {
-                    let _ = events.send_blocking(TerminalEvent::Error(error));
-                    true
-                }
-            };
+        if pending.dirty && snapshots.is_empty() {
+            pending.dirty =
+                match projector.capture(pending.generation, size, has_selection, &terminal) {
+                    Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
+                    Err(error) => {
+                        let _ = events.send_blocking(TerminalEvent::Error(error));
+                        true
+                    }
+                };
         }
     }
 
     // The final generation still deserves delivery, so the last projection
     // displaces any stale one left in the slot.
-    if dirty && let Ok(bundle) = projector.capture(generation, size, has_selection, &terminal) {
+    if pending.dirty
+        && let Ok(bundle) = projector.capture(pending.generation, size, has_selection, &terminal)
+    {
         let _ = snapshots.force_send(Arc::new(bundle));
     }
 

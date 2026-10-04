@@ -181,7 +181,7 @@ fn a_live_colour_reload_repaints_on_its_own() {
     let events = EventPump::new(session.take_event_stream().expect("take event stream"));
     let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
     events.expect_ready();
-    snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains('A'));
+    let before = snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains('A'));
 
     session
         .send(sprite_term::TerminalCommand::SetColors(ColorDefaults {
@@ -195,4 +195,8 @@ fn a_live_colour_reload_repaints_on_its_own() {
         bundle.render.default_foreground == color(0x11, 0x22, 0x33)
     });
     assert_eq!(bundle.render.default_foreground, color(0x11, 0x22, 0x33));
+    assert!(
+        bundle.generation > before.generation,
+        "reload must advance the generation accepted by the view"
+    );
 }

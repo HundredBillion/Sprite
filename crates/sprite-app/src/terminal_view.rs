@@ -12,6 +12,9 @@ mod render;
 mod surfaces;
 mod theme;
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use gpui::{
