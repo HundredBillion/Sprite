@@ -144,17 +144,17 @@ placeholder answer unsupported requests, including Open, rather than drop replie
 ```rust
 pub trait PaneRequest { fn refuse(self); }
 // Pane: type Request: PaneRequest; default surface_request refuses.
-// PaneHandle<Request = ...> dispatches through Entity::update_in with Window.
+// PaneHandle<Request = ...> dispatches through Entity::update, forwarding Window.
 ```
 
-- [ ] Test a placeholder pane's Open returns NotATerminal through the trait, and
+- [x] Test a placeholder pane's Open returns NotATerminal through the trait, and
   terminal pane open/update/focus/close/grid/list/capabilities retain behavior.
-- [ ] Add surface_request at the existing handle seam. Move pane-specific matching
+- [x] Add surface_request at the existing handle seam. Move pane-specific matching
   into TerminalView; keep window token registration in the workspace. Route focus
   cycling through the same seam or an explicit default trait operation.
-- [ ] Delete both workspace downcasts. Preserve failed/ended terminal refusals,
+- [x] Delete both workspace downcasts. Preserve failed/ended terminal refusals,
   owner checks, reply completion, close-on-disconnect and focus notifications.
-- [ ] Run app Surface and GPUI tests, pane crate tests and all-target clippy.
+- [x] Run app Surface and GPUI tests, pane crate tests and all-target clippy.
   Confirm no `downcast` remains in workspace sources. Commit interface + adapters.
 
 ### Task 5: Encode parsed Surface variants and geometry invariants
