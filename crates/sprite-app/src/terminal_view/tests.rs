@@ -360,3 +360,70 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         "cat"
     );
 }
+
+#[gpui::test]
+fn closing_an_owned_terminal_unregisters_before_retained_handles_drop(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::observation::broker::PaneSource;
+    use crate::observation::panes::{PaneLink, WindowPanes};
+    use crate::pane_tree::{PaneId, PaneTree};
+    use crate::tabs::TabId;
+    use gpui::AppContext;
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let panes = WindowPanes::new();
+    let (sender, _exits) = async_channel::unbounded();
+    let (host, cx) = cx.add_window_view(|_, _| gpui::Empty);
+    let view = host.update_in(cx, |_, window, cx| {
+        cx.new(|cx| {
+            TerminalView::new(
+                Some(vec!["/bin/cat".into()]),
+                settings,
+                Vec::new(),
+                Some(PaneLink {
+                    pane: PaneId(0),
+                    tab: TabId(0),
+                    panes: Arc::clone(&panes),
+                }),
+                PaneExit {
+                    sender,
+                    identity: (TabId(0), PaneId(0)),
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    let mut tree = PaneTree::new(PaneId(0), view.clone());
+    assert_eq!(panes.panes().len(), 1);
+    let pending = panes
+        .begin(PaneId(0), sprite_term::HistoryLines::default())
+        .unwrap();
+    let closed = tree.close(PaneId(0)).unwrap();
+    let cleanup = closed.update(cx, |view, _| {
+        view.begin_shutdown().expect("first shutdown owns worker")
+    });
+    assert!(
+        panes.panes().is_empty(),
+        "closing must revoke command access while another handle lives"
+    );
+    assert!(
+        panes
+            .begin(PaneId(0), sprite_term::HistoryLines::default())
+            .is_err()
+    );
+    assert!(
+        pending.answer.try_recv().unwrap().is_err(),
+        "pending capture is released immediately"
+    );
+    assert!(view.update(cx, |view, _| view.begin_shutdown()).is_none());
+    cleanup.wait().unwrap();
+    drop(closed);
+    let weak = view.downgrade();
+    drop(view);
+    cx.run_until_parked();
+    assert!(weak.upgrade().is_none());
+    assert!(panes.panes().is_empty());
+}

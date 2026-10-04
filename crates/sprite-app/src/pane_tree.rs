@@ -1,6 +1,7 @@
 //! The recursive split tree that a tab owns.
 //!
-//! This is deliberately pure: it knows pane identities and geometry and nothing
+//! Leaves own generic payloads alongside their identities and geometry.
+//! The tree knows nothing
 //! about terminal sessions, GPUI, or pixels. Every rule the PRD states about
 //! splits — that closing collapses redundant nodes, that focus moves by
 //! geometry rather than creation order, that moving or resizing a pane never
@@ -83,21 +84,21 @@ impl Rect {
     }
 }
 
-enum Node {
-    Leaf(PaneId),
+enum Node<T> {
+    Leaf(PaneId, T),
     Split {
         orientation: Orientation,
         /// Share of the space given to `first`, in 0.0..1.0.
         ratio: f32,
-        first: Box<Node>,
-        second: Box<Node>,
+        first: Box<Node<T>>,
+        second: Box<Node<T>>,
     },
 }
 
-impl Node {
-    fn collect(&self, area: Rect, into: &mut Vec<(PaneId, Rect)>) {
+impl<T> Node<T> {
+    fn collect<'a>(&'a self, area: Rect, into: &mut Vec<(PaneId, Rect, &'a T)>) {
         match self {
-            Self::Leaf(pane) => into.push((*pane, area)),
+            Self::Leaf(pane, content) => into.push((*pane, area, content)),
             Self::Split {
                 orientation,
                 ratio,
@@ -113,7 +114,7 @@ impl Node {
 
     fn contains(&self, pane: PaneId) -> bool {
         match self {
-            Self::Leaf(leaf) => *leaf == pane,
+            Self::Leaf(leaf, _) => *leaf == pane,
             Self::Split { first, second, .. } => first.contains(pane) || second.contains(pane),
         }
     }
@@ -127,7 +128,7 @@ impl Node {
     /// this boundary, so either would do.
     fn last_leaf(&self) -> PaneId {
         match self {
-            Self::Leaf(pane) => *pane,
+            Self::Leaf(pane, _) => *pane,
             Self::Split { second, .. } => second.last_leaf(),
         }
     }
@@ -276,54 +277,100 @@ impl Node {
         }
     }
 
-    /// Replaces `pane`'s leaf with a split of `pane` and `new_pane`.
+    fn get(&self, pane: PaneId) -> Option<&T> {
+        match self {
+            Self::Leaf(id, content) => (*id == pane).then_some(content),
+            Self::Split { first, second, .. } => first.get(pane).or_else(|| second.get(pane)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Leaf(..) => 1,
+            Self::Split { first, second, .. } => first.len() + second.len(),
+        }
+    }
+
     fn split_leaf(
-        &mut self,
+        self,
         pane: PaneId,
         new_pane: PaneId,
         orientation: Orientation,
-        ratio: f32,
-    ) -> bool {
+        content: T,
+    ) -> Self {
         match self {
-            Self::Leaf(leaf) if *leaf == pane => {
-                *self = Self::Split {
-                    orientation,
-                    ratio,
-                    first: Box::new(Self::Leaf(pane)),
-                    second: Box::new(Self::Leaf(new_pane)),
+            Self::Leaf(..) => Self::Split {
+                orientation,
+                ratio: 0.5,
+                first: Box::new(self),
+                second: Box::new(Self::Leaf(new_pane, content)),
+            },
+            Self::Split {
+                orientation: existing,
+                ratio,
+                first,
+                second,
+            } => {
+                let (first, second) = if first.contains(pane) {
+                    (
+                        Box::new(first.split_leaf(pane, new_pane, orientation, content)),
+                        second,
+                    )
+                } else {
+                    (
+                        first,
+                        Box::new(second.split_leaf(pane, new_pane, orientation, content)),
+                    )
                 };
-                true
-            }
-            Self::Leaf(_) => false,
-            Self::Split { first, second, .. } => {
-                first.split_leaf(pane, new_pane, orientation, ratio)
-                    || second.split_leaf(pane, new_pane, orientation, ratio)
+                Self::Split {
+                    orientation: existing,
+                    ratio,
+                    first,
+                    second,
+                }
             }
         }
     }
 
-    /// Removes `pane`, collapsing the split that held it.
-    ///
-    /// Returns whether this node itself should be replaced by its surviving
-    /// child, which is how a redundant internal node disappears rather than
-    /// lingering with one child.
-    fn remove(&mut self, pane: PaneId) -> bool {
-        let Self::Split { first, second, .. } = self else {
-            return false;
-        };
-
-        if matches!(**first, Self::Leaf(leaf) if leaf == pane) {
-            let surviving = std::mem::replace(&mut **second, Self::Leaf(pane));
-            *self = surviving;
-            return true;
+    fn remove(self, pane: PaneId) -> (Option<Self>, Option<T>) {
+        match self {
+            Self::Leaf(id, content) if id == pane => (None, Some(content)),
+            Self::Leaf(..) => (Some(self), None),
+            Self::Split {
+                orientation,
+                ratio,
+                first,
+                second,
+            } => {
+                let (first, second, removed) = if first.contains(pane) {
+                    let (first, removed) = first.remove(pane);
+                    (first, Some(*second), removed)
+                } else {
+                    let (second, removed) = second.remove(pane);
+                    (Some(*first), second, removed)
+                };
+                let surviving = match (first, second) {
+                    (Some(first), Some(second)) => Some(Self::Split {
+                        orientation,
+                        ratio,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }),
+                    (first, second) => first.or(second),
+                };
+                (surviving, removed)
+            }
         }
-        if matches!(**second, Self::Leaf(leaf) if leaf == pane) {
-            let surviving = std::mem::replace(&mut **first, Self::Leaf(pane));
-            *self = surviving;
-            return true;
-        }
+    }
 
-        first.remove(pane) || second.remove(pane)
+    fn into_contents(self, contents: &mut Vec<(PaneId, T)>) {
+        match self {
+            Self::Leaf(pane, content) => contents.push((pane, content)),
+            Self::Split { first, second, .. } => {
+                first.into_contents(contents);
+                second.into_contents(contents);
+            }
+        }
     }
 }
 
@@ -389,27 +436,30 @@ impl PaneIds {
     }
 }
 
-/// One tab's split tree.
-pub struct PaneTree {
-    root: Node,
-    focus: PaneId,
+/// One tab's layout and payload ownership.
+///
+/// Every leaf owns its payload; an empty tree has no focus.
+/// A nonempty tree always focuses one of its live leaves.
+pub struct PaneTree<T> {
+    root: Option<Node<T>>,
+    focus: Option<PaneId>,
 }
 
-impl PaneTree {
+impl<T> PaneTree<T> {
     /// A new tab: one pane, focused. The caller supplies the identity.
-    pub fn new(first: PaneId) -> Self {
+    pub fn new(first: PaneId, content: T) -> Self {
         Self {
-            root: Node::Leaf(first),
-            focus: first,
+            root: Some(Node::Leaf(first, content)),
+            focus: Some(first),
         }
     }
 
-    pub fn focus(&self) -> PaneId {
+    pub fn focus(&self) -> Option<PaneId> {
         self.focus
     }
 
     pub fn contains(&self, pane: PaneId) -> bool {
-        self.root.contains(pane)
+        self.root.as_ref().is_some_and(|root| root.contains(pane))
     }
 
     /// Panes and their normalised rectangles.
@@ -417,10 +467,12 @@ impl PaneTree {
     /// Ordered by top edge, then left edge, then id — the same order the
     /// observation schema promises, so serialisation never depends on
     /// traversal or completion order.
-    pub fn panes(&self) -> Vec<(PaneId, Rect)> {
-        let mut panes = Vec::new();
-        self.root.collect(Rect::FULL, &mut panes);
-        panes.sort_by(|(left_id, left), (right_id, right)| {
+    pub fn layout(&self) -> Vec<(PaneId, Rect, &T)> {
+        let mut panes = Vec::with_capacity(self.len());
+        if let Some(root) = &self.root {
+            root.collect(Rect::FULL, &mut panes);
+        }
+        panes.sort_by(|(left_id, left, _), (right_id, right, _)| {
             left.y
                 .total_cmp(&right.y)
                 .then(left.x.total_cmp(&right.x))
@@ -435,7 +487,9 @@ impl PaneTree {
     /// depends on it: a caller draws all of them, and addresses name a pane.
     pub fn dividers(&self) -> Vec<Divider> {
         let mut dividers = Vec::new();
-        self.root.collect_dividers(Rect::FULL, &mut dividers);
+        if let Some(root) = &self.root {
+            root.collect_dividers(Rect::FULL, &mut dividers);
+        }
         dividers
     }
 
@@ -445,8 +499,9 @@ impl PaneTree {
     /// does one whose neighbours are all divided the other way.
     pub fn divider(&self, pane: PaneId, direction: Direction) -> Option<Divider> {
         let (orientation, side_first) = address(direction);
-        let route = self.root.divider_path(pane, orientation, side_first)?;
-        self.root.divider_along(&route, Rect::FULL)
+        let root = self.root.as_ref()?;
+        let route = root.divider_path(pane, orientation, side_first)?;
+        root.divider_along(&route, Rect::FULL)
     }
 
     /// Moves the boundary on `direction` side of `pane`, reporting whether
@@ -456,10 +511,13 @@ impl PaneTree {
     /// or refocused, and no session hears about it.
     pub fn set_divider_ratio(&mut self, pane: PaneId, direction: Direction, ratio: f32) -> bool {
         let (orientation, side_first) = address(direction);
-        let Some(route) = self.root.divider_path(pane, orientation, side_first) else {
+        let Some(root) = self.root.as_mut() else {
             return false;
         };
-        let Some(slot) = self.root.ratio_at(&route) else {
+        let Some(route) = root.divider_path(pane, orientation, side_first) else {
+            return false;
+        };
+        let Some(slot) = root.ratio_at(&route) else {
             return false;
         };
         // The same limits `split_area` lays out with, so what is stored and
@@ -469,55 +527,69 @@ impl PaneTree {
     }
 
     pub fn len(&self) -> usize {
-        self.panes().len()
+        self.root.as_ref().map_or(0, Node::len)
     }
 
-    /// Whether the tree holds no panes.
-    ///
-    /// Always false in practice: `new` seeds one leaf and `close` refuses to
-    /// remove the last, so no sequence of operations empties a tree. Computed
-    /// rather than returned as a constant so that the assertion in `close` is a
-    /// real check — a constant would make it assert nothing.
     pub fn is_empty(&self) -> bool {
-        self.panes().is_empty()
+        self.root.is_none()
     }
 
-    /// Splits the focused pane, focusing the new one.
-    ///
-    /// The new pane gets a fresh identity; the existing pane keeps its own, so
-    /// its session is untouched by the rearrangement.
-    pub fn split(&mut self, orientation: Orientation, new_pane: PaneId) -> PaneId {
-        self.root.split_leaf(self.focus, new_pane, orientation, 0.5);
-        self.focus = new_pane;
-        new_pane
+    pub fn get(&self, pane: PaneId) -> Option<&T> {
+        self.root.as_ref()?.get(pane)
     }
 
-    /// Closes a pane, returning the pane focus moved to.
-    ///
-    /// Returns `None` when the last pane closes, which is the tab ending.
-    pub fn close(&mut self, pane: PaneId) -> Option<PaneId> {
-        if !self.contains(pane) {
-            return Some(self.focus);
-        }
-        if self.len() == 1 {
+    pub fn focused(&self) -> Option<&T> {
+        self.get(self.focus?)
+    }
+
+    /// Empty trees and duplicate identities refuse splits without constructing a payload.
+    pub fn split(
+        &mut self,
+        new_pane: PaneId,
+        orientation: Orientation,
+        content: impl FnOnce() -> T,
+    ) -> Option<PaneId> {
+        let focus = self.focus?;
+        if self.contains(new_pane) {
             return None;
         }
+        let content = content();
+        let root = self.root.take()?;
+        self.root = Some(root.split_leaf(focus, new_pane, orientation, content));
+        self.focus = Some(new_pane);
+        Some(new_pane)
+    }
 
-        // Chosen before the tree changes, from geometry, so the survivor does
-        // not depend on how the tree happens to be shaped internally.
-        let successor = self.nearest_neighbour(pane);
-        self.root.remove(pane);
-
-        if self.focus == pane {
-            self.focus = successor
-                .unwrap_or_else(|| self.panes().first().map(|(id, _)| *id).unwrap_or(pane));
+    /// Transfers the closed payload to its caller; the final close empties the tree.
+    pub fn close(&mut self, pane: PaneId) -> Option<T> {
+        if !self.contains(pane) {
+            return None;
         }
-        // The tree keeps its final leaf, so a close can never empty it. Checked
-        // here rather than trusted: this is the function that maintains the
-        // invariant, so it is the function that can break it. Debug-only, so
-        // the traversal costs release builds nothing.
-        debug_assert!(!self.is_empty(), "close emptied the tree");
-        Some(self.focus)
+        let successor = self.nearest_neighbour(pane);
+        let (root, content) = self.root.take()?.remove(pane);
+        self.root = root;
+        if self.focus == Some(pane) {
+            self.focus = successor;
+        }
+        content
+    }
+
+    /// Transfers payloads in pane ID order for deterministic session shutdown.
+    pub fn into_contents(self) -> Vec<T> {
+        let mut contents = Vec::new();
+        if let Some(root) = self.root {
+            root.into_contents(&mut contents);
+        }
+        contents.sort_unstable_by_key(|(pane, _)| *pane);
+        contents.into_iter().map(|(_, content)| content).collect()
+    }
+
+    #[cfg(test)]
+    fn panes(&self) -> Vec<(PaneId, Rect)> {
+        self.layout()
+            .into_iter()
+            .map(|(pane, rect, _)| (pane, rect))
+            .collect()
     }
 
     /// The pane nearest to `pane` by centre distance, ignoring direction.
@@ -525,14 +597,14 @@ impl PaneTree {
     /// Deterministic: ties break on pane id, so the choice cannot depend on
     /// creation order or traversal.
     fn nearest_neighbour(&self, pane: PaneId) -> Option<PaneId> {
-        let panes = self.panes();
-        let (_, origin) = panes.iter().find(|(id, _)| *id == pane)?;
+        let panes = self.layout();
+        let (_, origin, _) = panes.iter().find(|(id, _, _)| *id == pane)?;
         let (origin_x, origin_y) = origin.centre();
 
         panes
             .iter()
-            .filter(|(id, _)| *id != pane)
-            .min_by(|(left_id, left), (right_id, right)| {
+            .filter(|(id, _, _)| *id != pane)
+            .min_by(|(left_id, left, _), (right_id, right, _)| {
                 let (lx, ly) = left.centre();
                 let (rx, ry) = right.centre();
                 let left_distance = (lx - origin_x).powi(2) + (ly - origin_y).powi(2);
@@ -541,7 +613,7 @@ impl PaneTree {
                     .total_cmp(&right_distance)
                     .then(left_id.cmp(right_id))
             })
-            .map(|(id, _)| *id)
+            .map(|(id, _, _)| *id)
     }
 
     /// Moves focus geometrically, not through the tree.
@@ -553,7 +625,7 @@ impl PaneTree {
     /// Focuses a specific pane, if it is still in the tree.
     pub fn focus_pane(&mut self, pane: PaneId) -> bool {
         if self.contains(pane) {
-            self.focus = pane;
+            self.focus = Some(pane);
             true
         } else {
             false
@@ -561,17 +633,17 @@ impl PaneTree {
     }
 
     pub fn focus_direction(&mut self, direction: Direction) -> Option<PaneId> {
-        let target = self.neighbour(self.focus, direction)?;
-        self.focus = target;
+        let target = self.neighbour(self.focus?, direction)?;
+        self.focus = Some(target);
         Some(target)
     }
 
     fn neighbour(&self, from: PaneId, direction: Direction) -> Option<PaneId> {
-        let panes = self.panes();
-        let (_, origin) = panes.iter().find(|(id, _)| *id == from)?;
+        let panes = self.layout();
+        let (_, origin, _) = panes.iter().find(|(id, _, _)| *id == from)?;
 
         let mut candidates: Vec<(PaneId, f32, f32)> = Vec::new();
-        for (id, rect) in &panes {
+        for (id, rect, _) in &panes {
             if *id == from {
                 continue;
             }
@@ -640,11 +712,11 @@ impl PaneTree {
 mod tests {
     use super::*;
 
-    fn pane_ids(tree: &PaneTree) -> Vec<u64> {
+    fn pane_ids(tree: &PaneTree<()>) -> Vec<u64> {
         tree.panes().iter().map(|(id, _)| id.0).collect()
     }
 
-    fn rect_of(tree: &PaneTree, pane: u64) -> Rect {
+    fn rect_of(tree: &PaneTree<()>, pane: u64) -> Rect {
         tree.panes()
             .into_iter()
             .find(|(id, _)| id.0 == pane)
@@ -655,19 +727,21 @@ mod tests {
     #[test]
     fn a_new_tab_has_one_focused_pane_filling_it() {
         let mut ids = PaneIds::new();
-        let tree = PaneTree::new(ids.allocate());
+        let tree = PaneTree::new(ids.allocate(), ());
         assert_eq!(tree.len(), 1);
-        assert_eq!(tree.focus(), PaneId(0));
+        assert_eq!(tree.focus().unwrap(), PaneId(0));
         assert_eq!(rect_of(&tree, 0), Rect::FULL);
     }
 
     #[test]
     fn splitting_halves_the_space_and_focuses_the_new_pane() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let new = tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let new = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
-        assert_eq!(tree.focus(), new);
+        assert_eq!(tree.focus().unwrap(), new);
         assert_eq!(tree.len(), 2);
 
         let left = rect_of(&tree, 0);
@@ -681,8 +755,10 @@ mod tests {
     #[test]
     fn a_vertical_split_divides_top_from_bottom() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let new = tree.split(Orientation::Vertical, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let new = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         let top = rect_of(&tree, 0);
         let bottom = rect_of(&tree, new.0);
@@ -699,10 +775,13 @@ mod tests {
         let mut ids = PaneIds::new();
         // Identity is what ties a pane to its session, so a rearrangement that
         // renamed panes would silently reattach terminals to the wrong panes.
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
-        tree.split(Orientation::Vertical, ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
+        tree.split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         assert!(tree.contains(PaneId(0)), "the original pane still exists");
         let mut seen = pane_ids(&tree);
@@ -714,8 +793,10 @@ mod tests {
     #[test]
     fn closing_collapses_the_redundant_split() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let second = tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let second = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         tree.close(second);
 
@@ -728,21 +809,27 @@ mod tests {
     #[test]
     fn closing_the_last_pane_ends_the_tab() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        assert_eq!(tree.close(PaneId(0)), None);
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        assert_eq!(tree.close(PaneId(0)), Some(()));
+        assert!(tree.is_empty());
+        assert_eq!(tree.focus(), None);
     }
 
     #[test]
     fn closing_an_unfocused_pane_leaves_focus_alone() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let second = tree.split(Orientation::Horizontal, ids.allocate());
-        let third = tree.split(Orientation::Vertical, ids.allocate());
-        assert_eq!(tree.focus(), third);
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let second = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
+        let third = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
+        assert_eq!(tree.focus().unwrap(), third);
 
         tree.close(second);
         assert_eq!(
-            tree.focus(),
+            tree.focus().unwrap(),
             third,
             "closing elsewhere does not steal focus"
         );
@@ -754,10 +841,12 @@ mod tests {
     #[test]
     fn the_focus_successor_is_the_geometrically_nearest_pane() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate()); // 0 | 1
-        tree.split(Orientation::Vertical, ids.allocate()); // 0 | (1 over 2)
-        let closing = tree.focus();
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap(); // 0 | 1
+        tree.split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap(); // 0 | (1 over 2)
+        let closing = tree.focus().unwrap();
 
         // Work out the expected survivor from rectangles alone.
         let panes = tree.panes();
@@ -781,7 +870,7 @@ mod tests {
             .expect("another pane exists");
 
         tree.close(closing);
-        assert_eq!(tree.focus(), expected);
+        assert_eq!(tree.focus().unwrap(), expected);
     }
 
     /// Two layouts that are identical on screen must behave identically, even
@@ -792,21 +881,29 @@ mod tests {
     fn identical_layouts_agree_however_the_tree_was_built() {
         let mut ids = PaneIds::new();
         // 0 | 1, focus right, split vertically: 0 | (1 over 2)
-        let mut built_right_last = PaneTree::new(ids.allocate());
-        built_right_last.split(Orientation::Horizontal, ids.allocate());
-        built_right_last.split(Orientation::Vertical, ids.allocate());
+        let mut built_right_last = PaneTree::new(ids.allocate(), ());
+        built_right_last
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
+        built_right_last
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         // Same picture, but the vertical split is created before the pane that
         // ends up beside it: 0 over 1, then focus 0 and split horizontally.
         let left_first = ids.allocate();
-        let mut built_left_last = PaneTree::new(left_first);
-        built_left_last.split(Orientation::Vertical, ids.allocate());
-        built_left_last.focus = left_first;
-        built_left_last.split(Orientation::Horizontal, ids.allocate());
+        let mut built_left_last = PaneTree::new(left_first, ());
+        built_left_last
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
+        built_left_last.focus = Some(left_first);
+        built_left_last
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         // Different trees, so different ids in different places — what must
         // match is the geometry each reports.
-        let shape = |tree: &PaneTree| {
+        let shape = |tree: &PaneTree<()>| {
             let mut rects: Vec<(u32, u32, u32, u32)> = tree
                 .panes()
                 .into_iter()
@@ -844,13 +941,17 @@ mod tests {
         //   | 0  +----+
         //   |    | 2  |
         //   +----+----+
-        let mut tree = PaneTree::new(ids.allocate());
-        let right_top = tree.split(Orientation::Horizontal, ids.allocate());
-        let right_bottom = tree.split(Orientation::Vertical, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let right_top = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
+        let right_bottom = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         // From the bottom-right pane, Left must reach pane 0 even though the
         // tree puts it on the far side of the root split.
-        assert_eq!(tree.focus(), right_bottom);
+        assert_eq!(tree.focus().unwrap(), right_bottom);
         assert_eq!(tree.focus_direction(Direction::Left), Some(PaneId(0)));
 
         // And back to the right lands on one of the right-hand panes.
@@ -861,8 +962,9 @@ mod tests {
     #[test]
     fn focus_does_not_move_where_there_is_nothing() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
         // Focus is the right-hand pane; nothing lies further right.
         assert_eq!(tree.focus_direction(Direction::Right), None);
         assert_eq!(tree.focus_direction(Direction::Up), None);
@@ -877,20 +979,23 @@ mod tests {
         //   +----+----+
         //   |    2    |
         //   +---------+
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Vertical, ids.allocate()); // 0 over 1(new, focused)
-        let bottom = tree.focus();
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap(); // 0 over 1(new, focused)
+        let bottom = tree.focus().unwrap();
         // Split the top half horizontally by focusing pane 0 first.
-        tree.focus = PaneId(0);
-        let top_right = tree.split(Orientation::Horizontal, ids.allocate());
+        tree.focus = Some(PaneId(0));
+        let top_right = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         // From the top-right pane, Down must reach the full-width bottom pane.
-        tree.focus = top_right;
+        tree.focus = Some(top_right);
         assert_eq!(tree.focus_direction(Direction::Down), Some(bottom));
 
         // From the top-right pane, Left reaches the top-left pane, not the
         // bottom one, even though the bottom pane's left edge is further left.
-        tree.focus = top_right;
+        tree.focus = Some(top_right);
         assert_eq!(tree.focus_direction(Direction::Left), Some(PaneId(0)));
     }
 
@@ -899,10 +1004,12 @@ mod tests {
         let mut ids = PaneIds::new();
         // The observation schema promises this order, so it must not depend on
         // traversal.
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Vertical, ids.allocate());
-        tree.focus = PaneId(0);
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
+        tree.focus = Some(PaneId(0));
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         let ordered = tree.panes();
         for pair in ordered.windows(2) {
@@ -918,16 +1025,18 @@ mod tests {
     #[test]
     fn rectangles_always_stay_within_the_tab() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
         for step in 0..8 {
             tree.split(
+                ids.allocate(),
                 if step % 2 == 0 {
                     Orientation::Horizontal
                 } else {
                     Orientation::Vertical
                 },
-                ids.allocate(),
-            );
+                || (),
+            )
+            .unwrap();
         }
         for (id, rect) in tree.panes() {
             assert!(
@@ -944,9 +1053,10 @@ mod tests {
     #[test]
     fn closing_panes_one_by_one_ends_with_the_tab_closing() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
         for _ in 0..4 {
-            tree.split(Orientation::Horizontal, ids.allocate());
+            tree.split(ids.allocate(), Orientation::Horizontal, || ())
+                .unwrap();
         }
         assert_eq!(tree.len(), 5);
 
@@ -954,34 +1064,39 @@ mod tests {
             let victim = tree.panes().last().map(|(id, _)| *id).expect("a pane");
             assert!(tree.close(victim).is_some());
         }
-        let last = tree.focus();
-        assert_eq!(tree.close(last), None, "the final close ends the tab");
+        let last = tree.focus().unwrap();
+        assert_eq!(tree.close(last), Some(()), "the final payload is returned");
+        assert!(tree.is_empty());
+        assert_eq!(tree.focus(), None);
     }
 
     #[test]
     fn closing_an_unknown_pane_changes_nothing() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
         let before = pane_ids(&tree);
-        let focus = tree.focus();
+        let focus = tree.focus().unwrap();
 
-        assert_eq!(tree.close(PaneId(999)), Some(focus));
+        assert_eq!(tree.close(PaneId(999)), None);
+        assert_eq!(tree.focus(), Some(focus));
         assert_eq!(pane_ids(&tree), before);
     }
 
     #[test]
     fn one_pane_has_no_dividers() {
         let mut ids = PaneIds::new();
-        let tree = PaneTree::new(ids.allocate());
+        let tree = PaneTree::new(ids.allocate(), ());
         assert!(tree.dividers().is_empty());
     }
 
     #[test]
     fn a_split_reports_one_divider_across_the_middle() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         let dividers = tree.dividers();
         assert_eq!(dividers.len(), 1);
@@ -997,8 +1112,9 @@ mod tests {
     #[test]
     fn a_vertical_split_names_the_boundary_below_its_first_pane() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Vertical, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         let divider = tree.dividers()[0];
         assert_eq!(divider.pane, PaneId(0));
@@ -1013,10 +1129,14 @@ mod tests {
     fn a_nested_split_names_its_boundary_by_the_last_leaf_before_it() {
         let mut ids = PaneIds::new();
         // A, then C to A's right, then B between them by splitting A.
-        let mut tree = PaneTree::new(ids.allocate());
-        let c = tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let c = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
         assert!(tree.focus_pane(PaneId(0)));
-        let b = tree.split(Orientation::Horizontal, ids.allocate());
+        let b = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         let dividers = tree.dividers();
         assert_eq!(dividers.len(), 2);
@@ -1041,9 +1161,12 @@ mod tests {
     #[test]
     fn a_dividers_area_is_the_split_it_divides() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
-        let lower = tree.split(Orientation::Vertical, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
+        let lower = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         let vertical = tree
             .dividers()
@@ -1060,8 +1183,10 @@ mod tests {
     #[test]
     fn a_pane_finds_the_boundary_on_each_side_of_it() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let right = tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let right = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         let from_left = tree
             .divider(PaneId(0), Direction::Right)
@@ -1076,8 +1201,10 @@ mod tests {
     #[test]
     fn a_pane_against_the_edge_has_no_boundary_there() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let right = tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let right = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         assert!(tree.divider(PaneId(0), Direction::Left).is_none());
         assert!(tree.divider(right, Direction::Right).is_none());
@@ -1089,8 +1216,10 @@ mod tests {
     #[test]
     fn a_pane_finds_the_boundary_above_and_below_it() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let bottom = tree.split(Orientation::Vertical, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let bottom = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         let from_top = tree
             .divider(PaneId(0), Direction::Down)
@@ -1105,8 +1234,10 @@ mod tests {
     #[test]
     fn a_pane_against_the_top_or_bottom_edge_has_no_boundary_there() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let bottom = tree.split(Orientation::Vertical, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let bottom = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         assert!(tree.divider(PaneId(0), Direction::Up).is_none());
         assert!(tree.divider(bottom, Direction::Down).is_none());
@@ -1121,10 +1252,13 @@ mod tests {
     #[test]
     fn the_boundary_right_of_a_nested_pane_is_the_outer_one() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
         assert!(tree.focus_pane(PaneId(0)));
-        let b = tree.split(Orientation::Horizontal, ids.allocate());
+        let b = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         let right_of_b = tree
             .divider(b, Direction::Right)
@@ -1148,10 +1282,13 @@ mod tests {
     fn panes_stacked_side_by_side_share_the_boundary_beside_them() {
         let mut ids = PaneIds::new();
         // A, then C to A's right, then B below A by splitting A the other way.
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
         assert!(tree.focus_pane(PaneId(0)));
-        let b = tree.split(Orientation::Vertical, ids.allocate());
+        let b = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         let right_of_b = tree
             .divider(b, Direction::Right)
@@ -1168,9 +1305,11 @@ mod tests {
     #[test]
     fn moving_a_boundary_moves_both_sides_and_nothing_else() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let right = tree.split(Orientation::Horizontal, ids.allocate());
-        let focus_before = tree.focus();
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let right = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
+        let focus_before = tree.focus().unwrap();
 
         assert!(tree.set_divider_ratio(PaneId(0), Direction::Right, 0.75));
 
@@ -1181,7 +1320,7 @@ mod tests {
         assert!((right_rect.width - 0.25).abs() < 1e-6);
 
         assert_eq!(
-            tree.focus(),
+            tree.focus().unwrap(),
             focus_before,
             "focus is not the layout's to move"
         );
@@ -1191,8 +1330,10 @@ mod tests {
     #[test]
     fn either_side_may_move_the_same_boundary() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let right = tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let right = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         assert!(tree.set_divider_ratio(right, Direction::Left, 0.25));
         assert!((rect_of(&tree, 0).width - 0.25).abs() < 1e-6);
@@ -1201,9 +1342,11 @@ mod tests {
     #[test]
     fn moving_a_vertical_boundary_moves_both_sides_and_nothing_else() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let bottom = tree.split(Orientation::Vertical, ids.allocate());
-        let focus_before = tree.focus();
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let bottom = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
+        let focus_before = tree.focus().unwrap();
 
         assert!(tree.set_divider_ratio(PaneId(0), Direction::Down, 0.75));
 
@@ -1220,7 +1363,7 @@ mod tests {
         assert!((bottom_rect.width - 1.0).abs() < 1e-6);
 
         assert_eq!(
-            tree.focus(),
+            tree.focus().unwrap(),
             focus_before,
             "focus is not the layout's to move"
         );
@@ -1230,8 +1373,10 @@ mod tests {
     #[test]
     fn either_side_may_move_the_same_vertical_boundary() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let bottom = tree.split(Orientation::Vertical, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let bottom = tree
+            .split(ids.allocate(), Orientation::Vertical, || ())
+            .unwrap();
 
         assert!(tree.set_divider_ratio(bottom, Direction::Up, 0.25));
         assert!((rect_of(&tree, 0).height - 0.25).abs() < 1e-6);
@@ -1240,8 +1385,9 @@ mod tests {
     #[test]
     fn a_ratio_beyond_the_trees_own_limits_is_brought_back_inside_them() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
 
         assert!(tree.set_divider_ratio(PaneId(0), Direction::Right, 5.0));
         let width = rect_of(&tree, 0).width;
@@ -1254,8 +1400,10 @@ mod tests {
     #[test]
     fn closing_a_pane_takes_its_boundary_with_it() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        let right = tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        let right = tree
+            .split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
         assert_eq!(tree.dividers().len(), 1);
 
         tree.close(right);
@@ -1268,11 +1416,435 @@ mod tests {
     #[test]
     fn a_pane_that_is_not_in_the_tree_has_no_boundary() {
         let mut ids = PaneIds::new();
-        let mut tree = PaneTree::new(ids.allocate());
-        tree.split(Orientation::Horizontal, ids.allocate());
+        let mut tree = PaneTree::new(ids.allocate(), ());
+        tree.split(ids.allocate(), Orientation::Horizontal, || ())
+            .unwrap();
         let stranger = ids.allocate();
 
         assert!(tree.divider(stranger, Direction::Left).is_none());
         assert!(!tree.set_divider_ratio(stranger, Direction::Right, 0.3));
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::pane_tree::PaneIds;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Stands in for a Terminal Session, recording its own death.
+    ///
+    /// A session that is dropped has had its worker shut down, so "pane 2's
+    /// session is still alive" is exactly "the spy for pane 2 has not dropped".
+    struct SessionSpy {
+        name: &'static str,
+        dropped: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Drop for SessionSpy {
+        fn drop(&mut self) {
+            self.dropped.borrow_mut().push(self.name);
+        }
+    }
+
+    fn spy(name: &'static str, log: &Rc<RefCell<Vec<&'static str>>>) -> SessionSpy {
+        SessionSpy {
+            name,
+            dropped: Rc::clone(log),
+        }
+    }
+
+    #[test]
+    fn a_new_tab_owns_exactly_one_session() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let tree = PaneTree::new(ids.allocate(), spy("first", &log));
+
+        assert_eq!(tree.len(), 1);
+        assert!(tree.focused().is_some());
+        assert!(log.borrow().is_empty(), "nothing has been shut down");
+    }
+
+    #[test]
+    fn splitting_creates_a_second_session_and_focuses_it() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+
+        let second = tree
+            .split(ids.allocate(), Orientation::Horizontal, || {
+                spy("second", &log)
+            })
+            .unwrap();
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree.focus().unwrap(), second);
+        assert_eq!(tree.focused().map(|s| s.name), Some("second"));
+        assert!(log.borrow().is_empty(), "splitting shuts nothing down");
+    }
+
+    /// The rule the PRD is most explicit about: sessions are never shared, and
+    /// closing one pane must not disturb another's child.
+    #[test]
+    fn closing_one_pane_shuts_down_only_its_own_session() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+        let second = tree
+            .split(ids.allocate(), Orientation::Horizontal, || {
+                spy("second", &log)
+            })
+            .unwrap();
+        tree.split(ids.allocate(), Orientation::Vertical, || spy("third", &log))
+            .unwrap();
+
+        let closed = tree.close(second).expect("the pane existed");
+        assert_eq!(closed.name, "second");
+        drop(closed);
+
+        assert_eq!(
+            *log.borrow(),
+            vec!["second"],
+            "exactly one session ended, and it was the one closed"
+        );
+        assert_eq!(tree.len(), 2, "the other two are untouched");
+    }
+
+    #[test]
+    fn a_closed_pane_is_handed_back_rather_than_silently_dropped() {
+        let mut ids = PaneIds::new();
+        // The caller shuts the session down deliberately; relying on a drop
+        // would mean a session ending at an unpredictable moment.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+        let second = tree
+            .split(ids.allocate(), Orientation::Horizontal, || {
+                spy("second", &log)
+            })
+            .unwrap();
+
+        let handed_back = tree.close(second).expect("returned");
+        assert!(
+            log.borrow().is_empty(),
+            "still alive while the caller holds it"
+        );
+        drop(handed_back);
+        assert_eq!(*log.borrow(), vec!["second"]);
+    }
+
+    #[test]
+    fn closing_the_last_pane_ends_the_tab_and_its_session() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("only", &log));
+
+        let closed = tree.close(tree.focus().unwrap()).expect("returned");
+        drop(closed);
+
+        assert_eq!(tree.len(), 0);
+        assert!(tree.is_empty());
+        assert_eq!(*log.borrow(), vec!["only"]);
+    }
+
+    #[test]
+    fn closing_an_unknown_pane_touches_nothing() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+        tree.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        })
+        .unwrap();
+
+        assert!(tree.close(PaneId(999)).is_none());
+        assert_eq!(tree.len(), 2);
+        assert!(log.borrow().is_empty());
+    }
+
+    /// Rearranging panes must never disturb a session, because the PRD promises
+    /// that moving or resizing a pane does not recreate its PTY.
+    #[test]
+    fn moving_focus_around_never_ends_a_session() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+        tree.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        })
+        .unwrap();
+        tree.split(ids.allocate(), Orientation::Vertical, || spy("third", &log))
+            .unwrap();
+
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+        ] {
+            tree.focus_direction(direction);
+        }
+
+        assert_eq!(tree.len(), 3);
+        assert!(
+            log.borrow().is_empty(),
+            "focus movement is presentation, not lifecycle"
+        );
+    }
+
+    #[test]
+    fn every_pane_appears_in_the_layout_with_its_own_contents() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+        tree.split(ids.allocate(), Orientation::Horizontal, || {
+            spy("second", &log)
+        })
+        .unwrap();
+        tree.split(ids.allocate(), Orientation::Vertical, || spy("third", &log))
+            .unwrap();
+
+        let layout = tree.layout();
+        assert_eq!(layout.len(), 3);
+
+        let mut names: Vec<&str> = layout.iter().map(|(_, _, item)| item.name).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["first", "second", "third"]);
+
+        // Panes tile the tab, so nothing is hidden behind anything else.
+        let area: f32 = layout
+            .iter()
+            .map(|(_, rect, _)| rect.width * rect.height)
+            .sum();
+        assert!((area - 1.0).abs() < 1e-5, "panes tile the tab: {area}");
+    }
+
+    #[test]
+    fn moving_a_boundary_ends_no_session() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+        let second = tree
+            .split(ids.allocate(), Orientation::Horizontal, || {
+                spy("second", &log)
+            })
+            .unwrap();
+
+        assert_eq!(tree.dividers().len(), 1);
+        assert!(tree.set_divider_ratio(PaneId(0), Direction::Right, 0.8));
+
+        assert!(log.borrow().is_empty(), "nothing has been shut down");
+        assert_eq!(tree.len(), 2);
+        assert_eq!(
+            tree.focus().unwrap(),
+            second,
+            "focus is not the layout's to move"
+        );
+    }
+
+    #[test]
+    fn focusing_a_pane_by_identity_only_works_for_a_live_pane() {
+        let mut ids = PaneIds::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut tree = PaneTree::new(ids.allocate(), spy("first", &log));
+        let second = tree
+            .split(ids.allocate(), Orientation::Horizontal, || {
+                spy("second", &log)
+            })
+            .unwrap();
+
+        assert!(tree.focus_pane(PaneId(0)));
+        assert_eq!(tree.focus().unwrap(), PaneId(0));
+
+        let closed = tree.close(second).expect("returned");
+        drop(closed);
+        assert!(!tree.focus_pane(second), "a closed pane cannot be focused");
+    }
+
+    #[test]
+    fn refused_splits_do_not_build_payloads_and_panicking_construction_preserves_the_tree() {
+        let mut tree = PaneTree::new(PaneId(0), 7);
+        assert_eq!(
+            tree.split(PaneId(0), Orientation::Horizontal, || panic!("duplicate")),
+            None
+        );
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tree.split(PaneId(1), Orientation::Horizontal, || {
+                panic!("construction failed")
+            });
+        }));
+        assert!(failed.is_err());
+        assert_eq!(tree.layout(), vec![(PaneId(0), Rect::FULL, &7)]);
+        assert_eq!(tree.close(PaneId(0)), Some(7));
+        assert_eq!(
+            tree.split(PaneId(1), Orientation::Horizontal, || panic!("empty")),
+            None
+        );
+        assert_eq!(tree.focus(), None);
+        assert_eq!(tree.focused(), None);
+        assert_eq!(tree.focus_direction(Direction::Left), None);
+        assert!(!tree.focus_pane(PaneId(0)));
+        assert!(tree.dividers().is_empty());
+        assert_eq!(tree.divider(PaneId(0), Direction::Right), None);
+        assert!(!tree.set_divider_ratio(PaneId(0), Direction::Right, 0.5));
+        assert_eq!(tree.close(PaneId(0)), None);
+        assert!(tree.into_contents().is_empty());
+    }
+
+    #[test]
+    fn draining_uses_identity_order_even_when_geometry_and_insertion_differ() {
+        let log = Rc::default();
+        let mut tree = PaneTree::new(PaneId(9), spy("nine", &log));
+        tree.split(PaneId(1), Orientation::Horizontal, || spy("one", &log))
+            .unwrap();
+        tree.focus_pane(PaneId(9));
+        tree.split(PaneId(4), Orientation::Vertical, || spy("four", &log))
+            .unwrap();
+        assert_eq!(
+            tree.layout()
+                .iter()
+                .map(|(id, _, _)| id.0)
+                .collect::<Vec<_>>(),
+            vec![9, 1, 4]
+        );
+        let contents = tree.into_contents();
+        assert!(log.borrow().is_empty());
+        assert_eq!(
+            contents.iter().map(|item| item.name).collect::<Vec<_>>(),
+            vec!["one", "four", "nine"]
+        );
+        drop(contents);
+        assert_eq!(*log.borrow(), vec!["one", "four", "nine"]);
+    }
+
+    #[test]
+    fn generated_transition_sequences_preserve_geometry_and_exactly_once_ownership() {
+        use std::collections::BTreeSet;
+        struct Payload {
+            id: PaneId,
+            dropped: Rc<RefCell<Vec<PaneId>>>,
+        }
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                self.dropped.borrow_mut().push(self.id);
+            }
+        }
+        // Shorter sequences run first, so a failure reports a shortest failing prefix.
+        for length in 0..=5 {
+            for sequence in 0..8_usize.pow(length) {
+                let log = Rc::new(RefCell::new(Vec::new()));
+                let payload = |id| Payload {
+                    id,
+                    dropped: Rc::clone(&log),
+                };
+                let mut tree = PaneTree::new(PaneId(0), payload(PaneId(0)));
+                let mut live = BTreeSet::from([PaneId(0)]);
+                let mut allocated = 1;
+                let mut word = sequence;
+                for step in 0..length {
+                    let operation = word % 8;
+                    word /= 8;
+                    match operation {
+                        0 | 1 => {
+                            let id = PaneId(allocated);
+                            let split = tree.split(
+                                id,
+                                if operation == 0 {
+                                    Orientation::Horizontal
+                                } else {
+                                    Orientation::Vertical
+                                },
+                                || payload(id),
+                            );
+                            if live.is_empty() {
+                                assert_eq!(split, None);
+                            } else {
+                                assert_eq!(split, Some(id));
+                                live.insert(id);
+                                allocated += 1;
+                            }
+                        }
+                        2 | 3 => {
+                            let id = if operation == 2 {
+                                tree.focus()
+                            } else {
+                                live.first().copied()
+                            }
+                            .unwrap_or(PaneId(u64::MAX));
+                            let drops = log.borrow().len();
+                            let removed = tree.close(id);
+                            assert_eq!(removed.is_some(), live.remove(&id));
+                            assert_eq!(log.borrow().len(), drops, "close transfers ownership");
+                            drop(removed);
+                            assert!(tree.close(id).is_none());
+                        }
+                        4 => {
+                            assert!(tree.close(PaneId(u64::MAX)).is_none());
+                        }
+                        5 | 6 => {
+                            let dividers = tree.dividers();
+                            for divider in dividers {
+                                assert!(tree.set_divider_ratio(
+                                    divider.pane,
+                                    divider.direction,
+                                    if operation == 5 { -1.0 } else { 2.0 }
+                                ));
+                                let moved = tree.divider(divider.pane, divider.direction).unwrap();
+                                assert_eq!(
+                                    (moved.pane, moved.direction, moved.orientation),
+                                    (divider.pane, divider.direction, divider.orientation)
+                                );
+                            }
+                        }
+                        _ => {
+                            tree.focus_direction(Direction::Left);
+                        }
+                    }
+                    let context = format!("length={length} sequence={sequence} step={step}");
+                    let layout = tree.layout();
+                    assert_eq!(layout.len(), tree.len(), "{context}");
+                    assert_eq!(layout.len(), live.len(), "{context}");
+                    assert_eq!(
+                        layout.iter().map(|(id, _, _)| *id).collect::<BTreeSet<_>>(),
+                        live,
+                        "{context}"
+                    );
+                    assert_eq!(tree.is_empty(), live.is_empty(), "{context}");
+                    assert_eq!(tree.focus().is_none(), live.is_empty(), "{context}");
+                    if let Some(focus) = tree.focus() {
+                        assert!(live.contains(&focus), "{context}");
+                    }
+                    for (id, rect, value) in &layout {
+                        assert_eq!(*id, value.id, "{context}");
+                        assert!(std::ptr::eq(*value, tree.get(*id).unwrap()), "{context}");
+                        assert!(rect.width > 0.0 && rect.height > 0.0, "{context}");
+                    }
+                    let area: f32 = layout.iter().map(|(_, r, _)| r.width * r.height).sum();
+                    assert!(
+                        (area - if live.is_empty() { 0.0 } else { 1.0 }).abs() < 1e-5,
+                        "{context}"
+                    );
+                    assert_eq!(
+                        tree.dividers().len(),
+                        live.len().saturating_sub(1),
+                        "{context}"
+                    );
+                }
+                let drained = tree.into_contents();
+                assert_eq!(
+                    drained.iter().map(|value| value.id).collect::<Vec<_>>(),
+                    live.into_iter().collect::<Vec<_>>()
+                );
+                drop(drained);
+                let mut drops = log.borrow().clone();
+                drops.sort_unstable();
+                assert_eq!(
+                    drops,
+                    (0..allocated).map(PaneId).collect::<Vec<_>>(),
+                    "length={length} sequence={sequence}"
+                );
+            }
+        }
     }
 }

@@ -16,7 +16,6 @@ mod local_socket;
 mod observation;
 #[doc(hidden)]
 pub mod paint_benchmark;
-mod pane_registry;
 mod pane_tree;
 mod surface;
 mod tabs;

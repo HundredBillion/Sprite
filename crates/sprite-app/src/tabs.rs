@@ -1,6 +1,6 @@
 //! A window's ordered tabs, each owning one pane tree.
 //!
-//! Generic over the payload for the same reason `PaneRegistry` is: the rules
+//! Generic over the payload for the same reason `PaneTree` is: the rules
 //! that matter here — closing a tab ends every session it owns and no others,
 //! switching tabs ends none, identity is never reused — are ownership rules,
 //! and a drop-recording payload turns each of them into an assertion that runs
@@ -11,8 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::pane_registry::PaneRegistry;
-use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneIds, Rect};
+use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneIds, PaneTree, Rect};
 
 /// One tab within a window. Never reused once its tab has closed.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -20,7 +19,7 @@ pub struct TabId(pub u64);
 
 /// The tabs of one window, in the order they are shown.
 pub struct Tabs<T> {
-    tabs: Vec<(TabId, PaneRegistry<T>)>,
+    tabs: Vec<(TabId, PaneTree<T>)>,
     active: Option<TabId>,
     /// Names people gave tabs. Beside the tabs rather than inside a pane,
     /// because a name must survive the pane changing what it is doing and no
@@ -41,7 +40,7 @@ impl<T> Tabs<T> {
         let mut panes = PaneIds::new();
         let tab = TabId(0);
         let pane = panes.allocate();
-        let first = PaneRegistry::new(pane, content(tab, pane));
+        let first = PaneTree::new(pane, content(tab, pane));
         Self {
             tabs: vec![(tab, first)],
             active: Some(tab),
@@ -68,7 +67,7 @@ impl<T> Tabs<T> {
         self.tabs.is_empty()
     }
 
-    pub fn active(&self) -> Option<&PaneRegistry<T>> {
+    pub fn active(&self) -> Option<&PaneTree<T>> {
         let index = self.index_of(self.active?)?;
         Some(&self.tabs[index].1)
     }
@@ -110,8 +109,8 @@ impl<T> Tabs<T> {
         let tab = TabId(self.next_tab);
         self.next_tab += 1;
         let pane = self.panes.allocate();
-        let registry = PaneRegistry::new(pane, content(tab, pane));
-        self.tabs.push((tab, registry));
+        let tree = PaneTree::new(pane, content(tab, pane));
+        self.tabs.push((tab, tree));
         self.active = Some(tab);
         tab
     }
@@ -124,7 +123,7 @@ impl<T> Tabs<T> {
         let Some(index) = self.index_of(tab) else {
             return Vec::new();
         };
-        let (_, registry) = self.tabs.remove(index);
+        let (_, tree) = self.tabs.remove(index);
         // Identity is never reused, so a name must not outlive its tab.
         self.names.remove(&tab);
         if self.active == Some(tab) {
@@ -134,7 +133,7 @@ impl<T> Tabs<T> {
                 .or_else(|| self.tabs.last())
                 .map(|(id, _)| *id);
         }
-        registry.into_contents()
+        tree.into_contents()
     }
 
     /// Splits the active tab's focused pane.
@@ -146,11 +145,9 @@ impl<T> Tabs<T> {
         let tab = self.active_tab()?;
         let index = self.index_of(tab)?;
         let pane = self.panes.allocate();
-        Some(
-            self.tabs[index]
-                .1
-                .split(pane, orientation, || content(tab, pane)),
-        )
+        self.tabs[index]
+            .1
+            .split(pane, orientation, || content(tab, pane))
     }
 
     /// Closes the active tab's focused pane, handing back what it owned.
@@ -159,7 +156,7 @@ impl<T> Tabs<T> {
     /// caller must consult [`Tabs::is_empty`] afterwards: a window with no tabs
     /// left has nothing to show.
     pub fn close_focused_pane(&mut self) -> Option<T> {
-        self.close_pane(self.active_tab()?, self.active()?.focus())
+        self.close_pane(self.active_tab()?, self.active()?.focus()?)
     }
 
     /// Closes a specific pane, including one in a tab that is not active.
@@ -212,15 +209,13 @@ impl<T> Tabs<T> {
     /// The active tab's panes with their normalised rectangles. Only the active
     /// tab is laid out: the others are running, not shown.
     pub fn layout(&self) -> Vec<(PaneId, Rect, &T)> {
-        self.active().map(PaneRegistry::layout).unwrap_or_default()
+        self.active().map(PaneTree::layout).unwrap_or_default()
     }
 
     /// The active tab's boundaries. Only the active tab is laid out, so only
     /// its boundaries can be grabbed.
     pub fn dividers(&self) -> Vec<Divider> {
-        self.active()
-            .map(PaneRegistry::dividers)
-            .unwrap_or_default()
+        self.active().map(PaneTree::dividers).unwrap_or_default()
     }
 
     pub fn divider(&self, pane: PaneId, direction: Direction) -> Option<Divider> {
@@ -241,9 +236,8 @@ impl<T> Tabs<T> {
     pub fn all_panes(&self) -> Vec<(TabId, PaneId, &T)> {
         self.tabs
             .iter()
-            .flat_map(|(tab, registry)| {
-                registry
-                    .layout()
+            .flat_map(|(tab, tree)| {
+                tree.layout()
                     .into_iter()
                     .map(move |(pane, _, item)| (*tab, pane, item))
             })
@@ -259,12 +253,11 @@ impl<T> Tabs<T> {
         self.tabs
             .iter()
             .enumerate()
-            .flat_map(|(order, (_, registry))| {
-                let focus = registry.focus();
-                registry
-                    .layout()
+            .flat_map(|(order, (_, tree))| {
+                let focus = tree.focus();
+                tree.layout()
                     .into_iter()
-                    .map(move |(pane, rect, _)| (pane, order, rect, pane == focus))
+                    .map(move |(pane, rect, _)| (pane, order, rect, Some(pane) == focus))
             })
             .collect()
     }
@@ -482,12 +475,15 @@ mod tests {
         let log: Log = Rc::default();
         let mut tabs = Tabs::new(|_, _| spy("first", &log));
         let first = tabs.active_tab().unwrap();
-        let pane = tabs.active().unwrap().focus();
+        let pane = tabs.active().unwrap().focus().unwrap();
         tabs.open(|_, _| spy("second", &log));
         drop(tabs.close_pane(first, pane));
         assert_eq!(tabs.len(), 1);
         assert_eq!(ended(&log), vec!["first"]);
-        assert_eq!(tabs.active().unwrap().focus(), tabs.all_panes()[0].1);
+        assert_eq!(
+            tabs.active().unwrap().focus().unwrap(),
+            tabs.all_panes()[0].1
+        );
     }
 
     #[test]

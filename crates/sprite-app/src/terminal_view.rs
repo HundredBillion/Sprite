@@ -521,6 +521,10 @@ impl TerminalView {
 
     /// Hands over the worker so the window can wait for it off the GPUI thread.
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
+        // Retained view handles must not keep a closed pane reachable by commands.
+        if let Some(link) = self.observation.take() {
+            link.panes.forget(link.pane);
+        }
         // A view with no session has no worker to wait for, so there is
         // nothing to hand over.
         match &mut self.session {

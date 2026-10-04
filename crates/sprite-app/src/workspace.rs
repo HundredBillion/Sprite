@@ -2,7 +2,7 @@
 //!
 //! The workspace owns the tabs, positions the active tab's panes in their share
 //! of the window, and routes focus. It creates a session per pane and never
-//! shares one, which is the property `Tabs` and `PaneRegistry` pin without
+//! shares one, which is the property `Tabs` and `PaneTree` pin without
 //! needing a window.
 
 use gpui::prelude::*;
@@ -446,8 +446,9 @@ impl Workspace {
         if let Some(endpoint) = self.endpoint.as_mut() {
             endpoint.close();
         }
-        self.tabs
-            .all_panes()
+        let mut panes = self.tabs.all_panes();
+        panes.sort_unstable_by_key(|(_, pane, _)| *pane);
+        panes
             .into_iter()
             .map(|(_, _, pane)| Rc::clone(pane))
             .collect::<Vec<_>>()
@@ -860,7 +861,9 @@ impl Workspace {
         let Some(active) = self.tabs.active() else {
             return;
         };
-        let focused = active.focus();
+        let Some(focused) = active.focus() else {
+            return;
+        };
         let Some(divider) = self.tabs.divider(focused, direction) else {
             return;
         };
@@ -1620,7 +1623,7 @@ impl Render for Workspace {
             .iter()
             .cloned()
             .map(|(pane, x, y, pane_width, pane_height, handle)| {
-                let is_focused = pane == focused;
+                let is_focused = Some(pane) == focused;
                 div()
                     .absolute()
                     .left(px(x))
@@ -2057,7 +2060,7 @@ mod tests {
         let background = workspace.read_with(cx, |workspace, _| {
             (
                 workspace.tabs.active_tab().unwrap(),
-                workspace.tabs.active().unwrap().focus(),
+                workspace.tabs.active().unwrap().focus().unwrap(),
             )
         });
         workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
@@ -2309,7 +2312,9 @@ mod tests {
         let (workspace, cx) = test_workspace(cx);
         draw_workspace(cx);
         let terminal_focus = focused_handle(&workspace, cx);
-        let pane = workspace.read_with(cx, |workspace, _| workspace.tabs.active().unwrap().focus());
+        let pane = workspace.read_with(cx, |workspace, _| {
+            workspace.tabs.active().unwrap().focus().unwrap()
+        });
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         workspace.update_in(cx, |workspace, window, cx| {
@@ -2395,7 +2400,9 @@ mod tests {
             });
             workspace.refresh_layout(cx);
         });
-        let pane = workspace.read_with(cx, |workspace, _| workspace.tabs.active().unwrap().focus());
+        let pane = workspace.read_with(cx, |workspace, _| {
+            workspace.tabs.active().unwrap().focus().unwrap()
+        });
         for (pane, expected) in [
             (pane, Refusal::NotATerminal),
             (PaneId(u64::MAX), Refusal::UnknownPane),
@@ -3289,5 +3296,109 @@ mod tests {
 
         let upright = place(Orientation::Vertical, Direction::Down);
         assert!((upright.along(pointer) - 450.0).abs() < 1e-4);
+    }
+
+    struct ShutdownPane {
+        focus: gpui::FocusHandle,
+        id: PaneId,
+        started: std::rc::Rc<std::cell::RefCell<Vec<PaneId>>>,
+        completed: std::sync::Arc<std::sync::Mutex<Vec<PaneId>>>,
+        shutting_down: bool,
+    }
+
+    impl gpui::Focusable for ShutdownPane {
+        fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+            self.focus.clone()
+        }
+    }
+
+    impl gpui::Render for ShutdownPane {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    impl gpui::EventEmitter<sprite_pane::TitleChanged> for ShutdownPane {}
+
+    impl sprite_pane::Pane for ShutdownPane {
+        type Request = crate::surface::channel::SurfaceRequest;
+        fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
+            None
+        }
+        fn title(&self) -> Option<gpui::SharedString> {
+            None
+        }
+        fn set_allocated(&mut self, _: gpui::Size<gpui::Pixels>) {}
+        fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
+            if std::mem::replace(&mut self.shutting_down, true) {
+                return None;
+            }
+            self.started.borrow_mut().push(self.id);
+            let completed = self.completed.clone();
+            let id = self.id;
+            Some(Box::new(move || completed.lock().unwrap().push(id)))
+        }
+    }
+
+    #[gpui::test]
+    fn window_shutdown_includes_background_panes_in_identity_order_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let (workspace, cx) = test_workspace(cx);
+        let started = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let completed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        workspace.update(cx, |workspace, cx| {
+            let mut make = |_, id| {
+                std::rc::Rc::new(cx.new(|cx| ShutdownPane {
+                    focus: cx.focus_handle(),
+                    id,
+                    started: started.clone(),
+                    completed: completed.clone(),
+                    shutting_down: false,
+                }))
+                    as std::rc::Rc<
+                        dyn sprite_pane::PaneHandle<
+                                Request = crate::surface::channel::SurfaceRequest,
+                            >,
+                    >
+            };
+            workspace.tabs = crate::tabs::Tabs::new(&mut make);
+            workspace.tabs.split(Orientation::Vertical, &mut make);
+            workspace.tabs.focus_pane(PaneId(0));
+            workspace.tabs.split(Orientation::Horizontal, &mut make);
+            assert_eq!(
+                workspace
+                    .tabs
+                    .layout()
+                    .iter()
+                    .map(|(id, _, _)| id.0)
+                    .collect::<Vec<_>>(),
+                vec![0, 2, 1]
+            );
+            workspace.tabs.open(make);
+            workspace.refresh_layout(cx);
+        });
+        let cleanups = workspace.update(cx, |workspace, cx| workspace.begin_shutdown(cx));
+        assert_eq!(
+            *started.borrow(),
+            vec![PaneId(0), PaneId(1), PaneId(2), PaneId(3)]
+        );
+        assert_eq!(cleanups.len(), 4);
+        assert!(completed.lock().unwrap().is_empty());
+        assert!(
+            workspace
+                .update(cx, |workspace, cx| workspace.begin_shutdown(cx))
+                .is_empty()
+        );
+        for cleanup in cleanups {
+            cleanup();
+        }
+        assert_eq!(*completed.lock().unwrap(), *started.borrow());
+        assert_eq!(started.borrow().len(), 4);
     }
 }
