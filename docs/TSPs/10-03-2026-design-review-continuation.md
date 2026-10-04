@@ -203,25 +203,28 @@ blank/inline char/shared grapheme or a row text slice, selected by baseline data
 Palette is Arc<[Rgb;256]>. A private layout cache accepts generation, row identities
 and hovered span and returns shared immutable positioned rows.
 
-- [ ] Extend benchmark/checks for non-ASCII graphemes, wide spacers, blank fills,
+- [x] Extend benchmark/checks for non-ASCII graphemes, wide spacers, blank fills,
   selection-only changes, hover transitions, palette/default reload and images.
   Add allocations_per_capture to the term benchmark with a bounded isolated
   measuring run (exclude unrelated worker setup and test allocation).
-- [ ] Replace per-cell String allocations with shared/inline text across both
+- [x] Replace per-cell String allocations with shared/inline text across both
   snapshots and positioned cells. Keep PaneSnapshot text-only and independent.
-- [ ] Retain previous Arc render rows in Projector and reuse genuinely clean rows.
+- [x] Retain previous Arc render rows in Projector and reuse genuinely clean rows.
   Read libghostty row dirty state before clearing it; invalidate on dimensions,
   viewport/alternate-screen changes, selection changes and relevant styles.
   Compare content as a correctness fallback where upstream dirty signals are
   insufficient; don't trust dirty flags without tests for each mutation class.
-- [ ] Cache layout by row identity and hovered span; unchanged blink reuses the
+- [x] Cache layout by row identity and hovered span; unchanged blink reuses the
   existing shared rows. Hover rebuilds only affected rows. Pass snapshot palette
   Arc directly; split background/text passes share row storage.
-- [ ] Run original generation/input/selection/history/graphics tests and paint
+- [x] Run original generation/input/selection/history/graphics tests and paint
   decision tests. Prove unchanged-generation blink preparation/draw decisions have
   zero allocations in every measured sample after warmup (a p95 of zero alone
   is insufficient), one-row change rebuilds one row, capture budgets
-  improve, and old benchmarks pass. Commit measured before/after budgets and code.
+  improve, and run the old benchmark gates. Record and explain any pre-existing
+  carried timing-budget breaches without loosening their thresholds; do not label
+  them as passing or dismiss a demonstrated production regression. Commit measured
+  before/after budgets and code.
 
 ### Task 7: Push pane title changes and publish layout only on mutation
 
