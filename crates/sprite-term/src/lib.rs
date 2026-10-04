@@ -518,17 +518,10 @@ impl Default for GraphicsPolicy {
 ///
 /// Anything left `None` keeps what libghostty ships.
 ///
-/// **Set `foreground` and `background` together or not at all.** libghostty
-/// reports the two as a pair and only when it knows both: a terminal with one
-/// of them unset reports neither, and a snapshot falls back to the placeholder
-/// black-on-white a `RenderState` starts life with. Its own comment says as
-/// much — the expected use is that an application supplies its defaults at
-/// startup. Sprite's does, so a pane's reported colours are always the ones it
-/// is actually drawn in.
+/// Base colours are supplied together because libghostty reports them as a pair.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ColorDefaults {
-    pub foreground: Option<Rgb>,
-    pub background: Option<Rgb>,
+    pub base: Option<BaseColors>,
     pub cursor: Option<Rgb>,
     /// Palette entries to replace, by index.
     ///
@@ -538,13 +531,30 @@ pub struct ColorDefaults {
     pub palette: Vec<(u8, Rgb)>,
 }
 
+/// The terminal's foreground and background defaults must be configured together.
+///
+/// ```
+/// use sprite_term::{BaseColors, Rgb};
+/// let colors = BaseColors {
+///     foreground: Rgb { r: 255, g: 255, b: 255 },
+///     background: Rgb { r: 0, g: 0, b: 0 },
+/// };
+/// ```
+///
+/// ```compile_fail
+/// use sprite_term::{BaseColors, Rgb};
+/// let incomplete = BaseColors { foreground: Rgb { r: 0, g: 0, b: 0 } };
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BaseColors {
+    pub foreground: Rgb,
+    pub background: Rgb,
+}
+
 impl ColorDefaults {
     /// Whether anything at all is configured.
     pub fn is_empty(&self) -> bool {
-        self.foreground.is_none()
-            && self.background.is_none()
-            && self.cursor.is_none()
-            && self.palette.is_empty()
+        self.base.is_none() && self.cursor.is_none() && self.palette.is_empty()
     }
 }
 
@@ -1059,10 +1069,14 @@ fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
     Ok(())
 }
 
+pub struct Spawned {
+    pub session: TerminalSession,
+    pub events: EventStream,
+    pub snapshots: SnapshotStream,
+}
+
 pub struct TerminalSession {
     commands: SyncSender<worker::Message>,
-    events: Option<EventStream>,
-    snapshots: Option<SnapshotStream>,
     shutdown: Arc<AtomicBool>,
     /// Answers "what is running in this pane" without a round-trip.
     foreground: Arc<ForegroundWatch>,
@@ -1072,7 +1086,7 @@ pub struct TerminalSession {
 impl TerminalSession {
     /// Starts the worker. Returns once the worker is running; `Ready` means the
     /// PTY, child, and terminal are live.
-    pub fn spawn(config: SessionConfig) -> Result<Self, SessionError> {
+    pub fn spawn(config: SessionConfig) -> Result<Spawned, SessionError> {
         config.size.validate("spawn")?;
 
         let (commands, command_rx) = mpsc::sync_channel(WORKER_QUEUE_CAPACITY);
@@ -1102,16 +1116,18 @@ impl TerminalSession {
             .map_err(|error| SessionError::new("spawn_worker", error))?;
 
         let requests = commands.clone();
-        Ok(Self {
-            commands,
-            events: Some(EventStream { receiver: event_rx }),
-            snapshots: Some(SnapshotStream {
+        Ok(Spawned {
+            session: Self {
+                commands,
+                shutdown,
+                foreground,
+                worker: Some(worker),
+            },
+            events: EventStream { receiver: event_rx },
+            snapshots: SnapshotStream {
                 receiver: snapshot_rx,
                 requests,
-            }),
-            shutdown,
-            foreground,
-            worker: Some(worker),
+            },
         })
     }
 
@@ -1126,21 +1142,6 @@ impl TerminalSession {
     /// Returns the process group when `pid` owns this terminal's foreground.
     pub fn foreground_owner_group(&self, pid: u32) -> Option<i32> {
         self.foreground.owner_group(pid)
-    }
-
-    pub fn take_event_stream(&mut self) -> Result<EventStream, SessionError> {
-        self.events.take().ok_or_else(|| {
-            SessionError::new("take_event_stream", "the event stream was already taken")
-        })
-    }
-
-    pub fn take_snapshot_stream(&mut self) -> Result<SnapshotStream, SessionError> {
-        self.snapshots.take().ok_or_else(|| {
-            SessionError::new(
-                "take_snapshot_stream",
-                "the snapshot stream was already taken",
-            )
-        })
     }
 
     /// A handle for sending commands from another thread.

@@ -37,14 +37,18 @@ use surfaces::DockDrag;
 use surfaces::HostedSurface;
 use theme::{chosen_family, measure_cell_width, unpack};
 
+enum SessionState {
+    NeverStarted,
+    Running(TerminalSession),
+    Ended(TerminalSession),
+}
+
 pub struct TerminalView {
-    /// The pane's terminal, or `None` for a view that never started one.
+    /// An ended pane keeps its worker handle until cleanup can join it.
     ///
     /// A pane whose configured program could not be run still has to draw the
     /// reason it could not, and nothing it draws needs a terminal behind it.
-    session: Option<TerminalSession>,
-    /// Set as soon as the worker reports exit, before the workspace removes us.
-    ended: bool,
+    session: SessionState,
     bundle: Option<Arc<SnapshotBundle>>,
     /// Textures for the images this pane is showing.
     ///
@@ -174,11 +178,10 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let defaults = theme::session_defaults(&settings);
         let crate::config::Settings {
             font,
             graphics,
-            colors,
-            cursor,
             shell,
             scrollback,
             grid,
@@ -228,35 +231,18 @@ impl TerminalView {
             storage_bytes: graphics.storage_bytes,
             ..sprite_term::GraphicsPolicy::default()
         };
-        // Kept for the frames before the first snapshot, when there is no
-        // terminal state to ask.
-        let fallback_colors = (
-            colors.foreground.unwrap_or_else(|| unpack(FOREGROUND)),
-            colors.background.unwrap_or_else(|| unpack(BACKGROUND)),
-        );
-        // Written into the pane's *default* colours, so a program that sets its
-        // own still wins.
-        //
-        // Foreground and background are always supplied, configured or not:
-        // libghostty reports the pair only when it knows both, and a pane that
-        // supplied neither would draw its cells in the placeholder black a
-        // render state starts with while its window drew Sprite's own colour
-        // behind them.
-        config.colors = sprite_term::ColorDefaults {
-            foreground: Some(fallback_colors.0),
-            background: Some(fallback_colors.1),
-            cursor: colors.cursor,
-            palette: colors.palette,
-        };
-        config.cursor = sprite_term::CursorDefaults {
-            style: cursor.style,
-            blink: cursor.blink,
-        };
+        let fallback_colors = defaults.fallback_colors;
+        config.colors = defaults.colors;
+        config.cursor = defaults.cursor;
         config.scrollback_bytes = scrollback.bytes;
         config.environment.extend(environment);
         let initial_size = config.size;
 
-        let mut session = match TerminalSession::spawn(config) {
+        let sprite_term::Spawned {
+            session,
+            mut events,
+            mut snapshots,
+        } = match TerminalSession::spawn(config) {
             Ok(session) => session,
             Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
         };
@@ -267,15 +253,21 @@ impl TerminalView {
             link.panes.register(link.pane, link.tab, session.commands());
         }
 
-        let events = session.take_event_stream();
-        let snapshots = session.take_snapshot_stream();
-
         let event_task = cx.spawn(async move |view, cx| {
-            let Ok(mut events) = events else { return };
             loop {
                 let decision = crate::terminal_events::decide(events.next().await);
                 if decision.stop {
-                    let _ = view.update(cx, |view, _| view.ended = true);
+                    let _ = view.update(cx, |view, _| {
+                        view.session = match std::mem::replace(
+                            &mut view.session,
+                            SessionState::NeverStarted,
+                        ) {
+                            SessionState::Running(session) | SessionState::Ended(session) => {
+                                SessionState::Ended(session)
+                            }
+                            SessionState::NeverStarted => SessionState::NeverStarted,
+                        };
+                    });
                 }
                 if decision.close_pane {
                     let _ = exit.sender.try_send(exit.identity);
@@ -301,7 +293,6 @@ impl TerminalView {
         });
 
         let snapshot_task = cx.spawn(async move |view, cx| {
-            let Ok(mut snapshots) = snapshots else { return };
             while let Ok(bundle) = snapshots.next().await {
                 let generation = bundle.generation;
                 if view
@@ -341,8 +332,7 @@ impl TerminalView {
             });
 
         Self {
-            session: Some(session),
-            ended: false,
+            session: SessionState::Running(session),
             observation,
             surfaces: SurfaceHost::default(),
             dock_drag: None,
@@ -427,8 +417,7 @@ impl TerminalView {
                 view.apply_settings(&settings, window, cx);
             });
         Self {
-            session: None,
-            ended: true,
+            session: SessionState::NeverStarted,
             // A view that never started a session has nothing to observe.
             observation: None,
             surfaces: SurfaceHost::default(),
@@ -533,18 +522,19 @@ impl TerminalView {
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
         // A view with no session has no worker to wait for, so there is
         // nothing to hand over.
-        let session = self.session.as_mut()?;
-        session.begin_shutdown().ok().flatten()
+        match &mut self.session {
+            SessionState::NeverStarted => None,
+            SessionState::Running(session) | SessionState::Ended(session) => {
+                session.begin_shutdown().ok().flatten()
+            }
+        }
     }
 
     fn send(&mut self, command: TerminalCommand) {
         // Sending to a view with no session is a no-op, not an error: a failed
         // pane has nothing to send to, and reporting a send failure over its
         // status line would replace the reason it failed with a symptom.
-        if self.ended {
-            return;
-        }
-        let Some(session) = self.session.as_mut() else {
+        let SessionState::Running(session) = &mut self.session else {
             return;
         };
         if let Err(error) = session.send(command) {
@@ -557,17 +547,20 @@ impl TerminalView {
     pub fn foreground(&self) -> sprite_term::ForegroundState {
         // Nothing is running in a pane that never started, so closing it must
         // not ask for confirmation.
-        let Some(session) = self.session.as_ref() else {
-            return sprite_term::ForegroundState::Idle;
-        };
-        session.foreground()
+        match &self.session {
+            SessionState::NeverStarted | SessionState::Ended(_) => {
+                sprite_term::ForegroundState::Idle
+            }
+            SessionState::Running(session) => session.foreground(),
+        }
     }
 
     /// Returns the process group when `pid` owns this pane's foreground.
     pub fn foreground_owner_group(&self, pid: u32) -> Option<i32> {
-        self.session
-            .as_ref()
-            .and_then(|session| session.foreground_owner_group(pid))
+        match &self.session {
+            SessionState::NeverStarted | SessionState::Ended(_) => None,
+            SessionState::Running(session) => session.foreground_owner_group(pid),
+        }
     }
 
     /// What this pane is called, as the tab and the window title will show it.

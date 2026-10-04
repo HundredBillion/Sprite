@@ -68,9 +68,13 @@ fn croft_checkpoint_one_capabilities() {
     config.working_directory = Some(directory.clone());
     config.environment = identity;
 
-    let mut session = TerminalSession::spawn(config).expect("spawn Croft");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn Croft");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     // A full-screen editor takes the alternate screen and draws something.

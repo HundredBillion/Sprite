@@ -77,7 +77,11 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
     let path = directory.join("image.esc");
     std::fs::write(&path, &sequence).expect("write the fixture");
 
-    let mut session = TerminalSession::spawn(SessionConfig::command(
+    let sprite_term::Spawned {
+        mut session,
+        mut events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
         "/bin/sh",
         vec![
             "-c".into(),
@@ -85,7 +89,6 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
         ],
     ))
     .expect("spawn session");
-    let mut events = session.take_event_stream().expect("take event stream");
 
     // Give the child time to print, then ask. The history answer is what the
     // schema is built from.

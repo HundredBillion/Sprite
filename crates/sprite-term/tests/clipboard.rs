@@ -14,7 +14,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
-fn session(script: &str) -> TerminalSession {
+fn session(script: &str) -> sprite_term::Spawned {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
 }
@@ -40,9 +40,13 @@ fn clipboard_write(events: &EventPump, snapshots: &SnapshotPump) -> Option<Strin
 /// A focused pane writing a modest payload is honoured.
 #[test]
 fn a_focused_pane_may_write_the_clipboard() {
-    let mut session = session(&on_cue("printf '\\033]52;c;aGk=\\007';"));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&on_cue("printf '\\033]52;c;aGk=\\007';"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     session
@@ -63,9 +67,13 @@ fn a_focused_pane_may_write_the_clipboard() {
 /// the clipboard from under the person using another one.
 #[test]
 fn an_unfocused_pane_may_not_write_the_clipboard() {
-    let mut session = session(&on_cue("printf '\\033]52;c;aGk=\\007';"));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&on_cue("printf '\\033]52;c;aGk=\\007';"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     session
@@ -90,9 +98,13 @@ fn an_oversized_payload_is_denied() {
     let body = "printf '\\033]52;c;'; i=0; \
          while [ $i -lt 2048 ]; do printf 'QUFB%.0s' $(seq 1 512); i=$((i+1)); done; \
          printf '\\007';";
-    let mut session = session(&on_cue(body));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&on_cue(body));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     session
@@ -113,12 +125,16 @@ fn an_oversized_payload_is_denied() {
 /// before they reach Sprite at all; this pins that the behaviour stays.
 #[test]
 fn a_clipboard_read_request_is_never_answered() {
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 1 time 0; read _; printf '\\033]52;c;?\\007'; \
          printf 'DONE\\n'; head -c 1 | od -An -tx1 | tr -s ' '; printf 'ANSWERED\\n'; sleep 30",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     session
@@ -147,9 +163,13 @@ fn a_clipboard_read_request_is_never_answered() {
 /// A write to the selection clipboard is treated by the same policy.
 #[test]
 fn the_selection_clipboard_obeys_the_same_policy() {
-    let mut session = session(&on_cue("printf '\\033]52;p;aGk=\\007';"));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&on_cue("printf '\\033]52;p;aGk=\\007';"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     session

@@ -16,7 +16,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
-fn session(script: &str) -> TerminalSession {
+fn session(script: &str) -> sprite_term::Spawned {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
 }
@@ -24,9 +24,13 @@ fn session(script: &str) -> TerminalSession {
 /// A title set with OSC 2 reaches both the snapshot and a typed event.
 #[test]
 fn the_title_is_reported() {
-    let mut session = session("printf '\\033]2;my-title\\007'; printf 'DONE\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = session("printf '\\033]2;my-title\\007'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("the title", |bundle| {
@@ -39,9 +43,13 @@ fn the_title_is_reported() {
 /// scraped from the screen.
 #[test]
 fn the_working_directory_is_reported() {
-    let mut session = session("printf '\\033]7;file:///tmp\\007'; printf 'DONE\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = session("printf '\\033]7;file:///tmp\\007'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("the working directory", |bundle| {
@@ -62,9 +70,13 @@ fn the_working_directory_is_reported() {
 /// from whatever happens to be on screen.
 #[test]
 fn metadata_is_unknown_when_the_shell_says_nothing() {
-    let mut session = session("printf 'just some output\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = session("printf 'just some output\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("the output", |bundle| {
@@ -94,13 +106,17 @@ fn metadata_is_unknown_when_the_shell_says_nothing() {
 #[test]
 fn prompt_marks_are_reported_per_row() {
     // OSC 133;A marks a prompt start, ;B the command, ;C the output.
-    let mut session = session(
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = session(
         "printf '\\033]133;A\\007'; printf 'prompt$ '; printf '\\033]133;B\\007'; \
          printf 'ls\\n'; printf '\\033]133;C\\007'; printf 'output-line\\n'; \
          printf 'DONE\\n'; sleep 30",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     // Both conditions, not just the mark: the first bundle carrying a prompt
@@ -148,9 +164,13 @@ fn prompt_marks_are_reported_per_row() {
 /// the text.
 #[test]
 fn a_bell_is_reported_as_an_event() {
-    let mut session = session("printf 'ring\\007'; printf 'DONE\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("printf 'ring\\007'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the output", |bundle| pane_text(bundle).contains("DONE"));
 

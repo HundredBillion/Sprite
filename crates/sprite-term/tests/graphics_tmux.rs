@@ -82,9 +82,13 @@ fn images_through_tmux(passthrough: bool) -> GraphicsSnapshot {
     );
     config_session.graphics = GraphicsPolicy::default();
 
-    let mut session = TerminalSession::spawn(config_session).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config_session).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     // tmux takes a moment to start; the marker is how we know the inner shell

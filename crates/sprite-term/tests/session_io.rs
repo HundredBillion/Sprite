@@ -41,16 +41,20 @@ fn release(logical_key: &str, text: Option<&str>) -> TerminalCommand {
     })
 }
 
-fn session(script: &str) -> TerminalSession {
+fn session(script: &str) -> sprite_term::Spawned {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
 }
 
 #[test]
 fn key_events_reach_the_child_in_order() {
-    let mut session = session("read line; printf 'got:%s\\n' \"$line\"");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("read line; printf 'got:%s\\n' \"$line\"");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     for letter in ["s", "p", "r", "i", "t", "e"] {
@@ -88,9 +92,13 @@ fn arrow_up_encoding(set_mode: &str) -> String {
     let script = format!(
         "{set_mode} stty -icanon -echo min 3 time 0; printf 'READY\\n'; head -c 3 | od -An -tx1 | tr -s ' '"
     );
-    let mut session = session(&script);
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&script);
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     // The mode change only counts once the terminal has parsed it, so wait for
@@ -112,11 +120,15 @@ fn arrow_up_encoding(set_mode: &str) -> String {
 /// The reply is read back as hex so the parser cannot consume its own answer.
 #[test]
 fn terminal_answers_device_status_report() {
-    let mut session = session(
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 4 time 0; printf '\\033[5n'; head -c 4 | od -An -tx1 | tr -s ' '",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("the terminal's own reply", |bundle| {
@@ -130,9 +142,13 @@ fn terminal_answers_device_status_report() {
 
 #[test]
 fn oversized_input_is_rejected_and_the_session_survives() {
-    let mut session = session("read line; printf 'got:%s\\n' \"$line\"");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("read line; printf 'got:%s\\n' \"$line\"");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let too_big = vec![b'x'; 16 * 1024 + 1];
@@ -156,13 +172,17 @@ fn oversized_input_is_rejected_and_the_session_survives() {
 /// queue space for commands no matter how loud the child is.
 #[test]
 fn input_survives_sustained_output() {
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -echo; yes sprite-flood-line & producer=$!; \
          read line; kill $producer 2>/dev/null; wait $producer 2>/dev/null; \
          printf '\\nMARKER:%s\\n' \"$line\"",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     // Only send once the flood is genuinely under way.
@@ -184,9 +204,13 @@ fn input_survives_sustained_output() {
 /// reads with `stty size`) and the terminal grid the snapshot describes.
 #[test]
 fn resize_updates_pty_and_snapshot() {
-    let mut session = session("stty -echo; while read line; do stty size; done");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; while read line; do stty size; done");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let resized = sprite_term::TerminalSize {
@@ -219,8 +243,12 @@ fn resize_updates_pty_and_snapshot() {
 
 #[test]
 fn degenerate_and_oversized_resizes_are_refused() {
-    let mut session = session("sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots: _snapshots,
+    } = session("sleep 30");
+    let events = EventPump::new(events);
     events.expect_ready();
 
     let base = sprite_term::TerminalSize::DEFAULT;
@@ -273,9 +301,13 @@ fn kitty_keyboard_flags_change_the_encoding() {
             "stty -icanon -icrnl -echo min {bytes} time 0; {setup} printf 'READY\\n'; \
              head -c {bytes} | od -An -tx1 | tr -s ' '"
         );
-        let mut session = session(&script);
-        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots,
+        } = session(&script);
+        let events = EventPump::new(events);
+        let snapshots = SnapshotPump::new(snapshots);
         events.expect_ready();
         snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -311,9 +343,13 @@ fn a_key_release_types_nothing_under_release_reporting() {
     // release together delivered.
     let script = "printf '\\033[>2u'; stty -icanon -echo min 0 time 15; printf 'READY\\n'; \
                   dd bs=32 count=1 2>/dev/null | od -An -tx1 | tr -s ' '; printf 'DONE\\n'";
-    let mut session = session(script);
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(script);
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -341,9 +377,13 @@ fn a_key_release_types_nothing_under_release_reporting() {
 /// verbatim and carries no bracketing.
 #[test]
 fn committed_input_method_text_reaches_the_child() {
-    let mut session = session("stty -echo; read line; printf 'got:%s\\n' \"$line\"");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; read line; printf 'got:%s\\n' \"$line\"");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     session
@@ -362,9 +402,13 @@ fn committed_input_method_text_reaches_the_child() {
 /// A commit returns the reader to live output, because it is typing.
 #[test]
 fn committing_returns_the_viewport_to_live_output() {
-    let mut session = session("stty -echo; seq 1 200; cat");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; seq 1 200; cat");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the output", |b| pane_text(b).contains("200"));
 

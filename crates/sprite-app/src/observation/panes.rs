@@ -266,6 +266,7 @@ mod tests {
             vec!["-c".into(), "sleep 30".into()],
         ))
         .expect("spawn a session")
+        .session
     }
 
     #[test]

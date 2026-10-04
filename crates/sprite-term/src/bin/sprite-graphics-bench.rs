@@ -115,9 +115,11 @@ fn base64(bytes: &[u8]) -> String {
 fn pane() -> (TerminalSession, sprite_term::SnapshotStream) {
     let mut config = SessionConfig::command("/bin/sh", Vec::<OsString>::new());
     config.graphics = GraphicsPolicy::default();
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let mut events = session.take_event_stream().expect("take event stream");
-    let snapshots = session.take_snapshot_stream().expect("take snapshots");
+    let sprite_term::Spawned {
+        session,
+        mut events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
     // Wait for Ready so the measurement does not include process start-up.
     while let Ok(event) = events.next_blocking() {
         if matches!(event, TerminalEvent::Ready) {
@@ -238,9 +240,11 @@ fn steady_state() -> (usize, usize) {
         storage_bytes: 64 * 1024,
         ..GraphicsPolicy::default()
     };
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let mut events = session.take_event_stream().expect("take event stream");
-    let mut snapshots = session.take_snapshot_stream().expect("take snapshots");
+    let sprite_term::Spawned {
+        mut session,
+        mut events,
+        mut snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
     while let Ok(event) = events.next_blocking() {
         if matches!(event, TerminalEvent::Ready) {
             break;

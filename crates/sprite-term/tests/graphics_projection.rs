@@ -20,9 +20,13 @@ fn args(values: &[&str]) -> Vec<OsString> {
 fn session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {
     let mut config = SessionConfig::command("/bin/sh", args(&[]));
     config.graphics = policy;
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     session
         // Split by a `%s` for the reason `marker_command` gives: the tty echoes

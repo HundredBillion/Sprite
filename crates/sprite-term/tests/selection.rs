@@ -16,7 +16,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
-fn session(script: &str) -> TerminalSession {
+fn session(script: &str) -> sprite_term::Spawned {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
 }
@@ -29,9 +29,13 @@ fn at(row: u16, column: u16) -> CellPosition {
 /// way the renderer can draw an overlay without a second copy of the text.
 #[test]
 fn selected_cells_are_marked_in_the_render_projection() {
-    let mut session = session("stty -echo; printf 'hello world\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf 'hello world\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the output", |bundle| {
@@ -88,9 +92,13 @@ fn selected_cells_are_marked_in_the_render_projection() {
 /// invents, so it agrees with Ghostty on what a word is.
 #[test]
 fn word_selection_expands_to_the_whole_word() {
-    let mut session = session("stty -echo; printf 'alpha beta gamma\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf 'alpha beta gamma\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the output", |bundle| {
@@ -128,9 +136,13 @@ fn word_selection_expands_to_the_whole_word() {
 /// extraction because it knows which rows were soft-wrapped.
 #[test]
 fn copying_returns_the_selected_text() {
-    let mut session = session("stty -echo; printf 'copy-me-please\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf 'copy-me-please\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the output", |bundle| {
@@ -165,9 +177,13 @@ fn copying_returns_the_selected_text() {
 /// whole screen.
 #[test]
 fn copying_without_a_selection_yields_nothing() {
-    let mut session = session("stty -echo; printf 'untouched\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf 'untouched\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the output", |bundle| {
@@ -203,11 +219,15 @@ fn copying_without_a_selection_yields_nothing() {
 fn a_wide_character_is_its_own_word() {
     // Two CJK words either side of an ASCII space. Each character occupies two
     // columns, so a naive column-counting rule would land in the wrong place.
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -echo; printf '\\346\\227\\245\\346\\234\\254 \\344\\270\\255\\345\\233\\275\\n'; sleep 30",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the output", |bundle| pane_text(bundle).contains("日本"));
 
@@ -245,9 +265,13 @@ fn a_wide_character_is_its_own_word() {
 #[test]
 fn word_selection_keeps_combining_marks_with_their_base() {
     // "café" written as e + U+0301, so the accent is a separate codepoint.
-    let mut session = session("stty -echo; printf 'caf\\145\\314\\201 next\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf 'caf\\145\\314\\201 next\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the output", |bundle| pane_text(bundle).contains("caf"));
 
@@ -282,9 +306,13 @@ fn word_selection_keeps_combining_marks_with_their_base() {
 /// Whitespace is a boundary, not part of the word.
 #[test]
 fn a_space_is_not_part_of_a_word() {
-    let mut session = session("stty -echo; printf 'alpha beta\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf 'alpha beta\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the output", |bundle| {
         pane_text(bundle).contains("alpha beta")

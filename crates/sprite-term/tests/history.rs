@@ -59,9 +59,13 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
 fn counting_session(count: usize) -> (TerminalSession, EventPump, SnapshotPump) {
     let script = format!("for i in $(seq 1 {count}); do echo line-$i; done; exec sleep 300");
     let config = SessionConfig::command("/bin/sh", args(&["-c", &script]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     let marker = format!("line-{count}");
     snapshots.wait_for("the last printed line", |bundle| {
@@ -184,9 +188,13 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
     config
         .environment
         .push((OsString::from("TERM"), OsString::from("xterm")));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("less to take the alternate screen", |bundle| {
@@ -239,9 +247,13 @@ fn unicode_whitespace_and_wrap_markers_survive() {
         "sleep 300"
     );
     let config = SessionConfig::command("/bin/sh", args(&["-c", script]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the long line", |bundle| pane_text(bundle).contains("WWWW"));
 
@@ -436,9 +448,13 @@ fn a_small_scrollback_budget_holds_less_history() {
         let script = "for i in $(seq 1 5000); do echo line-$i; done; sleep 300";
         let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
         config.scrollback_bytes = scrollback_bytes;
-        let mut session = TerminalSession::spawn(config).expect("spawn session");
-        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots,
+        } = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(events);
+        let snapshots = SnapshotPump::new(snapshots);
         events.expect_ready();
         snapshots.wait_for("the last printed line", |bundle| {
             pane_text(bundle).contains("line-5000")

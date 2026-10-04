@@ -24,9 +24,13 @@ fn args(values: &[&str]) -> Vec<OsString> {
 #[test]
 fn projections_share_one_coherent_generation() {
     let config = SessionConfig::command("/bin/sh", args(&["-c", MIXED_OUTPUT]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
 
     events.expect_ready();
 
@@ -96,9 +100,13 @@ fn a_silent_child_still_publishes_dimensions() {
     // No output at all: the application must still learn the grid and cursor
     // without a timer or a synthetic mutation.
     let config = SessionConfig::command("/bin/sh", args(&["-c", "sleep 30"]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
 
     events.expect_ready();
 
@@ -134,9 +142,13 @@ fn scrollback_history_is_reachable_by_scrolling() {
             "i=1; while [ $i -le 200 ]; do echo line-$i; i=$((i+1)); done; sleep 30",
         ]),
     );
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let live = snapshots.wait_for("the newest output", |bundle| {
@@ -204,9 +216,13 @@ fn a_zero_scrollback_budget_keeps_no_history() {
     );
     config.scrollback_bytes = 0;
 
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("the newest output", |bundle| {
@@ -240,9 +256,13 @@ fn a_smaller_scrollback_budget_retains_less_history() {
         let mut config = SessionConfig::command("/bin/sh", args(&["-c", "seq 1 3000; sleep 30"]));
         config.scrollback_bytes = scrollback_bytes;
 
-        let mut session = TerminalSession::spawn(config).expect("spawn session");
-        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots,
+        } = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(events);
+        let snapshots = SnapshotPump::new(snapshots);
         events.expect_ready();
 
         let bundle = snapshots.wait_for("the newest output", |bundle| {
@@ -277,9 +297,13 @@ fn a_scrolled_viewport_stays_anchored_while_output_arrives() {
             "stty -echo; seq 1 200; read _; seq 1000 1200; sleep 30",
         ]),
     );
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the first burst", |bundle| {
@@ -324,9 +348,13 @@ fn a_scrolled_viewport_stays_anchored_while_output_arrives() {
 #[test]
 fn a_keystroke_returns_the_viewport_to_live_output() {
     let config = SessionConfig::command("/bin/sh", args(&["-c", "stty -echo; seq 1 200; cat"]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the output", |bundle| pane_text(bundle).contains("200"));
@@ -370,9 +398,12 @@ fn bell_burst_does_not_stall_snapshots_with_a_paused_event_consumer() {
             "stty -echo; head -c 16384 /dev/zero | tr '\\000' '\\007'; printf 'after-bells'; read _",
         ]),
     );
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = session.take_event_stream().expect("take events");
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let snapshots = SnapshotPump::new(snapshots);
     let progress = std::panic::catch_unwind(|| {
         snapshots.wait_for("output after the bell burst", |bundle| {
             pane_text(bundle).contains("after-bells")

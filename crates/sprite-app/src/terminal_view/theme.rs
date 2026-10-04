@@ -104,6 +104,37 @@ pub(super) fn measure_cell_width(window: &Window, family: &SharedString, size: P
     if width > px(0.0) { width } else { px(8.0) }
 }
 
+pub(super) struct SessionDefaults {
+    pub colors: sprite_term::ColorDefaults,
+    pub cursor: sprite_term::CursorDefaults,
+    pub fallback_colors: (Rgb, Rgb),
+}
+
+pub(super) fn session_defaults(settings: &crate::config::Settings) -> SessionDefaults {
+    let base = sprite_term::BaseColors {
+        foreground: settings
+            .colors
+            .foreground
+            .unwrap_or_else(|| unpack(FOREGROUND)),
+        background: settings
+            .colors
+            .background
+            .unwrap_or_else(|| unpack(BACKGROUND)),
+    };
+    SessionDefaults {
+        colors: sprite_term::ColorDefaults {
+            base: Some(base),
+            cursor: settings.colors.cursor,
+            palette: settings.colors.palette.clone(),
+        },
+        cursor: sprite_term::CursorDefaults {
+            style: settings.cursor.style,
+            blink: settings.cursor.blink,
+        },
+        fallback_colors: (base.foreground, base.background),
+    }
+}
+
 impl TerminalView {
     pub(super) fn default_colors(&self) -> (Rgb, Rgb) {
         match &self.bundle {
@@ -139,31 +170,11 @@ impl TerminalView {
         // re-measuring a cell costs one text layout.
         self.set_font_size(settings.font.size, window, cx);
 
-        self.fallback_colors = (
-            settings
-                .colors
-                .foreground
-                .unwrap_or_else(|| unpack(FOREGROUND)),
-            settings
-                .colors
-                .background
-                .unwrap_or_else(|| unpack(BACKGROUND)),
-        );
-        if let Some(session) = self.session.as_mut() {
-            let _ = session.send(sprite_term::TerminalCommand::SetColors(
-                sprite_term::ColorDefaults {
-                    foreground: Some(self.fallback_colors.0),
-                    background: Some(self.fallback_colors.1),
-                    cursor: settings.colors.cursor,
-                    palette: settings.colors.palette.clone(),
-                },
-            ));
-            let _ = session.send(sprite_term::TerminalCommand::SetCursor(
-                sprite_term::CursorDefaults {
-                    style: settings.cursor.style,
-                    blink: settings.cursor.blink,
-                },
-            ));
+        let defaults = session_defaults(settings);
+        self.fallback_colors = defaults.fallback_colors;
+        if let SessionState::Running(session) = &mut self.session {
+            let _ = session.send(TerminalCommand::SetColors(defaults.colors));
+            let _ = session.send(TerminalCommand::SetCursor(defaults.cursor));
         }
 
         self.textures.set_budget(settings.graphics.texture_bytes);

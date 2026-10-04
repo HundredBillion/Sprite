@@ -1014,14 +1014,12 @@ fn apply_color_defaults(
         b: value.b,
     };
 
-    if let Some(foreground) = colors.foreground {
+    if let Some(base) = colors.base {
         terminal
-            .set_default_fg_color(Some(color(foreground)))
+            .set_default_fg_color(Some(color(base.foreground)))
             .map_err(vt("default_fg_color"))?;
-    }
-    if let Some(background) = colors.background {
         terminal
-            .set_default_bg_color(Some(color(background)))
+            .set_default_bg_color(Some(color(base.background)))
             .map_err(vt("default_bg_color"))?;
     }
     if let Some(cursor) = colors.cursor {

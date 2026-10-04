@@ -235,10 +235,7 @@ fn fatal(what: &str) -> ! {
     process::exit(1);
 }
 
-fn await_ready(session: &mut TerminalSession) -> sprite_term::EventStream {
-    let mut events = session
-        .take_event_stream()
-        .unwrap_or_else(|error| fatal(&format!("event stream: {error}")));
+fn await_ready(mut events: sprite_term::EventStream) -> sprite_term::EventStream {
     let deadline = Instant::now() + SAMPLE_TIMEOUT;
     loop {
         if Instant::now() > deadline {
@@ -260,9 +257,13 @@ fn finish(mut session: TerminalSession) {
 
 fn spawn_to_ready() -> Duration {
     let started = Instant::now();
-    let mut session = TerminalSession::spawn(shell("exec sleep 30"))
+    let sprite_term::Spawned {
+        session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(shell("exec sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
+    let _events = await_ready(events);
     let elapsed = started.elapsed();
     finish(session);
     elapsed
@@ -271,12 +272,13 @@ fn spawn_to_ready() -> Duration {
 /// Time from one keystroke reaching the seam to the character being visible in
 /// a snapshot, on an otherwise quiet terminal.
 fn input_to_snapshot_idle() -> Duration {
-    let mut session = TerminalSession::spawn(shell("stty -icanon -echo min 1 time 0; cat"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("stty -icanon -echo min 1 time 0; cat"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     // Drain the generation-0 blank so the measured snapshot is the response.
     let _ = snapshots.next_blocking();
@@ -295,15 +297,16 @@ fn input_to_snapshot_idle() -> Duration {
 /// stops its own producer on receipt, so the marker survives long enough to be
 /// observed rather than scrolling away.
 fn input_to_snapshot_under_load() -> Duration {
-    let mut session = TerminalSession::spawn(shell(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell(
         "stty -echo; yes sprite-load-line & producer=$!; \
          read line; kill $producer 2>/dev/null; printf '\\nMARK:%s\\n' \"$line\"",
     ))
     .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     // Only measure once the flood is genuinely under way.
     let warmup = Instant::now();
@@ -329,12 +332,13 @@ fn output_to_final_snapshot(output_bytes: usize) -> Duration {
         "awk 'BEGIN{{s=sprintf(\"%79s\",\"\"); gsub(/ /,\"a\",s); \
          for(i=0;i<{lines};i++) print s}}'"
     );
-    let mut session = TerminalSession::spawn(shell(&script))
+    let sprite_term::Spawned {
+        session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell(&script))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let started = Instant::now();
     let mut last = started;
@@ -364,12 +368,12 @@ fn capture_100x100_grid() -> Duration {
         cell_height_px: 16,
     };
 
-    let mut session =
-        TerminalSession::spawn(config).unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(config).unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
+    let _events = await_ready(events);
 
     let blank = snapshots
         .next_blocking()
@@ -420,12 +424,13 @@ fn capture_100x100_grid() -> Duration {
 /// the visible screen, not to retained scrollback, so this should track
 /// `capture_100x100_grid` rather than growing with history.
 fn capture_with_full_scrollback() -> Duration {
-    let mut session = TerminalSession::spawn(shell("seq 1 20000; sleep 30"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("seq 1 20000; sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let warmup = Instant::now();
     let deep = wait_for_predicate(&mut snapshots, warmup, |bundle| {
@@ -445,12 +450,13 @@ fn capture_with_full_scrollback() -> Duration {
 
 /// One scroll command to the snapshot that reflects it.
 fn scroll_round_trip() -> Duration {
-    let mut session = TerminalSession::spawn(shell("seq 1 5000; sleep 30"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("seq 1 5000; sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let warmup = Instant::now();
     let generation = wait_for_predicate(&mut snapshots, warmup, |bundle| {
@@ -469,12 +475,13 @@ fn scroll_round_trip() -> Duration {
 
 /// Selecting a whole visible screen, to the snapshot that marks it.
 fn select_full_screen() -> Duration {
-    let mut session = TerminalSession::spawn(shell("seq 1 200; sleep 30"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("seq 1 200; sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let warmup = Instant::now();
     let generation = wait_for_predicate(&mut snapshots, warmup, |bundle| {
