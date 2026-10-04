@@ -12,7 +12,9 @@
 //! This crate depends on `gpui` and nothing else. That is the dependency
 //! invariant — Sprite names no editor — in the one form a tool can check.
 
-use gpui::{AnyView, App, FocusHandle, Focusable, Pixels, Render, SharedString, Size};
+use gpui::{
+    AnyView, App, Context, FocusHandle, Focusable, Pixels, Render, SharedString, Size, Window,
+};
 
 /// What Sprite needs from anything that occupies a pane.
 ///
@@ -21,6 +23,22 @@ use gpui::{AnyView, App, FocusHandle, Focusable, Pixels, Render, SharedString, S
 /// assumptions, and the first pane from another repository is the right place
 /// to discover what else is owed.
 pub trait Pane: Render + Focusable + 'static {
+    /// The application's requests, independent of the pane implementation.
+    type Request: PaneRequest;
+
+    /// Applies a request with the current window available for focus changes.
+    fn surface_request(
+        &mut self,
+        request: Self::Request,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        request.refuse();
+    }
+
+    /// Cycles focus among the pane's contents, when the pane supports it.
+    fn cycle_surface_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
     /// What this pane calls itself, or `None` when it does not know.
     ///
     /// Never a guess. A pane that has not been told its name says so, and the
@@ -44,6 +62,12 @@ pub trait Pane: Render + Focusable + 'static {
     fn close_warning(&self) -> Option<CloseWarning>;
 }
 
+/// A request must complete its reply when a pane cannot serve it.
+pub trait PaneRequest {
+    /// Answers unsupported requests instead of leaving the caller waiting.
+    fn refuse(self);
+}
+
 /// What a person is told before a pane that is busy is closed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseWarning {
@@ -61,6 +85,12 @@ pub struct CloseWarning {
 /// yields `&mut V` inside. That is what lets the workspace hold
 /// `Rc<dyn PaneHandle>` and clone it for free.
 pub trait PaneHandle {
+    /// See [`Pane::Request`].
+    type Request: PaneRequest;
+    /// See [`Pane::surface_request`].
+    fn surface_request(&self, request: Self::Request, window: &mut Window, cx: &mut App);
+    /// See [`Pane::cycle_surface_focus`].
+    fn cycle_surface_focus(&self, window: &mut Window, cx: &mut App);
     /// The pane as an element the workspace can place.
     fn view(&self) -> AnyView;
     /// See [`Pane::title`].
@@ -76,6 +106,16 @@ pub trait PaneHandle {
 }
 
 impl<V: Pane> PaneHandle for gpui::Entity<V> {
+    type Request = V::Request;
+
+    fn surface_request(&self, request: Self::Request, window: &mut Window, cx: &mut App) {
+        self.update(cx, |pane, cx| pane.surface_request(request, window, cx));
+    }
+
+    fn cycle_surface_focus(&self, window: &mut Window, cx: &mut App) {
+        self.update(cx, |pane, cx| pane.cycle_surface_focus(window, cx));
+    }
+
     fn view(&self) -> AnyView {
         self.clone().into()
     }
@@ -125,7 +165,14 @@ mod tests {
         }
     }
 
+    struct Request;
+
+    impl PaneRequest for Request {
+        fn refuse(self) {}
+    }
+
     impl Pane for Placeholder {
+        type Request = Request;
         fn title(&self) -> Option<SharedString> {
             None
         }
@@ -152,7 +199,7 @@ mod tests {
     #[test]
     fn a_second_pane_type_is_a_pane_handle() {
         accepts_handle::<gpui::Entity<Placeholder>>();
-        accepts_handle::<dyn PaneHandle>();
+        accepts_handle::<dyn PaneHandle<Request = Request>>();
     }
 
     /// The manifest is the invariant. Anything beside `gpui` under

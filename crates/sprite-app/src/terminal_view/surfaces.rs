@@ -17,9 +17,10 @@ use gpui::{
 use super::list_view::VirtualListView;
 use crate::config::Highlights;
 use crate::surface::channel::{
-    FocusTarget, Open, Position, ReturnTarget, Side, SurfaceConnection, event_applied, event_blur,
-    event_closed, event_dock_size, event_focus, event_grid_resize, event_input, event_mouse,
-    event_paste, event_refused, event_resize, event_warning, neovim_modifiers,
+    FocusTarget, Open, Position, ReturnTarget, Side, SurfaceConnection, SurfaceRequest,
+    event_applied, event_blur, event_closed, event_dock_size, event_focus, event_grid_resize,
+    event_input, event_mouse, event_paste, event_refused, event_resize, event_warning,
+    neovim_modifiers,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -192,6 +193,53 @@ fn eligible_owner_group(
 }
 
 impl TerminalView {
+    pub(super) fn serve_surface_request(
+        &mut self,
+        request: SurfaceRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match request {
+            SurfaceRequest::Capabilities {
+                owner_pid,
+                return_target,
+                reply,
+                ..
+            } => {
+                let answer = self.capability_owner_group(owner_pid, return_target);
+                let _ = reply.send(answer.map(|_| crate::surface::channel::capabilities(true)));
+            }
+            SurfaceRequest::Open {
+                id,
+                open,
+                connection,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(self.open_surface(id, open, connection, window, cx));
+            }
+            SurfaceRequest::Update {
+                id, description, ..
+            } => self.update_surface(id, description, cx),
+            SurfaceRequest::Focus { id, target, .. } => {
+                if let Err(refusal) = self.focus_from_surface(id, target, window, cx) {
+                    self.refuse_on(id, &refusal);
+                }
+            }
+            SurfaceRequest::Close { id, .. } | SurfaceRequest::Closed { id, .. } => {
+                self.close_surface(id, window, cx);
+            }
+            SurfaceRequest::FocusPane { target, reply, .. } => {
+                let _ = reply.send(self.focus_target(target, window, cx));
+            }
+            SurfaceRequest::Grid { id, ops, .. } => self.grid_operations(id, ops, cx),
+            SurfaceRequest::List { id, op, .. } => self.list_operation(id, op, cx),
+            request @ SurfaceRequest::RegisterToken { .. } => {
+                sprite_pane::PaneRequest::refuse(request);
+            }
+        }
+    }
+
     fn resize_dock(&mut self, id: SurfaceId, width: f32, cx: &mut Context<Self>) {
         let Some(surface) = self
             .surfaces
@@ -1606,6 +1654,425 @@ mod tests {
             view.close_surface(SurfaceId(2), window, cx)
         });
         assert!(host.read_with(cx, |view, _| view.surfaces.fill.is_none()));
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    fn dispatch(
+        host: &Entity<TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+        request: SurfaceRequest,
+    ) {
+        let handle: &dyn sprite_pane::PaneHandle<Request = SurfaceRequest> = host;
+        cx.update(|window, cx| handle.surface_request(request, window, cx));
+    }
+
+    fn open_request(
+        host: &Entity<TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+        id: SurfaceId,
+        open: Open,
+    ) -> (Result<(), Refusal>, std::os::unix::net::UnixStream) {
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            host,
+            cx,
+            SurfaceRequest::Open {
+                pane: crate::pane_tree::PaneId(1),
+                id,
+                open,
+                connection: connection.clone(),
+                reply,
+            },
+        );
+        let answer = receiver.try_recv().unwrap();
+        if answer.is_ok() {
+            let opened = crate::surface::channel::event_opened(id);
+            assert!(connection.establish(&opened));
+            draw_test_window(cx);
+            let initial = events(&mut peer);
+            assert_eq!(
+                initial.first(),
+                Some(&serde_json::from_str::<serde_json::Value>(&opened).unwrap())
+            );
+        }
+        (answer, peer)
+    }
+
+    fn open_description(description: serde_json::Value) -> Open {
+        Open {
+            position: Position::Fill,
+            side: Side::Left,
+            size: 0.0,
+            focus: false,
+            owner_pid: None,
+            return_target: None,
+            resizable: false,
+            description,
+        }
+    }
+
+    fn draw_test_window(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    fn events(peer: &mut std::os::unix::net::UnixStream) -> Vec<serde_json::Value> {
+        use std::io::Read;
+        let mut wire = String::new();
+        if let Err(error) = peer.read_to_string(&mut wire) {
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        }
+        wire.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn pane_handle_routes_terminal_surface_verbs_and_ordered_events(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.focus(&host.read(cx).focus);
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let pane = crate::pane_tree::PaneId(1);
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid: std::process::id(),
+                return_target: ReturnTarget::Terminal,
+                reply,
+            },
+        );
+        assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
+        let mut owned = open_description(
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"owned"}}),
+        );
+        owned.owner_pid = Some(std::process::id());
+        assert_eq!(
+            open_request(&host, cx, SurfaceId(100), owned).0,
+            Err(Refusal::Ineligible)
+        );
+        let id = SurfaceId(101);
+        let text = |text| serde_json::json!({"version":1,"root":{"kind":"text","text":text}});
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(text("before")));
+        assert_eq!(answer, Ok(()));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: text("after"),
+            },
+        );
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert_eq!(description.root.text.as_deref(), Some("after"));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: serde_json::Value::Null,
+            },
+        );
+        assert_eq!(events(&mut peer)[0]["type"], "refused");
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert_eq!(description.root.text.as_deref(), Some("after"));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Focus {
+                id,
+                pane,
+                target: FocusTarget::Surface(id),
+            },
+        );
+        cx.update(|window, cx| {
+            assert!(
+                host.read(cx)
+                    .surfaces
+                    .fill
+                    .as_ref()
+                    .unwrap()
+                    .focus
+                    .is_focused(window)
+            )
+        });
+        cx.update(|window, _| assert!(window.is_window_active(), "test window must be active"));
+        draw_test_window(cx);
+        assert_eq!(events(&mut peer), vec![serde_json::json!({"type":"focus"})]);
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::FocusPane {
+                pane,
+                target: FocusTarget::Terminal,
+                reply,
+            },
+        );
+        assert_eq!(receiver.try_recv().unwrap(), Ok(()));
+        draw_test_window(cx);
+        assert_eq!(events(&mut peer), vec![serde_json::json!({"type":"blur"})]);
+        cx.update(|window, cx| {
+            let handle: &dyn sprite_pane::PaneHandle<Request = SurfaceRequest> = &host;
+            handle.cycle_surface_focus(window, cx);
+        });
+        draw_test_window(cx);
+        assert_eq!(events(&mut peer), vec![serde_json::json!({"type":"focus"})]);
+        dispatch(&host, cx, SurfaceRequest::Close { id, pane });
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"closed"})]
+        );
+        cx.update(|window, cx| assert!(host.read(cx).focus.is_focused(window)));
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+
+        let id = SurfaceId(102);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":2,"rows":2}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![Op::Resize { cols: 7, rows: 3 }],
+            },
+        );
+        host.read_with(cx, |host, _| {
+            let Body::Grid { grid, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid Surface")
+            };
+            assert_eq!((grid.cols(), grid.rows()), (7, 3));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![Op::Resize { cols: 0, rows: 3 }],
+            },
+        );
+        assert_eq!(events(&mut peer)[0]["type"], "refused");
+        dispatch(&host, cx, SurfaceRequest::Closed { id, pane });
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"closed"})]
+        );
+
+        let id = SurfaceId(103);
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(fixture["description"].clone()),
+        );
+        assert_eq!(answer, Ok(()));
+        for operation in &fixture["operations"].as_array().unwrap()[..2] {
+            let op = crate::surface::list::parse_op(&operation["request"]).unwrap();
+            dispatch(&host, cx, SurfaceRequest::List { id, pane, op });
+            let reported = events(&mut peer);
+            assert_eq!(reported.first(), Some(&operation["reply"]));
+            assert!(
+                reported[1..]
+                    .iter()
+                    .all(|event| event["type"] == "list_scroll")
+            );
+        }
+        host.read_with(cx, |host, cx| {
+            let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("list Surface")
+            };
+            assert_eq!(view.read(cx).model.revision, 1);
+            assert_eq!(view.read(cx).model.rows.len(), 2);
+        });
+        let list = host.read_with(cx, |host, _| {
+            let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("list Surface")
+            };
+            view.downgrade()
+        });
+        drop(peer);
+        dispatch(&host, cx, SurfaceRequest::Closed { id, pane });
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+        assert!(list.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn pane_handle_preserves_live_owner_checks_and_ended_refusals(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (sender, _exits) = async_channel::unbounded();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::new(
+                Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf '\033]0;%s\007' "$$"; exec /bin/cat"#.into(),
+                ]),
+                settings,
+                Vec::new(),
+                None,
+                super::super::PaneExit {
+                    sender,
+                    identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                },
+                window,
+                cx,
+            )
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        executor.block_test(host.condition::<()>(cx, |host, _| {
+            host.bundle
+                .as_ref()
+                .is_some_and(|bundle| bundle.pane.title.is_some())
+        }));
+        let owner_pid = host.read_with(cx, |host, _| {
+            host.bundle
+                .as_ref()
+                .unwrap()
+                .pane
+                .title
+                .as_ref()
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        });
+        let pane = crate::pane_tree::PaneId(1);
+        for (pid, expected) in [(owner_pid, true), (std::process::id(), false)] {
+            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Capabilities {
+                    pane,
+                    owner_pid: pid,
+                    return_target: ReturnTarget::Terminal,
+                    reply,
+                },
+            );
+            let answer = receiver.try_recv().unwrap();
+            if expected {
+                assert_eq!(answer.unwrap(), crate::surface::channel::capabilities(true));
+            } else {
+                assert_eq!(answer, Err(Refusal::Ineligible));
+            }
+        }
+        let make_owned = |pid| {
+            let mut open = open_description(
+                serde_json::json!({"version":1,"root":{"kind":"text","text":"owned"}}),
+            );
+            open.position = Position::Dock;
+            open.owner_pid = Some(pid);
+            open.return_target = Some(ReturnTarget::Terminal);
+            open
+        };
+        assert_eq!(
+            open_request(&host, cx, SurfaceId(201), make_owned(std::process::id())).0,
+            Err(Refusal::Ineligible)
+        );
+        let (answer, mut peer) = open_request(&host, cx, SurfaceId(202), make_owned(owner_pid));
+        assert_eq!(answer, Ok(()));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id: SurfaceId(202),
+                pane,
+                description: serde_json::json!({"version":1,"root":{"kind":"text","text":"changed"}}),
+            },
+        );
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"applied","operation":"update"})]
+        );
+        host.update(cx, |host, _| {
+            let SessionState::Running(session) =
+                std::mem::replace(&mut host.session, SessionState::NeverStarted)
+            else {
+                panic!("running session")
+            };
+            host.session = SessionState::Ended(session);
+        });
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target: ReturnTarget::Terminal,
+                reply,
+            },
+        );
+        assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
+        assert_eq!(
+            open_request(&host, cx, SurfaceId(203), make_owned(owner_pid)).0,
+            Err(Refusal::Ineligible)
+        );
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Focus {
+                id: SurfaceId(202),
+                pane,
+                target: FocusTarget::Surface(SurfaceId(202)),
+            },
+        );
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"closed"})]
+        );
+        assert!(host.read_with(cx, |host, _| host.surfaces.iter().next().is_none()));
         cx.update(|window, _| window.remove_window());
         drop(host);
     }

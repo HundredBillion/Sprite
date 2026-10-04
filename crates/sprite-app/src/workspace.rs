@@ -53,7 +53,7 @@ const CONFIRM_BG: u32 = 0x5a3030;
 const CONFIRM_FG: u32 = 0xffe0e0;
 
 pub struct Workspace {
-    tabs: Tabs<Rc<dyn PaneHandle>>,
+    tabs: Tabs<Rc<dyn PaneHandle<Request = SurfaceRequest>>>,
     /// This window's observation socket and key.
     ///
     /// `None` when the endpoint could not be opened — there is no private
@@ -324,7 +324,11 @@ impl Workspace {
 
     /// Shuts a pane down deliberately rather than leaving it to a drop, so
     /// whatever it owns is released at a known moment.
-    fn shut_down(&self, pane: Rc<dyn PaneHandle>, cx: &mut Context<Self>) {
+    fn shut_down(
+        &self,
+        pane: Rc<dyn PaneHandle<Request = SurfaceRequest>>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(cleanup) = pane.begin_shutdown(cx) {
             cx.background_executor()
                 .spawn(async move { cleanup() })
@@ -440,7 +444,7 @@ impl Workspace {
 
     /// The programs a close would interrupt, one entry per busy pane.
     fn running_programs(&self, scope: CloseScope, cx: &Context<Self>) -> Vec<Option<String>> {
-        let panes: Vec<&Rc<dyn PaneHandle>> = match scope {
+        let panes: Vec<&Rc<dyn PaneHandle<Request = SurfaceRequest>>> = match scope {
             CloseScope::Pane => self
                 .tabs
                 .active()
@@ -516,76 +520,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match request {
-            SurfaceRequest::Capabilities {
-                pane,
-                owner_pid,
-                return_target,
-                reply,
-            } => {
-                let answer = self.terminal(pane).and_then(|view| {
-                    view.update(cx, |view, _cx| {
-                        view.capability_owner_group(owner_pid, return_target)
-                    })
-                });
-                let _ = reply.send(answer.map(|_| crate::surface::channel::capabilities(true)));
-            }
-            SurfaceRequest::Open {
-                id,
-                pane,
-                open,
-                connection,
-                reply,
-            } => {
-                let answer = self.terminal(pane).and_then(|view| {
-                    view.update(cx, |view, cx| {
-                        view.open_surface(id, open, connection, window, cx)
-                    })
-                });
-                let _ = reply.send(answer);
-            }
-            SurfaceRequest::Update {
-                id,
-                pane,
-                description,
-            } => {
-                if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.update_surface(id, description, cx));
-                }
-            }
-            SurfaceRequest::Focus { id, pane, target } => {
-                if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| {
-                        if let Err(refusal) = view.focus_from_surface(id, target, window, cx) {
-                            view.refuse_on(id, &refusal);
-                        }
-                    });
-                }
-            }
-            SurfaceRequest::Close { id, pane } | SurfaceRequest::Closed { id, pane } => {
-                if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.close_surface(id, window, cx));
-                }
-            }
-            SurfaceRequest::FocusPane {
-                pane,
-                target,
-                reply,
-            } => {
-                let answer = self.terminal(pane).and_then(|view| {
-                    view.update(cx, |view, cx| view.focus_target(target, window, cx))
-                });
-                let _ = reply.send(answer);
-            }
-            SurfaceRequest::Grid { id, pane, ops } => {
-                if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.grid_operations(id, ops, cx));
-                }
-            }
-            SurfaceRequest::List { id, pane, op } => {
-                if let Ok(view) = self.terminal(pane) {
-                    view.update(cx, |view, cx| view.list_operation(id, op, cx));
-                }
-            }
             SurfaceRequest::RegisterToken {
                 name,
                 default,
@@ -599,45 +533,36 @@ impl Workspace {
                 if answer == Ok(crate::tokens::Registration::New) {
                     // A Surface already drawn with this name's fallback picks up
                     // the real colour on its next frame.
-                    self.repaint_terminals(cx);
+                    self.repaint_panes(cx);
                 }
                 let _ = reply.send(answer.map(|_| ()));
             }
-        }
-    }
-
-    /// The terminal view behind a pane id, or why there is none: a Surface can
-    /// only be drawn into a pane that exists and is a terminal.
-    fn terminal(&self, pane: PaneId) -> Result<gpui::Entity<TerminalView>, Refusal> {
-        let (_, _, handle) = self
-            .tabs
-            .all_panes()
-            .into_iter()
-            .find(|(_, id, _)| *id == pane)
-            .ok_or(Refusal::UnknownPane)?;
-        handle
-            .view()
-            .downcast::<TerminalView>()
-            .map_err(|_| Refusal::NotATerminal)
-    }
-
-    fn repaint_terminals(&self, cx: &mut Context<Self>) {
-        for (_, _, handle) in self.tabs.all_panes() {
-            if let Ok(view) = handle.view().downcast::<TerminalView>() {
-                view.update(cx, |_view, cx| cx.notify());
+            request => {
+                let pane = request.pane().expect("pane request");
+                if let Some((_, _, handle)) = self
+                    .tabs
+                    .all_panes()
+                    .into_iter()
+                    .find(|(_, id, _)| *id == pane)
+                {
+                    handle.surface_request(request, window, cx);
+                } else {
+                    request.refuse_with(Refusal::UnknownPane);
+                }
             }
         }
     }
 
-    /// Ctrl+Shift+Space: the focused pane cycles the keyboard between its
-    /// terminal and its Surfaces.
+    fn repaint_panes(&self, cx: &mut Context<Self>) {
+        for (_, _, handle) in self.tabs.all_panes() {
+            gpui::App::notify(cx, handle.view().entity_id());
+        }
+    }
+
+    /// Ctrl+Shift+Space cycles the focused pane's contents.
     fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = self.tabs.active() else {
-            return;
-        };
-        let focused = active.focus();
-        if let Ok(view) = self.terminal(focused) {
-            view.update(cx, |view, cx| view.cycle_focus(window, cx));
+        if let Some(handle) = self.tabs.active().and_then(|active| active.focused()) {
+            handle.cycle_surface_focus(window, cx);
         }
     }
 
@@ -909,7 +834,7 @@ fn make_pane<'a>(
     services: PaneServices<'a>,
     window: &'a mut Window,
     cx: &'a mut Context<Workspace>,
-) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle> + 'a {
+) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle<Request = SurfaceRequest>> + 'a {
     move |tab, pane| {
         let environment = session_environment(services.endpoint, services.surfaces, tab, pane);
         let link = pane_link(services.panes, services.endpoint, tab, pane);
@@ -1049,7 +974,14 @@ fn classify(current: &crate::config::Settings, next: &crate::config::Settings) -
 
 /// One pane's place in the frame: its identity, its pixel rectangle as
 /// (x, y, width, height), and the pane itself.
-type PanePlacement = (PaneId, f32, f32, f32, f32, Rc<dyn PaneHandle>);
+type PanePlacement = (
+    PaneId,
+    f32,
+    f32,
+    f32,
+    f32,
+    Rc<dyn PaneHandle<Request = SurfaceRequest>>,
+);
 
 /// What a tab shows: the Tab Name if a person gave one, else the focused pane's
 /// Pane Title, else the tab's position counted from one.
@@ -1903,14 +1835,38 @@ mod tests {
     }
 
     #[gpui::test]
-    fn duplicate_token_registration_does_not_repaint_terminals(cx: &mut gpui::TestAppContext) {
+    fn duplicate_token_registration_does_not_repaint_panes(cx: &mut gpui::TestAppContext) {
         use crate::surface::channel::SurfaceRequest;
+        use gpui::AppContext;
         let (workspace, cx) = test_workspace(cx);
         draw_workspace(cx);
-        let terminal = workspace.read_with(cx, |workspace, _| {
-            workspace
-                .terminal(workspace.tabs.active().unwrap().focus())
-                .unwrap()
+        let (terminal, placeholder) = workspace.update_in(cx, |workspace, window, cx| {
+            let terminal = cx.new(|cx| {
+                super::TerminalView::new(
+                    workspace.command.clone(),
+                    workspace.settings.clone(),
+                    Vec::new(),
+                    None,
+                    super::PaneExit {
+                        sender: workspace.exit_sender.clone(),
+                        identity: (crate::tabs::TabId(1), PaneId(1)),
+                    },
+                    window,
+                    cx,
+                )
+            });
+            let placeholder = cx.new(|cx| BusyPane {
+                focus: cx.focus_handle(),
+            });
+            workspace.tabs = crate::tabs::Tabs::new(|_, _| {
+                std::rc::Rc::new(terminal.clone())
+                    as std::rc::Rc<dyn sprite_pane::PaneHandle<Request = SurfaceRequest>>
+            });
+            workspace.tabs.split(Orientation::Horizontal, |_, _| {
+                std::rc::Rc::new(placeholder.clone())
+                    as std::rc::Rc<dyn sprite_pane::PaneHandle<Request = SurfaceRequest>>
+            });
+            (terminal, placeholder)
         });
         let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
         let observed = notifications.clone();
@@ -1919,8 +1875,13 @@ mod tests {
                 observed.set(observed.get() + 1);
             })
         });
+        let placeholder_notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = placeholder_notifications.clone();
+        let _placeholder_subscription = cx
+            .update(|_, cx| cx.observe(&placeholder, move |_, _| observed.set(observed.get() + 1)));
         for (index, color) in [0x12ab03, 0x12ab03, 0xff0000].into_iter().enumerate() {
             notifications.set(0);
+            placeholder_notifications.set(0);
             let (reply, receiver) = std::sync::mpsc::sync_channel(1);
             workspace.update_in(cx, |workspace, window, cx| {
                 workspace.serve_surface_request(
@@ -1953,6 +1914,7 @@ mod tests {
                 usize::from(index == 0),
                 "registration {index}"
             );
+            assert_eq!(placeholder_notifications.get(), usize::from(index == 0));
         }
         cx.update(|_, cx| {
             assert_eq!(
@@ -2007,19 +1969,19 @@ mod tests {
         let (workspace, cx) = test_workspace(cx);
         draw_workspace(cx);
         let terminal_focus = focused_handle(&workspace, cx);
-        let terminal = workspace.read_with(cx, |workspace, _| {
-            workspace
-                .terminal(workspace.tabs.active().unwrap().focus())
-                .unwrap()
-        });
+        let pane = workspace.read_with(cx, |workspace, _| workspace.tabs.active().unwrap().focus());
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        terminal.update_in(cx, |terminal, window, cx| {
-            terminal.open_surface(crate::surface::SurfaceId(1), Open {
-                position: Position::Fill, side: Side::Left, size: 0.0, focus: true,
-                owner_pid: None, return_target: None, resizable: false,
-                description: serde_json::json!({"version":1,"root":{"kind":"text","text":"Surface"}}),
-            }, SurfaceConnection::new(&stream).unwrap(), window, cx).unwrap();
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.serve_surface_request(crate::surface::channel::SurfaceRequest::Open {
+                id: crate::surface::SurfaceId(1), pane, open: Open {
+                    position: Position::Fill, side: Side::Left, size: 0.0, focus: true,
+                    owner_pid: None, return_target: None, resizable: false,
+                    description: serde_json::json!({"version":1,"root":{"kind":"text","text":"Surface"}}),
+                }, connection: SurfaceConnection::new(&stream).unwrap(), reply,
+            }, window, cx);
         });
+        assert_eq!(receiver.try_recv().unwrap(), Ok(()));
         let surface_focus = cx.update(|window, cx| window.focused(cx).unwrap());
         assert_ne!(surface_focus, terminal_focus);
         draw_workspace(cx);
@@ -2058,6 +2020,7 @@ mod tests {
         }
     }
     impl sprite_pane::Pane for BusyPane {
+        type Request = crate::surface::channel::SurfaceRequest;
         fn title(&self) -> Option<gpui::SharedString> {
             None
         }
@@ -2073,6 +2036,87 @@ mod tests {
     }
 
     #[gpui::test]
+    fn placeholder_surface_replies_complete_and_missing_panes_are_unknown(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::surface::channel::{
+            FocusTarget, Open, Position, ReturnTarget, Side, SurfaceConnection, SurfaceRequest,
+        };
+        use crate::surface::{Refusal, SurfaceId};
+        use gpui::AppContext;
+        let (workspace, cx) = test_workspace(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs = crate::tabs::Tabs::new(|_, _| {
+                std::rc::Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                }))
+                    as std::rc::Rc<dyn sprite_pane::PaneHandle<Request = SurfaceRequest>>
+            });
+        });
+        let pane = workspace.read_with(cx, |workspace, _| workspace.tabs.active().unwrap().focus());
+        for (pane, expected) in [
+            (pane, Refusal::NotATerminal),
+            (PaneId(u64::MAX), Refusal::UnknownPane),
+        ] {
+            let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.serve_surface_request(
+                    SurfaceRequest::Open {
+                        pane,
+                        id: SurfaceId(1),
+                        open: Open {
+                            position: Position::Fill,
+                            side: Side::Left,
+                            size: 0.0,
+                            focus: false,
+                            owner_pid: None,
+                            return_target: None,
+                            resizable: false,
+                            description: serde_json::Value::Null,
+                        },
+                        connection: SurfaceConnection::new(&stream).unwrap(),
+                        reply,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            assert_eq!(receiver.try_recv().unwrap(), Err(expected.clone()));
+            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.serve_surface_request(
+                    SurfaceRequest::FocusPane {
+                        pane,
+                        target: FocusTarget::Terminal,
+                        reply,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            assert_eq!(receiver.try_recv().unwrap(), Err(expected.clone()));
+            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.serve_surface_request(
+                    SurfaceRequest::Capabilities {
+                        pane,
+                        owner_pid: std::process::id(),
+                        return_target: ReturnTarget::Terminal,
+                        reply,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            assert_eq!(receiver.try_recv().unwrap(), Err(expected));
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.cycle_surface_focus(window, cx)
+        });
+    }
+
+    #[gpui::test]
     fn modes_cancel_and_close_confirmation_remains_scope_specific(cx: &mut gpui::TestAppContext) {
         use super::Mode;
         use gpui::AppContext;
@@ -2081,12 +2125,22 @@ mod tests {
             workspace.tabs = crate::tabs::Tabs::new(|_, _| {
                 std::rc::Rc::new(cx.new(|cx| BusyPane {
                     focus: cx.focus_handle(),
-                })) as std::rc::Rc<dyn sprite_pane::PaneHandle>
+                }))
+                    as std::rc::Rc<
+                        dyn sprite_pane::PaneHandle<
+                                Request = crate::surface::channel::SurfaceRequest,
+                            >,
+                    >
             });
             workspace.tabs.split(Orientation::Horizontal, |_, _| {
                 std::rc::Rc::new(cx.new(|cx| BusyPane {
                     focus: cx.focus_handle(),
-                })) as std::rc::Rc<dyn sprite_pane::PaneHandle>
+                }))
+                    as std::rc::Rc<
+                        dyn sprite_pane::PaneHandle<
+                                Request = crate::surface::channel::SurfaceRequest,
+                            >,
+                    >
             });
             workspace.begin_rename(cx);
             assert!(matches!(workspace.mode, Mode::Renaming(_)));

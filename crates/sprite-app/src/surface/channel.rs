@@ -230,7 +230,7 @@ impl SurfaceConnection {
     /// thread that decided to accept the Surface — never by the program.
     /// Stops at the first failed write and marks the wire dead, as `send`
     /// does: a client that is gone is not written to a thousand more times.
-    fn establish(&self, line: &str) -> bool {
+    pub(crate) fn establish(&self, line: &str) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
         };
@@ -342,6 +342,48 @@ pub enum SurfaceRequest {
         description: String,
         reply: Reply,
     },
+}
+
+impl SurfaceRequest {
+    pub(crate) fn pane(&self) -> Option<PaneId> {
+        match self {
+            Self::Capabilities { pane, .. }
+            | Self::Open { pane, .. }
+            | Self::Update { pane, .. }
+            | Self::Focus { pane, .. }
+            | Self::Close { pane, .. }
+            | Self::Closed { pane, .. }
+            | Self::FocusPane { pane, .. }
+            | Self::Grid { pane, .. }
+            | Self::List { pane, .. } => Some(*pane),
+            Self::RegisterToken { .. } => None,
+        }
+    }
+
+    pub(crate) fn refuse_with(self, refusal: Refusal) {
+        match self {
+            Self::Capabilities { reply, .. } => {
+                let _ = reply.send(Err(refusal));
+            }
+            Self::Open { reply, .. }
+            | Self::FocusPane { reply, .. }
+            | Self::RegisterToken { reply, .. } => {
+                let _ = reply.send(Err(refusal));
+            }
+            Self::Update { .. }
+            | Self::Focus { .. }
+            | Self::Close { .. }
+            | Self::Closed { .. }
+            | Self::Grid { .. }
+            | Self::List { .. } => {}
+        }
+    }
+}
+
+impl sprite_pane::PaneRequest for SurfaceRequest {
+    fn refuse(self) {
+        self.refuse_with(Refusal::NotATerminal);
+    }
 }
 
 /// The listening end: a private socket, the window's key, one thread asleep

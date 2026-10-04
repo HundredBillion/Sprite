@@ -597,6 +597,21 @@ impl Focusable for TerminalView {
 }
 
 impl sprite_pane::Pane for TerminalView {
+    type Request = crate::surface::channel::SurfaceRequest;
+
+    fn surface_request(
+        &mut self,
+        request: Self::Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.serve_surface_request(request, window, cx);
+    }
+
+    fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_focus(window, cx);
+    }
+
     fn title(&self) -> Option<SharedString> {
         TerminalView::title(self)
     }
