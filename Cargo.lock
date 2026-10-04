@@ -5141,7 +5141,7 @@ dependencies = [
 
 [[package]]
 name = "sprite-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-channel 2.5.0",
  "gpui",
@@ -5157,14 +5157,14 @@ dependencies = [
 
 [[package]]
 name = "sprite-pane"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "sprite-term"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-channel 2.5.0",
  "flate2",
