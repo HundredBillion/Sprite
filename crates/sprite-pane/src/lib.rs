@@ -22,7 +22,7 @@ use gpui::{
 /// added on speculation: an interface shaped by guesswork encodes the guesser's
 /// assumptions, and the first pane from another repository is the right place
 /// to discover what else is owed.
-pub trait Pane: Render + Focusable + 'static {
+pub trait Pane: Render + Focusable + gpui::EventEmitter<TitleChanged> + 'static {
     /// The application's requests, independent of the pane implementation.
     type Request: PaneRequest;
 
@@ -40,6 +40,7 @@ pub trait Pane: Render + Focusable + 'static {
     fn cycle_surface_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     /// What this pane calls itself, or `None` when it does not know.
+    /// Emit [`TitleChanged`] whenever this value changes.
     ///
     /// Never a guess. A pane that has not been told its name says so, and the
     /// workspace decides what to show instead; a pane that invented one would
@@ -61,6 +62,13 @@ pub trait Pane: Render + Focusable + 'static {
     /// uneventful.
     fn close_warning(&self) -> Option<CloseWarning>;
 }
+
+/// A pane emits its new display title when that title changes, including resets to unknown.
+#[derive(Clone, Debug)]
+pub struct TitleChanged(pub Option<SharedString>);
+
+/// Receives display title changes on the GPUI thread.
+pub type TitleListener = Box<dyn FnMut(&TitleChanged, &mut App)>;
 
 /// A request must complete its reply when a pane cannot serve it.
 pub trait PaneRequest {
@@ -95,6 +103,8 @@ pub trait PaneHandle {
     fn view(&self) -> AnyView;
     /// See [`Pane::title`].
     fn title(&self, cx: &App) -> Option<SharedString>;
+    /// Subscribes without retaining the pane; dropping the subscription stops delivery.
+    fn subscribe_title(&self, cx: &mut App, listener: TitleListener) -> gpui::Subscription;
     /// The handle the workspace focuses to hand this pane the keyboard.
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     /// See [`Pane::set_allocated`].
@@ -122,6 +132,10 @@ impl<V: Pane> PaneHandle for gpui::Entity<V> {
 
     fn title(&self, cx: &App) -> Option<SharedString> {
         self.read(cx).title()
+    }
+
+    fn subscribe_title(&self, cx: &mut App, mut listener: TitleListener) -> gpui::Subscription {
+        cx.subscribe(self, move |_, event, cx| listener(event, cx))
     }
 
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -170,6 +184,8 @@ mod tests {
     impl PaneRequest for Request {
         fn refuse(self) {}
     }
+
+    impl gpui::EventEmitter<TitleChanged> for Placeholder {}
 
     impl Pane for Placeholder {
         type Request = Request;

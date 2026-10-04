@@ -211,3 +211,152 @@ fn startup_and_reload_apply_identical_session_defaults(cx: &mut gpui::TestAppCon
         assert!(view.begin_shutdown().is_none());
     });
 }
+
+#[gpui::test]
+fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
+    cx: &mut gpui::TestAppContext,
+) {
+    use sprite_pane::Pane;
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-i".into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(0), crate::pane_tree::PaneId(0)),
+            },
+            window,
+            cx,
+        )
+    });
+    wait_for_bundle(&view, cx, |_| true);
+    view.update(cx, |view, _| {
+        view.send(TerminalCommand::SetCursor(sprite_term::CursorDefaults {
+            style: None,
+            blink: Some(false),
+        }))
+    });
+    wait_for_bundle(&view, cx, |bundle| !bundle.render.cursor.blinking);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let received = events.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &sprite_pane::TitleChanged, _| {
+            received.borrow_mut().push(event.0.clone());
+        })
+    });
+    view.update(cx, |view, cx| {
+        view.apply(
+            crate::terminal_events::Effect::Title(Some("explicit".into())),
+            cx,
+        );
+        view.send(TerminalCommand::Input(b"stty -echo; cat\n".to_vec()));
+    });
+    // Wait on the kernel condition without advancing GPUI's blink clock or delivering snapshots.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if view.read_with(cx, |view, _| view.foreground().program() == Some("cat")) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cat did not become the foreground job"
+        );
+        std::thread::yield_now();
+    }
+    cx.run_until_parked();
+    let queries = FOREGROUND_QUERIES.with(|count| count.get());
+    cx.executor().advance_clock(BLINK_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(
+        FOREGROUND_QUERIES.with(|count| count.get()),
+        queries,
+        "explicit titles skip foreground lookups even on blink activity"
+    );
+    view.update(cx, |view, cx| {
+        let queries = FOREGROUND_QUERIES.with(|count| count.get());
+        let warning = view.close_warning().unwrap();
+        assert_eq!(warning.program.unwrap().as_ref(), "cat");
+        assert_eq!(
+            FOREGROUND_QUERIES.with(|count| count.get()),
+            queries + 1,
+            "close consent must query live state, not the explicit display title"
+        );
+        assert!(view.foreground_owner_group(std::process::id()).is_none());
+        view.apply(crate::terminal_events::Effect::Title(None), cx);
+        assert_eq!(view.title().unwrap().as_ref(), "cat");
+    });
+    assert_eq!(
+        events
+            .borrow()
+            .iter()
+            .map(|title| title.as_ref().map(|title| title.as_ref()))
+            .collect::<Vec<_>>(),
+        [Some("explicit"), Some("cat")]
+    );
+    let strings = TITLE_STRINGS.with(|count| count.get());
+    cx.executor().advance_clock(BLINK_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(
+        TITLE_STRINGS.with(|count| count.get()),
+        strings,
+        "unchanged fallback names reuse the cached display String"
+    );
+    assert_eq!(events.borrow().len(), 2);
+    view.update(cx, |view, _| view.send(TerminalCommand::Input(vec![0x04])));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if view.read_with(cx, |view, _| {
+            view.foreground() == sprite_term::ForegroundState::Idle
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cat did not leave the foreground"
+        );
+        std::thread::yield_now();
+    }
+    cx.executor().advance_clock(BLINK_INTERVAL);
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(view.title().is_none());
+        assert!(view.close_warning().is_none());
+    });
+    // Isolate blink activity from shell output snapshots that may still be queued.
+    view.update(cx, |view, _| view._snapshots = Task::ready(()));
+    let generation = view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation);
+    view.update(cx, |view, _| {
+        view.send(TerminalCommand::Input(b"cat\n".to_vec()))
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if view.read_with(cx, |view, _| view.foreground().program() == Some("cat")) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "silent cat did not become the foreground job"
+        );
+        std::thread::yield_now();
+    }
+    cx.executor().advance_clock(BLINK_INTERVAL);
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.title().unwrap().as_ref(), "cat")
+    });
+    assert_eq!(
+        view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation),
+        generation,
+        "the existing blink timer discovers a silent job without a new snapshot"
+    );
+    assert_eq!(
+        events.borrow().last().unwrap().as_ref().unwrap().as_ref(),
+        "cat"
+    );
+}

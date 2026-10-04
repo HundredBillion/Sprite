@@ -85,6 +85,7 @@ pub struct TerminalView {
     ///
     /// `None` means unknown, never a guess: the engine's own rule, kept here.
     title: Option<SharedString>,
+    display_title: Option<SharedString>,
     /// Sub-row scroll remainder, so trackpad gestures are not rounded away.
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
@@ -133,6 +134,13 @@ pub struct TerminalView {
 pub(crate) struct PaneExit {
     pub sender: async_channel::Sender<(crate::tabs::TabId, crate::pane_tree::PaneId)>,
     pub identity: (crate::tabs::TabId, crate::pane_tree::PaneId),
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TITLE_STRINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static TITLE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static FOREGROUND_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl TerminalView {
@@ -250,7 +258,7 @@ impl TerminalView {
             loop {
                 let decision = crate::terminal_events::decide(events.next().await);
                 if decision.stop {
-                    let _ = view.update(cx, |view, _| {
+                    let _ = view.update(cx, |view, cx| {
                         view.session = match std::mem::replace(
                             &mut view.session,
                             SessionState::NeverStarted,
@@ -260,6 +268,7 @@ impl TerminalView {
                             }
                             SessionState::NeverStarted => SessionState::NeverStarted,
                         };
+                        view.refresh_display_title(cx);
                     });
                 }
                 if decision.close_pane {
@@ -300,6 +309,7 @@ impl TerminalView {
                         if newer {
                             view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
+                            view.refresh_display_title(cx);
                             if view.hover_request.is_none()
                                 && let Some(cell) = view.hovered_cell
                             {
@@ -341,6 +351,7 @@ impl TerminalView {
             size: Some(initial_size),
             allocated: None,
             title: None,
+            display_title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
             plain_link_click: input::PlainLinkClick::default(),
@@ -422,6 +433,7 @@ impl TerminalView {
             size: None,
             allocated: None,
             title: None,
+            display_title: None,
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag: None,
@@ -454,7 +466,10 @@ impl TerminalView {
         use crate::terminal_events::Effect;
         match effect {
             Effect::Status(line) => self.status = Some(line),
-            Effect::Title(title) => self.title = title.map(SharedString::from),
+            Effect::Title(title) => {
+                self.title = title.map(SharedString::from);
+                self.refresh_display_title(cx);
+            }
             Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
             Effect::HyperlinkResolved {
                 position,
@@ -531,6 +546,8 @@ impl TerminalView {
     /// What this pane is running, asked of the kernel rather than of the
     /// worker — see [`sprite_term::ForegroundWatch`].
     pub fn foreground(&self) -> sprite_term::ForegroundState {
+        #[cfg(test)]
+        FOREGROUND_QUERIES.with(|count| count.set(count.get() + 1));
         // Nothing is running in a pane that never started, so closing it must
         // not ask for confirmation.
         match &self.session {
@@ -556,14 +573,39 @@ impl TerminalView {
     /// for. Then nothing — the workspace falls back to the tab's index, and
     /// this view does not invent a word to save it the trouble.
     pub fn title(&self) -> Option<SharedString> {
-        if let Some(title) = &self.title {
-            return Some(title.clone());
+        #[cfg(test)]
+        TITLE_QUERIES.with(|count| count.set(count.get() + 1));
+        self.display_title.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocated_for_test(&self) -> Option<Size<Pixels>> {
+        self.allocated
+    }
+
+    fn refresh_display_title(&mut self, cx: &mut Context<Self>) {
+        let wanted = if let Some(title) = &self.title {
+            Some(title.clone())
+        } else {
+            let foreground = self.foreground();
+            let program = foreground.program();
+            if self.display_title.as_ref().map(|title| title.as_ref()) == program {
+                return;
+            }
+            program.map(|program| {
+                #[cfg(test)]
+                TITLE_STRINGS.with(|count| count.set(count.get() + 1));
+                SharedString::from(program.to_owned())
+            })
+        };
+        if wanted != self.display_title {
+            self.display_title = wanted;
+            cx.emit(sprite_pane::TitleChanged(self.display_title.clone()));
         }
-        self.foreground()
-            .program()
-            .map(|program| SharedString::from(program.to_owned()))
     }
 }
+
+impl gpui::EventEmitter<sprite_pane::TitleChanged> for TerminalView {}
 
 impl Drop for TerminalView {
     fn drop(&mut self) {

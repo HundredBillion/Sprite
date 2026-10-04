@@ -122,6 +122,8 @@ impl TerminalView {
     /// blinking, so a program that stops the blink cannot leave the cursor
     /// hidden.
     pub(super) fn tick_blink(&mut self, cx: &mut Context<Self>) {
+        // The existing wake also discovers silent foreground programs with no OSC title.
+        self.refresh_display_title(cx);
         let terminal_blinks = self
             .bundle
             .as_ref()

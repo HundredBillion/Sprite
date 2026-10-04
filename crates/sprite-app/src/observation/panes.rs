@@ -48,7 +48,7 @@ struct Entry {
 }
 
 /// Where a pane sits in the window, as the schema reports it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     pub tab_order: usize,
     pub rect: Rect,
@@ -69,6 +69,8 @@ impl Default for Placement {
 #[derive(Default)]
 pub struct WindowPanes {
     entries: Mutex<HashMap<PaneId, Entry>>,
+    #[cfg(test)]
+    layout_publications: std::sync::atomic::AtomicUsize,
 }
 
 impl WindowPanes {
@@ -95,12 +97,21 @@ impl WindowPanes {
         );
     }
 
+    #[cfg(test)]
+    pub(crate) fn layout_publications(&self) -> usize {
+        self.layout_publications
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Records where the window's panes currently sit.
     ///
     /// Published by the window as the layout changes. Panes the window no
     /// longer has are ignored rather than added back: this reports placement,
     /// not membership.
     pub fn set_layout(&self, placements: &[(PaneId, Placement)]) {
+        #[cfg(test)]
+        self.layout_publications
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut entries = self
             .entries
             .lock()

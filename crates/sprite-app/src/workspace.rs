@@ -25,6 +25,17 @@ use crate::tabs::{TabId, Tabs};
 use crate::terminal_view::{PaneExit, TerminalView};
 use crate::tokens::TokenRegistry;
 
+#[cfg(test)]
+thread_local! {
+    static DISPLAY_STRINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn display_text(text: String) -> SharedString {
+    #[cfg(test)]
+    DISPLAY_STRINGS.with(|count| count.set(count.get() + 1));
+    text.into()
+}
+
 const BACKGROUND: u32 = 0x101014;
 /// Drawn between panes so a split is visible without a separate widget.
 const DIVIDER: u32 = 0x2a2a34;
@@ -95,6 +106,19 @@ pub struct Workspace {
     /// What the title bar currently says, so it is set only when it changes:
     /// the platform call is not free, and render runs every frame.
     window_title: Option<SharedString>,
+    wanted_title: SharedString,
+    pane_titles: std::collections::HashMap<gpui::EntityId, PaneTitle>,
+    labels: Vec<(TabId, SharedString)>,
+    viewport: Size<Pixels>,
+    placements: Vec<PanePlacement>,
+    dividers: Vec<(DividerPlacement, SharedString)>,
+    published: Vec<(PaneId, Placement)>,
+    _bounds: gpui::Subscription,
+}
+
+struct PaneTitle {
+    title: Option<SharedString>,
+    _subscription: gpui::Subscription,
 }
 
 enum Mode {
@@ -219,7 +243,15 @@ impl Workspace {
             }
         });
 
-        Self {
+        let bounds = cx.observe_window_bounds(window, |workspace, window, cx| {
+            let viewport = window.viewport_size();
+            if workspace.viewport != viewport {
+                workspace.viewport = viewport;
+                workspace.refresh_layout(cx);
+                cx.notify();
+            }
+        });
+        let mut workspace = Self {
             tabs,
             endpoint,
             panes,
@@ -229,6 +261,14 @@ impl Workspace {
             focus: cx.focus_handle(),
             mode: Mode::Idle,
             window_title: None,
+            wanted_title: "Sprite".into(),
+            pane_titles: Default::default(),
+            labels: Vec::new(),
+            viewport: window.viewport_size(),
+            placements: Vec::new(),
+            dividers: Vec::new(),
+            published: Vec::new(),
+            _bounds: bounds,
             config_path,
             _reload: reload_task,
             reload_sender,
@@ -236,7 +276,136 @@ impl Workspace {
             _surface_requests: surface_task,
             exit_sender,
             _exits: exit_task,
+        };
+        workspace.refresh_layout(cx);
+        workspace
+    }
+
+    fn refresh_layout(&mut self, cx: &mut Context<Self>) {
+        let all = self.tabs.all_panes();
+        self.pane_titles.retain(|id, _| {
+            all.iter()
+                .any(|(_, _, pane)| pane.view().entity_id() == *id)
+        });
+        for (_, _, pane) in all {
+            let id = pane.view().entity_id();
+            self.pane_titles.entry(id).or_insert_with(|| {
+                let workspace = cx.weak_entity();
+                let subscription = pane.subscribe_title(
+                    cx,
+                    Box::new(move |event, cx| {
+                        let _ = workspace.update(cx, |workspace, cx| {
+                            if let Some(cached) = workspace.pane_titles.get_mut(&id)
+                                && cached.title != event.0
+                            {
+                                cached.title = event.0.clone();
+                                workspace.refresh_labels();
+                                cx.notify();
+                            }
+                        });
+                    }),
+                );
+                PaneTitle {
+                    title: pane.title(cx),
+                    _subscription: subscription,
+                }
+            });
         }
+        self.refresh_labels();
+        let (width, height, strip) = self.cached_pane_area();
+        let placements: Vec<PanePlacement> = self
+            .tabs
+            .layout()
+            .into_iter()
+            .map(|(pane, rect, handle)| {
+                (
+                    pane,
+                    rect.x * width,
+                    rect.y * height,
+                    (rect.width * width - DIVIDER_PX).max(1.0),
+                    (rect.height * height - DIVIDER_PX).max(1.0),
+                    Rc::clone(handle),
+                )
+            })
+            .collect();
+        for (pane, _, _, width, height, handle) in &placements {
+            let unchanged = self.placements.iter().any(|(old, _, _, w, h, old_handle)| {
+                old == pane && w == width && h == height && Rc::ptr_eq(old_handle, handle)
+            });
+            if !unchanged {
+                handle.set_allocated(gpui::size(px(*width), px(*height)), cx);
+            }
+        }
+        self.placements = placements;
+        self.dividers = divider_placements(&self.tabs.dividers(), width, height, strip)
+            .into_iter()
+            .enumerate()
+            .map(|(index, placed)| (placed, display_text(format!("divider-{index}"))))
+            .collect();
+        let published: Vec<_> = self
+            .tabs
+            .placements()
+            .into_iter()
+            .map(|(pane, tab_order, rect, focused)| {
+                (
+                    pane,
+                    Placement {
+                        tab_order,
+                        rect,
+                        focused,
+                    },
+                )
+            })
+            .collect();
+        // Observation reports normalized geometry and each tab's own focus, independent of viewport size.
+        if published != self.published {
+            self.panes.set_layout(&published);
+            self.published = published;
+        }
+    }
+
+    fn refresh_labels(&mut self) {
+        self.labels = self
+            .tabs
+            .order()
+            .into_iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let title = self
+                    .tabs
+                    .focused_in(tab)
+                    .and_then(|pane| self.pane_titles.get(&pane.view().entity_id()))
+                    .and_then(|cached| cached.title.as_ref());
+                (
+                    tab,
+                    tab_label(
+                        self.tabs.name(tab),
+                        title.map(|title| title.as_ref()),
+                        index,
+                    ),
+                )
+            })
+            .collect();
+        self.wanted_title = self
+            .tabs
+            .active()
+            .and_then(|tab| tab.focused())
+            .and_then(|pane| self.pane_titles.get(&pane.view().entity_id()))
+            .and_then(|cached| cached.title.clone())
+            .unwrap_or_else(|| window_title(None).into());
+    }
+
+    fn cached_pane_area(&self) -> (f32, f32, f32) {
+        let strip = if self.tabs.len() > 1 {
+            TAB_STRIP_HEIGHT
+        } else {
+            0.0
+        };
+        (
+            f32::from(self.viewport.width),
+            (f32::from(self.viewport.height) - strip).max(1.0),
+            strip,
+        )
     }
 
     /// Turns pane observation on or off while the window is running.
@@ -260,6 +429,7 @@ impl Workspace {
         } else if let Some(mut endpoint) = self.endpoint.take() {
             endpoint.close();
         }
+        self.refresh_layout(cx);
         cx.notify();
     }
 
@@ -303,6 +473,7 @@ impl Workspace {
                 cx,
             ),
         );
+        self.refresh_layout(cx);
         cx.notify();
     }
 
@@ -319,6 +490,7 @@ impl Workspace {
             window,
             cx,
         ));
+        self.refresh_layout(cx);
         cx.notify();
     }
 
@@ -357,6 +529,7 @@ impl Workspace {
         if was_active || self.tabs.is_empty() {
             self.after_close(cx);
         } else {
+            self.refresh_layout(cx);
             cx.notify();
         }
     }
@@ -434,9 +607,15 @@ impl Workspace {
         if running.is_empty() {
             return true;
         }
+        let running: SharedString = describe_running(&running).into();
         self.mode = Mode::ConfirmingClose(PendingClose {
             scope,
-            running: describe_running(&running).into(),
+            label: display_text(format!(
+                "{} — {} to close this {}, Esc to keep it",
+                running,
+                scope.again(),
+                scope.noun()
+            )),
         });
         cx.notify();
         false
@@ -572,7 +751,11 @@ impl Workspace {
         };
         // Start from the current name, so a rename edits rather than retypes.
         let text = self.tabs.name(tab).unwrap_or_default().to_owned();
-        self.mode = Mode::Renaming(TabRename { tab, text });
+        self.mode = Mode::Renaming(TabRename {
+            tab,
+            label: display_text(format!("{text}\u{258f}")),
+            text,
+        });
         cx.notify();
     }
 
@@ -583,11 +766,15 @@ impl Workspace {
             return false;
         };
         match rename_step(&renaming.text, keystroke) {
-            RenameStep::Editing(text) => renaming.text = text,
+            RenameStep::Editing(text) => {
+                renaming.label = display_text(format!("{text}\u{258f}"));
+                renaming.text = text;
+            }
             RenameStep::Commit(text) => {
                 let tab = renaming.tab;
                 let name = (!text.is_empty()).then_some(text);
                 self.tabs.set_name(tab, name);
+                self.refresh_labels();
                 self.mode = Mode::Idle;
             }
             RenameStep::Cancel => self.mode = Mode::Idle,
@@ -605,6 +792,7 @@ impl Workspace {
 
     fn after_close(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::Idle;
+        self.refresh_layout(cx);
         if self.tabs.is_empty() {
             // The last pane of the last tab closed, so the window has nothing
             // left to show.
@@ -616,6 +804,7 @@ impl Workspace {
 
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
         if self.tabs.focus_direction(direction).is_some() {
+            self.refresh_layout(cx);
             cx.notify();
         }
     }
@@ -639,6 +828,7 @@ impl Workspace {
             .tabs
             .set_divider_ratio(drag.pane, drag.direction, ratio)
         {
+            self.refresh_layout(cx);
             cx.notify();
         } else {
             // The boundary is gone, so there is nothing left to move.
@@ -656,6 +846,7 @@ impl Workspace {
     /// Returns a split to even, which is where it started.
     fn reset_divider(&mut self, pane: PaneId, direction: Direction, cx: &mut Context<Self>) {
         if self.tabs.set_divider_ratio(pane, direction, 0.5) {
+            self.refresh_layout(cx);
             cx.notify();
         }
     }
@@ -677,6 +868,7 @@ impl Workspace {
         let (width, height, _) = self.pane_area(window);
         let ratio = nudged_ratio(&divider, width, height, direction);
         if self.tabs.set_divider_ratio(focused, direction, ratio) {
+            self.refresh_layout(cx);
             cx.notify();
         }
     }
@@ -707,12 +899,14 @@ impl Workspace {
         } else {
             self.tabs.previous_tab();
         }
+        self.refresh_layout(cx);
         cx.notify();
     }
 
     fn focus_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
         self.mode = Mode::Idle;
         if self.tabs.focus_tab(tab) {
+            self.refresh_layout(cx);
             cx.notify();
         }
     }
@@ -767,6 +961,7 @@ impl Workspace {
     fn focus_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         if self.tabs.focus_pane(pane) {
             self.mode = Mode::Idle;
+            self.refresh_layout(cx);
             cx.notify();
         }
     }
@@ -991,9 +1186,9 @@ type PanePlacement = (
 /// the order can be asserted without a window.
 fn tab_label(name: Option<&str>, title: Option<&str>, index: usize) -> SharedString {
     match (name, title) {
-        (Some(name), _) => name.to_owned().into(),
-        (None, Some(title)) => title.to_owned().into(),
-        (None, None) => format!("{}", index + 1).into(),
+        (Some(name), _) => display_text(name.to_owned()),
+        (None, Some(title)) => display_text(title.to_owned()),
+        (None, None) => display_text(format!("{}", index + 1)),
     }
 }
 
@@ -1002,6 +1197,7 @@ fn tab_label(name: Option<&str>, title: Option<&str>, index: usize) -> SharedStr
 struct TabRename {
     tab: TabId,
     text: String,
+    label: SharedString,
 }
 
 /// Where one keystroke leaves a name being typed.
@@ -1045,8 +1241,7 @@ fn window_title(title: Option<&str>) -> &str {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingClose {
     scope: CloseScope,
-    /// What is running, as it will be shown.
-    running: SharedString,
+    label: SharedString,
 }
 
 /// How much a close would take with it.
@@ -1402,59 +1597,15 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (width, height, strip) = self.pane_area(window);
+        let (_, height, strip) = self.cached_pane_area();
         let Some(active) = self.tabs.active() else {
             return div().into_any_element();
         };
         let focused = active.focus();
         let active_tab = self.tabs.active_tab();
-        let tab_order = self.tabs.order();
-
-        // Each tab's label, resolved before the strip is built so the tab
-        // closure stays a pure placement of a value it is handed.
-        let labels: Vec<SharedString> = tab_order
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                let title = self.tabs.focused_in(*tab).and_then(|pane| pane.title(cx));
-                tab_label(
-                    self.tabs.name(*tab),
-                    title.as_ref().map(|t| t.as_ref()),
-                    index,
-                )
-            })
-            .collect();
-
-        // The title bar follows the focused pane of the active tab.
-        let focused_title = active.focused().and_then(|pane| pane.title(cx));
-        let wanted: SharedString = window_title(focused_title.as_ref().map(|t| t.as_ref()))
-            .to_owned()
-            .into();
-        if self.window_title.as_ref() != Some(&wanted) {
-            window.set_window_title(&wanted);
-            self.window_title = Some(wanted);
-        }
-
-        // Each pane learns its own allocation before it lays out its grid, so
-        // every child is told the size of its pane rather than of the window.
-        let placements: Vec<PanePlacement> = self
-            .tabs
-            .layout()
-            .into_iter()
-            .map(|(pane, rect, handle)| {
-                (
-                    pane,
-                    rect.x * width,
-                    rect.y * height,
-                    (rect.width * width - DIVIDER_PX).max(1.0),
-                    (rect.height * height - DIVIDER_PX).max(1.0),
-                    Rc::clone(handle),
-                )
-            })
-            .collect();
-
-        for (_, _, _, pane_width, pane_height, handle) in &placements {
-            handle.set_allocated(gpui::size(px(*pane_width), px(*pane_height)), cx);
+        if self.window_title.as_ref() != Some(&self.wanted_title) {
+            window.set_window_title(&self.wanted_title);
+            self.window_title = Some(self.wanted_title.clone());
         }
 
         // A new Surface joins the focus subtree only after this frame is drawn.
@@ -1462,30 +1613,12 @@ impl Render for Workspace {
             workspace.focus_active_pane(window, cx);
         });
 
-        // Published from here because this is where the layout is decided, and
-        // a request arriving on another thread must never have to wait for a
-        // frame to learn where a pane sits.
-        let published: Vec<(PaneId, Placement)> = self
-            .tabs
-            .placements()
-            .into_iter()
-            .map(|(pane, tab_order, rect, focused)| {
-                (
-                    pane,
-                    Placement {
-                        tab_order,
-                        rect,
-                        focused,
-                    },
-                )
-            })
-            .collect();
-        self.panes.set_layout(&published);
-
         // Built before the outer element so each listener's borrow of `cx`
         // ends here rather than spanning the rest of the chain.
-        let pane_children: Vec<gpui::Div> = placements
-            .into_iter()
+        let pane_children: Vec<gpui::Div> = self
+            .placements
+            .iter()
+            .cloned()
             .map(|(pane, x, y, pane_width, pane_height, handle)| {
                 let is_focused = pane == focused;
                 div()
@@ -1512,15 +1645,14 @@ impl Render for Workspace {
         // Each pane is drawn a pixel short on its far edge, so the gap a
         // boundary shows through sits just before it. The strip is centred on
         // that gap, which puts the target where the eye already is.
-        let dividers = divider_placements(&self.tabs.dividers(), width, height, strip);
-        let divider_children: Vec<gpui::Div> = dividers
+        let divider_children: Vec<gpui::Div> = self
+            .dividers
             .iter()
-            .enumerate()
-            .map(|(index, placed)| {
+            .map(|(placed, group)| {
                 let placed = *placed;
                 // A group per divider, so the line can answer its own strip
                 // being hovered without the workspace keeping any state.
-                let group: SharedString = format!("divider-{index}").into();
+                let group = group.clone();
                 let horizontal = placed.orientation == Orientation::Horizontal;
                 let leading = strip_leading(placed.boundary);
                 // A dragged line stays lit even once the pointer has left the
@@ -1589,21 +1721,22 @@ impl Render for Workspace {
             })
             .collect();
 
-        let tab_children: Vec<gpui::Div> = tab_order
-            .into_iter()
-            .enumerate()
-            .map(|(index, tab)| {
+        let tab_children: Vec<gpui::Div> = self
+            .labels
+            .iter()
+            .map(|(tab, cached_label)| {
+                let tab = *tab;
                 let is_active = Some(tab) == active_tab;
                 let editing = self
                     .mode
                     .renaming()
                     .filter(|renaming| renaming.tab == tab)
-                    .map(|renaming| renaming.text.clone());
+                    .map(|renaming| renaming.label.clone());
                 // A thin bar after the text stands for the caret; there is no
                 // cursor to move, so a glyph is all the field needs.
                 let label: SharedString = match &editing {
-                    Some(text) => format!("{text}\u{258f}").into(),
-                    None => labels[index].clone(),
+                    Some(label) => label.clone(),
+                    None => cached_label.clone(),
                 };
                 div()
                     .flex()
@@ -1726,12 +1859,7 @@ impl Render for Workspace {
                     .py(px(4.0))
                     .bg(rgb(CONFIRM_BG))
                     .text_color(rgb(CONFIRM_FG))
-                    .child(SharedString::from(format!(
-                        "{} — {} to close this {}, Esc to keep it",
-                        pending.running,
-                        pending.scope.again(),
-                        pending.scope.noun()
-                    )))
+                    .child(pending.label.clone())
             }))
             .when(strip > 0.0, |element| {
                 element.child(
@@ -1835,6 +1963,217 @@ mod tests {
     }
 
     #[gpui::test]
+    fn idle_workspace_does_not_refresh_titles_or_publish_layout(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split(Orientation::Horizontal, window, cx);
+            workspace.open_tab(window, cx);
+            workspace.switch_tab(false, cx);
+            workspace.begin_rename(cx);
+        });
+        draw_workspace(cx);
+        let before = (
+            super::DISPLAY_STRINGS.with(|count| count.get()),
+            crate::terminal_view::TITLE_QUERIES.with(|count| count.get()),
+            crate::terminal_view::TITLE_STRINGS.with(|count| count.get()),
+            crate::terminal_view::FOREGROUND_QUERIES.with(|count| count.get()),
+            workspace.read_with(cx, |workspace, _| workspace.panes.layout_publications()),
+        );
+        for _ in 0..4 {
+            draw_workspace(cx);
+        }
+        let after = (
+            super::DISPLAY_STRINGS.with(|count| count.get()),
+            crate::terminal_view::TITLE_QUERIES.with(|count| count.get()),
+            crate::terminal_view::TITLE_STRINGS.with(|count| count.get()),
+            crate::terminal_view::FOREGROUND_QUERIES.with(|count| count.get()),
+            workspace.read_with(cx, |workspace, _| workspace.panes.layout_publications()),
+        );
+        assert_eq!(
+            after, before,
+            "idle frames must only consume cached titles and layout"
+        );
+    }
+
+    fn publications(
+        workspace: &gpui::Entity<super::Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> usize {
+        workspace.read_with(cx, |workspace, _| workspace.panes.layout_publications())
+    }
+
+    #[gpui::test]
+    fn layout_mutations_publish_only_changed_observation_geometry(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        assert_eq!(publications(&workspace, cx), 1);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split(Orientation::Horizontal, window, cx)
+        });
+        assert_eq!(publications(&workspace, cx), 2);
+        let placed = workspace.read_with(cx, |workspace, _| workspace.dividers[0].0);
+        workspace.update(cx, |workspace, cx| {
+            workspace.begin_divider_drag(placed, placed.boundary, cx);
+            workspace.drag_divider(
+                gpui::point(gpui::px(placed.boundary - 40.0), gpui::px(0.0)),
+                cx,
+            );
+            workspace.end_divider_drag(cx);
+        });
+        assert_eq!(publications(&workspace, cx), 3);
+        workspace.update(cx, |workspace, cx| {
+            workspace.reset_divider(placed.pane, placed.direction, cx)
+        });
+        assert_eq!(publications(&workspace, cx), 4);
+        workspace.update(cx, |workspace, cx| {
+            workspace.reset_divider(placed.pane, placed.direction, cx)
+        });
+        assert_eq!(publications(&workspace, cx), 4);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.nudge_divider(Direction::Left, window, cx)
+        });
+        assert_eq!(publications(&workspace, cx), 5);
+        workspace.update(cx, |workspace, cx| {
+            workspace.focus_direction(Direction::Left, cx)
+        });
+        assert_eq!(publications(&workspace, cx), 6);
+        let size = gpui::size(gpui::px(1000.0), gpui::px(700.0));
+        cx.simulate_resize(size);
+        draw_workspace(cx);
+        assert_eq!(
+            publications(&workspace, cx),
+            6,
+            "pixel resize does not change normalized observation geometry"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.viewport, size);
+            for (_, _, _, width, height, pane) in &workspace.placements {
+                let terminal = pane.view().downcast::<super::TerminalView>().unwrap();
+                assert_eq!(
+                    terminal.read(cx).allocated_for_test(),
+                    Some(gpui::size(gpui::px(*width), gpui::px(*height)))
+                );
+            }
+        });
+        let background = workspace.read_with(cx, |workspace, _| {
+            (
+                workspace.tabs.active_tab().unwrap(),
+                workspace.tabs.active().unwrap().focus(),
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
+        assert_eq!(publications(&workspace, cx), 7);
+        workspace.update(cx, |workspace, cx| workspace.switch_tab(false, cx));
+        assert_eq!(
+            publications(&workspace, cx),
+            7,
+            "observation focus belongs to each tab, not only the active tab"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.placements.len(), 2);
+            assert_eq!(
+                workspace.placements[0].4,
+                700.0 - super::TAB_STRIP_HEIGHT - super::DIVIDER_PX
+            );
+        });
+        workspace.update(cx, |workspace, cx| workspace.switch_tab(true, cx));
+        workspace.update(cx, |workspace, cx| {
+            workspace.close_exited_pane(background.0, background.1, cx)
+        });
+        assert_eq!(publications(&workspace, cx), 8);
+        workspace.update(cx, |workspace, cx| workspace.close_active_tab(cx));
+        assert_eq!(publications(&workspace, cx), 9);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.placements.len(), 1);
+            assert_eq!(workspace.placements[0].4, 699.0);
+            assert_eq!(workspace.pane_titles.len(), 1);
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_observation_enabled(true, cx);
+            workspace.set_observation_enabled(false, cx);
+        });
+        assert_eq!(
+            publications(&workspace, cx),
+            9,
+            "reenabling retains the current registry layout"
+        );
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        assert_eq!(publications(&workspace, cx), 10);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.placements.is_empty());
+            assert!(workspace.pane_titles.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn pushed_titles_update_labels_and_closed_panes_release_subscriptions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let (workspace, cx) = test_workspace(cx);
+        let pane = workspace.update(cx, |workspace, cx| {
+            let pane = cx.new(|cx| BusyPane {
+                focus: cx.focus_handle(),
+            });
+            workspace.tabs = crate::tabs::Tabs::new(|_, _| {
+                std::rc::Rc::new(pane.clone())
+                    as std::rc::Rc<
+                        dyn sprite_pane::PaneHandle<
+                                Request = crate::surface::channel::SurfaceRequest,
+                            >,
+                    >
+            });
+            workspace.refresh_layout(cx);
+            pane
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.labels[0].1.as_ref(), "1");
+            assert_eq!(workspace.wanted_title.as_ref(), "Sprite");
+        });
+        pane.update(cx, |_, cx| {
+            cx.emit(sprite_pane::TitleChanged(Some("editor".into())))
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.labels[0].1.as_ref(), "editor");
+            assert_eq!(workspace.wanted_title.as_ref(), "editor");
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.begin_rename(cx);
+            workspace.rename_key(&plain("a", Some("a")), cx);
+            workspace.rename_key(&plain("enter", None), cx);
+        });
+        pane.update(cx, |_, cx| {
+            cx.emit(sprite_pane::TitleChanged(Some("changed".into())))
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.labels[0].1.as_ref(), "a");
+            assert_eq!(workspace.wanted_title.as_ref(), "changed");
+        });
+        pane.update(cx, |_, cx| cx.emit(sprite_pane::TitleChanged(None)));
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.wanted_title.as_ref(), "Sprite")
+        });
+        workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
+        workspace.update(cx, |workspace, cx| {
+            workspace.close_exited_pane(crate::tabs::TabId(0), PaneId(0), cx)
+        });
+        let before = super::DISPLAY_STRINGS.with(|count| count.get());
+        pane.update(cx, |_, cx| {
+            cx.emit(sprite_pane::TitleChanged(Some("stale".into())))
+        });
+        assert_eq!(super::DISPLAY_STRINGS.with(|count| count.get()), before);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.pane_titles.len(), 1)
+        });
+        let weak = pane.downgrade();
+        drop(pane);
+        cx.run_until_parked();
+        assert!(
+            weak.upgrade().is_none(),
+            "title subscriptions and cached geometry must release closed panes"
+        );
+    }
+
+    #[gpui::test]
     fn duplicate_token_registration_does_not_repaint_panes(cx: &mut gpui::TestAppContext) {
         use crate::surface::channel::SurfaceRequest;
         use gpui::AppContext;
@@ -1866,6 +2205,7 @@ mod tests {
                 std::rc::Rc::new(placeholder.clone())
                     as std::rc::Rc<dyn sprite_pane::PaneHandle<Request = SurfaceRequest>>
             });
+            workspace.refresh_layout(cx);
             (terminal, placeholder)
         });
         let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -2018,6 +2358,8 @@ mod tests {
             gpui::div().track_focus(&self.focus)
         }
     }
+    impl gpui::EventEmitter<sprite_pane::TitleChanged> for BusyPane {}
+
     impl sprite_pane::Pane for BusyPane {
         type Request = crate::surface::channel::SurfaceRequest;
         fn title(&self) -> Option<gpui::SharedString> {
@@ -2051,6 +2393,7 @@ mod tests {
                 }))
                     as std::rc::Rc<dyn sprite_pane::PaneHandle<Request = SurfaceRequest>>
             });
+            workspace.refresh_layout(cx);
         });
         let pane = workspace.read_with(cx, |workspace, _| workspace.tabs.active().unwrap().focus());
         for (pane, expected) in [
@@ -2136,6 +2479,7 @@ mod tests {
                             >,
                     >
             });
+            workspace.refresh_layout(cx);
             workspace.begin_rename(cx);
             assert!(matches!(workspace.mode, Mode::Renaming(_)));
             let placed = divider_placements(&workspace.tabs.dividers(), 800.0, 600.0, 0.0)[0];
