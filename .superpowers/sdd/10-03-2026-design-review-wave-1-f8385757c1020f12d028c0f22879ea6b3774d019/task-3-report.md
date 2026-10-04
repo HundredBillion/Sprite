@@ -11,7 +11,7 @@ Implemented from reviewed base `1be3df0` on `fix/issue-48-design`.
 
 Inspected existing worker `apply_color_defaults`, snapshot colour projection, stream ownership/drop and shutdown implementations, application startup/reload paths, helper functions returning sessions, and benchmark `await_ready`. The dependency source at `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libghostty-vt-0.2.1/src/terminal.rs:155` documents separate default and OSC override layers; lines 657 and 673 implement the default setters. Both paired values still go through those setters, preserving program precedence/reset behavior rather than changing effective colours directly.
 
-Internal workspace API migration is atomic: no compatibility wrapper, persistence, or external protocol transition is needed. Test bindings named `_session`, `_events`, and `_snapshots` retain ownership until scope exit; dropping the unused session immediately would shut down the worker before assertions. Shell helpers now return Spawned where their consumers need streams; observation registry tests intentionally select only the session. The adapter returns named colours, cursor, and fallback fields to keep startup/reload use straightforward. Later size and lib.rs module changes remain out of this task.
+Internal workspace API migration is atomic: no compatibility wrapper, persistence, or external protocol transition is needed. Test bindings named `_session`, `_events`, and `_snapshots` retain ownership until scope exit; dropping the unused session immediately would shut down the worker before assertions. Shell helpers return Spawned and retain the streams alongside the session. The initial observation registry helper selected only the session; independent review found that dropping its event receiver could stop worker startup, corrected in review round 1 below. The adapter returns named colours, cursor, and fallback fields to keep startup/reload use straightforward. Later size and lib.rs module changes remain out of this task.
 
 ## Verification evidence
 
@@ -28,3 +28,18 @@ Internal workspace API migration is atomic: no compatibility wrapper, persistenc
 ## Self-review
 
 Reviewed public interface, worker application, app state transitions, startup/reload adapter, all helper families and benchmark lifetime management. Removed unnecessary stream rebinding statements during review. Colour precedence/reset tests retain their assertions and paired defaults; the idle reload test supplies the existing background with its new foreground. Ended handles remain owned until cleanup; repeat shutdown yields no second join handle. No task-2 ownership changes, later-wave work, or parent plan edits are included. Independent task review is handled by the parent workflow.
+
+## Review round 1 — observation fixture stream lifetime
+
+Accepted P2 after checking `worker.rs:425`: a failed Ready send returns from the worker, so selecting `.session` from a temporary Spawned was a startup race. The observation test helper now returns the complete Spawned value; every consumer retains it for the whole test. Before returning, the helper consumes Ready and the initial snapshot, proving startup rather than merely enqueueing commands. The observation-disabled regression additionally sends CaptureHistory and consumes the worker's real History reply after endpoint teardown.
+
+Sibling audit: unbounded multiline spawn-to-`.session` search returned no remaining temporary extraction; the only standalone `.session` accesses in crates are the retained observation fixture's command sends. No production code or unrelated task files changed.
+
+Verification after the fix:
+
+- `TERM=xterm-ghostty cargo test -p sprite-app observation::panes::tests --locked --offline`: exit 0, 8 passed; `/tmp/sprite-task3-review-fix-test.log`.
+- `TERM=xterm-ghostty cargo test -p sprite-app --locked --offline`: exit 0, 479 passed, 0 failed, 0 ignored (459 library tests plus 20 binary/integration tests); `/tmp/sprite-task3-review-fix-app.log`.
+- `TERM=xterm-ghostty cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: exit 0; `/tmp/sprite-task3-review-fix-clippy.log`.
+- `cargo fmt --all` and `git diff --check`: clean. No sleep calls added.
+
+Self-review checked fixture receiver retention, startup ordering, and the post-teardown history round trip. The earlier report's assertion that session-only extraction was intentional was incorrect and has been corrected.
