@@ -1756,6 +1756,89 @@ mod tests {
     }
 
     #[gpui::test]
+    fn surface_wheel_syscall_probe(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(987),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update(cx, |host, _| {
+            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0), px(0.0)));
+            eprintln!("SURFACE_GESTURE_BEGIN");
+            host.report_grid_wheel(
+                SurfaceId(987),
+                &ScrollWheelEvent {
+                    position: gpui::point(px(1.0), px(1.0)),
+                    delta: gpui::ScrollDelta::Lines(gpui::point(2.0, 3.0)),
+                    ..Default::default()
+                },
+            );
+            eprintln!("SURFACE_GESTURE_END");
+        });
+        let messages = events(&mut peer);
+        assert_eq!(messages.len(), 5);
+        for (event, action) in messages.iter().zip(["up", "up", "up", "left", "left"]) {
+            assert_eq!(event["action"], action);
+        }
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn surface_list_100k_virtualization_probe(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(988),
+            open_description(fixture["description"].clone()),
+        );
+        assert_eq!(answer, Ok(()));
+        let rows = (0..100_000).map(|i| serde_json::json!({"id":format!("r{i}"),"text":"a long shared row label","indent":0,"guides":[]})).collect::<Vec<_>>();
+        let op = crate::surface::list::parse_op(
+            &serde_json::json!({"type":"list_rows","revision":1,"rows":rows,"selected":"r99999"}),
+        )
+        .unwrap();
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::List {
+                id: SurfaceId(988),
+                pane: crate::pane_tree::PaneId(1),
+                op,
+            },
+        );
+        draw_test_window(cx);
+        super::super::list_view::TRUNCATE_CALLS.with(|n| n.set(0));
+        draw_test_window(cx);
+        let calls = super::super::list_view::TRUNCATE_CALLS.with(|n| n.get());
+        assert!(calls > 0);
+        println!("list 100k actual truncate_line calls={calls}");
+        assert!(calls <= 100, "bounded visible rendering");
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
     fn pane_handle_routes_terminal_surface_verbs_and_ordered_events(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));

@@ -50,3 +50,6 @@ pub use workspace::Workspace;
 pub use surface::channel::{
     Open as SurfaceOpen, Ownership as SurfaceOwnership, Placement as SurfacePlacement,
 };
+
+#[cfg(test)]
+mod surface_performance;

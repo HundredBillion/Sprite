@@ -120,6 +120,9 @@ fn revealed_pixel_offset(
     offset.clamp(0.0, (rows as f32 * row_height - viewport).max(0.0))
 }
 
+#[cfg(test)]
+thread_local! { pub(super) static TRUNCATE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 pub(super) struct VirtualListView {
     pub(super) model: ListModel,
     config: ListConfig,
@@ -556,6 +559,8 @@ impl Render for VirtualListView {
                             - 2.0)
                             .max(0.0);
                         let label = if label_width > 0.0 {
+                            #[cfg(test)]
+                            TRUNCATE_CALLS.with(|n| n.set(n.get() + 1));
                             window
                                 .text_system()
                                 .line_wrapper(
@@ -833,6 +838,8 @@ fn header_element(
     let mut label_font = gpui::font(font_family.to_owned());
     label_font.weight = weight;
     let label = if label_width > 0.0 {
+        #[cfg(test)]
+        TRUNCATE_CALLS.with(|n| n.set(n.get() + 1));
         window
             .text_system()
             .line_wrapper(label_font, px(header.font_size.unwrap_or(config.font_size)))
