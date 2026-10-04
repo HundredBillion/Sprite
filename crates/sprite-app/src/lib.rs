@@ -12,6 +12,7 @@ mod graphics_cache;
 mod grid;
 mod grid_paint;
 mod input;
+mod local_socket;
 mod observation;
 #[doc(hidden)]
 pub mod paint_benchmark;

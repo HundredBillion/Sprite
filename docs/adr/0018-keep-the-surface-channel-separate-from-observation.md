@@ -1,60 +1,140 @@
 # Keep the Surface Channel separate from Pane Observation
 
 Surfaces travel over a **second endpoint** — its own socket file, exported to
-children as `SPRITE_SURFACE_SOCKET`, speaking newline-delimited JSON — that
-shares the observation key, runtime directory, and authentication code but
-**never its grammar**. Pane Observation remains read-only by construction.
+children as `SPRITE_SURFACE_SOCKET`, speaking newline-delimited JSON. The two
+endpoints share the transport implementation and key type, **never their grammar**.
+Production creates independent observation and Surface keys; possessing only
+observation credentials does not authorize Surface requests.
 
 Taken while grilling the native-surfaces PRD on 2026-09-07, after the PRD's
-first draft had put surface verbs on the observation socket.
+first draft had put surface verbs on the observation socket. Qualified on
+2026-10-04 to describe the existing configuration commands and independent keys
+accurately, while extracting the common transport.
 
 ## Why
 
-Every child Sprite spawns already holds `SPRITE_PANE`,
-`SPRITE_OBSERVATION_SOCKET`, and `SPRITE_OBSERVATION_KEY`, so reusing that
-socket looked free. It was not, for two reasons.
+**Pane queries grant no control of a Pane or its child.** The `Query` type in
+`observation/request.rs` contains no operation that draws, sends input, takes
+focus, or opens a stream. The observation endpoint also accepts its existing
+`config print` and `config reload` commands: the former reads configuration and
+the latter changes window settings. The earlier claim that nothing on that
+socket could mutate was too broad. Those commands remain supported, but Surface
+verbs cannot enter either the pane-query grammar or the configuration grammar.
 
-**The observation grammar's defining promise is that nothing on it can
-mutate.** `observation/request.rs` states it in code: "`broker` promises that
-a request which could mutate cannot be constructed," and "there is
-deliberately no variant that writes, sends input, subscribes, or opens a
-stream." The glossary defines Pane Observation as access that "never grants
-control of a Pane or its child." That promise is what makes it safe for any
-program — and for an LLM reading a pane through it — to hold the socket. A
-surface is nothing but control: open, update, close, register, and a stream
-carrying input back. Adding those verbs would not extend the promise; it would
-repeal it.
+**The framing differs.** Observation exchanges a bounded line of space-separated
+words for a response framed by EOF. Surface descriptions are structured documents
+flowing in both directions for the Surface's lifetime. An SVG icon set can be
+large, so Surface messages need a larger bound. Sharing socket mechanics does
+not require sharing either grammar or connection lifetime.
 
-**The framing is wrong for the payload.** An observation request "crosses two
-processes as a line of text" of space-separated words; a surface description
-is a structured document flowing in both directions. A second grammar was
-needed regardless.
+**A future Surface permission model has a home.** Gating who may draw into which
+pane belongs in the Surface adapter. Pane observation cannot construct those
+operations. Configuration authorization remains a separate existing concern.
 
-**Distinguishing verbs by protocol token on one socket** was considered and
-rejected: it makes the read-only promise true of *some lines on a socket*
-rather than of the socket, which is exactly the blur the comment in
-`request.rs` was written to prevent. Zed and VS Code's Agent Host keep the
-same separation — Zed labels every agent tool `ToolKind::Read` or
-`ToolKind::Edit` and gates only edits; VS Code routes every tool call through
-a `CanUseTool` gate — and a second endpoint is the structural form of that
-rule: control is *absent* from the read line, not merely denied.
+## Shared transport contract
 
-## What follows from it
+`local_socket::LocalSocket` owns directory preparation, random names, the key,
+binding, accepted connection accounting, first-line authentication, cancellation,
+and socket unlinking. `ObservationKey` and the runtime helpers remain available
+through their old observation module paths. The window still supplies an
+independently generated key when constructing the Surface endpoint.
 
-**Cost is one descriptor and one parked thread.** The endpoint runs one thread
-asleep in `accept()` per listener; per message the two designs share the same
-kernel path. The chatty grid stream — an update per keystroke — stays off the
-listener an LLM reads through.
+| Policy | Observation | Surface |
+| --- | --- | --- |
+| Concurrent connections, including unauthenticated clients | 16 | 64 |
+| Maximum first line, including key and newline | 8 KiB | 16 MiB |
+| Total authentication deadline from acceptance | 2 seconds | 5 seconds |
+| Blocking socket write timeout | 2 seconds | 2 seconds |
+| Random filename | 24 hex digits + `.sock` | 16 hex digits + `.surface.sock` |
+| Authenticated lifetime | One response, then EOF | Until stream/endpoint closes |
 
-**A future permission model has a home.** Any gating of who may draw into
-which pane belongs on the Surface Channel, where acting happens; the
-observation line never needs it.
+Both filenames occupy 29 bytes. This deliberately preserves room for macOS's
+long per-user temporary directory. The shared path guard permits 103 bytes on
+macOS and 107 on Linux, excluding the terminating NUL. Surface tests reduce
+handshake/write timeouts to 200 ms; production values are unchanged.
 
-**Two glossary terms defined against each other.** Surface Channel is "the
-one line that grants control of what a Pane shows; Pane Observation grants
-none, and the two never share a grammar."
+The directory is made `0700` before binding; the socket is `0600`. The shared
+bind helper also creates abandoned-socket test fixtures, so permissions and path
+validation have one implementation. Socket names are independent random draws,
+never derived from authentication secrets. Stale cleanup only removes paths
+whose connection attempt reports `ConnectionRefused`. Other errors prove
+nothing. Closing joins the listener, interrupts accepted socket I/O, and unlinks
+only that socket. The shared runtime directory stays to avoid racing other
+windows' startup. Connection slots are returned on normal completion, spawn
+failure, and adapter panic.
 
-**Descriptions are not capped small.** Zed's own agent transport records that
-"512 KiB is not enough" for its stream buffer
-(`crates/agent_servers/src/acp.rs:674`); an SVG icon set in a description can
-be large.
+Authentication consumes a complete newline-terminated UTF-8 line before testing
+the exact key once. EOF before newline, an oversized line, an invalid key, and
+cancellation never dispatch a protocol request. Observation answers `denied`;
+Surface retains its JSON `refused` event. The transport passes both the first
+body and its original `BufReader` to the adapter: buffered bytes after the first
+newline must survive when a client pipelines an open and subsequent messages.
+
+The request framing evidence predates this extraction: the module contract in
+`observation/request.rs` calls a request a line of text; the endpoint's
+`MAX_REQUEST_BYTES` comment defines its bound relative to a newline; and
+`observation/client.rs::exchange` writes with `writeln!` and flushes without
+half-closing its request stream. [ADR 0001](0001-protected-local-pane-observation.md)
+identifies that bundled CLI as the supported interface and the socket protocol
+as private. The checkpoint-3 TSP's EOF framing decision explicitly concerns
+**responses**. The old endpoint nevertheless accepted an EOF-terminated partial
+request, and could dispatch a prefix truncated at the byte cap. Regression tests
+reproduce both old behaviors and require refusal before dispatch. No supported
+EOF-terminated request variant was found; this change enforces complete request
+lines while retaining EOF-framed responses.
+
+### Timeout semantics
+
+The previous implementations set `SO_RCVTIMEO` once and called `read_line`.
+That timeout applies to individual blocking reads, **not the whole handshake**;
+a client sending occasional bytes could renew its effective budget. The shared
+reader records a deadline at accept and supplies the remaining duration before
+each buffered read. It checks that deadline again before dispatch. Silent and
+trickling clients therefore both lose their slot after the authentication budget,
+subject to OS scheduling. Failure to configure required timeouts refuses the
+connection instead of silently allowing an unbounded read.
+
+After authentication the read timeout is cleared, preserving long idle Surface
+streams. The Surface write timeout now also covers initial refusals and one-shot
+responses; previously only established `SurfaceConnection` writes set it.
+Writes remain per-operation inactivity bounds, not total response deadlines.
+The observation CLI likewise uses per-operation read/write timeouts, not a total
+15-second exchange deadline.
+
+The generic workspace reply relay retains the existing queue submission and
+reply-wait semantics: blocking enqueue, then a bounded reply wait (5 seconds for
+Surface, the existing configuration timeout for config). Its deadline does not
+cover queue submission or arbitrary adapter work. Closing interrupts socket I/O;
+it does not join workers awaiting the GPUI queue/reply. Accepted workers remain
+bounded by each listener's connection cap. No new timer thread, polling animation,
+or dependency is introduced.
+
+The API evidence is Rust's [`UnixStream` documentation](https://doc.rust-lang.org/std/os/unix/net/struct.UnixStream.html#method.set_read_timeout),
+[`BufReader` documentation](https://doc.rust-lang.org/std/io/struct.BufReader.html),
+and the Linux [`SO_RCVTIMEO` contract](https://man7.org/linux/man-pages/man7/socket.7.html).
+The requested versioned Rust documentation URL was unavailable; the installed
+Rust 1.97.1 sources confirm `UnixStream::set_read_timeout` delegates to
+`SO_RCVTIMEO`, cloned handles share socket options, and dropping a buffered reader
+discards unread bytes. The manifest and toolchain both require/use 1.97.1.
+
+## Wire compatibility
+
+`surface/wire.rs` owns pure first-request/stream parsing and event serialization.
+One `Envelope` check handles versions. Open and capabilities requests still need
+version 1. Existing versionless focus/token callers and messages on an established
+stream explicitly default to version 1. An explicitly unsupported version is
+refused consistently, including paths that previously ignored that field. Unknown
+verbs remain grammar errors. Built-in clients emit versioned requests; an explicit
+version supplied by a streaming client is retained for validation, never silently
+rewritten. Existing event JSON, field ordering, feature names, and limits remain
+unchanged.
+
+This is a compatible transport extraction with retained legacy decoding, not a
+contract-removal migration. Old clients continue to work with the new server;
+new version-1 requests also work with the old server, which already recognizes
+version 1 on open/capabilities and ignores the added version on other verbs.
+The reference CLI, the two Surface Python scripts, and existing external Surface
+callers may continue to omit the legacy fields. No historical data, database
+backfill, dual writes, or consumer-retirement gate applies. Rollback is reverting
+the extraction; it requires no data deletion. Tests cover both protocol adapters,
+legacy/new envelopes, unchanged event fixtures, and transport resource boundaries.

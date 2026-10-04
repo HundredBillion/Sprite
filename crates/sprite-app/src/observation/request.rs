@@ -307,13 +307,16 @@ fn config_request(body: &str) -> Option<ConfigVerb> {
 
 /// Hands the question to the GPUI thread and waits, briefly, for its answer.
 fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -> String {
-    let (reply, answer) = std::sync::mpsc::sync_channel(1);
-    if reload.send_blocking(ReloadRequest { what, reply }).is_err() {
-        return "this window is no longer answering".to_owned();
-    }
-    match answer.recv_timeout(RELOAD_TIMEOUT) {
+    use crate::workspace::{RelayError, relay};
+    match relay(reload, RELOAD_TIMEOUT, |reply| ReloadRequest {
+        what,
+        reply,
+    }) {
         Ok(answer) => answer,
-        Err(_) => "this window did not answer in time; nothing was changed".to_owned(),
+        Err(RelayError::Disconnected) => "this window is no longer answering".to_owned(),
+        Err(RelayError::Timeout) => {
+            "this window did not answer in time; nothing was changed".to_owned()
+        }
     }
 }
 
@@ -324,6 +327,23 @@ mod tests {
     };
     use crate::pane_tree::PaneId;
     use sprite_term::HistoryLines;
+
+    #[test]
+    fn surface_verbs_cannot_enter_the_observation_grammar() {
+        let (reload, requests) = async_channel::bounded(1);
+        for body in [
+            "open",
+            "focus",
+            "token",
+            "update",
+            "close",
+            "{\"type\":\"open\",\"version\":1}",
+        ] {
+            let answer = respond(&NoPanes, &reload, body);
+            assert!(answer.starts_with("malformed:"), "{body}: {answer}");
+            assert!(requests.try_recv().is_err());
+        }
+    }
 
     /// The grammar has two directions and they must be the same grammar.
     ///

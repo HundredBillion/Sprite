@@ -871,6 +871,25 @@ pub(crate) struct ReloadRequest {
     pub(crate) reply: std::sync::mpsc::SyncSender<String>,
 }
 
+pub(crate) enum RelayError {
+    Disconnected,
+    Timeout,
+}
+
+pub(crate) fn relay<Request, Answer>(
+    sender: &async_channel::Sender<Request>,
+    timeout: std::time::Duration,
+    request: impl FnOnce(std::sync::mpsc::SyncSender<Answer>) -> Request,
+) -> Result<Answer, RelayError> {
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    sender
+        .send_blocking(request(reply))
+        .map_err(|_| RelayError::Disconnected)?;
+    answer
+        .recv_timeout(timeout)
+        .map_err(|_| RelayError::Timeout)
+}
+
 struct PaneServices<'a> {
     panes: &'a Arc<WindowPanes>,
     endpoint: Option<&'a Endpoint>,

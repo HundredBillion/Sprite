@@ -9,6 +9,7 @@ pub mod host;
 pub mod list;
 pub mod render;
 pub mod style;
+mod wire;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DockSize(f32);
