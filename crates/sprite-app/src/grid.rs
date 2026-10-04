@@ -9,6 +9,8 @@
 //! position depends only on the terminal grid. A glyph that renders wider than
 //! its cell is clipped rather than allowed to displace its neighbours.
 
+use std::sync::Arc;
+
 use gpui::{Pixels, Point, Size, px, size};
 use sprite_term::{
     CellStyle, CellWidth, HyperlinkSpan, RenderRow, RenderSnapshot, SnapshotColor, UnderlineStyle,
@@ -56,7 +58,7 @@ pub(crate) struct PositionedCell {
     pub column: u16,
     /// How many columns it occupies: 1 for narrow, 2 for wide.
     pub columns: u16,
-    pub text: String,
+    pub text: sprite_term::CellText,
     pub style: CellStyle,
     pub selected: bool,
     pub hovered_link: bool,
@@ -106,26 +108,76 @@ pub(crate) fn lay_out_row(row: &RenderRow) -> Vec<PositionedCell> {
     placed
 }
 
-pub(crate) fn prepare_rows(
-    snapshot: Option<&RenderSnapshot>,
-    hovered_link: Option<(u64, HyperlinkSpan)>,
-) -> Vec<Vec<PositionedCell>> {
-    let Some(snapshot) = snapshot else {
-        return Vec::new();
-    };
-    let mut rows: Vec<_> = snapshot.rows.iter().map(lay_out_row).collect();
-    if let Some((generation, span)) = hovered_link
-        && generation == snapshot.generation
-    {
-        style_hyperlink_span(&mut rows, span);
-    }
-    rows
+pub(crate) type PositionedRows = Arc<[Arc<Vec<PositionedCell>>]>;
+
+#[derive(Default)]
+pub(crate) struct LayoutCache {
+    sources: Vec<Arc<RenderRow>>,
+    hovered: Option<HyperlinkSpan>,
+    rows: PositionedRows,
 }
 
-pub(crate) fn style_hyperlink_span(rows: &mut [Vec<PositionedCell>], span: HyperlinkSpan) {
-    let Some(row) = rows.get_mut(usize::from(span.row)) else {
-        return;
+pub(crate) fn prepare_rows(
+    cache: &mut LayoutCache,
+    snapshot: Option<&RenderSnapshot>,
+    hovered_link: Option<(u64, HyperlinkSpan)>,
+) -> PositionedRows {
+    let Some(snapshot) = snapshot else {
+        if !cache.sources.is_empty() {
+            *cache = LayoutCache::default();
+        }
+        return Arc::clone(&cache.rows);
     };
+    let hovered = hovered_link
+        .filter(|(generation, _)| *generation == snapshot.generation)
+        .map(|(_, span)| span);
+    let row_hover = |span: Option<HyperlinkSpan>, index: usize| {
+        span.filter(|span| usize::from(span.row) == index)
+    };
+    let unchanged = |index: usize, source: &Arc<RenderRow>| {
+        cache
+            .sources
+            .get(index)
+            .is_some_and(|old| Arc::ptr_eq(old, source))
+            && row_hover(cache.hovered, index) == row_hover(hovered, index)
+    };
+    if cache.sources.len() == snapshot.rows.len()
+        && snapshot
+            .rows
+            .iter()
+            .enumerate()
+            .all(|(index, source)| unchanged(index, source))
+    {
+        return Arc::clone(&cache.rows);
+    }
+    cache.rows = snapshot
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            if unchanged(index, source) {
+                return Arc::clone(&cache.rows[index]);
+            }
+            let mut row = lay_out_row(source);
+            if let Some(span) = row_hover(hovered, index) {
+                style_hyperlink_row(&mut row, span);
+            }
+            Arc::new(row)
+        })
+        .collect();
+    cache.sources.clone_from(&snapshot.rows);
+    cache.hovered = hovered;
+    Arc::clone(&cache.rows)
+}
+
+#[cfg(test)]
+fn style_hyperlink_span(rows: &mut [Vec<PositionedCell>], span: HyperlinkSpan) {
+    if let Some(row) = rows.get_mut(usize::from(span.row)) {
+        style_hyperlink_row(row, span);
+    }
+}
+
+fn style_hyperlink_row(row: &mut [PositionedCell], span: HyperlinkSpan) {
     for cell in row {
         let cell_span = cell.span();
         if cell_span.start < u32::from(span.end_column)
@@ -167,7 +219,7 @@ mod tests {
         let cell = |column| PositionedCell {
             column,
             columns: 1,
-            text: "x".to_owned(),
+            text: "x".into(),
             style: style(),
             selected: false,
             hovered_link: false,
@@ -196,7 +248,7 @@ mod tests {
 
     fn cell(text: &str, width: CellWidth) -> RenderCell {
         RenderCell {
-            text: text.to_owned(),
+            text: text.into(),
             width,
             style: style(),
             selected: false,
@@ -690,5 +742,53 @@ mod hit_tests {
             )
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn generation_checked_hover_selection_and_empty_snapshot_invalidate_only_affected_rows() {
+        let mut snapshot = crate::paint_benchmark::fixture();
+        let mut cache = LayoutCache::default();
+        let original = prepare_rows(&mut cache, Some(&snapshot), None);
+        let span = HyperlinkSpan {
+            row: 1,
+            start_column: 2,
+            end_column: 5,
+        };
+        let stale = prepare_rows(&mut cache, Some(&snapshot), Some((0, span)));
+        assert!(Arc::ptr_eq(&original, &stale));
+        let hovered = prepare_rows(&mut cache, Some(&snapshot), Some((1, span)));
+        assert!(hovered[1][2].hovered_link);
+        assert!(!Arc::ptr_eq(&original[1], &hovered[1]));
+        snapshot.generation += 1;
+        Arc::make_mut(&mut snapshot.rows[3]).cells[0].selected = true;
+        let selected = prepare_rows(&mut cache, Some(&snapshot), Some((1, span)));
+        assert!(!selected[1][2].hovered_link);
+        assert!(selected[3][0].selected);
+        for index in 0..snapshot.rows.len() {
+            assert_eq!(
+                Arc::ptr_eq(&hovered[index], &selected[index]),
+                index != 1 && index != 3
+            );
+        }
+        snapshot.default_background.r ^= 0xff;
+        Arc::make_mut(&mut snapshot.palette)[12].r ^= 0xff;
+        let recolored = prepare_rows(&mut cache, Some(&snapshot), None);
+        assert!(
+            Arc::ptr_eq(&selected, &recolored),
+            "paint resolves colors from each current snapshot"
+        );
+        snapshot.rows.truncate(2);
+        let shortened = prepare_rows(&mut cache, Some(&snapshot), None);
+        assert_eq!(shortened.len(), 2);
+        assert!(Arc::ptr_eq(&shortened[0], &recolored[0]));
+        assert!(prepare_rows(&mut cache, None, None).is_empty());
+        let restored = prepare_rows(&mut cache, Some(&snapshot), None);
+        assert_eq!(shortened, restored);
+        assert!(!Arc::ptr_eq(&shortened[0], &restored[0]));
     }
 }

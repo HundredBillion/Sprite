@@ -192,7 +192,7 @@ pub(crate) fn decorations(
 
 /// The grid of one pane, painted without a layout pass.
 pub(crate) struct GridPaint {
-    rows: Vec<Vec<PositionedCell>>,
+    rows: crate::grid::PositionedRows,
     pass: RowPass,
     cursor: Option<CursorSnapshot>,
     cursor_color: Option<Rgb>,
@@ -211,7 +211,7 @@ pub(crate) struct GridPaint {
 /// and three are lengths, so at a call site the positional form is unreadable
 /// and a transposition would be invisible.
 pub(crate) struct GridPaintSpec {
-    pub rows: Vec<Vec<PositionedCell>>,
+    pub rows: crate::grid::PositionedRows,
     pub pass: RowPass,
     pub cursor: Option<CursorSnapshot>,
     pub cursor_color: Option<Rgb>,
@@ -227,7 +227,7 @@ pub(crate) struct GridPaintSpec {
 impl GridPaint {
     pub(crate) fn prepare(
         snapshot: Option<&RenderSnapshot>,
-        rows: Vec<Vec<PositionedCell>>,
+        rows: crate::grid::PositionedRows,
         metrics: &crate::surface::render::GridMetrics,
         split: bool,
     ) -> (Self, Option<Self>) {
@@ -235,7 +235,7 @@ impl GridPaint {
             .map(|snapshot| snapshot.cursor)
             .filter(|cursor| metrics.blink_on || !cursor.blinking);
         let cursor_color = snapshot.and_then(|snapshot| snapshot.cursor_color);
-        let palette = snapshot.map(|snapshot| Arc::new(*snapshot.palette.clone()));
+        let palette = snapshot.map(|snapshot| Arc::clone(&snapshot.palette));
         Self::prepare_spec(
             GridPaintSpec {
                 rows,
@@ -270,20 +270,29 @@ impl GridPaint {
         }
     }
 
-    fn resolve_row(&self, index: usize, cells: &[PositionedCell], resolved: &mut Vec<Drawn>) {
+    fn resolve_row<'a>(
+        &'a self,
+        index: usize,
+        cells: &'a [PositionedCell],
+    ) -> impl Iterator<Item = Drawn> + Clone + 'a {
         let on_cursor = self
             .cursor
             .filter(|cursor| cursor.visible && usize::from(cursor.row) == index);
-        resolved.clear();
-        resolved.extend(cells.iter().map(|cell| self.draw(cell, on_cursor)));
+        cells.iter().map(move |cell| self.draw(cell, on_cursor))
     }
 
-    /// Runs the live cell decisions and row scratch allocation without a Window.
+    /// Exercises the same decision passes as live painting, without glyph or GPU work.
     pub(crate) fn benchmark_draw_decisions(&self) {
-        let mut resolved = Vec::new();
         for (index, cells) in self.rows.iter().enumerate() {
-            self.resolve_row(index, cells, &mut resolved);
-            std::hint::black_box(&resolved);
+            let resolved = self.resolve_row(index, cells);
+            for drawn in resolved.clone() {
+                std::hint::black_box(drawn);
+            }
+            if self.pass != RowPass::Background {
+                for drawn in resolved {
+                    std::hint::black_box(drawn);
+                }
+            }
         }
     }
 
@@ -522,16 +531,13 @@ impl Element for GridPaint {
         let edge = |column: Col| column_edge(bounds.origin.x, self.cell_width, column, scale);
         let row_edge = |row: Row| row_edge(bounds.origin.y, self.cell_height, row, scale);
 
-        let rows = std::mem::take(&mut self.rows);
-        // One row's worth, reused: a resolved cell is wanted twice, and
-        // resolving it twice would mean resolving a palette colour twice for
-        // every cell on screen.
-        let mut resolved: Vec<Drawn> = Vec::new();
+        let rows = Arc::clone(&self.rows);
+        // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
             let top = row_edge(Row(index));
             let bottom = row_edge(Row(index + 1));
 
-            self.resolve_row(index, cells, &mut resolved);
+            let resolved = self.resolve_row(index, cells);
 
             // The ground first, for the whole row, so that a glyph is never
             // covered by the cell painted after it.
@@ -546,7 +552,7 @@ impl Element for GridPaint {
                     run.color,
                 ));
             };
-            for (cell, drawn) in cells.iter().zip(&resolved) {
+            for (cell, drawn) in cells.iter().zip(resolved.clone()) {
                 let span = cell.span();
                 let (start, end) = (span.start, span.end);
                 match drawn.background {
@@ -578,7 +584,7 @@ impl Element for GridPaint {
                 continue;
             }
 
-            for (cell, drawn) in cells.iter().zip(&resolved) {
+            for (cell, drawn) in cells.iter().zip(resolved.clone()) {
                 let span = cell.span();
                 let bounds = CellBounds {
                     left: edge(Col(span.start)),
@@ -586,11 +592,10 @@ impl Element for GridPaint {
                     top,
                     bottom,
                 };
-                self.paint_glyph(cell, drawn, bounds, scale, window, cx);
-                self.paint_cursor(drawn, bounds, scale, window);
+                self.paint_glyph(cell, &drawn, bounds, scale, window, cx);
+                self.paint_cursor(&drawn, bounds, scale, window);
             }
         }
-        self.rows = rows;
     }
 }
 
@@ -630,7 +635,7 @@ impl GridPaint {
             return;
         }
 
-        let text = SharedString::from(cell.text.clone());
+        let text = SharedString::from(cell.text.as_str().to_owned());
         let (underline, strikethrough) = decorations(
             &cell.style,
             drawn.foreground,
@@ -868,7 +873,24 @@ mod tests {
             let (blink, _) = benchmark.prepare(Scenario::SameGenerationBlink, split);
             assert!(blink.cursor.is_none());
             assert_eq!(first.rows, blink.rows);
+            assert!(Arc::ptr_eq(&first.rows, &blink.rows));
+            assert!(Arc::ptr_eq(
+                first.palette.as_ref().unwrap(),
+                blink.palette.as_ref().unwrap()
+            ));
+            if let Some(text) = &first_text {
+                assert!(Arc::ptr_eq(&first.rows, &text.rows));
+            }
             let (hover, _) = benchmark.prepare(Scenario::Hover, split);
+            assert!(!Arc::ptr_eq(&first.rows[12], &hover.rows[12]));
+            assert!(
+                first
+                    .rows
+                    .iter()
+                    .zip(hover.rows.iter())
+                    .enumerate()
+                    .all(|(index, (before, after))| index == 12 || Arc::ptr_eq(before, after))
+            );
             assert!(hover.rows[12].iter().any(|cell| cell.hovered_link));
             assert!(
                 hover
@@ -884,11 +906,19 @@ mod tests {
             let changed_rows: Vec<_> = first
                 .rows
                 .iter()
-                .zip(&changed.rows)
+                .zip(changed.rows.iter())
                 .enumerate()
                 .filter_map(|(index, (before, after))| (before != after).then_some(index))
                 .collect();
             assert_eq!(changed_rows, [30]);
+            assert!(
+                unhover
+                    .rows
+                    .iter()
+                    .zip(changed.rows.iter())
+                    .enumerate()
+                    .all(|(index, (before, after))| Arc::ptr_eq(before, after) == (index != 30))
+            );
             assert_eq!(changed.rows[30][10].text, "Z");
             let (fresh, _) = PaintBenchmark::new().prepare(Scenario::FirstFrame, split);
             assert_eq!(first.rows, fresh.rows);

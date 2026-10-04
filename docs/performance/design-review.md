@@ -172,3 +172,112 @@ TERM=xterm-ghostty cargo run -p sprite-term --bin sprite-term-bench \
   --release --locked --offline -- --samples 30 \
   --output docs/performance/design-review-capture-baseline.json
 ```
+
+## Shared rows and paint preparation
+
+`design-review-paint-shared.json` and `design-review-capture-shared.json` record
+30 release samples after row sharing. Both used Rust/Cargo 1.97.1 on the machine
+specified above. Measurement ran after the workspace tests and release build
+completed; neither run overlapped compilation, tests, or the other benchmark.
+Fixture setup, transitions, priming, and allocation scopes remain the same.
+
+| Scenario/pass | Allocations max | Requested bytes max | Median ms | p95 ms |
+| --- | ---: | ---: | ---: | ---: |
+| `whole_first_frame` | 122 | 579,376 | 0.414037 | 0.481569 |
+| `whole_same_generation_blink` | 0 | 0 | 0.370313 | 0.384785 |
+| `whole_hover` | 3 | 10,136 | 0.382118 | 0.399413 |
+| `whole_one_row_change` | 3 | 10,136 | 0.385735 | 0.404405 |
+| `split_first_frame` | 122 | 579,376 | 0.672180 | 0.716478 |
+| `split_same_generation_blink` | 0 | 0 | 0.594845 | 0.634608 |
+| `split_hover` | 3 | 10,136 | 0.605731 | 0.635041 |
+| `split_one_row_change` | 3 | 10,136 | 0.599389 | 0.643119 |
+
+Allocation counts and bytes were identical across all samples of each metric.
+The benchmark asserts zero allocations and bytes for **every** measured blink
+sample, reports maxima, and checks maxima against the allocation/byte budgets.
+Both the original paint budgets and the new budgets pass. A zero allocation
+budget on the genuinely nonzero `whole_first_frame` metric fails at `122 > 0`.
+No original budget was relaxed.
+
+Isolated capture decreased from 10,206 allocations / 527,832 requested Rust bytes
+to **104 / 14,656** in every sample. Median/p95 decreased from
+0.731974/1.187771 ms to 0.010386/0.016306 ms. The remaining allocations include
+independent pane text strings: PaneSnapshot retains its own text-only storage.
+These are Rust projection counts, excluding native libghostty allocations.
+
+`CellText` stores empty strings and one Unicode scalar inline, and shares longer
+UTF-8 text through `Arc<str>`. Render rows use `Arc<RenderRow>` and the palette uses
+`Arc<[Rgb; 256]>`. Projector reads both Ghostty dirty layers before clearing them.
+Clean visual rows reuse their identity; selection, full redraws and dirty rows
+compare content before retaining an old row. Size, viewport and screen changes
+invalidate row reuse. Live row metadata is read separately because Ghostty permits
+stale nonvisual metadata in its render cache. A prompt-only OSC 133 transition
+with a stationary cursor is a regression test for this distinction. History
+capture updates the same render state without clearing pending render dirtiness.
+
+The per-view layout cache accepts row identity and generation-checked hover;
+hover rebuilds only the affected row, and a one-row update rebuilds one row.
+Positioned rows use `Arc<Vec<PositionedCell>>`, so moving a prepared vector into
+shared storage does not copy its allocation. Whole and split passes share the
+outer row collection and snapshot palette directly. Live painting no longer
+allocates a `Vec<Drawn>` per ephemeral element: it resolves colors lazily for the
+background and text traversals. This repeats inexpensive decisions for a whole
+or text pass; the benchmark executes those same traversals inside measurement.
+Glyph shaping/painting, GPUI string conversion, image element construction,
+geometry submission, and GPU work remain outside the benchmark. Zero allocations
+therefore describes the measured CPU preparation/decision seam, not an entire
+GPUI frame.
+
+```sh
+TERM=xterm-ghostty cargo build --workspace --bins --release --locked --offline
+TERM=xterm-ghostty target/release/sprite-paint-bench --samples 30 \
+  --output docs/performance/design-review-paint-shared.json \
+  --check-budgets docs/performance/design-review-paint-baseline.json
+TERM=xterm-ghostty target/release/sprite-term-bench --samples 30 \
+  --output docs/performance/design-review-capture-shared.json
+python3 scripts/check_capture_budgets.py \
+  docs/performance/design-review-capture-shared.json \
+  docs/performance/design-review-capture-baseline.json
+TERM=xterm-ghostty target/release/sprite-paint-bench --samples 30 \
+  --check-budgets docs/performance/design-review-paint-shared.json
+```
+
+The capture checker checks maximum counts/bytes and p95 isolated timing. A copy
+of the new report with `allocations_per_capture.budget = 0` fails at `104 > 0`.
+The actual report passes against both the original and new capture budgets.
+
+### Carried timing gates
+
+The original session, observation and graphics harnesses were also run, without
+concurrent compilation/tests. Graphics used 30 samples (its existing large-image
+cap remains 10); observation used 30 (its existing stalled/history caps remain 6).
+Reports are `design-review-graphics-shared.json` and
+`design-review-observation-shared.json`. All four graphics latency gates pass;
+image storage remains 65,536 bytes after both 30 and 60 transmissions. Seven of
+eight Checkpoint 2 session gates and three of five Checkpoint 3 observation gates
+pass. The following carried gates **do not pass**:
+
+| Metric | Measured median ms | Measured p95 ms | Carried budget ms |
+| --- | ---: | ---: | ---: |
+| `capture_100x100_grid` | 0.041324 | 0.150657 | 0.097317 |
+| `collect_sixteen_panes` | 0.002873 | 0.003070 | 0.002956 |
+| `encode_default_request` | 1.327925 | 1.495205 | 1.416955 |
+
+`checkpoint-5.md` already recorded breaches of all three carried gates. That
+history does not prove the present differences are noise. In this task's
+contemporaneous pre-optimization report, `capture_100x100_grid` measured
+0.022249 ms median / 0.096404 ms p95, versus 0.041324 / 0.150657 after sharing.
+The session metric waits only for the first changed generation while filling,
+and accepts `generation >=` after requesting capture. A pending snapshot can
+therefore satisfy it before the requested capture is processed. Capture commands
+do not themselves increment generation. The full-scrollback metric, conversely,
+waits for a newer generation while output continues. These timings cannot
+attribute a change to isolated projection work. The separate synchronous seam
+shows the actual primed projection is faster with fewer Rust allocations.
+
+The observation harness uses stand-in pane data and never invokes Projector or
+the terminal painter; those code paths were unchanged by this task. Its two
+breaches remain unresolved carried gates, not evidence of a measured improvement
+from row caching. No timing budget was changed and no repeated run was selected
+to make these gates green. Parent review tracks this limited historical-budget
+exception separately from the passing new allocation gates.

@@ -150,7 +150,7 @@ impl TerminalView {
     /// appears; fixed placements retain their own viewport coordinates.
     pub(super) fn image_layers(
         &self,
-        rows: &[Vec<PositionedCell>],
+        rows: &[std::sync::Arc<Vec<PositionedCell>>],
         cell_width: Pixels,
         cell_height: Pixels,
     ) -> [Vec<gpui::Div>; 3] {
@@ -256,7 +256,7 @@ impl Render for TerminalView {
         self.synchronise_size(window);
 
         let snapshot = self.bundle.as_ref().map(|bundle| bundle.render.as_ref());
-        let rows = prepare_rows(snapshot, self.hovered_link);
+        let rows = prepare_rows(&mut self.layout_cache, snapshot, self.hovered_link);
         // The one place the pane's cell, font and colours are read for a frame:
         // the terminal's own rows and any hosted grid draw from the same values,
         // so a grid cannot end up a font behind the text beside it.

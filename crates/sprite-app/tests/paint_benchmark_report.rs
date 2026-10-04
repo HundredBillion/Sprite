@@ -32,6 +32,11 @@ fn paint_report_is_checked_and_rejects_an_insufficient_allocation_budget() {
             .unwrap()
             > 0
     );
+    for pass in ["whole", "split"] {
+        let metric = &report["metrics"][format!("{pass}_same_generation_blink")];
+        assert_eq!(metric["allocations"]["max"], 0);
+        assert_eq!(metric["bytes"]["max"], 0);
+    }
     let checked = Command::new(binary)
         .args(["--samples", "2", "--check-budgets"])
         .arg(&report_path)

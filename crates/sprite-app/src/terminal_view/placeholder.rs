@@ -362,7 +362,7 @@ fn rgb_id(color: SnapshotColor) -> Option<u32> {
 }
 
 pub(super) fn image_cells<'a>(
-    rows: &[Vec<PositionedCell>],
+    rows: &[std::sync::Arc<Vec<PositionedCell>>],
     placements: &'a [Placement],
 ) -> Vec<ImageCell<'a>> {
     let exact: HashMap<(u32, u32), &Placement> = placements
@@ -380,7 +380,7 @@ pub(super) fn image_cells<'a>(
         .collect();
     let mut result = Vec::new();
     for (row, cells) in rows.iter().enumerate() {
-        for cell in cells {
+        for cell in cells.iter() {
             let Some((image_row, image_column)) = coordinates(&cell.text) else {
                 continue;
             };
@@ -445,7 +445,7 @@ mod tests {
 
     fn row(fg: u32, placement_id: Option<u32>) -> RenderRow {
         let cell = |text: &str| RenderCell {
-            text: text.to_owned(),
+            text: text.into(),
             width: CellWidth::Narrow,
             selected: false,
             style: CellStyle {
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn default_placement_matches_even_when_terminal_assigns_an_id() {
         let placements = [placement(1001, 3)];
-        let cells = image_cells(&[lay_out_row(&row(1001, None))], &placements);
+        let cells = image_cells(&[lay_out_row(&row(1001, None)).into()], &placements);
         assert_eq!(cells.len(), 2);
         assert_eq!((cells[0].column, cells[0].image_column), (1, 0));
         assert_eq!((cells[1].column, cells[1].image_column), (2, 1));
@@ -494,11 +494,11 @@ mod tests {
     fn explicit_placement_requires_its_exact_id() {
         let placements = [placement(1001, 3)];
         assert_eq!(
-            image_cells(&[lay_out_row(&row(1001, Some(4)))], &placements).len(),
+            image_cells(&[lay_out_row(&row(1001, Some(4))).into()], &placements).len(),
             0
         );
         assert_eq!(
-            image_cells(&[lay_out_row(&row(1001, Some(3)))], &placements).len(),
+            image_cells(&[lay_out_row(&row(1001, Some(3))).into()], &placements).len(),
             2
         );
     }

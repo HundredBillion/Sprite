@@ -736,9 +736,63 @@ pub struct CellStyle {
     pub underline: UnderlineStyle,
 }
 
+/// UTF-8 cell text: empty and single-scalar cells need no heap allocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CellText(CellTextStorage);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CellTextStorage {
+    Inline { bytes: [u8; 4], len: u8 },
+    Shared(Arc<str>),
+}
+
+impl CellText {
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            CellTextStorage::Inline { bytes, len } => {
+                std::str::from_utf8(&bytes[..usize::from(*len)]).expect("encoded scalar")
+            }
+            CellTextStorage::Shared(text) => text,
+        }
+    }
+}
+
+impl From<&str> for CellText {
+    fn from(text: &str) -> Self {
+        let mut chars = text.chars();
+        let first = chars.next();
+        if chars.next().is_none() {
+            let mut bytes = [0; 4];
+            let len = first.map_or(0, |ch| ch.encode_utf8(&mut bytes).len() as u8);
+            Self(CellTextStorage::Inline { bytes, len })
+        } else {
+            Self(CellTextStorage::Shared(Arc::from(text)))
+        }
+    }
+}
+
+impl From<String> for CellText {
+    fn from(text: String) -> Self {
+        Self::from(text.as_str())
+    }
+}
+
+impl std::ops::Deref for CellText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<&str> for CellText {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderCell {
-    pub text: String,
+    pub text: CellText,
     pub width: CellWidth,
     pub style: CellStyle,
     /// Whether this cell falls inside the current selection.
@@ -790,7 +844,7 @@ pub struct RenderSnapshot {
     /// Terminal Core does, from the same terminal state, so the two cannot
     /// deliver one event to both consumers.
     pub mouse_tracking: bool,
-    pub rows: Vec<RenderRow>,
+    pub rows: Vec<Arc<RenderRow>>,
     pub cursor: CursorSnapshot,
     pub default_foreground: Rgb,
     pub default_background: Rgb,
@@ -804,7 +858,7 @@ pub struct RenderSnapshot {
     ///
     /// It is the *active* palette, so a program that redefines an entry through
     /// OSC 4 is reflected here rather than overridden by a preference.
-    pub palette: Box<[Rgb; 256]>,
+    pub palette: Arc<[Rgb; 256]>,
     /// The colour the cursor should be painted, when one is set.
     ///
     /// `None` means nobody has an opinion, and the renderer should fall back to
@@ -1311,5 +1365,34 @@ mod tests {
         assert!(ValidTerminalSize::new(TerminalSize::DEFAULT, "test").is_ok());
         assert_eq!(TerminalSize::DEFAULT.pixel_width(), 640);
         assert_eq!(TerminalSize::DEFAULT.pixel_height(), 384);
+    }
+}
+
+#[cfg(test)]
+mod cell_text_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_scalars_round_trip_inline_and_graphemes_clone_shared_storage() {
+        assert_eq!(CellText::from("").as_str(), "");
+        let mut bytes = [0; 4];
+        for value in 0..=0x10ffff {
+            if let Some(ch) = char::from_u32(value) {
+                let text = ch.encode_utf8(&mut bytes);
+                let stored = CellText::from(&*text);
+                assert_eq!(stored.as_str(), text, "U+{value:04X}");
+                assert!(matches!(stored.0, CellTextStorage::Inline { .. }));
+            }
+        }
+        for text in ["e\u{301}", "👩‍💻", "\u{10eeee}\u{305}\u{30d}"] {
+            let stored = CellText::from(text);
+            let cloned = stored.clone();
+            assert_eq!(cloned.as_str(), text);
+            let (CellTextStorage::Shared(a), CellTextStorage::Shared(b)) = (stored.0, cloned.0)
+            else {
+                panic!("shared grapheme")
+            };
+            assert!(Arc::ptr_eq(&a, &b));
+        }
     }
 }

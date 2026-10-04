@@ -148,6 +148,16 @@ fn measure(scenario: Scenario, split: bool, samples: usize) -> Value {
         allocations.push(sample.allocations);
         bytes.push(sample.bytes);
     }
+    if scenario == Scenario::SameGenerationBlink {
+        assert!(
+            allocations.iter().all(|count| *count == 0),
+            "every blink sample must allocate zero times"
+        );
+        assert!(
+            bytes.iter().all(|count| *count == 0),
+            "every blink sample must request zero bytes"
+        );
+    }
     times.sort_by(f64::total_cmp);
     allocations.sort_unstable();
     bytes.sort_unstable();
@@ -175,7 +185,7 @@ fn percentile<T: Copy>(sorted: &[T], fraction: f64) -> T {
 
 fn allocation_metric(sorted: &[u64]) -> Value {
     let p95 = percentile(sorted, 0.95);
-    json!({"median": percentile(sorted, 0.50), "p95": p95, "budget": p95 + p95.div_ceil(10)})
+    json!({"median": percentile(sorted, 0.50), "p95": p95, "max": sorted.last().unwrap(), "budget": p95 + p95.div_ceil(10)})
 }
 
 fn validate_report(report: &Value) -> Result<(), String> {
@@ -234,7 +244,9 @@ fn check_budgets(report: &Value, budgets: &Value) -> Result<(), String> {
     validate_report(budgets)?;
     for (name, metric) in report["metrics"].as_object().expect("validated metrics") {
         for (kind, label) in [("allocations", "allocation"), ("bytes", "byte")] {
-            let actual = metric[kind]["p95"].as_u64().expect("validated count");
+            let actual = metric[kind]["max"]
+                .as_u64()
+                .expect("measured maximum count");
             let budget = budgets["metrics"][name][kind]["budget"]
                 .as_u64()
                 .expect("validated budget");

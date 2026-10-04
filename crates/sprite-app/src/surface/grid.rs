@@ -623,7 +623,7 @@ impl GridSurface {
             placed.push(PositionedCell {
                 column: column as u16,
                 columns: if wide { 2 } else { 1 },
-                text: cell.text.clone(),
+                text: cell.text.as_str().into(),
                 style: self.style_for(cell.hl, theme),
                 selected: false,
                 hovered_link: false,
