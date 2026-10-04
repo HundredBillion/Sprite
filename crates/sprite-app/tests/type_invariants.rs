@@ -255,7 +255,7 @@ fn public_doctests_fail_for_the_documented_contract_and_no_other_error() {
         (
             "terminal_size",
             public_examples(
-                include_str!("../../sprite-term/src/lib.rs"),
+                include_str!("../../sprite-term/src/config.rs"),
                 "/// Dimensions accepted by both terminal backends.",
             ),
             vec![("E0308", "ValidTerminalSize")],
