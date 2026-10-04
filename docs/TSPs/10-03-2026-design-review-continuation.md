@@ -44,10 +44,13 @@ and docs/performance/design-review.md; add benchmark report test.
 private. The driver calls actual lay_out_row and GridPaint::draw, not copied logic.
 Binary accepts `--samples N --output PATH` and `--check-budgets PATH`.
 
-- [ ] Construct a synthetic 200x60 RenderSnapshot with ASCII, blanks, Unicode,
+- [x] Construct a synthetic 200x60 RenderSnapshot with ASCII, blanks, Unicode,
   wide cells, selection, palette colours and a blinking cursor. Add first-frame,
-  same-generation blink, hover, and one-row-change scenarios.
-- [ ] Use a counting allocator in the standalone bench process. Disable counting
+  same-generation blink, hover, and one-row-change scenarios. Blink toggles phase
+  after warmup; hover transitions on each sample; one-row-change presents a fresh
+  row/generation per sample with fixture mutation outside measurement; first-frame
+  resets preparation state. These semantics must remain valid after caching.
+- [x] Use a counting allocator in the standalone bench process. Disable counting
   for fixture/report setup and warmup; scope actual measured work with a guard.
 
 ```rust
@@ -56,13 +59,13 @@ struct AllocationSample { allocations: u64, bytes: u64 }
 // does not increment allocations. Use std::alloc::System behind GlobalAlloc.
 ```
 
-- [ ] Make the measured draw decision path shared with production. Consume results
+- [x] Make the measured draw decision path shared with production. Consume results
   with black_box. Record timing median/p95 plus allocations/bytes in stable JSON.
   Clearly exclude GPUI Window/glyph submission from this headless seam.
-- [ ] Run a release benchmark with >=20 samples and commit the baseline BEFORE
+- [x] Run a release benchmark with >=20 samples and commit the baseline BEFORE
   optimising. Add an executable budget/report-schema check that fails when a
   supplied allocation budget is deliberately too small, then passes with baseline.
-- [ ] Run sprite-app tests/fmt/clippy for changed targets; commit benchmark/evidence.
+- [x] Run sprite-app tests/fmt/clippy for changed targets; commit benchmark/evidence.
 
 ### Task 2: Return PTY permits and buffers through ownership
 
@@ -115,7 +118,9 @@ ObservationKey re-export remains source compatible.
   0600 mode, private directory, cancellation, stale cleanup and path-length limits.
 - [ ] Move runtime directory, random name/key generation, bind, accept accounting,
   capped first-line authentication and teardown into local_socket. Bind and
-  key.matches should each have one production call site. Preserve justified
+  key.matches should each have one production call site. Route socket test
+  fixtures through the shared bind helper too, so the literal source census has
+  one `UnixListener::bind` site without hiding calls behind aliases. Preserve justified
   observation/stream-specific policy differences and record them in ADR 0018.
 - [ ] Move pure Surface request parsing and event serialisation to wire.rs;
   unify one-shot relay plumbing and version handling behind one Envelope parse.
@@ -212,7 +217,8 @@ and hovered span and returns shared immutable positioned rows.
   Arc directly; split background/text passes share row storage.
 - [ ] Run original generation/input/selection/history/graphics tests and paint
   decision tests. Prove unchanged-generation blink preparation/draw decisions have
-  zero allocations after warmup, one-row change rebuilds one row, capture budgets
+  zero allocations in every measured sample after warmup (a p95 of zero alone
+  is insufficient), one-row change rebuilds one row, capture budgets
   improve, and old benchmarks pass. Commit measured before/after budgets and code.
 
 ### Task 7: Push pane title changes and publish layout only on mutation
@@ -335,11 +341,13 @@ logic remains Window-free. Avoid pass-through wrappers around moved code.
 - [ ] Move workspace keymap/divider/rename/title/reload/factory/routing logic to
   named files. Make CloseGate::decide pure and keep both mouse/keyboard divider
   adapters on shared arithmetic. Reuse PaneServices construction in the factory.
+  Dispatch modal keyboard behavior with one exhaustive `Mode` match, preserving
+  rename, confirmation, idle and divider-drag key behavior with interface tests.
 - [ ] Run all offline gates: fmt, clippy --workspace --all-targets -D warnings,
   test --workspace --no-fail-fast, build --workspace, cargo tree duplicates/features,
   plus CI forbidden-state checks. Run paint/capture/Surface budget checks.
 - [ ] Confirm source census: one generation increment; no manual return_permit;
-  no workspace downcast; one production UnixListener::bind and key.matches;
+  no workspace downcast; one UnixListener::bind site and one production key.matches;
   lib.rs re-exports; no PaneRegistry; size validation only in validated constructor.
 - [ ] Write issue-item-to-proof coverage record in docs/performance/design-review.md
   or a linked implementation record. Update all plan checkboxes from evidence.
