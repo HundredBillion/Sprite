@@ -1,0 +1,742 @@
+{
+  "scope": "One predefined relative isolated-capture comparison; existing absolute budgets remain unchanged.",
+  "cwd": "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design",
+  "TERM": "xterm-ghostty",
+  "affinity": [
+    2
+  ],
+  "output_bytes": 10485760,
+  "samples_per_run": 30,
+  "fixture_warmup": "One unmeasured capture per fresh driver before each timed capture; unchanged built-in harness behavior.",
+  "warmup_order": [
+    "A",
+    "B"
+  ],
+  "measured_order": [
+    "A",
+    "B",
+    "B",
+    "A",
+    "B",
+    "A",
+    "A",
+    "B"
+  ],
+  "binaries": {
+    "A": {
+      "path": "/tmp/sprite-task11-before-term-bench",
+      "sha256": "0b36c424a71be7c74db80c2d34667c8cf0bfe8555c6771b8c3f852d8513aed22",
+      "revision": "b0aae2d75a77f5efc19476f198cb64c8497c8818"
+    },
+    "B": {
+      "path": "/tmp/sprite-task11-final-term-bench",
+      "sha256": "16769b60cbc2d6e8d000e680198cd06fd5b3eb8a925d97972fbef00813e6a9ee",
+      "revision": "a806bf9528f02ce13aedc0dce9ef83955c8bacd2 (identical measured final binary)"
+    }
+  },
+  "before": {
+    "utc": "2026-10-04T09:25:37.556439+00:00",
+    "allowed_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "load_average": [
+      1.48974609375,
+      1.365234375,
+      1.7392578125
+    ],
+    "uname": [
+      "Linux",
+      "omarchy",
+      "7.2.5-3-omarchy",
+      "#1 SMP PREEMPT_DYNAMIC Mon, 14 Sep 2026 19:55:01 +0000",
+      "x86_64"
+    ],
+    "scaling_governor": "powersave",
+    "scaling_cur_freq": "4199957",
+    "thread_siblings_list": "2,10"
+  },
+  "runs": [
+    {
+      "phase": "warmup",
+      "index": 1,
+      "binary": "A",
+      "report": "warmup-01-A.json",
+      "log": "/tmp/sprite-task11-capture-controlled/warmup-01-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-before-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/warmup-01-A.json"
+      ],
+      "started_utc": "2026-10-04T09:25:37.562682+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 26.017710511998303,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.013992,
+        "p95": 0.023214,
+        "max": 0.025661,
+        "budget": 0.025535
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/warmup-01-A.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 1,
+        "log": "/tmp/sprite-task11-capture-controlled/warmup-01-A-shared-gate.log"
+      }
+    },
+    {
+      "phase": "warmup",
+      "index": 2,
+      "binary": "B",
+      "report": "warmup-02-B.json",
+      "log": "/tmp/sprite-task11-capture-controlled/warmup-02-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-final-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/warmup-02-B.json"
+      ],
+      "started_utc": "2026-10-04T09:26:03.581072+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 30.13273544900221,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.013682,
+        "p95": 0.020601,
+        "max": 0.028541,
+        "budget": 0.022661
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/warmup-02-B.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 1,
+        "log": "/tmp/sprite-task11-capture-controlled/warmup-02-B-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 1,
+      "binary": "A",
+      "report": "measured-01-A.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-01-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-before-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-01-A.json"
+      ],
+      "started_utc": "2026-10-04T09:26:33.714279+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 24.974510997002653,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.014197,
+        "p95": 0.017916,
+        "max": 0.026026,
+        "budget": 0.019708
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-01-A.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 0,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-01-A-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 2,
+      "binary": "B",
+      "report": "measured-02-B.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-02-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-final-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-02-B.json"
+      ],
+      "started_utc": "2026-10-04T09:26:58.689741+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 28.11795090099986,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.012824,
+        "p95": 0.017422,
+        "max": 0.02253,
+        "budget": 0.019164
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-02-B.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 0,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-02-B-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 3,
+      "binary": "B",
+      "report": "measured-03-B.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-03-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-final-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-03-B.json"
+      ],
+      "started_utc": "2026-10-04T09:27:26.808870+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 28.035057853998296,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.013407,
+        "p95": 0.025291,
+        "max": 0.035517,
+        "budget": 0.02782
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-03-B.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 1,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-03-B-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 4,
+      "binary": "A",
+      "report": "measured-04-A.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-04-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-before-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-04-A.json"
+      ],
+      "started_utc": "2026-10-04T09:27:54.845042+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 38.357480122002016,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.013609,
+        "p95": 0.014973,
+        "max": 0.032797,
+        "budget": 0.01647
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-04-A.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 0,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-04-A-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 5,
+      "binary": "B",
+      "report": "measured-05-B.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-05-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-final-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-05-B.json"
+      ],
+      "started_utc": "2026-10-04T09:28:33.203727+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 33.09151862299768,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.013519,
+        "p95": 0.022432,
+        "max": 0.022655,
+        "budget": 0.024675
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-05-B.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 1,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-05-B-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 6,
+      "binary": "A",
+      "report": "measured-06-A.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-06-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-before-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-06-A.json"
+      ],
+      "started_utc": "2026-10-04T09:29:06.296487+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 41.15220466300161,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.0138,
+        "p95": 0.017446,
+        "max": 0.018627,
+        "budget": 0.019191
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-06-A.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 0,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-06-A-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 7,
+      "binary": "A",
+      "report": "measured-07-A.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-07-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-before-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-07-A.json"
+      ],
+      "started_utc": "2026-10-04T09:29:47.449925+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 29.029034770999715,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.014179,
+        "p95": 0.019941,
+        "max": 0.020892,
+        "budget": 0.021935
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-07-A.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 1,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-07-A-shared-gate.log"
+      }
+    },
+    {
+      "phase": "measured",
+      "index": 8,
+      "binary": "B",
+      "report": "measured-08-B.json",
+      "log": "/tmp/sprite-task11-capture-controlled/measured-08-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-task11-final-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-08-B.json"
+      ],
+      "started_utc": "2026-10-04T09:30:16.480197+00:00",
+      "return_code": 0,
+      "elapsed_seconds": 29.02608256199892,
+      "isolated_capture": {
+        "unit": "ms",
+        "samples": 30,
+        "median": 0.014382,
+        "p95": 0.028868,
+        "max": 0.124903,
+        "budget": 0.031755
+      },
+      "allocations": {
+        "unit": "Rust allocations",
+        "samples": 30,
+        "median": 104.0,
+        "p95": 104.0,
+        "max": 104.0,
+        "budget": 114.4
+      },
+      "bytes": {
+        "unit": "requested Rust bytes",
+        "samples": 30,
+        "median": 14656.0,
+        "p95": 14656.0,
+        "max": 14656.0,
+        "budget": 16121.6
+      },
+      "shared_gate": {
+        "command": [
+          "python3",
+          "scripts/check_capture_budgets.py",
+          "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-controlled/measured-08-B.json",
+          "docs/performance/design-review-capture-shared.json"
+        ],
+        "return_code": 1,
+        "log": "/tmp/sprite-task11-capture-controlled/measured-08-B-shared-gate.log"
+      }
+    }
+  ],
+  "after": {
+    "utc": "2026-10-04T09:30:45.507369+00:00",
+    "allowed_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "load_average": [
+      4.20654296875,
+      2.91455078125,
+      2.29931640625
+    ],
+    "uname": [
+      "Linux",
+      "omarchy",
+      "7.2.5-3-omarchy",
+      "#1 SMP PREEMPT_DYNAMIC Mon, 14 Sep 2026 19:55:01 +0000",
+      "x86_64"
+    ],
+    "scaling_governor": "powersave",
+    "scaling_cur_freq": "852661",
+    "thread_siblings_list": "2,10"
+  },
+  "adjacent_pairs": [
+    {
+      "measured_indices": [
+        1,
+        2
+      ],
+      "order": "AB",
+      "B_over_A": {
+        "median": 0.9032894273438051,
+        "p95": 0.9724268810002232,
+        "max": 0.8656727887497119
+      }
+    },
+    {
+      "measured_indices": [
+        3,
+        4
+      ],
+      "order": "BA",
+      "B_over_A": {
+        "median": 0.9851568814754942,
+        "p95": 1.689107059373539,
+        "max": 1.0829344147330549
+      }
+    },
+    {
+      "measured_indices": [
+        5,
+        6
+      ],
+      "order": "BA",
+      "B_over_A": {
+        "median": 0.9796376811594203,
+        "p95": 1.2857961710420727,
+        "max": 1.2162452354109625
+      }
+    },
+    {
+      "measured_indices": [
+        7,
+        8
+      ],
+      "order": "AB",
+      "B_over_A": {
+        "median": 1.0143169475985612,
+        "p95": 1.4476706283536434,
+        "max": 5.978508520007658
+      }
+    }
+  ],
+  "median_of_run_summaries_not_pooled_percentiles": {
+    "A": {
+      "median": {
+        "median_of_four_run_summaries": 0.0139895,
+        "minimum_run_summary": 0.013609,
+        "maximum_run_summary": 0.014197
+      },
+      "p95": {
+        "median_of_four_run_summaries": 0.017681000000000002,
+        "minimum_run_summary": 0.014973,
+        "maximum_run_summary": 0.019941
+      },
+      "max": {
+        "median_of_four_run_summaries": 0.023459,
+        "minimum_run_summary": 0.018627,
+        "maximum_run_summary": 0.032797
+      }
+    },
+    "B": {
+      "median": {
+        "median_of_four_run_summaries": 0.013463,
+        "minimum_run_summary": 0.012824,
+        "maximum_run_summary": 0.014382
+      },
+      "p95": {
+        "median_of_four_run_summaries": 0.0238615,
+        "minimum_run_summary": 0.017422,
+        "maximum_run_summary": 0.028868
+      },
+      "max": {
+        "median_of_four_run_summaries": 0.029086,
+        "minimum_run_summary": 0.02253,
+        "maximum_run_summary": 0.124903
+      }
+    }
+  },
+  "median_of_four_pair_ratios": {
+    "median": 0.9823972813174573,
+    "p95": 1.366733399697858,
+    "max": 1.1495898250720087
+  }
+}

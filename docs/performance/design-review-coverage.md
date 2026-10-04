@@ -266,6 +266,18 @@ governor; an observed load average was 3.75/3.35/2.85. Those observations do not
 prove noise or justify waiving a budget. The shared timing miss and all carried
 timing failures remain review risks.
 
+A subsequent [predefined CPU-affinity comparison](design-review-capture-controlled/README.md)
+ran the preserved binaries once in balanced ABBA BAAB order, after fixed A/B
+warmups, with 30 samples per invocation. All ten reports and the protocol are
+retained. The median of four paired final/baseline ratios was 0.982397 for medians
+and **1.366733 for p95s**. Final p95 was higher in three of four pairs, in both
+orders; three measured final runs still exceeded the shared 0.017937 ms budget.
+The median of four run p95s was 0.0238615 ms final versus 0.0176810 ms baseline;
+these are not pooled percentiles. The focused source/binary assessment found no
+added direct capture work or actionable production defect, but does not establish
+a cause or dismiss the tail slowdown. Timing acceptance remains unresolved;
+there were no further benchmark runs or threshold changes.
+
 Reproduction commands for the final measurements:
 
 ```sh

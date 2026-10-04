@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "sample_count": 30,
+  "metrics": {
+    "spawn_to_ready": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 1.636956,
+      "p95": 1.792385,
+      "max": 1.809380,
+      "budget": 1.971624
+    },
+    "input_to_snapshot_idle": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.139107,
+      "p95": 0.193650,
+      "max": 0.931416,
+      "budget": 0.213015
+    },
+    "input_to_snapshot_under_load": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 1.196484,
+      "p95": 2.453612,
+      "max": 3.157298,
+      "budget": 2.698973
+    },
+    "output_10mib_to_final_snapshot": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 647.310118,
+      "p95": 855.905674,
+      "max": 961.391760,
+      "budget": 941.496241
+    },
+    "capture_100x100_grid": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.039372,
+      "p95": 0.402927,
+      "max": 0.619250,
+      "budget": 0.443220
+    },
+    "capture_with_full_scrollback": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.273448,
+      "p95": 2.353738,
+      "max": 2.787433,
+      "budget": 2.589112
+    },
+    "scroll_round_trip": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.484088,
+      "p95": 1.607212,
+      "max": 1.775301,
+      "budget": 1.767933
+    },
+    "select_full_screen": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.142267,
+      "p95": 0.380762,
+      "max": 0.398506,
+      "budget": 0.418838
+    },
+    "allocations_per_capture": {
+      "unit": "Rust allocations",
+      "samples": 30,
+      "median": 104.000000,
+      "p95": 104.000000,
+      "max": 104.000000,
+      "budget": 114.400000
+    },
+    "rust_bytes_per_capture": {
+      "unit": "requested Rust bytes",
+      "samples": 30,
+      "median": 14656.000000,
+      "p95": 14656.000000,
+      "max": 14656.000000,
+      "budget": 16121.600000
+    },
+    "isolated_projector_capture": {
+      "unit": "ms",
+      "samples": 30,
+      "median": 0.014197,
+      "p95": 0.017916,
+      "max": 0.026026,
+      "budget": 0.019708
+    }
+  }
+}
