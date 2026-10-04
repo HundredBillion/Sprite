@@ -286,16 +286,16 @@ terminal_view observation registration/cleanup; app lib.rs and tests.
 operations extended to return payload references. Layout cannot name an absent
 payload. Closing/moving a leaf transfers ownership exactly once.
 
-- [ ] Move existing PaneRegistry drop-spy tests unchanged in meaning to generic
+- [x] Move existing PaneRegistry drop-spy tests unchanged in meaning to generic
   tree tests. Add layout().len()==len(), split/close/resize sequence properties,
   and exactly-once payload shutdown/drop assertions.
-- [ ] Fold registry storage into leaves, migrate tabs/workspace access, remove
+- [x] Fold registry storage into leaves, migrate tabs/workspace access, remove
   defensive filter_map and parallel contents.clear/contains_key sync logic.
   Keep observation WindowPanes only for its authorization/command responsibilities;
   ensure closing a payload unregisters it rather than retaining a ghost command.
-- [ ] Preserve stable Divider identity and geometry ordering. Run pane/tree/tab,
+- [x] Preserve stable Divider identity and geometry ordering. Run pane/tree/tab,
   observation, shutdown, and workspace tests; no orphan IDs/payloads may remain.
-- [ ] Commit generic tree and remove the obsolete registry module.
+- [x] Commit generic tree and remove the obsolete registry module.
 
 ### Task 10: Parse raw config into validated settings and typed differences
 
