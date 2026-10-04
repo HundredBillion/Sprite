@@ -146,9 +146,17 @@ pub(crate) struct Authenticated {
     // A pipelined Surface message may already be buffered after the key line.
     pub reader: BufReader<UnixStream>,
     pub body: String,
+    pub reply_connection: ReplyConnection,
 }
 
 type Connections = Arc<Mutex<HashMap<usize, UnixStream>>>;
+
+/// Only the authenticated origin may finish a bounded one-shot reply during closure.
+#[derive(Clone, Debug)]
+pub(crate) struct ReplyConnection {
+    connections: Connections,
+    id: usize,
+}
 
 struct ConnectionSlot {
     connections: Connections,
@@ -239,6 +247,10 @@ impl LocalSocket {
                                         stream,
                                         reader,
                                         body,
+                                        reply_connection: ReplyConnection {
+                                            connections: Arc::clone(&_slot.connections),
+                                            id,
+                                        },
                                     }),
                                     Err(_) => refused(&mut stream),
                                 }
@@ -270,6 +282,12 @@ impl LocalSocket {
     }
 
     pub fn close(&mut self) {
+        self.close_after_reply(None);
+    }
+
+    /// Stop authentication and cancel peers while the initiating one-shot writes its reply.
+    /// A registry-scoped identity cannot exempt a connection on a later socket.
+    pub fn close_after_reply(&mut self, reply: Option<&ReplyConnection>) {
         if self.listener.is_none() {
             return;
         }
@@ -278,8 +296,15 @@ impl LocalSocket {
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
         }
-        for stream in self.connections.lock().unwrap().values() {
-            let _ = stream.shutdown(Shutdown::Both);
+        for (id, stream) in self.connections.lock().unwrap().iter() {
+            let finishing_reply = reply.is_some_and(|reply| {
+                Arc::ptr_eq(&reply.connections, &self.connections) && reply.id == *id
+            });
+            let _ = stream.shutdown(if finishing_reply {
+                Shutdown::Read
+            } else {
+                Shutdown::Both
+            });
         }
         let _ = fs::remove_file(&self.socket);
         // Other windows may be between directory creation and binding their socket.
@@ -692,6 +717,170 @@ mod tests {
         wait_for_count(&socket, 0);
         assert!(!path.exists());
         assert!(scratch.0.exists());
+    }
+
+    fn gated_reply_socket(
+        directory: &Path,
+    ) -> (
+        LocalSocket,
+        mpsc::Receiver<ReplyConnection>,
+        mpsc::Sender<()>,
+    ) {
+        let (entered, identities) = mpsc::channel();
+        let (finish, finished) = mpsc::channel();
+        let finished = Mutex::new(finished);
+        let socket = LocalSocket::open_in(
+            directory.to_owned(),
+            Arc::new(ObservationKey::generate().unwrap()),
+            POLICY,
+            rejected,
+            move |mut connection| {
+                assert_eq!(
+                    connection.stream.write_timeout().unwrap(),
+                    Some(POLICY.write_timeout)
+                );
+                entered.send(connection.reply_connection).unwrap();
+                finished
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                let _ = writeln!(connection.stream, "finished");
+            },
+        )
+        .unwrap();
+        (socket, identities, finish)
+    }
+
+    fn authenticated_client(socket: &LocalSocket) -> UnixStream {
+        let mut client = UnixStream::connect(socket.socket_path()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        writeln!(client, "{} reply", socket.key_hex()).unwrap();
+        client
+    }
+
+    #[test]
+    fn closing_for_one_reply_cancels_other_clients_and_preserves_write_timeout() {
+        let scratch = Scratch::new();
+        let (entered, identities) = mpsc::channel();
+        let (finish, finished) = mpsc::channel();
+        let finished = Mutex::new(finished);
+        let policy = TransportPolicy {
+            max_connections: 3,
+            handshake_timeout: Duration::from_secs(30),
+            ..POLICY
+        };
+        let mut socket = LocalSocket::open_in(
+            scratch.0.clone(),
+            Arc::new(ObservationKey::generate().unwrap()),
+            policy,
+            rejected,
+            move |mut connection| {
+                assert_eq!(
+                    connection.stream.write_timeout().unwrap(),
+                    Some(POLICY.write_timeout)
+                );
+                entered.send(connection.reply_connection).unwrap();
+                if connection.body == "reply" {
+                    finished
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    writeln!(connection.stream, "finished").unwrap();
+                } else {
+                    let _ = connection.reader.read_line(&mut String::new());
+                }
+            },
+        )
+        .unwrap();
+        let mut client = authenticated_client(&socket);
+        let origin = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut unrelated = UnixStream::connect(socket.socket_path()).unwrap();
+        unrelated
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        writeln!(unrelated, "{} unrelated", socket.key_hex()).unwrap();
+        identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut partial = UnixStream::connect(socket.socket_path()).unwrap();
+        partial
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        write!(partial, "{} unfinished", socket.key_hex()).unwrap();
+        wait_for_count(&socket, 3);
+        socket.close_after_reply(Some(&origin));
+        assert!(!socket.socket_path().exists());
+        assert!(UnixStream::connect(socket.socket_path()).is_err());
+        let mut answer = String::new();
+        unrelated.read_to_string(&mut answer).unwrap();
+        assert!(answer.is_empty());
+        if let Err(error) = partial.read_to_string(&mut answer) {
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        }
+        assert!(answer.is_empty() || answer == "denied\n");
+        wait_for_count(&socket, 1);
+        finish.send(()).unwrap();
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).unwrap();
+        assert_eq!(answer, "finished\n");
+        wait_for_count(&socket, 0);
+    }
+
+    #[test]
+    fn foreign_and_reopened_reply_identities_cannot_spare_another_connection() {
+        let source_dir = Scratch::new();
+        let target_dir = Scratch::new();
+        let (mut source, identities, finish_source) = gated_reply_socket(&source_dir.0);
+        let _source_client = authenticated_client(&source);
+        let foreign = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (mut target, identities, finish_target) = gated_reply_socket(&target_dir.0);
+        let mut target_client = authenticated_client(&target);
+        let old_target = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(foreign.id, old_target.id);
+        target.close_after_reply(Some(&foreign));
+        assert_eq!(target_client.read(&mut [0]).unwrap(), 0);
+        finish_target.send(()).unwrap();
+        wait_for_count(&target, 0);
+        drop(target);
+        let (mut reopened, identities, finish_reopened) = gated_reply_socket(&target_dir.0);
+        let mut reopened_client = authenticated_client(&reopened);
+        let new_target = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(old_target.id, new_target.id);
+        reopened.close_after_reply(Some(&old_target));
+        assert_eq!(reopened_client.read(&mut [0]).unwrap(), 0);
+        finish_reopened.send(()).unwrap();
+        wait_for_count(&reopened, 0);
+        source.close();
+        finish_source.send(()).unwrap();
+        wait_for_count(&source, 0);
+    }
+
+    #[test]
+    fn completed_reply_identity_and_ordinary_close_never_spare_active_clients() {
+        let scratch = Scratch::new();
+        let (mut socket, identities, finish) = gated_reply_socket(&scratch.0);
+        let mut first = authenticated_client(&socket);
+        let stale = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        finish.send(()).unwrap();
+        first.read_to_string(&mut String::new()).unwrap();
+        wait_for_count(&socket, 0);
+        let mut second = authenticated_client(&socket);
+        let active = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_ne!(stale.id, active.id);
+        socket.close_after_reply(Some(&stale));
+        assert_eq!(second.read(&mut [0]).unwrap(), 0);
+        finish.send(()).unwrap();
+        wait_for_count(&socket, 0);
+
+        let (mut socket, identities, finish) = gated_reply_socket(&scratch.0);
+        let mut client = authenticated_client(&socket);
+        let _active = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        socket.close();
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
+        finish.send(()).unwrap();
+        wait_for_count(&socket, 0);
     }
 
     #[test]

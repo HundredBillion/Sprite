@@ -237,7 +237,7 @@ fn canonical_names_and_palette_indices_are_sorted_unique_and_last_wins() {
 }
 
 #[test]
-fn escaping_and_whitespace_are_lossless_in_keys_and_preferences() {
+fn escaped_keys_arguments_and_normalized_preferences_round_trip() {
     let hostile = " \0\u{1}\u{8}\u{c}\n\r\t\u{1f}\u{7f}é界🦀\\\". ";
     let mut settings = Settings::default();
     settings.font.family = NonBlank::new(hostile.into());
@@ -249,6 +249,15 @@ fn escaping_and_whitespace_are_lossless_in_keys_and_preferences() {
     settings.highlights =
         Highlights::from_groups(vec![(hostile.into(), HighlightStyle::default())]);
     settings.colors.tokens = vec![(hostile.into(), sprite_term::Rgb { r: 1, g: 2, b: 3 })].into();
+    assert_eq!(settings.font.family.as_deref(), Some(hostile.trim()));
+    assert_eq!(settings.shell.program.as_deref(), Some(hostile.trim()));
+    assert_eq!(
+        settings.shell.startup_directory.as_deref(),
+        Some(hostile.trim())
+    );
+    assert_eq!(settings.shell.args.as_ref().unwrap()[0], hostile);
+    assert_eq!(settings.colors.tokens[0].0, hostile);
+    assert!(settings.highlights.get(hostile).is_some());
     assert_eq!(
         Settings::parse_candidate(&settings.to_toml()).unwrap(),
         (settings, Complaints::default())
@@ -299,10 +308,35 @@ fn non_utf8_cli_commands_reach_session_config_unchanged() {
         startup_directory: NonBlank::new(" /tmp/界 ".into()),
     }
     .session_preference();
-    assert_eq!(preference.program.unwrap().as_os_str(), " /tmp/é ");
+    assert_eq!(preference.program.unwrap().as_os_str(), "/tmp/é");
     assert_eq!(preference.args.unwrap(), vec![OsString::from("界\\\"")]);
+    assert_eq!(preference.startup_directory.unwrap().as_os_str(), "/tmp/界");
+}
+
+#[test]
+fn padded_preferences_normalize_while_arguments_and_names_remain_verbatim() {
+    let text = "[font]\nfamily = '  Fira Code  '\n[shell]\nprogram = ' /bin/sh '\nstartup_directory = ' /tmp '\nargs = [' -i ', '']\n[colors.tokens]\n' token ' = '#010203'\n[highlights]\n' group ' = { bold = true }\n";
+    let (settings, complaints) = Settings::parse_candidate(text).unwrap();
+    assert!(complaints.0.is_empty());
+    assert_eq!(settings.font.family.as_deref(), Some("Fira Code"));
+    assert_eq!(settings.shell.program.as_deref(), Some("/bin/sh"));
+    assert_eq!(settings.shell.startup_directory.as_deref(), Some("/tmp"));
+    assert_eq!(settings.shell.args, Some(vec![" -i ".into(), "".into()]));
+    assert_eq!(settings.colors.tokens[0].0, " token ");
+    assert!(settings.highlights.get(" group ").is_some());
     assert_eq!(
-        preference.startup_directory.unwrap().as_os_str(),
-        " /tmp/界 "
+        Settings::parse_candidate(&settings.to_toml()).unwrap(),
+        (settings.clone(), Complaints::default())
+    );
+    let (session, refused) =
+        sprite_term::SessionConfig::shell(&settings.shell.session_preference()).unwrap();
+    assert!(refused.is_empty());
+    assert_eq!(session.program, std::path::Path::new("/bin/sh"));
+    assert_eq!(
+        session.args,
+        vec![
+            std::ffi::OsString::from(" -i "),
+            std::ffi::OsString::from("")
+        ]
     );
 }

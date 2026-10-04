@@ -584,6 +584,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
         mut stream,
         reader,
         body,
+        ..
     } = connection;
     match first_line(&body) {
         Ok(FirstRequest::Open { pane, open }) => {

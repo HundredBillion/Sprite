@@ -65,10 +65,11 @@ pub(crate) use crate::local_socket::{MAX_SOCKET_PATH, runtime_directory, sweep_d
 ///
 /// The key is already checked and deliberately absent: nothing downstream can
 /// re-examine or leak it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Request {
     /// Everything after the key, verbatim. Task 6 gives this meaning.
     pub body: String,
+    pub(crate) reply_connection: crate::local_socket::ReplyConnection,
 }
 
 /// One window's socket and key.
@@ -164,6 +165,13 @@ impl Endpoint {
     pub fn close(&mut self) {
         self.transport.close();
     }
+
+    pub(crate) fn close_after_reply(
+        &mut self,
+        reply: Option<&crate::local_socket::ReplyConnection>,
+    ) {
+        self.transport.close_after_reply(reply);
+    }
 }
 
 fn answer<H>(connection: Authenticated, handler: &H)
@@ -171,9 +179,15 @@ where
     H: Fn(Request) -> String,
 {
     let Authenticated {
-        mut stream, body, ..
+        mut stream,
+        body,
+        reply_connection,
+        ..
     } = connection;
-    let response = handler(Request { body });
+    let response = handler(Request {
+        body,
+        reply_connection,
+    });
     let _ = writeln!(stream, "{response}");
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }

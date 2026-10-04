@@ -45,8 +45,10 @@ Printed configuration preserves section order, escapes arbitrary Unicode and
 control characters, and serializes highlight groups as TOML subtables.
 
 File preferences are UTF-8. Blank-only font names, shell paths and startup
-directories use the default; nonblank values preserve surrounding whitespace.
-Empty strings remain valid shell arguments and token/highlight names.
+directories use the default; nonblank values trim surrounding whitespace at
+construction, preserving the established file normalization.
+Shell arguments and token/highlight names remain verbatim, including empty
+strings and surrounding whitespace.
 CLI commands and session commands continue to use OS strings, including
 non-UTF-8 bytes on Unix; printing file settings does not transcode those commands.
 
@@ -56,3 +58,11 @@ pane applies only its changed live settings. The reload report names the same
 effects. An unchanged reload does not remeasure fonts or send color/cursor
 commands to the terminal. Next-session preferences are retained for new panes
 without changing running PTYs.
+
+An observation-disabling reload reconciles the endpoint before replacing the
+settings it compares. Its authenticated requesting client receives the reload
+report before EOF while the socket is removed, new authentication is stopped,
+and other clients are cancelled. Only that one-shot reply keeps its existing
+write timeout; ordinary closure still cancels all clients. Reenabling through
+the workspace creates a new socket and key. See [ADR 0018](0018-keep-the-surface-channel-separate-from-observation.md)
+for the scoped reply identity and cancellation contract.

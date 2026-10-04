@@ -364,9 +364,10 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
     let config_fixture = scratch.join("config.rs");
     std::fs::write(&config_fixture, config_source).unwrap();
     let prelude = format!(
-        "#![allow(dead_code, unused_imports, unused_variables)]\n#[path = {:?}] mod config;\n#[path = {:?}] mod graphics_cache;\n",
+        "#![allow(dead_code, unused_imports, unused_variables)]\n#[path = {:?}] mod config;\n#[path = {:?}] mod graphics_cache;\n#[path = {:?}] mod local_socket;\n",
         config_fixture,
-        root.join("src/graphics_cache.rs")
+        root.join("src/graphics_cache.rs"),
+        root.join("src/local_socket.rs")
     );
     let compile = |name: &str, body: &str| {
         compile_source(
@@ -409,6 +410,11 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
             "let mut settings = config::Settings::default(); settings.colors.palette = Vec::new();",
             "E0308",
             "CanonicalMap",
+        ),
+        (
+            "let value = local_socket::ReplyConnection { connections: Default::default(), id: 0 };",
+            "E0451",
+            "private",
         ),
     ]
     .into_iter()

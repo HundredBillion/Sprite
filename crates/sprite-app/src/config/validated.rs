@@ -84,12 +84,13 @@ bytes!(
     usize::try_from(i64::MAX).unwrap_or(usize::MAX)
 );
 
-/// UTF-8 names preserve whitespace; blank-only values mean an absent preference.
+/// UTF-8 preferences trim surrounding whitespace; blank-only values mean no preference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NonBlank(String);
 impl NonBlank {
     pub fn new(value: String) -> Option<Self> {
-        (!value.trim().is_empty()).then_some(Self(value))
+        let value = value.trim();
+        (!value.is_empty()).then(|| Self(value.to_owned()))
     }
 }
 impl Deref for NonBlank {

@@ -58,10 +58,27 @@ bind helper also creates abandoned-socket test fixtures, so permissions and path
 validation have one implementation. Socket names are independent random draws,
 never derived from authentication secrets. Stale cleanup only removes paths
 whose connection attempt reports `ConnectionRefused`. Other errors prove
-nothing. Closing joins the listener, interrupts accepted socket I/O, and unlinks
-only that socket. The shared runtime directory stays to avoid racing other
-windows' startup. Connection slots are returned on normal completion, spawn
-failure, and adapter panic.
+nothing. Ordinary closure joins the listener, interrupts all accepted socket I/O,
+and unlinks only that socket. The shared runtime directory stays to avoid racing
+other windows' startup. Connection slots are returned on normal completion,
+spawn failure, and adapter panic.
+
+A configuration reload that disables its own observation endpoint makes one
+narrow exception: its already authenticated, one-shot request may finish writing
+the reload report under the existing two-second socket write timeout. The
+transport first stops accepts/authentication, unlinks the socket, cancels all
+other clients (including incomplete handshakes), and shuts down the initiating
+connection's read side. The observation adapter writes one reply and closes;
+it cannot accept another request on that connection. Ordinary window shutdown
+and Surface closure continue to cancel every connection.
+
+Only the transport can construct the opaque reply identity. It combines the
+connection number with the identity of its owning connection registry. A stale
+request or an identity from another/reopened endpoint cannot spare a different
+connection with the same number. The identity passes through the authenticated
+observation request and bounded workspace relay; it is never parsed from client
+input and does not carry the key. Authentication/connection caps and timeout
+values are unchanged; no delayed shutdown timer or second transport is added.
 
 Authentication consumes a complete newline-terminated UTF-8 line before testing
 the exact key once. EOF before newline, an oversized line, an invalid key, and

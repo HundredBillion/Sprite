@@ -220,7 +220,9 @@ impl Workspace {
             while let Ok(request) = reload_rx.recv().await {
                 let answer = workspace
                     .update(cx, |workspace, cx| match request.what {
-                        ConfigVerb::Reload => workspace.reload(cx),
+                        ConfigVerb::Reload => {
+                            workspace.reload(request.reply_connection.as_ref(), cx)
+                        }
                         // Printed from what the window is *using*, which after
                         // a reload is not necessarily what the file says.
                         ConfigVerb::Print => workspace.settings.to_toml(),
@@ -420,6 +422,15 @@ impl Workspace {
     /// Reviving the old one would mean a key someone captured while observation
     /// was enabled started working again the moment it was re-enabled.
     pub fn set_observation_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.change_observation(enabled, None, cx);
+    }
+
+    fn change_observation(
+        &mut self,
+        enabled: bool,
+        reply: Option<&crate::local_socket::ReplyConnection>,
+        cx: &mut Context<Self>,
+    ) {
         if enabled == self.settings.pane_observation.enabled {
             return;
         }
@@ -427,7 +438,7 @@ impl Workspace {
         if enabled {
             self.endpoint = open_endpoint(&self.panes, &self.reload_sender);
         } else if let Some(mut endpoint) = self.endpoint.take() {
-            endpoint.close();
+            endpoint.close_after_reply(reply);
         }
         self.refresh_layout(cx);
         cx.notify();
@@ -661,7 +672,11 @@ impl Workspace {
     /// reported field by field while the rest takes effect. And a change that
     /// cannot honestly be applied to a session that is already running is said
     /// to be waiting for the next one, rather than silently dropped.
-    fn reload(&mut self, cx: &mut Context<Self>) -> String {
+    fn reload(
+        &mut self,
+        reply: Option<&crate::local_socket::ReplyConnection>,
+        cx: &mut Context<Self>,
+    ) -> String {
         let Some(path) = self.config_path.clone().or_else(crate::config::path) else {
             return "there is nowhere to read a configuration file from \
                     (neither XDG_CONFIG_HOME nor HOME is set)"
@@ -680,17 +695,15 @@ impl Workspace {
             cx.global_mut::<crate::tokens::TokenRegistry>()
                 .apply_theme(&settings.colors);
         }
+        if outcome.has(crate::config::LiveChange::Observation) {
+            self.change_observation(settings.pane_observation.enabled, reply, cx);
+        }
         // Published, not pushed: each pane observes the global with its own
         // window in hand, which is what a cell re-measure needs and what this
         // method, reached from an endpoint thread, does not have.
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
         self.settings = settings;
         self.configured_font_size = self.settings.font.size;
-        // Observation is the one setting the window itself owns, and it can be
-        // turned on or off without a frame.
-        if outcome.has(crate::config::LiveChange::Observation) {
-            self.set_observation_enabled(self.settings.pane_observation.enabled, cx);
-        }
         cx.notify();
 
         outcome.describe(&path, &complaints.0)
@@ -978,7 +991,12 @@ fn open_endpoint(
     let panes = Arc::clone(panes);
     let reload = reload.clone();
     Endpoint::open(move |request| {
-        crate::observation::request::respond(panes.as_ref(), &reload, &request.body)
+        crate::observation::request::respond(
+            panes.as_ref(),
+            &reload,
+            &request.body,
+            Some(request.reply_connection),
+        )
     })
     .ok()
 }
@@ -992,6 +1010,7 @@ fn open_endpoint(
 pub(crate) struct ReloadRequest {
     pub(crate) what: ConfigVerb,
     pub(crate) reply: std::sync::mpsc::SyncSender<String>,
+    pub(crate) reply_connection: Option<crate::local_socket::ReplyConnection>,
 }
 
 pub(crate) enum RelayError {
@@ -1885,6 +1904,151 @@ mod tests {
                 .unwrap()
                 .focus_handle(cx)
         })
+    }
+
+    #[gpui::test]
+    fn reload_reconciles_observation_endpoint_and_revokes_old_credentials(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A child owns runtime-directory variables without racing parallel tests.
+        // Its private directory also works without a logged-in desktop.
+        if std::env::var_os("SPRITE_OBSERVATION_RELOAD_TEST_CHILD").is_none() {
+            let directory = std::env::temp_dir().join(format!("sp-r-{:x}", std::process::id()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "workspace::tests::reload_reconciles_observation_endpoint_and_revokes_old_credentials", "--nocapture"])
+                .env("SPRITE_OBSERVATION_RELOAD_TEST_CHILD", "1")
+                .env("XDG_RUNTIME_DIR", &directory)
+                .env("TMPDIR", &directory)
+                .output().unwrap();
+            std::fs::remove_dir_all(directory).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        let (workspace, cx) = test_workspace(cx);
+        let path = std::env::temp_dir().join(format!(
+            "sprite-observation-reload-{}.toml",
+            std::process::id()
+        ));
+        workspace.update(cx, |workspace, cx| {
+            workspace.config_path = Some(path.clone());
+            workspace.set_observation_enabled(true, cx);
+        });
+        let (old_socket, old_key, layout_count, title_count) =
+            workspace.read_with(cx, |workspace, _| {
+                let endpoint = workspace
+                    .endpoint
+                    .as_ref()
+                    .expect("enabled observation endpoint");
+                (
+                    endpoint.socket_path().to_owned(),
+                    endpoint.key_hex(),
+                    workspace.panes.layout_publications(),
+                    workspace.pane_titles.len(),
+                )
+            });
+        assert!(old_socket.exists());
+        std::fs::write(&path, "[pane_observation]\nenabled = false\n").unwrap();
+        let (answer, receive) = async_channel::bounded(1);
+        let socket = old_socket.clone();
+        let key = old_key.clone();
+        let client = std::thread::spawn(move || {
+            let result = (|| -> std::io::Result<String> {
+                let mut stream = UnixStream::connect(socket)?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+                writeln!(stream, "{key} sprite-observation/1 config reload")?;
+                let mut answer = String::new();
+                stream.read_to_string(&mut answer)?;
+                Ok(answer)
+            })();
+            answer.send_blocking(result).unwrap();
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        let report = executor
+            .block_test(async { receive.recv().await.unwrap() })
+            .unwrap();
+        client.join().unwrap();
+        assert!(report.starts_with(&format!("reloaded {}", path.display())));
+        assert!(report.contains("applied now: pane_observation"));
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.settings.pane_observation.enabled);
+            assert!(
+                !cx.global::<crate::config::ActiveSettings>()
+                    .0
+                    .pane_observation
+                    .enabled
+            );
+            assert!(
+                workspace.endpoint.is_none(),
+                "reload must close observation before installing the new preference"
+            );
+            let environment = super::session_environment(
+                workspace.endpoint.as_ref(),
+                workspace.surfaces.as_ref(),
+                crate::tabs::TabId(0),
+                PaneId(0),
+            );
+            assert!(
+                !environment
+                    .iter()
+                    .any(|(key, _)| key == "SPRITE_OBSERVATION_KEY"
+                        || key == "SPRITE_OBSERVATION_SOCKET")
+            );
+        });
+        assert!(!old_socket.exists());
+        assert!(UnixStream::connect(&old_socket).is_err());
+
+        std::fs::write(&path, "[pane_observation]\nenabled = true\n").unwrap();
+        let report = workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        assert!(report.contains("applied now: pane_observation"));
+        let new_socket = workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.settings.pane_observation.enabled);
+            assert!(
+                cx.global::<crate::config::ActiveSettings>()
+                    .0
+                    .pane_observation
+                    .enabled
+            );
+            let endpoint = workspace
+                .endpoint
+                .as_ref()
+                .expect("reload must reopen observation");
+            assert!(
+                endpoint.key_hex() != old_key,
+                "reenabling creates a fresh key"
+            );
+            assert_ne!(endpoint.socket_path(), old_socket);
+            assert_eq!(workspace.panes.layout_publications(), layout_count);
+            assert_eq!(workspace.pane_titles.len(), title_count);
+            endpoint.socket_path().to_owned()
+        });
+        let mut rejected = UnixStream::connect(&new_socket).unwrap();
+        rejected
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        writeln!(rejected, "{old_key} unused").unwrap();
+        let mut response = String::new();
+        rejected.read_to_string(&mut response).unwrap();
+        assert_eq!(response.trim(), crate::observation::endpoint::DENIED);
+        let unchanged = workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        assert!(unchanged.contains("nothing changed"));
+        workspace.update(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.endpoint.as_ref().unwrap().socket_path(),
+                new_socket
+            );
+            workspace.begin_shutdown(cx);
+        });
+        assert!(!new_socket.exists());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[gpui::test]
