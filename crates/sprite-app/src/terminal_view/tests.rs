@@ -1,26 +1,18 @@
 use super::*;
-use std::time::{Duration, Instant};
+
+impl gpui::EventEmitter<()> for TerminalView {}
 
 fn wait_for_bundle(
     view: &gpui::Entity<TerminalView>,
     cx: &mut gpui::VisualTestContext,
-    description: &str,
     predicate: impl Fn(&SnapshotBundle) -> bool,
 ) -> Arc<SnapshotBundle> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        cx.run_until_parked();
-        let bundle = view.read_with(cx, |view, _| view.bundle.clone());
-        if let Some(bundle) = bundle.as_ref().filter(|bundle| predicate(bundle)) {
-            return bundle.clone();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {description}; held generation: {:?}",
-            bundle.as_ref().map(|bundle| bundle.generation)
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let executor = cx.executor();
+    executor.allow_parking();
+    executor.block_test(view.condition::<()>(cx, |view, _| {
+        view.bundle.as_ref().is_some_and(|bundle| predicate(bundle))
+    }));
+    view.read_with(cx, |view, _| view.bundle.clone().unwrap())
 }
 
 #[gpui::test]
@@ -43,7 +35,7 @@ fn idle_view_accepts_colour_and_cursor_reloads(cx: &mut gpui::TestAppContext) {
             cx,
         )
     });
-    let initial = wait_for_bundle(&view, cx, "initial snapshot", |_| true);
+    let initial = wait_for_bundle(&view, cx, |_| true);
     let foreground = Rgb {
         r: 0x11,
         g: 0x22,
@@ -59,7 +51,7 @@ fn idle_view_accepts_colour_and_cursor_reloads(cx: &mut gpui::TestAppContext) {
             }))
             .unwrap();
     });
-    let coloured = wait_for_bundle(&view, cx, "reloaded foreground", |bundle| {
+    let coloured = wait_for_bundle(&view, cx, |bundle| {
         bundle.render.default_foreground == foreground
     });
     assert!(coloured.generation > initial.generation);
@@ -73,7 +65,7 @@ fn idle_view_accepts_colour_and_cursor_reloads(cx: &mut gpui::TestAppContext) {
             }))
             .unwrap();
     });
-    let cursor = wait_for_bundle(&view, cx, "reloaded cursor", |bundle| {
+    let cursor = wait_for_bundle(&view, cx, |bundle| {
         bundle.render.cursor.style == sprite_term::CursorStyle::Bar
     });
     assert!(cursor.generation > coloured.generation);
