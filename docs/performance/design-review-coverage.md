@@ -310,5 +310,18 @@ the allocation/byte checks.
 
 Native Wayland/X11 compositor interactions, interactive real macOS, native
 clipboard/window behavior and GPU/font rasterization performance remain outside
-this host's validation. The independent task/whole-branch reviews and PR action
-are separate follow-up gates; this evidence record is not a claim they passed.
+this host's validation.
+
+
+## Whole-branch review and PR readiness
+
+Independent review covered all 150 changed paths from `cee803a` through
+`69bcea3`, including the final controlled measurement evidence. It found no
+actionable Critical or Important code defect. The functional, static and scoped
+allocation evidence supports opening a draft PR for all three waves.
+
+The branch is **not ready to merge**. Capture timing acceptance remains an
+Important unresolved gate: the controlled comparison reports a median paired
+p95 ratio of 1.3667, and three of four final runs exceed the unchanged shared
+budget. No source-level cause or accepted exception has been established.
+Opening a draft PR does not waive that gate or claim native-platform acceptance.

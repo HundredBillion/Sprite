@@ -358,7 +358,12 @@ logic remains Window-free. Avoid pass-through wrappers around moved code.
   lib.rs re-exports; no PaneRegistry; size validation only in validated constructor.
 - [x] Write issue-item-to-proof coverage record in docs/performance/design-review.md
   or a linked implementation record. Update all plan checkboxes from evidence.
-- [ ] Obtain independent whole-branch review, resolve important findings, repeat
-  affected checks, and commit final docs. Push branch and open one PR for #48 using
-  creating-a-pull-request skill, with measured evidence and native-platform limits.
+- [x] Obtain independent whole-branch review and commit the final evidence.
+  Review of `cee803a..69bcea3` found no actionable Critical or Important code
+  defect. Functional/static/allocation checks pass within their documented scopes.
+- [ ] Resolve capture timing acceptance before merge. The controlled comparison
+  retains a +36.7% median paired p95 ratio and three of four final shared-budget
+  misses. Cause and acceptance remain unresolved; opening a draft is not a waiver.
+- [ ] Push the branch and open one draft PR for #48 using creating-a-pull-request,
+  with measured evidence and native-platform limits. Preserve the worktree.
   Do not merge or publish a release.
