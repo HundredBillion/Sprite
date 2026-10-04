@@ -74,8 +74,7 @@ pub struct Workspace {
     /// Held so that a pane created later — by a split or a new tab — runs the
     /// same thing the window was asked to run.
     command: Option<Vec<std::ffi::OsString>>,
-    /// A close waiting on a second press, because something is running.
-    pending_close: Option<PendingClose>,
+    mode: Mode,
     /// The file this window was told to read, if it was told.
     ///
     /// Kept so a reload re-reads *that* file rather than quietly switching to
@@ -93,24 +92,42 @@ pub struct Workspace {
     /// Ordinary shell exits are handled here, where the owning tab is known.
     exit_sender: async_channel::Sender<(TabId, PaneId)>,
     _exits: gpui::Task<()>,
-    /// The pane that should hold the keyboard, applied while rendering.
-    ///
-    /// A pane created by a split has no element in the dispatch tree until the
-    /// frame that draws it, and focusing a handle that is not yet there is
-    /// discarded: the keyboard silently stays with the previous pane, so the
-    /// next split divides the wrong one. Recording the intention and applying
-    /// it during render means focus lands on a pane that exists.
-    pending_focus: Option<PaneId>,
-    /// The boundary the pointer is currently moving, if any.
-    ///
-    /// While this is set the pane area wears an overlay, which is what keeps
-    /// the moves coming when the pointer outruns a seven-pixel strip.
-    divider_drag: Option<DividerDrag>,
-    /// A tab name being typed. While set, the keyboard belongs to the label.
-    renaming: Option<TabRename>,
     /// What the title bar currently says, so it is set only when it changes:
     /// the platform call is not free, and render runs every frame.
     window_title: Option<SharedString>,
+}
+
+enum Mode {
+    Idle,
+    Renaming(TabRename),
+    ConfirmingClose(PendingClose),
+    DraggingDivider(DividerDrag),
+}
+
+impl Mode {
+    fn renaming(&self) -> Option<&TabRename> {
+        if let Self::Renaming(rename) = self {
+            Some(rename)
+        } else {
+            None
+        }
+    }
+
+    fn pending_close(&self) -> Option<&PendingClose> {
+        if let Self::ConfirmingClose(close) = self {
+            Some(close)
+        } else {
+            None
+        }
+    }
+
+    fn divider_drag(&self) -> Option<DividerDrag> {
+        if let Self::DraggingDivider(drag) = self {
+            Some(*drag)
+        } else {
+            None
+        }
+    }
 }
 
 impl Workspace {
@@ -175,7 +192,6 @@ impl Workspace {
                 }
             }
         });
-        // The window focuses the workspace; the workspace hands the keyboard to
         let reload_task = cx.spawn(async move |workspace, cx| {
             while let Ok(request) = reload_rx.recv().await {
                 let answer = workspace
@@ -203,8 +219,6 @@ impl Workspace {
             }
         });
 
-        // a pane, rather than leaving which pane receives typing to chance.
-        let pending_focus = Some(tabs.active().focus());
         Self {
             tabs,
             endpoint,
@@ -213,11 +227,8 @@ impl Workspace {
             configured_font_size: settings.font.size,
             settings,
             focus: cx.focus_handle(),
-            pending_focus,
-            divider_drag: None,
-            renaming: None,
+            mode: Mode::Idle,
             window_title: None,
-            pending_close: None,
             config_path,
             _reload: reload_task,
             reload_sender,
@@ -277,7 +288,7 @@ impl Workspace {
 
     fn split(&mut self, orientation: Orientation, window: &mut Window, cx: &mut Context<Self>) {
         // A split starts a fresh session; panes never share one.
-        let pane = self.tabs.split(
+        self.tabs.split(
             orientation,
             make_pane(
                 self.command.clone(),
@@ -292,7 +303,6 @@ impl Workspace {
                 cx,
             ),
         );
-        self.request_focus(pane);
         cx.notify();
     }
 
@@ -309,7 +319,6 @@ impl Workspace {
             window,
             cx,
         ));
-        self.request_focus(self.tabs.active().focus());
         cx.notify();
     }
 
@@ -336,7 +345,7 @@ impl Workspace {
 
     /// A shell can exit in a background tab, so close by identity rather than focus.
     fn close_exited_pane(&mut self, tab: TabId, pane: PaneId, cx: &mut Context<Self>) {
-        let was_active = !self.tabs.is_empty() && self.tabs.active_tab() == tab;
+        let was_active = self.tabs.active_tab() == Some(tab);
         let Some(view) = self.tabs.close_pane(tab, pane) else {
             return;
         };
@@ -352,7 +361,9 @@ impl Workspace {
         if !self.may_close(CloseScope::Tab, cx) {
             return;
         }
-        let tab = self.tabs.active_tab();
+        let Some(tab) = self.tabs.active_tab() else {
+            return;
+        };
         for view in self.tabs.close_tab(tab) {
             self.shut_down(view, cx);
         }
@@ -409,20 +420,17 @@ impl Workspace {
     fn may_close(&mut self, scope: CloseScope, cx: &mut Context<Self>) -> bool {
         // The second press. Only for the same scope: a pending pane close is
         // not consent to closing the whole tab.
-        if self
-            .pending_close
-            .as_ref()
-            .is_some_and(|pending| pending.scope == scope)
-        {
-            self.pending_close = None;
+        if matches!(&self.mode, Mode::ConfirmingClose(pending) if pending.scope == scope) {
+            self.mode = Mode::Idle;
             return true;
         }
+        self.mode = Mode::Idle;
 
         let running = self.running_programs(scope, cx);
         if running.is_empty() {
             return true;
         }
-        self.pending_close = Some(PendingClose {
+        self.mode = Mode::ConfirmingClose(PendingClose {
             scope,
             running: describe_running(&running).into(),
         });
@@ -433,10 +441,14 @@ impl Workspace {
     /// The programs a close would interrupt, one entry per busy pane.
     fn running_programs(&self, scope: CloseScope, cx: &Context<Self>) -> Vec<Option<String>> {
         let panes: Vec<&Rc<dyn PaneHandle>> = match scope {
-            CloseScope::Pane => self.tabs.active().focused().into_iter().collect(),
-            CloseScope::Tab => self
+            CloseScope::Pane => self
                 .tabs
                 .active()
+                .and_then(|tab| tab.focused())
+                .into_iter()
+                .collect(),
+            CloseScope::Tab => self
+                .tabs
                 .layout()
                 .into_iter()
                 .map(|(_, _, pane)| pane)
@@ -621,30 +633,29 @@ impl Workspace {
     /// Ctrl+Shift+Space: the focused pane cycles the keyboard between its
     /// terminal and its Surfaces.
     fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focused = self.tabs.active().focus();
+        let Some(active) = self.tabs.active() else {
+            return;
+        };
+        let focused = active.focus();
         if let Ok(view) = self.terminal(focused) {
             view.update(cx, |view, cx| view.cycle_focus(window, cx));
         }
     }
 
     fn begin_rename(&mut self, cx: &mut Context<Self>) {
-        let tab = self.tabs.active_tab();
+        let Some(tab) = self.tabs.active_tab() else {
+            return;
+        };
         // Start from the current name, so a rename edits rather than retypes.
         let text = self.tabs.name(tab).unwrap_or_default().to_owned();
-        self.renaming = Some(TabRename { tab, text });
+        self.mode = Mode::Renaming(TabRename { tab, text });
         cx.notify();
-    }
-
-    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        if self.renaming.take().is_some() {
-            cx.notify();
-        }
     }
 
     /// One keystroke into a rename in progress. True when the key was for the
     /// rename and must go no further.
     fn rename_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
-        let Some(renaming) = self.renaming.as_mut() else {
+        let Mode::Renaming(renaming) = &mut self.mode else {
             return false;
         };
         match rename_step(&renaming.text, keystroke) {
@@ -653,34 +664,34 @@ impl Workspace {
                 let tab = renaming.tab;
                 let name = (!text.is_empty()).then_some(text);
                 self.tabs.set_name(tab, name);
-                self.renaming = None;
+                self.mode = Mode::Idle;
             }
-            RenameStep::Cancel => self.renaming = None,
+            RenameStep::Cancel => self.mode = Mode::Idle,
         }
         cx.notify();
         true
     }
 
     fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
-        if self.pending_close.take().is_some() {
+        if matches!(self.mode, Mode::ConfirmingClose(_)) {
+            self.mode = Mode::Idle;
             cx.notify();
         }
     }
 
     fn after_close(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Idle;
         if self.tabs.is_empty() {
             // The last pane of the last tab closed, so the window has nothing
             // left to show.
             cx.quit();
             return;
         }
-        self.request_focus(self.tabs.active().focus());
         cx.notify();
     }
 
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
-        if let Some(pane) = self.tabs.focus_direction(direction) {
-            self.request_focus(pane);
+        if self.tabs.focus_direction(direction).is_some() {
             cx.notify();
         }
     }
@@ -691,12 +702,12 @@ impl Workspace {
         pointer: f32,
         cx: &mut Context<Self>,
     ) {
-        self.divider_drag = Some(DividerDrag::begin(placed, pointer));
+        self.mode = Mode::DraggingDivider(DividerDrag::begin(placed, pointer));
         cx.notify();
     }
 
     fn drag_divider(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(drag) = self.divider_drag else {
+        let Mode::DraggingDivider(drag) = self.mode else {
             return;
         };
         let ratio = drag.ratio_for(drag.along(position));
@@ -712,7 +723,8 @@ impl Workspace {
     }
 
     fn end_divider_drag(&mut self, cx: &mut Context<Self>) {
-        if self.divider_drag.take().is_some() {
+        if matches!(self.mode, Mode::DraggingDivider(_)) {
+            self.mode = Mode::Idle;
             cx.notify();
         }
     }
@@ -730,7 +742,10 @@ impl Workspace {
     /// — does nothing. Growing it by moving the *opposite* boundary would make
     /// one key mean two different motions depending on where the pane sits.
     fn nudge_divider(&mut self, direction: Direction, window: &Window, cx: &mut Context<Self>) {
-        let focused = self.tabs.active().focus();
+        let Some(active) = self.tabs.active() else {
+            return;
+        };
+        let focused = active.focus();
         let Some(divider) = self.tabs.divider(focused, direction) else {
             return;
         };
@@ -768,15 +783,12 @@ impl Workspace {
         } else {
             self.tabs.previous_tab();
         }
-        self.request_focus(self.tabs.active().focus());
         cx.notify();
     }
 
     fn focus_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
-        // A click on a tab is a person moving on from any rename in progress.
-        self.cancel_rename(cx);
+        self.mode = Mode::Idle;
         if self.tabs.focus_tab(tab) {
-            self.request_focus(self.tabs.active().focus());
             cx.notify();
         }
     }
@@ -817,27 +829,20 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Asks for `pane` to hold the keyboard from the next frame onwards.
-    fn request_focus(&mut self, pane: PaneId) {
-        self.pending_focus = Some(pane);
-    }
-
-    /// Hands the keyboard to the pane that asked for it, now that this frame is
-    /// describing its element.
-    fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pane) = self.pending_focus.take() else {
+    fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
+        let Some(pane) = self.tabs.active().and_then(|tab| tab.focused()) else {
             return;
         };
-        let Some(view) = self.tabs.active().get(pane) else {
-            return;
-        };
-        let handle = view.focus_handle(cx);
-        window.focus(&handle);
+        let handle = pane.focus_handle(cx);
+        // Hosted Surfaces share the pane's focus subtree and keep their keyboard focus.
+        if !handle.contains_focused(window, cx) {
+            window.focus(&handle);
+        }
     }
 
     fn focus_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         if self.tabs.focus_pane(pane) {
-            self.request_focus(pane);
+            self.mode = Mode::Idle;
             cx.notify();
         }
     }
@@ -1448,7 +1453,10 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (width, height, strip) = self.pane_area(window);
-        let focused = self.tabs.active().focus();
+        let Some(active) = self.tabs.active() else {
+            return div().into_any_element();
+        };
+        let focused = active.focus();
         let active_tab = self.tabs.active_tab();
         let tab_order = self.tabs.order();
 
@@ -1468,7 +1476,7 @@ impl Render for Workspace {
             .collect();
 
         // The title bar follows the focused pane of the active tab.
-        let focused_title = self.tabs.active().focused().and_then(|pane| pane.title(cx));
+        let focused_title = active.focused().and_then(|pane| pane.title(cx));
         let wanted: SharedString = window_title(focused_title.as_ref().map(|t| t.as_ref()))
             .to_owned()
             .into();
@@ -1499,9 +1507,10 @@ impl Render for Workspace {
             handle.set_allocated(gpui::size(px(*pane_width), px(*pane_height)), cx);
         }
 
-        // Every pane in `placements` gets an element in this frame, so a focus
-        // request recorded earlier can now be honoured.
-        self.apply_pending_focus(window, cx);
+        // A new Surface joins the focus subtree only after this frame is drawn.
+        cx.defer_in(window, |workspace, window, cx| {
+            workspace.focus_active_pane(window, cx);
+        });
 
         // Published from here because this is where the layout is decided, and
         // a request arriving on another thread must never have to wait for a
@@ -1566,7 +1575,7 @@ impl Render for Workspace {
                 let leading = strip_leading(placed.boundary);
                 // A dragged line stays lit even once the pointer has left the
                 // strip behind, which it does the moment the drag gets going.
-                let dragging = self.divider_drag.is_some_and(|drag| {
+                let dragging = self.mode.divider_drag().is_some_and(|drag| {
                     drag.pane == placed.pane && drag.direction == placed.direction
                 });
                 // The container is a flex child below the tab strip, so a
@@ -1634,10 +1643,10 @@ impl Render for Workspace {
             .into_iter()
             .enumerate()
             .map(|(index, tab)| {
-                let is_active = tab == active_tab;
+                let is_active = Some(tab) == active_tab;
                 let editing = self
-                    .renaming
-                    .as_ref()
+                    .mode
+                    .renaming()
                     .filter(|renaming| renaming.tab == tab)
                     .map(|renaming| renaming.text.clone());
                 // A thin bar after the text stands for the caret; there is no
@@ -1702,7 +1711,7 @@ impl Render for Workspace {
                     return;
                 }
                 let action = workspace_action(&event.keystroke);
-                if workspace.pending_close.is_some() {
+                if matches!(workspace.mode, Mode::ConfirmingClose(_)) {
                     // Escape answers "no". It is claimed, because a question on
                     // screen is what the key is for at that moment.
                     if event.keystroke.key == "escape" {
@@ -1759,7 +1768,7 @@ impl Render for Workspace {
                     }
                 }
             }))
-            .children(self.pending_close.as_ref().map(|pending| {
+            .children(self.mode.pending_close().map(|pending| {
                 div()
                     .flex()
                     .w_full()
@@ -1786,7 +1795,7 @@ impl Render for Workspace {
                 )
             })
             .child(panes)
-            .when_some(self.divider_drag, |element, drag| {
+            .when_some(self.mode.divider_drag(), |element, drag| {
                 // GPUI delivers a move only while the element under the pointer
                 // is hovered, and a pointer outruns a seven-pixel strip at
                 // once. The overlay is what keeps the moves coming — and it
@@ -1823,6 +1832,7 @@ impl Render for Workspace {
                         ),
                 )
             })
+            .into_any_element()
     }
 }
 
@@ -1835,6 +1845,209 @@ mod tests {
         window_title, workspace_action,
     };
     use gpui::{Keystroke, Modifiers};
+
+    fn test_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<super::Workspace>, &mut gpui::VisualTestContext) {
+        cx.add_window_view(|window, cx| {
+            let mut settings = crate::config::Settings::default();
+            settings.pane_observation.enabled = false;
+            super::Workspace::new(
+                Some(vec!["/sprite-test-command-does-not-exist".into()]),
+                settings,
+                None,
+                window,
+                cx,
+            )
+        })
+    }
+
+    fn draw_workspace(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    fn focused_handle(
+        workspace: &gpui::Entity<super::Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> gpui::FocusHandle {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .tabs
+                .active()
+                .unwrap()
+                .focused()
+                .unwrap()
+                .focus_handle(cx)
+        })
+    }
+
+    #[gpui::test]
+    fn window_focus_follows_split_tab_switch_and_close(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        let first = focused_handle(&workspace, cx);
+        cx.update(|window, _| assert!(first.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-shift-d");
+        draw_workspace(cx);
+        let split = focused_handle(&workspace, cx);
+        assert_ne!(first, split);
+        cx.update(|window, _| assert!(split.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-shift-t");
+        draw_workspace(cx);
+        let second_tab = focused_handle(&workspace, cx);
+        assert_ne!(split, second_tab);
+        cx.update(|window, _| assert!(second_tab.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-shift-pageup");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(split.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-shift-w");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(first.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-shift-q");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(second_tab.is_focused(window)));
+        workspace.update(cx, |workspace, cx| workspace.close_active_tab(cx));
+        draw_workspace(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.tabs.active().is_none());
+            assert_eq!(workspace.tabs.active_tab(), None);
+        });
+        workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
+        draw_workspace(cx);
+        let reopened = focused_handle(&workspace, cx);
+        cx.update(|window, _| assert!(reopened.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn repaint_preserves_a_hosted_surfaces_keyboard_focus(cx: &mut gpui::TestAppContext) {
+        use crate::surface::channel::{Open, Position, Side, SurfaceConnection};
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        let terminal_focus = focused_handle(&workspace, cx);
+        let terminal = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .terminal(workspace.tabs.active().unwrap().focus())
+                .unwrap()
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.open_surface(crate::surface::SurfaceId(1), Open {
+                position: Position::Fill, side: Side::Left, size: 0.0, focus: true,
+                owner_pid: None, return_target: None, resizable: false,
+                description: serde_json::json!({"version":1,"root":{"kind":"text","text":"Surface"}}),
+            }, SurfaceConnection::new(&stream).unwrap(), window, cx).unwrap();
+        });
+        let surface_focus = cx.update(|window, cx| window.focused(cx).unwrap());
+        assert_ne!(surface_focus, terminal_focus);
+        draw_workspace(cx);
+        cx.update(|window, cx| {
+            assert!(surface_focus.is_focused(window));
+            assert!(terminal_focus.contains_focused(window, cx));
+        });
+        cx.simulate_keystrokes("ctrl-shift-space");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(terminal_focus.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-shift-space");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(surface_focus.is_focused(window)));
+        cx.simulate_keystrokes("ctrl-shift-d");
+        draw_workspace(cx);
+        let split = focused_handle(&workspace, cx);
+        cx.update(|window, _| assert!(split.is_focused(window)));
+    }
+
+    struct BusyPane {
+        focus: gpui::FocusHandle,
+    }
+    impl gpui::Focusable for BusyPane {
+        fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+            self.focus.clone()
+        }
+    }
+    impl gpui::Render for BusyPane {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::prelude::*;
+            gpui::div().track_focus(&self.focus)
+        }
+    }
+    impl sprite_pane::Pane for BusyPane {
+        fn title(&self) -> Option<gpui::SharedString> {
+            None
+        }
+        fn set_allocated(&mut self, _: gpui::Size<gpui::Pixels>) {}
+        fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
+            None
+        }
+        fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
+            Some(sprite_pane::CloseWarning {
+                program: Some("busy".into()),
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn modes_cancel_and_close_confirmation_remains_scope_specific(cx: &mut gpui::TestAppContext) {
+        use super::Mode;
+        use gpui::AppContext;
+        let (workspace, cx) = test_workspace(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs = crate::tabs::Tabs::new(|_, _| {
+                std::rc::Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as std::rc::Rc<dyn sprite_pane::PaneHandle>
+            });
+            workspace.tabs.split(Orientation::Horizontal, |_, _| {
+                std::rc::Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as std::rc::Rc<dyn sprite_pane::PaneHandle>
+            });
+            workspace.begin_rename(cx);
+            assert!(matches!(workspace.mode, Mode::Renaming(_)));
+            let placed = divider_placements(&workspace.tabs.dividers(), 800.0, 600.0, 0.0)[0];
+            workspace.begin_divider_drag(placed, 400.0, cx);
+            assert!(matches!(workspace.mode, Mode::DraggingDivider(_)));
+            assert!(workspace.mode.renaming().is_none());
+            assert!(!workspace.may_close(CloseScope::Pane, cx));
+            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
+            assert!(workspace.mode.divider_drag().is_none());
+            assert!(!workspace.may_close(CloseScope::Tab, cx));
+            assert!(workspace.may_close(CloseScope::Tab, cx));
+            assert!(matches!(workspace.mode, Mode::Idle));
+            assert!(!workspace.may_close(CloseScope::Pane, cx));
+        });
+        draw_workspace(cx);
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(workspace.mode, Mode::Idle));
+            assert_eq!(workspace.tabs.active().unwrap().len(), 2);
+        });
+        cx.simulate_keystrokes("ctrl-shift-w");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)))
+        });
+        cx.simulate_keystrokes("a");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(workspace.mode, Mode::Idle))
+        });
+        cx.simulate_keystrokes("ctrl-shift-w");
+        workspace.update(cx, |workspace, cx| {
+            workspace.focus_pane(PaneId(0), cx);
+            assert!(matches!(workspace.mode, Mode::Idle));
+            assert!(!workspace.may_close(CloseScope::Pane, cx));
+            workspace.dismiss_pending_close(cx);
+        });
+        cx.simulate_keystrokes("ctrl-shift-w ctrl-shift-w");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.tabs.active().unwrap().len(), 1)
+        });
+    }
 
     fn press(key: &str, modifiers: Modifiers) -> Keystroke {
         Keystroke {
