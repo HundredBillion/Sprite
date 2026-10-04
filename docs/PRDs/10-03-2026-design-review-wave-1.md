@@ -2,10 +2,9 @@
 
 Source: https://github.com/HundredBillion/Sprite/issues/48 (review of cee803a).
 
-Deliver Wave 1 as one reviewable PR against master. Waves 2 and 3 remain open;
-this PR must not close the umbrella issue. The user authorized autonomous design,
-planning, implementation and verification. Initial scope is Wave 1 pending their
-answer to the scope question.
+Wave 1 is the first execution segment of the user-requested all-three-waves PR
+against master. See 10-03-2026-design-review-complete.md for the complete scope. The user authorized autonomous design,
+planning, implementation and verification. The user selected all three waves after the initial Wave 1 planning.
 
 ## Outcomes
 

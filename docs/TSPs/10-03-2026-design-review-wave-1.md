@@ -6,7 +6,8 @@
 
 **Architecture:** Retain terminal ownership in the worker and application state in
 its existing owners. Encode duplicated invariants in types and keep tests at the
-public terminal and GPUI interfaces. No Wave 2/3 work.
+public terminal and GPUI interfaces. This is the first segment of the all-wave PR;
+execute the continuation plan after Task 6.
 
 **Tech Stack:** Rust 1.97.1, pinned libghostty-vt 0.2.1, GPUI 0.2.2.
 
@@ -34,14 +35,14 @@ crates/sprite-term/tests/colors.rs; crates/sprite-app/src/terminal_view.rs
 Projector::capture(generation,...). Produces private Pending and unchanged public
 SnapshotBundle with strictly newer generation for reloads.
 
-- [ ] Preserve the existing uncommitted failing regression in colors.rs. Add a
+- [x] Preserve the existing uncommitted failing regression in colors.rs. Add a
   GPUI regression driving the actual TerminalView snapshot task on an idle child;
   change ActiveSettings or send the reload command and assert its held bundle
   accepts the new colour/cursor without PTY output. Use a bounded condition wait.
-- [ ] Run `cargo test -p sprite-term --locked --offline --test colors
+- [x] Run `cargo test -p sprite-term --locked --offline --test colors
   a_live_colour_reload_repaints_on_its_own -- --exact` and the new app regression;
   confirm generation failure, not startup or environment failure.
-- [ ] Introduce the mutation owner:
+- [x] Introduce the mutation owner:
 
 ```rust
 struct Pending { generation: u64, dirty: bool }
@@ -55,9 +56,9 @@ impl Pending {
   Capture requests alone mark dirty without inventing a mutation. Pass
   pending.generation to snapshots, hyperlink replies and history capture. Retain
   capture failure and full-slot dirty behaviour.
-- [ ] Run terminal colors, snapshot_waiting, history, hyperlink, selection tests
+- [x] Run terminal colors, snapshot_waiting, history, hyperlink, selection tests
   and the app regression. Assert only one `generation += 1` site remains.
-- [ ] Commit with the confirmed root cause and test evidence.
+- [x] Commit with the confirmed root cause and test evidence.
 
 ### Task 2: Coalesce bells and own terminal resources
 
@@ -211,5 +212,5 @@ No new config discovery, schema version or file watcher.
   tree checks from CI. Execute the forbidden-states commands from ci.yml.
 - [ ] Review the complete diff independently, resolve important findings, update
   this task checklist with commands/results, and commit final documentation.
-- [ ] Push the branch and open one PR referencing #48 without a closing keyword.
-  Explain Wave 1 coverage, evidence and outstanding baseline/environment failures.
+- [ ] Continue with docs/TSPs/10-03-2026-design-review-continuation.md.
+  The user selected all three waves; do not open a partial Wave 1 PR.
