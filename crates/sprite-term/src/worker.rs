@@ -6,7 +6,6 @@
 //! themselves.
 
 use std::cell::RefCell;
-use std::io::Read;
 use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -109,11 +108,46 @@ pub(crate) enum Message {
 struct Started {
     master: Box<dyn MasterPty + Send>,
     master_fd: RawFd,
-    reader: Box<dyn Read + Send>,
     /// Recorded at spawn so descendants can still be reached after the child
     /// itself is gone and its own process id means nothing.
     process_group: Option<i32>,
     waiter: JoinHandle<()>,
+}
+
+// Fields drop in declaration order, including on early return or unwind.
+// Projection scratch and both encoders must be released before terminal state.
+struct Owned {
+    projector: Projector<'static>,
+    encoder: key::Encoder<'static>,
+    mouse_encoder: libghostty_vt::mouse::Encoder<'static>,
+    terminal: Terminal<'static, 'static>,
+}
+
+#[derive(Default)]
+struct Notices {
+    bell_pending: bool,
+    events: Vec<TerminalEvent>,
+}
+
+impl Notices {
+    fn take(&mut self) -> Vec<TerminalEvent> {
+        let mut events = std::mem::take(&mut self.events);
+        if std::mem::take(&mut self.bell_pending) {
+            events.push(TerminalEvent::Bell);
+        }
+        events
+    }
+}
+
+fn register_bell(
+    terminal: &mut Terminal<'static, 'static>,
+    notices: Rc<RefCell<Notices>>,
+) -> Result<(), libghostty_vt::Error> {
+    terminal
+        .on_bell(move |_terminal: &Terminal<'_, '_>| {
+            notices.borrow_mut().bell_pending = true;
+        })
+        .map(|_| ())
 }
 
 struct Pending {
@@ -145,12 +179,9 @@ pub(crate) fn run(
         }
     };
 
-    // Declared before the pump so it outlives it: the pump borrows this
-    // descriptor and is joined when `Pump` drops.
     let Started {
         master,
         master_fd,
-        reader,
         process_group,
         waiter,
     } = started;
@@ -162,7 +193,7 @@ pub(crate) fn run(
     // Declared before the terminal so it outlives the callback that holds its
     // input handle. Every byte for the PTY goes through the pump from here on;
     // the worker itself never writes (ADR 0015).
-    let mut pump = match Pump::start(master_fd, reader, commands.clone()) {
+    let mut pump = match Pump::start(master_fd, commands.clone()) {
         Ok(pump) => pump,
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));
@@ -181,7 +212,7 @@ pub(crate) fn run(
     let clipboard_pending: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     // Lifecycle notices raised from inside the parser. Same reason as the
     // clipboard: a callback must not block on a channel.
-    let notices: Rc<RefCell<Vec<TerminalEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let notices = Rc::new(RefCell::new(Notices::default()));
 
     let mut size = config.size;
     let mut terminal = match Terminal::new(TerminalOptions {
@@ -259,12 +290,7 @@ pub(crate) fn run(
         return;
     }
 
-    let registered_bell = terminal.on_bell({
-        let notices = Rc::clone(&notices);
-        move |_terminal: &Terminal<'_, '_>| {
-            notices.borrow_mut().push(TerminalEvent::Bell);
-        }
-    });
+    let registered_bell = register_bell(&mut terminal, Rc::clone(&notices));
     if let Err(error) = registered_bell {
         let _ = events.send_blocking(TerminalEvent::Error(SessionError::new("on_bell", error)));
         return;
@@ -280,6 +306,7 @@ pub(crate) fn run(
                 .map(str::to_owned);
             notices
                 .borrow_mut()
+                .events
                 .push(TerminalEvent::TitleChanged(title));
         }
     });
@@ -301,6 +328,7 @@ pub(crate) fn run(
                 .map(str::to_owned);
             notices
                 .borrow_mut()
+                .events
                 .push(TerminalEvent::WorkingDirectoryChanged(pwd));
         }
     });
@@ -351,7 +379,7 @@ pub(crate) fn run(
         return;
     }
 
-    let mut mouse_encoder = match libghostty_vt::mouse::Encoder::new() {
+    let mouse_encoder = match libghostty_vt::mouse::Encoder::new() {
         Ok(encoder) => encoder,
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
@@ -362,7 +390,7 @@ pub(crate) fn run(
         }
     };
 
-    let mut encoder = match key::Encoder::new() {
+    let encoder = match key::Encoder::new() {
         Ok(encoder) => encoder,
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(SessionError::new(
@@ -373,13 +401,26 @@ pub(crate) fn run(
         }
     };
 
-    let mut projector = match Projector::new() {
+    let projector = match Projector::new() {
         Ok(projector) => projector,
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));
             return;
         }
     };
+
+    let mut owned = Owned {
+        projector,
+        encoder,
+        mouse_encoder,
+        terminal,
+    };
+    let Owned {
+        projector,
+        encoder,
+        mouse_encoder,
+        terminal,
+    } = &mut owned;
 
     if events.send_blocking(TerminalEvent::Ready).is_err() {
         return;
@@ -398,7 +439,7 @@ pub(crate) fn run(
     let mut exit_status: Option<Result<ExitStatus, String>> = None;
     let mut pump_stopped = false;
     let mut fatal: Option<SessionError> = None;
-    pending.dirty = match projector.capture(pending.generation, size, has_selection, &terminal) {
+    pending.dirty = match projector.capture(pending.generation, size, has_selection, terminal) {
         Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
         Err(error) => {
             let _ = events.send_blocking(TerminalEvent::Error(error));
@@ -431,7 +472,7 @@ pub(crate) fn run(
 
                 // Lifecycle notices raised during parsing are delivered here,
                 // outside the callback that cannot block.
-                let raised: Vec<TerminalEvent> = notices.borrow_mut().drain(..).collect();
+                let raised: Vec<TerminalEvent> = notices.borrow_mut().take();
                 for notice in raised {
                     if events.send_blocking(notice).is_err() {
                         break;
@@ -467,10 +508,10 @@ pub(crate) fn run(
                 TerminalCommand::Key(event) => {
                     // Typing returns the Pane to live output, so the result of
                     // the keystroke is visible rather than scrolled off above.
-                    if return_to_bottom(&mut terminal) {
+                    if return_to_bottom(terminal) {
                         pending.mutated();
                     }
-                    match encode_key(&mut encoder, &terminal, &event) {
+                    match encode_key(encoder, terminal, &event) {
                         Ok(bytes) => {
                             if let Err(error) = input.write(bytes) {
                                 report_refused_input(&events, error);
@@ -486,7 +527,7 @@ pub(crate) fn run(
                     }
                 }
                 TerminalCommand::Resize(requested) => {
-                    match apply_resize(master.as_ref(), &mut terminal, requested) {
+                    match apply_resize(master.as_ref(), terminal, requested) {
                         Ok(()) => {
                             // Published only once both backends agree, so the
                             // application never sees a size one of them refused.
@@ -518,16 +559,10 @@ pub(crate) fn run(
                     // Where a wheel turn goes depends on terminal state the
                     // application cannot see, so the decision is made here for
                     // the same reason a click's is.
-                    match wheel_destination(&terminal, &event) {
+                    match wheel_destination(terminal, &event) {
                         Ok(WheelDestination::Child(kind)) => {
-                            match encode_wheel(
-                                kind,
-                                &mut mouse_encoder,
-                                &mut encoder,
-                                &terminal,
-                                &event,
-                                size,
-                            ) {
+                            match encode_wheel(kind, mouse_encoder, encoder, terminal, &event, size)
+                            {
                                 Ok(bytes) => {
                                     if let Err(error) = input.write(bytes) {
                                         report_refused_input(&events, error);
@@ -559,7 +594,7 @@ pub(crate) fn run(
                     mode,
                     rectangle,
                 } => {
-                    match apply_selection(&terminal, anchor, head, mode, rectangle) {
+                    match apply_selection(terminal, anchor, head, mode, rectangle) {
                         Ok(()) => {
                             has_selection = true;
                             pending.mutated();
@@ -585,7 +620,7 @@ pub(crate) fn run(
                     pending.mutated();
                 }
                 TerminalCommand::CopySelection => {
-                    let event = match selection_text(&terminal) {
+                    let event = match selection_text(terminal) {
                         Ok(text) => TerminalEvent::SelectionCopied(text),
                         Err(error) => TerminalEvent::Error(error),
                     };
@@ -597,7 +632,7 @@ pub(crate) fn run(
                     // Routed here, never in the application: the terminal owns
                     // the reporting mode, so it is the only place that can
                     // decide without the two sides disagreeing.
-                    match encode_mouse(&mut mouse_encoder, &terminal, &event, size) {
+                    match encode_mouse(mouse_encoder, terminal, &event, size) {
                         Ok(Some(bytes)) => {
                             if let Err(error) = input.write(bytes) {
                                 report_refused_input(&events, error);
@@ -617,7 +652,7 @@ pub(crate) fn run(
                     // Bracketing is what makes a paste safe; without it a
                     // newline is indistinguishable from pressing Enter, so the
                     // person is asked before anything is written.
-                    if !paste_is_safe_to_perform(&terminal, &text) {
+                    if !paste_is_safe_to_perform(terminal, &text) {
                         if events
                             .send_blocking(TerminalEvent::UnsafePaste(text))
                             .is_err()
@@ -626,7 +661,7 @@ pub(crate) fn run(
                         }
                         continue;
                     }
-                    match encode_paste(&terminal, &text) {
+                    match encode_paste(terminal, &text) {
                         // Queued whole; the pump feeds it to the PTY as the
                         // PTY has room, so its size costs the pane nothing.
                         Ok(bytes) => {
@@ -641,7 +676,7 @@ pub(crate) fn run(
                         }
                     }
                 }
-                TerminalCommand::PasteConfirmed(text) => match encode_paste(&terminal, &text) {
+                TerminalCommand::PasteConfirmed(text) => match encode_paste(terminal, &text) {
                     Ok(bytes) => {
                         if let Err(error) = input.write(bytes) {
                             report_refused_input(&events, error);
@@ -656,7 +691,7 @@ pub(crate) fn run(
                 TerminalCommand::CommitText(text) => {
                     // Typing, so it returns the reader to where the result will
                     // appear, exactly as a keystroke does.
-                    if return_to_bottom(&mut terminal) {
+                    if return_to_bottom(terminal) {
                         pending.mutated();
                     }
                     if let Err(error) = input.write(text.into_bytes()) {
@@ -665,7 +700,7 @@ pub(crate) fn run(
                 }
                 TerminalCommand::Focus(gained) => {
                     focused.set(gained);
-                    match encode_focus(&terminal, gained) {
+                    match encode_focus(terminal, gained) {
                         Ok(Some(bytes)) => {
                             if let Err(error) = input.write(bytes) {
                                 report_refused_input(&events, error);
@@ -684,7 +719,7 @@ pub(crate) fn run(
                     position,
                     request_id,
                 } => {
-                    let resolved = resolve_hyperlink(&terminal, position);
+                    let resolved = resolve_hyperlink(terminal, position);
                     if events
                         .send_blocking(TerminalEvent::Hyperlink {
                             position,
@@ -702,7 +737,7 @@ pub(crate) fn run(
                 TerminalCommand::SetColors(colors) => {
                     // Applied on this thread, against this pane's own terminal,
                     // so a reload cannot interleave with the parser.
-                    if let Err(error) = apply_color_defaults(&mut terminal, &colors)
+                    if let Err(error) = apply_color_defaults(terminal, &colors)
                         && events.send_blocking(TerminalEvent::Error(error)).is_err()
                     {
                         break;
@@ -713,7 +748,7 @@ pub(crate) fn run(
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
                 TerminalCommand::SetCursor(cursor) => {
-                    if let Err(error) = apply_cursor_defaults(&mut terminal, cursor)
+                    if let Err(error) = apply_cursor_defaults(terminal, cursor)
                         && events.send_blocking(TerminalEvent::Error(error)).is_err()
                     {
                         break;
@@ -721,7 +756,7 @@ pub(crate) fn run(
                     pending.mutated();
                     let _ = commands.try_send(Message::CaptureRequested);
                 }
-                TerminalCommand::CaptureGraphics => match projector.capture_graphics(&terminal) {
+                TerminalCommand::CaptureGraphics => match projector.capture_graphics(terminal) {
                     Ok(snapshot) => {
                         if events
                             .send_blocking(TerminalEvent::Graphics(snapshot))
@@ -746,7 +781,7 @@ pub(crate) fn run(
                         size,
                         lines.get(),
                         foreground,
-                        &terminal,
+                        terminal,
                     ) {
                         Ok(history) => {
                             if events
@@ -796,7 +831,7 @@ pub(crate) fn run(
         // owner's time and delivers nothing.
         if pending.dirty && snapshots.is_empty() {
             pending.dirty =
-                match projector.capture(pending.generation, size, has_selection, &terminal) {
+                match projector.capture(pending.generation, size, has_selection, terminal) {
                     Ok(bundle) => snapshots.try_send(Arc::new(bundle)).is_err(),
                     Err(error) => {
                         let _ = events.send_blocking(TerminalEvent::Error(error));
@@ -809,26 +844,13 @@ pub(crate) fn run(
     // The final generation still deserves delivery, so the last projection
     // displaces any stale one left in the slot.
     if pending.dirty
-        && let Ok(bundle) = projector.capture(pending.generation, size, has_selection, &terminal)
+        && let Ok(bundle) = projector.capture(pending.generation, size, has_selection, terminal)
     {
         let _ = snapshots.force_send(Arc::new(bundle));
     }
 
-    // ---- Closing ----
-    //
-    // The projection state goes before the terminal it reads from. Dropping
-    // the terminal also removes the PTY-write callback, so from here it can
-    // neither be mutated nor generate a reply, and application commands are
-    // read only to be discarded.
-    //
-    // Explicit rather than left to scope order because that one relationship
-    // is the only ordering here that matters, and nothing in Rust expresses
-    // it: these are handles into libghostty rather than borrows the compiler
-    // can see. The order among the projector's own objects is free — each
-    // frees only itself.
-    drop(projector);
-    drop(encoder);
-    drop(terminal);
+    // Removing terminal state also removes the callback that can enqueue PTY replies.
+    drop(owned);
 
     // The pump may be parked on a PTY that a descendant keeps open forever, so
     // it is woken now rather than waited on.
@@ -1231,11 +1253,6 @@ fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Start
         ));
     };
 
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| SessionError::new("pty_reader", error))?;
-
     // The parent's slave handle would otherwise hold the PTY open and hide the
     // child's exit.
     drop(pair.slave);
@@ -1245,7 +1262,6 @@ fn start(config: &SessionConfig, commands: &SyncSender<Message>) -> Result<Start
     Ok(Started {
         master: pair.master,
         master_fd,
-        reader,
         process_group,
         waiter,
     })
@@ -2043,5 +2059,35 @@ fn function_or_character(name: &str) -> key::Key {
         'a'..='z' => LETTER_KEYS[single as usize - 'a' as usize],
         '0'..='9' => DIGIT_KEYS[single as usize - '0' as usize],
         _ => key::Key::Unidentified,
+    }
+}
+
+#[cfg(test)]
+mod bell_tests {
+    use super::*;
+
+    #[test]
+    fn one_bell_per_chunk_and_no_bell_for_the_next_silent_chunk() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal");
+        let notices = Rc::new(RefCell::new(Notices::default()));
+        register_bell(&mut terminal, Rc::clone(&notices)).expect("bell callback");
+
+        terminal.vt_write(&vec![7; 16 * 1024]);
+        assert!(matches!(
+            notices.borrow_mut().take().as_slice(),
+            [TerminalEvent::Bell]
+        ));
+        terminal.vt_write(b"next snapshot");
+        assert!(notices.borrow_mut().take().is_empty());
+        terminal.vt_write(b"\x07");
+        assert!(matches!(
+            notices.borrow_mut().take().as_slice(),
+            [TerminalEvent::Bell]
+        ));
     }
 }

@@ -360,3 +360,31 @@ fn a_keystroke_returns_the_viewport_to_live_output() {
         "a keystroke brings the reader back to where its result will appear"
     );
 }
+
+#[test]
+fn bell_burst_does_not_stall_snapshots_with_a_paused_event_consumer() {
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; head -c 16384 /dev/zero | tr '\\000' '\\007'; printf 'after-bells'; read _",
+        ]),
+    );
+    let mut session = TerminalSession::spawn(config).expect("spawn session");
+    let events = session.take_event_stream().expect("take events");
+    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let progress = std::panic::catch_unwind(|| {
+        snapshots.wait_for("output after the bell burst", |bundle| {
+            pane_text(bundle).contains("after-bells")
+        });
+    });
+    // Release a blocked lifecycle send before shutdown, including on a failed assertion.
+    drop(events);
+    session
+        .begin_shutdown()
+        .expect("shutdown")
+        .expect("worker")
+        .wait()
+        .expect("join");
+    assert!(progress.is_ok(), "bell burst stalled snapshot progress");
+}

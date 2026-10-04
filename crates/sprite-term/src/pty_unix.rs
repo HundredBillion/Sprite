@@ -1,7 +1,6 @@
 //! The audited Unix PTY I/O pump.
 //!
-//! This is the only module that borrows a raw descriptor, and it never touches
-//! libghostty. The pump blocks in `poll` on the PTY, a wake socket and a
+//! This module owns the pump descriptor and never touches libghostty. The pump blocks in `poll` on the PTY, a wake socket and a
 //! cancellation socket, so it is always joinable even when a descendant keeps
 //! the PTY open — no periodic wake-up, no async runtime, and no detached thread.
 //!
@@ -21,8 +20,8 @@
 //! draining, and the pane froze for good (ADR 0015).
 
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,12 +53,6 @@ const OUTPUT_PERMITS: usize = 16;
 const INPUT_BACKLOG_BYTES: usize = 1024 * 1024;
 
 /// The worker's handle on the pump thread.
-///
-/// # Safety invariant
-///
-/// The worker owns the PTY master and this handle, and drops neither until
-/// after [`Pump::shutdown`] returns. The pump therefore only ever borrows a
-/// descriptor that is still open for the whole of its life.
 pub(crate) struct Pump {
     cancel: UnixStream,
     permits: SyncSender<()>,
@@ -123,16 +116,14 @@ fn poke(wake: &UnixStream) {
 impl Pump {
     /// Starts the pump for an open PTY master.
     ///
-    /// `master_fd` must be the master's descriptor and `reader` a handle onto
-    /// the same open file description, both owned by the caller for at least as
-    /// long as the returned `Pump`. The master is switched to non-blocking here,
-    /// for the whole open file description: nothing this thread does may stall,
-    /// and a reader that shares the flag simply polls again on `WouldBlock`.
+    /// The pump duplicates `master_fd` before starting its thread.
+    /// Nonblocking mode is shared by every descriptor for the same open file description.
     pub(crate) fn start(
         master_fd: RawFd,
-        reader: Box<dyn Read + Send>,
         commands: SyncSender<Message>,
     ) -> Result<Self, SessionError> {
+        let master = duplicate(master_fd)
+            .ok_or_else(|| SessionError::new("pump_duplicate", std::io::Error::last_os_error()))?;
         let (cancel, pump_cancel) =
             UnixStream::pair().map_err(|error| SessionError::new("pump_cancel_socket", error))?;
         let (wake, pump_wake) =
@@ -141,7 +132,7 @@ impl Pump {
             end.set_nonblocking(true)
                 .map_err(|error| SessionError::new("pump_wake_socket", error))?;
         }
-        set_nonblocking(master_fd)?;
+        set_nonblocking(master.as_fd())?;
 
         let (permits, permit_rx) = sync_channel(OUTPUT_PERMITS);
         for _ in 0..OUTPUT_PERMITS {
@@ -164,8 +155,7 @@ impl Pump {
                 let waiting = Arc::clone(&input.waiting);
                 move || {
                     let outcome = run(Ends {
-                        master_fd,
-                        reader,
+                        master,
                         cancel: &pump_cancel,
                         wake: &pump_wake,
                         permit_rx: &permit_rx,
@@ -234,8 +224,7 @@ impl Drop for Pump {
 
 /// Everything the pump thread holds, named so `run` reads as one loop.
 struct Ends<'a> {
-    master_fd: RawFd,
-    reader: Box<dyn Read + Send>,
+    master: OwnedFd,
     cancel: &'a UnixStream,
     wake: &'a UnixStream,
     permit_rx: &'a Receiver<()>,
@@ -247,8 +236,7 @@ struct Ends<'a> {
 
 fn run(ends: Ends<'_>) -> PumpOutcome {
     let Ends {
-        master_fd,
-        mut reader,
+        master,
         cancel,
         wake,
         permit_rx,
@@ -257,8 +245,6 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
         waiting,
         commands,
     } = ends;
-    let cancel_fd = cancel.as_raw_fd();
-    let wake_fd = wake.as_raw_fd();
     let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
     // Input in the order it was queued; `written` is how much of the front
     // entry the kernel has already taken.
@@ -283,11 +269,11 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
         }
 
         let watch = Watch {
-            master_fd: (!hung_up).then_some(master_fd),
+            master_fd: (!hung_up).then(|| master.as_fd()),
             read: permit_held,
             write: !backlog.is_empty(),
-            wake_fd,
-            cancel_fd,
+            wake_fd: wake.as_fd(),
+            cancel_fd: cancel.as_fd(),
         };
         let ready = match wait_for_readiness(&watch) {
             Wait::Cancelled => {
@@ -322,7 +308,7 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
         }
 
         if ready.writable
-            && let Err(error) = write_some(master_fd, &mut backlog, &mut written, waiting)
+            && let Err(error) = write_some(master.as_fd(), &mut backlog, &mut written, waiting)
         {
             if permit_held {
                 let _ = permit_tx.send(());
@@ -331,10 +317,8 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
         }
 
         if ready.readable {
-            match read_once(&mut reader, &mut buffer) {
-                // The reader shares the master's non-blocking flag; a
-                // readiness that was consumed before the read got there is
-                // not an error, just a reason to poll again.
+            match read_once(master.as_fd(), &mut buffer) {
+                // Another reader can consume readiness before this nonblocking read.
                 ReadResult::NotReady => {}
                 // A closed slave surfaces as EIO on Linux and as a zero-length
                 // read elsewhere; both mean the same thing here.
@@ -360,13 +344,13 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
 }
 
 /// What one pass of the pump is waiting for.
-struct Watch {
+struct Watch<'a> {
     /// `None` leaves the PTY out of the poll entirely.
-    master_fd: Option<RawFd>,
+    master_fd: Option<BorrowedFd<'a>>,
     read: bool,
     write: bool,
-    wake_fd: RawFd,
-    cancel_fd: RawFd,
+    wake_fd: BorrowedFd<'a>,
+    cancel_fd: BorrowedFd<'a>,
 }
 
 struct Readiness {
@@ -383,17 +367,11 @@ enum Wait {
 }
 
 /// Blocks until something the pump can act on happens, retrying on EINTR.
-fn wait_for_readiness(watch: &Watch) -> Wait {
+fn wait_for_readiness(watch: &Watch<'_>) -> Wait {
     loop {
-        // SAFETY: every descriptor here is owned by the worker, which keeps the
-        // PTY master and both sockets alive until after this thread is joined
-        // (see the `Pump` safety invariant). The borrows do not outlive this
-        // call.
-        let cancel = unsafe { BorrowedFd::borrow_raw(watch.cancel_fd) };
-        let wake = unsafe { BorrowedFd::borrow_raw(watch.wake_fd) };
-        let master = watch
-            .master_fd
-            .map(|fd| unsafe { BorrowedFd::borrow_raw(fd) });
+        let cancel = watch.cancel_fd;
+        let wake = watch.wake_fd;
+        let master = watch.master_fd;
 
         let mut master_flags = PollFlags::empty();
         if watch.read {
@@ -463,14 +441,12 @@ fn drain(wake: &UnixStream) {
 /// time, and `WouldBlock` is where it says "no more" — the next poll reports
 /// when that changes. Nothing here can block.
 fn write_some(
-    master_fd: RawFd,
+    master: BorrowedFd<'_>,
     backlog: &mut VecDeque<Vec<u8>>,
     written: &mut usize,
     waiting: &AtomicUsize,
 ) -> Result<(), String> {
     while let Some(front) = backlog.front() {
-        // SAFETY: see `wait_for_readiness`; the master outlives this thread.
-        let master = unsafe { BorrowedFd::borrow_raw(master_fd) };
         match nix::unistd::write(master, &front[*written..]) {
             Ok(0) => break,
             Ok(count) => {
@@ -490,11 +466,11 @@ fn write_some(
 }
 
 /// Puts the master's open file description into non-blocking mode.
-fn set_nonblocking(fd: RawFd) -> Result<(), SessionError> {
-    let flags = fcntl(fd, FcntlArg::F_GETFL)
+fn set_nonblocking(fd: BorrowedFd<'_>) -> Result<(), SessionError> {
+    let flags = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL)
         .map_err(|error| SessionError::new("pty_nonblocking", error))?;
     let flags = OFlag::from_bits_retain(flags) | OFlag::O_NONBLOCK;
-    fcntl(fd, FcntlArg::F_SETFL(flags))
+    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags))
         .map_err(|error| SessionError::new("pty_nonblocking", error))?;
     Ok(())
 }
@@ -506,16 +482,16 @@ enum ReadResult {
     Failed(String),
 }
 
-fn read_once(reader: &mut Box<dyn Read + Send>, buffer: &mut [u8]) -> ReadResult {
+fn read_once(master: BorrowedFd<'_>, buffer: &mut [u8]) -> ReadResult {
     loop {
-        match reader.read(buffer) {
+        match nix::unistd::read(master.as_raw_fd(), buffer) {
             Ok(0) => return ReadResult::Eof,
             Ok(count) => return ReadResult::Chunk(buffer[..count].to_vec()),
-            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == ErrorKind::WouldBlock => return ReadResult::NotReady,
+            Err(Errno::EINTR) => continue,
+            Err(Errno::EAGAIN) => return ReadResult::NotReady,
             // Linux reports the closed slave this way rather than with a
             // zero-length read; it is an ordinary end of session, not a fault.
-            Err(error) if error.raw_os_error() == Some(Errno::EIO as i32) => {
+            Err(Errno::EIO) => {
                 return ReadResult::Eof;
             }
             Err(error) => return ReadResult::Failed(error.to_string()),
@@ -589,8 +565,8 @@ pub(crate) fn process_name(pid: i32) -> Option<String> {
 /// running on it could answer for an unrelated file. Holding a duplicate means
 /// the question is always asked of this session's terminal or of nothing.
 pub(crate) fn duplicate(fd: RawFd) -> Option<OwnedFd> {
-    let copy = nix::unistd::dup(fd).ok()?;
-    // SAFETY: `dup` returns a freshly allocated descriptor that no other owner
+    let copy = fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(0)).ok()?;
+    // SAFETY: F_DUPFD_CLOEXEC returns a fresh descriptor that no other owner
     // holds, and ownership passes to this `OwnedFd` and nowhere else.
     Some(unsafe { OwnedFd::from_raw_fd(copy) })
 }
@@ -619,4 +595,48 @@ pub(crate) fn signal_group(group: i32, signal: &GroupSignal) {
 /// Whether any process remains in the group, probed with the null signal.
 pub(crate) fn group_is_alive(group: i32) -> bool {
     killpg(Pid::from_raw(group), None).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn duplicated_endpoint_is_closed_on_exec() {
+        let (master, _peer) = UnixStream::pair().expect("socket pair");
+        let copy = duplicate(master.as_raw_fd()).expect("duplicate");
+        let flags = fcntl(copy.as_raw_fd(), FcntlArg::F_GETFD).expect("descriptor flags");
+        assert!(
+            nix::fcntl::FdFlag::from_bits_retain(flags).contains(nix::fcntl::FdFlag::FD_CLOEXEC)
+        );
+    }
+
+    #[test]
+    fn pump_keeps_its_endpoint_alive_after_the_callers_descriptor_closes() {
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        peer.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read deadline");
+        let (commands, inbox) = sync_channel(17);
+        let mut pump = Pump::start(master.as_raw_fd(), commands).expect("pump");
+        drop(master);
+        pump.input()
+            .write(b"owned endpoint".to_vec())
+            .expect("queue input");
+        let mut output = [0; 14];
+        let read = peer.read_exact(&mut output);
+        if read.is_ok() {
+            peer.write_all(b"child output").expect("output");
+            assert!(matches!(inbox.recv_timeout(Duration::from_secs(2)),
+                Ok(Message::PtyOutput(bytes)) if bytes == b"child output"));
+            pump.return_permit();
+        }
+        pump.shutdown();
+        assert!(matches!(
+            inbox.recv_timeout(Duration::from_secs(2)),
+            Ok(Message::PumpStopped(PumpOutcome::Canceled))
+        ));
+        read.expect("pump writes through its own descriptor");
+        assert_eq!(&output, b"owned endpoint");
+    }
 }

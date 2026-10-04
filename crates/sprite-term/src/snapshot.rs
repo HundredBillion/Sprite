@@ -30,7 +30,7 @@ use crate::{
 /// nothing outside a projection ever needs them individually.
 ///
 /// The whole value is released before the terminal, which the session worker's
-/// closing list is there to guarantee. The order *within* it does not matter:
+/// Owned fields guarantee. The order *within* it does not matter:
 /// each of these is an independently allocated handle whose free destroys only
 /// itself, and the borrows between them live in the short-lived iteration
 /// values that every capture drops before it returns.
