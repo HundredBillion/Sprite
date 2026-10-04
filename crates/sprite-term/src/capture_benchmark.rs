@@ -42,3 +42,19 @@ impl CaptureBenchmark {
         self.projector.capture(1, self.size, false, &self.terminal)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_capture_does_not_allocate_per_observation_row() {
+        let mut driver = CaptureBenchmark::new().unwrap();
+        std::hint::black_box(driver.capture().unwrap());
+        let (_, sample) = crate::test_allocations::measure(|| {
+            std::hint::black_box(driver.capture().unwrap());
+        });
+        assert!(sample.allocations <= 8, "{sample:?}");
+        assert!(sample.bytes <= 4096, "{sample:?}");
+    }
+}

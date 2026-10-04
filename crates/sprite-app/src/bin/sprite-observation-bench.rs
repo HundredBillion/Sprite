@@ -131,7 +131,7 @@ fn addresses(count: usize) -> Vec<PaneAddress> {
 fn snapshot(history: usize, width: usize) -> Arc<HistorySnapshot> {
     let rows: Vec<PaneRow> = (0..history + 40)
         .map(|index| PaneRow {
-            text: format!("{}{index}", "x".repeat(width)),
+            text: format!("{}{index}", "x".repeat(width)).into(),
             wrapped: false,
             prompt: PromptKind::None,
         })

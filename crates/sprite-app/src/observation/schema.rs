@@ -435,7 +435,7 @@ fn rows_value(rows: &[sprite_term::PaneRow], dropped: usize) -> Value {
             .skip(dropped)
             .map(|row| {
                 json!({
-                    "text": row.text,
+                    "text": row.text.as_ref(),
                     "wrapped": row.wrapped,
                     "prompt": match row.prompt {
                         sprite_term::PromptKind::None => "none",
@@ -481,7 +481,7 @@ mod tests {
             size: ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
-                text: text.to_owned(),
+                text: text.into(),
                 wrapped: false,
                 prompt: PromptKind::Prompt,
             }],
@@ -839,7 +839,7 @@ mod tests {
     fn terminal_text_cannot_break_out_of_the_document() {
         let hostile = "\" , \"injected\": true, \\ \u{1b}[31m \u{7} </script> \u{202e}";
         let mut snapshot = (*snapshot("placeholder")).clone();
-        snapshot.rows[0].text = hostile.to_owned();
+        snapshot.rows[0].text = hostile.into();
         let report = report_of(
             vec![PaneReport {
                 address: address(0, 0, 0, 0.0, 0.0),
@@ -870,7 +870,8 @@ mod tests {
             .map(|index| PaneRow {
                 text: std::iter::repeat_n(fill, width)
                     .chain(format!("{index}").chars())
-                    .collect(),
+                    .collect::<String>()
+                    .into(),
                 wrapped: false,
                 prompt: PromptKind::None,
             })
@@ -963,7 +964,7 @@ mod tests {
         {
             assert_eq!(
                 row["text"].as_str().expect("text"),
-                original[dropped + offset].text,
+                original[dropped + offset].text.as_ref(),
                 "every emitted row is one of the original rows, entire"
             );
         }

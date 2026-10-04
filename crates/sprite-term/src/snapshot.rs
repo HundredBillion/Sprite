@@ -422,7 +422,7 @@ impl<'vt> Projector<'vt> {
                 };
                 render_rows.push(row);
                 pane_rows.push(PaneRow {
-                    text: row_text,
+                    text: row_text.into(),
                     wrapped,
                     prompt,
                 });
@@ -535,10 +535,10 @@ fn history_row(
     };
     // One row was asked for, so a trailing row separator carries no
     // information and would otherwise appear inside the row's own text.
-    let text = text.strip_suffix('\n').unwrap_or(&text).to_owned();
+    let text = text.strip_suffix('\n').unwrap_or(&text);
 
     Ok(PaneRow {
-        text,
+        text: text.into(),
         wrapped,
         prompt,
     })
@@ -705,6 +705,7 @@ mod sharing_tests {
         let (mut projector, mut terminal, size) = fixture();
         let first = capture(&mut projector, &terminal, size, false);
         let saved = first.render.as_ref().clone();
+        let saved_pane = first.pane.as_ref().clone();
         let again = capture(&mut projector, &terminal, size, false);
         assert!(
             first
@@ -715,6 +716,9 @@ mod sharing_tests {
                 .all(|(a, b)| Arc::ptr_eq(a, b))
         );
         assert!(Arc::ptr_eq(&first.render.palette, &again.render.palette));
+        for (before, after) in first.pane.rows.iter().zip(&again.pane.rows) {
+            assert!(Arc::ptr_eq(&before.text, &after.text));
+        }
         terminal.vt_write(b"\x1b[2;1HZ");
         let changed = capture(&mut projector, &terminal, size, false);
         for (index, (a, b)) in first
@@ -726,6 +730,10 @@ mod sharing_tests {
         {
             assert_eq!(Arc::ptr_eq(a, b), index != 1);
         }
+        for (index, (before, after)) in first.pane.rows.iter().zip(&changed.pane.rows).enumerate() {
+            assert_eq!(Arc::ptr_eq(&before.text, &after.text), index != 1);
+        }
+        assert_eq!(*first.pane, saved_pane);
         assert_eq!(*first.render, saved);
         assert_oracle(&changed, &terminal, false);
     }
@@ -901,7 +909,7 @@ mod sharing_tests {
     }
 
     #[test]
-    fn clean_visual_rows_still_refresh_semantic_metadata_and_own_pane_text() {
+    fn clean_visual_rows_refresh_metadata_while_sharing_immutable_pane_text() {
         let (mut projector, mut terminal, size) = fixture();
         terminal.vt_write(b"\x1b[2;1H");
         let before = capture(&mut projector, &terminal, size, false);
@@ -910,7 +918,7 @@ mod sharing_tests {
         assert_eq!(after.pane.rows[1].prompt, PromptKind::Prompt);
         assert_eq!(before.pane.rows[1].prompt, PromptKind::None);
         assert!(Arc::ptr_eq(&before.render.rows[1], &after.render.rows[1]));
-        assert_ne!(
+        assert_eq!(
             before.pane.rows[1].text.as_ptr(),
             after.pane.rows[1].text.as_ptr()
         );

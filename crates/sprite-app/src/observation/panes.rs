@@ -243,7 +243,7 @@ mod tests {
             size: sprite_term::ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
-                text: "answer".to_owned(),
+                text: "answer".into(),
                 wrapped: false,
                 prompt: PromptKind::None,
             }],
@@ -327,7 +327,7 @@ mod tests {
             .answer
             .recv_timeout(Duration::from_secs(1))
             .expect("an answer arrived");
-        assert_eq!(answer.expect("a snapshot").rows[0].text, "answer");
+        assert_eq!(answer.expect("a snapshot").rows[0].text.as_ref(), "answer");
     }
 
     /// A session that errors must tell its waiter why, not leave it to time

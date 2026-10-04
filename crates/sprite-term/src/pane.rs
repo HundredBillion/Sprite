@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{CursorSnapshot, PlacementMetadata, ScreenKind, ValidTerminalSize, Viewport};
 /// Whether a row is part of a shell prompt, as reported by OSC 133.
 ///
@@ -13,7 +15,8 @@ pub enum PromptKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaneRow {
-    pub text: String,
+    /// Immutable observation text can be shared across unchanged terminal generations.
+    pub text: Arc<str>,
     pub wrapped: bool,
     pub prompt: PromptKind,
 }

@@ -327,7 +327,7 @@ mod tests {
             size: ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
-                text: text.to_owned(),
+                text: text.into(),
                 wrapped: false,
                 prompt: sprite_term::PromptKind::None,
             }],

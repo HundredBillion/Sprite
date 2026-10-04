@@ -217,7 +217,7 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
     let joined: String = history
         .rows
         .iter()
-        .map(|row| row.text.as_str())
+        .map(|row| row.text.as_ref())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
@@ -267,7 +267,7 @@ fn unicode_whitespace_and_wrap_markers_survive() {
     let joined: String = history
         .rows
         .iter()
-        .map(|row| row.text.as_str())
+        .map(|row| row.text.as_ref())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
