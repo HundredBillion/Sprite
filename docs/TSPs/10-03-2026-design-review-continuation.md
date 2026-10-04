@@ -364,6 +364,9 @@ logic remains Window-free. Avoid pass-through wrappers around moved code.
 - [ ] Resolve capture timing acceptance before merge. The controlled comparison
   retains a +36.7% median paired p95 ratio and three of four final shared-budget
   misses. Cause and acceptance remain unresolved; opening a draft is not a waiver.
-- [ ] Push the branch and open one draft PR for #48 using creating-a-pull-request,
+- [x] Push the branch and open one draft PR for #48 using creating-a-pull-request,
   with measured evidence and native-platform limits. Preserve the worktree.
   Do not merge or publish a release.
+
+Draft PR: https://github.com/HundredBillion/Sprite/pull/49.
+Capture timing acceptance remains open above; no merge or release was performed.
