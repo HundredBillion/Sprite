@@ -113,20 +113,20 @@ close/unlink. Protocol adapters receive authenticated connections. Explicit
 TransportPolicy supplies cap, handshake timeout, line bound and filename suffix.
 ObservationKey re-export remains source compatible.
 
-- [ ] Inventory current authentication paths and socket lifetimes. Preserve and
+- [x] Inventory current authentication paths and socket lifetimes. Preserve and
   test wrong/missing/oversized key lines, slow clients, cap exhaustion, socket
   0600 mode, private directory, cancellation, stale cleanup and path-length limits.
-- [ ] Move runtime directory, random name/key generation, bind, accept accounting,
+- [x] Move runtime directory, random name/key generation, bind, accept accounting,
   capped first-line authentication and teardown into local_socket. Bind and
   key.matches should each have one production call site. Route socket test
   fixtures through the shared bind helper too, so the literal source census has
   one `UnixListener::bind` site without hiding calls behind aliases. Preserve justified
   observation/stream-specific policy differences and record them in ADR 0018.
-- [ ] Move pure Surface request parsing and event serialisation to wire.rs;
+- [x] Move pure Surface request parsing and event serialisation to wire.rs;
   unify one-shot relay plumbing and version handling behind one Envelope parse.
   Existing version-less focus/token clients remain accepted through an explicit
   legacy default; emitted clients use the versioned envelope consistently.
-- [ ] Keep read-only observation verbs structurally separate; never accept Surface
+- [x] Keep read-only observation verbs structurally separate; never accept Surface
   verbs through the observation adapter. Run both endpoint/client/wire test suites
   and the full sprite-app suite. Check listener/key site census and commit.
 
