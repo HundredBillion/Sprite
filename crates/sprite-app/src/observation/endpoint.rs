@@ -209,8 +209,13 @@ mod tests {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        write!(stream, "{} {body}", endpoint.key_hex()).unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // Rejection can close the peer before an oversized write finishes.
+        // The response and dispatch assertions below establish the outcome.
+        let _ = write!(stream, "{} {body}", endpoint.key_hex());
+        let _ = stream.shutdown(std::net::Shutdown::Write);
         let mut answer = String::new();
         let _ = stream.read_to_string(&mut answer);
         assert_eq!(answer.trim(), DENIED);
@@ -224,7 +229,9 @@ mod tests {
 
     #[test]
     fn oversized_authenticated_lines_are_denied_before_dispatch() {
-        assert_denied_without_dispatch(&format!("{}\n", "x".repeat(MAX_REQUEST_BYTES as usize)));
+        for size in [MAX_REQUEST_BYTES as usize, 1024 * 1024] {
+            assert_denied_without_dispatch(&format!("{}\n", "x".repeat(size)));
+        }
     }
 
     /// A private directory of this test's own, removed when it is dropped.
