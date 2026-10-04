@@ -44,7 +44,10 @@ pub(crate) struct Projector<'vt> {
     previous_pane: Option<Arc<PaneSnapshot>>,
     previous_screen: Option<ScreenKind>,
     previous_selection: bool,
+    previous_rows_valid: bool,
     row_cells: Vec<RenderCell>,
+    #[cfg(test)]
+    fail_capture: Option<CaptureFailure>,
 }
 
 impl Projector<'static> {
@@ -67,7 +70,10 @@ impl Projector<'static> {
             previous_pane: None,
             previous_screen: None,
             previous_selection: false,
+            previous_rows_valid: false,
             row_cells: Vec::new(),
+            #[cfg(test)]
+            fail_capture: None,
         })
     }
 }
@@ -177,6 +183,9 @@ impl<'vt> Projector<'vt> {
         has_selection: bool,
         terminal: &Terminal<'vt, '_>,
     ) -> Result<SnapshotBundle, SessionError> {
+        // A failed traversal may consume dirty flags before it replaces the owned snapshots.
+        // Reuse becomes valid again only after every fallible capture operation succeeds.
+        let reuse_previous = std::mem::replace(&mut self.previous_rows_valid, false);
         // Named apart rather than reached through `self`: the row and cell
         // iterators read a borrow the render state lends out, and the compiler
         // can only see that those borrows leave each other alone once the
@@ -191,7 +200,10 @@ impl<'vt> Projector<'vt> {
             previous_pane,
             previous_screen,
             previous_selection,
+            previous_rows_valid,
             row_cells,
+            #[cfg(test)]
+            fail_capture,
         } = self;
         let screen = match terminal.active_screen().map_err(vt("active_screen"))? {
             Screen::Primary => ScreenKind::Primary,
@@ -240,7 +252,10 @@ impl<'vt> Projector<'vt> {
         let live_palette = terminal.color_palette().map_err(vt("color_palette"))?;
 
         let reusable = previous.as_ref().filter(|old| {
-            old.size == size && old.viewport == viewport && *previous_screen == Some(screen)
+            reuse_previous
+                && old.size == size
+                && old.viewport == viewport
+                && *previous_screen == Some(screen)
         });
         let palette_values = live_palette.0.map(rgb);
         let palette = previous
@@ -393,6 +408,9 @@ impl<'vt> Projector<'vt> {
                     .set_dirty(false)
                     .map_err(vt("row_set_dirty"))?;
 
+                #[cfg(test)]
+                fail_capture_at(fail_capture, CaptureFailure::AfterRow(render_rows.len()))?;
+
                 let row = match old_row {
                     Some(old) if old.wrapped == wrapped && old.cells == *row_cells => {
                         Arc::clone(old)
@@ -418,6 +436,8 @@ impl<'vt> Projector<'vt> {
         // Taken from the same terminal, in the same call, as the rows above: an
         // image drawn against text it never accompanied would be a frame that
         // never existed on anyone's screen.
+        #[cfg(test)]
+        fail_capture_at(fail_capture, CaptureFailure::BeforeGraphics)?;
         let graphics = crate::graphics::capture_frame(terminal, placements, pixels)?;
 
         let render = Arc::new(RenderSnapshot {
@@ -449,6 +469,7 @@ impl<'vt> Projector<'vt> {
             working_directory,
         });
         *previous_pane = Some(Arc::clone(&pane));
+        *previous_rows_valid = true;
         Ok(SnapshotBundle {
             generation,
             render,
@@ -601,6 +622,29 @@ fn vt(operation: &'static str) -> impl Fn(libghostty_vt::Error) -> SessionError 
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureFailure {
+    AfterRow(usize),
+    BeforeGraphics,
+}
+
+#[cfg(test)]
+fn fail_capture_at(
+    failure: &mut Option<CaptureFailure>,
+    stage: CaptureFailure,
+) -> Result<(), SessionError> {
+    if *failure == Some(stage) {
+        *failure = None;
+        Err(SessionError::new(
+            "injected_capture_failure",
+            "capture failed after clearing dirty state",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod sharing_tests {
     use super::*;
     use libghostty_vt::terminal::{Options, ScrollViewport};
@@ -684,6 +728,53 @@ mod sharing_tests {
         }
         assert_eq!(*first.render, saved);
         assert_oracle(&changed, &terminal, false);
+    }
+
+    fn assert_capture_failure_retry(failure: CaptureFailure) {
+        let (mut projector, mut terminal, size) = fixture();
+        let before = capture(&mut projector, &terminal, size, false);
+        let saved_render = before.render.as_ref().clone();
+        let saved_pane = before.pane.as_ref().clone();
+        terminal.vt_write(b"\x1b[1;1HX\x1b[3;1HY");
+        projector.fail_capture = Some(failure);
+        let failed = projector.capture(1, size, false, &terminal);
+        assert!(failed.is_err(), "fault must execute: {failure:?}");
+        assert!(
+            projector.fail_capture.is_none(),
+            "fault must be consumed: {failure:?}"
+        );
+        let retried = capture(&mut projector, &terminal, size, false);
+        assert_eq!(
+            retried.render.rows[0].cells[0].text, "X",
+            "retry after {failure:?}"
+        );
+        assert_eq!(
+            retried.render.rows[2].cells[0].text, "Y",
+            "retry after {failure:?}"
+        );
+        assert_oracle(&retried, &terminal, false);
+        assert_eq!(*before.render, saved_render);
+        assert_eq!(*before.pane, saved_pane);
+        let next = capture(&mut projector, &terminal, size, false);
+        assert!(
+            retried
+                .render
+                .rows
+                .iter()
+                .zip(&next.render.rows)
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "successful retry must restore sharing: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn capture_failure_mid_traversal_retry_matches_fresh_projection() {
+        assert_capture_failure_retry(CaptureFailure::AfterRow(0));
+    }
+
+    #[test]
+    fn capture_failure_before_graphics_retry_matches_fresh_projection() {
+        assert_capture_failure_retry(CaptureFailure::BeforeGraphics);
     }
 
     #[test]
