@@ -23,8 +23,8 @@ use sprite_term::{
     WheelEvent,
 };
 
-use crate::grid::{PositionedCell, lay_out_row, style_hyperlink_span};
-use crate::grid_paint::{RowPass, pack};
+use crate::grid::{PositionedCell, prepare_rows};
+use crate::grid_paint::{GridPaint, pack};
 use crate::input::gpui_key_event;
 use crate::tokens::TokenRegistry;
 
@@ -118,18 +118,12 @@ fn placeholder_element(
 }
 
 impl TerminalView {
-    /// The visible grid as positioned cells, one vector per row.
-    pub(super) fn laid_out_rows(&self) -> Vec<Vec<PositionedCell>> {
-        let Some(bundle) = &self.bundle else {
-            return Vec::new();
-        };
-        bundle.render.rows.iter().map(lay_out_row).collect()
-    }
-
     /// One half-blink. Returns the pane to a visible cursor when nothing is
     /// blinking, so a program that stops the blink cannot leave the cursor
     /// hidden.
     pub(super) fn tick_blink(&mut self, cx: &mut Context<Self>) {
+        // The existing wake also discovers silent foreground programs with no OSC title.
+        self.refresh_display_title(cx);
         let terminal_blinks = self
             .bundle
             .as_ref()
@@ -158,7 +152,7 @@ impl TerminalView {
     /// appears; fixed placements retain their own viewport coordinates.
     pub(super) fn image_layers(
         &self,
-        rows: &[Vec<PositionedCell>],
+        rows: &[std::sync::Arc<Vec<PositionedCell>>],
         cell_width: Pixels,
         cell_height: Pixels,
     ) -> [Vec<gpui::Div>; 3] {
@@ -263,19 +257,15 @@ impl Render for TerminalView {
         self.close_invalid_owned_surfaces(window, cx);
         self.synchronise_size(window);
 
-        let mut rows = self.laid_out_rows();
-        if let (Some(bundle), Some((generation, span))) = (&self.bundle, self.hovered_link)
-            && bundle.generation == generation
-        {
-            style_hyperlink_span(&mut rows, span);
-        }
+        let snapshot = self.bundle.as_ref().map(|bundle| bundle.render.as_ref());
+        let rows = prepare_rows(&mut self.layout_cache, snapshot, self.hovered_link);
         // The one place the pane's cell, font and colours are read for a frame:
         // the terminal's own rows and any hosted grid draw from the same values,
         // so a grid cannot end up a font behind the text beside it.
         let metrics = self.grid_metrics();
         let (default_fg, default_bg) = metrics.defaults;
-        let cell_width = metrics.cell_width;
-        let cell_height = metrics.cell_height;
+        let cell_width = metrics.cells.width();
+        let cell_height = metrics.cells.height();
         // A blinking cursor is simply absent for half of each blink, which is
         // the whole of what blinking is; a steady one ignores the phase.
         let cursor = self
@@ -283,10 +273,6 @@ impl Render for TerminalView {
             .as_ref()
             .map(|bundle| bundle.render.cursor)
             .filter(|cursor| metrics.blink_on || !cursor.blinking);
-        let cursor_color = self
-            .bundle
-            .as_ref()
-            .and_then(|bundle| bundle.render.cursor_color);
         let status = self.status.clone();
         let preedit = self.preedit.clone();
         // The terminal draws its own composition only when the terminal holds
@@ -307,8 +293,8 @@ impl Render for TerminalView {
         let origin = self.origin;
         let extent = self.size.map(|size| {
             gpui::size(
-                px(f32::from(size.cols) * f32::from(cell_width)),
-                px(f32::from(size.rows) * f32::from(cell_height)),
+                px(f32::from(size.cols()) * f32::from(cell_width)),
+                px(f32::from(size.rows()) * f32::from(cell_height)),
             )
         });
 
@@ -321,39 +307,7 @@ impl Render for TerminalView {
         // is above the text, so the common case never pays for it.
         let split = !below_background.is_empty() || !below_text.is_empty();
 
-        // Cloned per pass because each row closure outlives this call; an
-        // `Arc` of 768 bytes is cheaper than the alternative of resolving
-        // colours before layout.
-        let palette = self
-            .bundle
-            .as_ref()
-            .map(|bundle| std::sync::Arc::new(*bundle.render.palette.clone()));
-
-        let build = |pass: RowPass, rows: Vec<Vec<PositionedCell>>| {
-            crate::grid_paint::GridPaint::new(crate::grid_paint::GridPaintSpec {
-                rows,
-                pass,
-                cursor,
-                cursor_color,
-                default_fg,
-                default_bg,
-                palette: palette.clone(),
-                cell_width,
-                cell_height,
-                font_family: metrics.font_family.clone(),
-                font_size: metrics.font_size,
-            })
-        };
-        // One element for the whole grid rather than one per cell: see
-        // `grid_paint` for why a layout pass cannot be trusted with a grid.
-        let (background_grid, text_grid) = if split {
-            (
-                build(RowPass::Background, rows.clone()),
-                Some(build(RowPass::Text, rows)),
-            )
-        } else {
-            (build(RowPass::Whole, rows), None)
-        };
+        let (background_grid, text_grid) = GridPaint::prepare(snapshot, rows, &metrics, split);
 
         // With nothing hosted, the frame must cost what it cost before
         // Surfaces existed: no registry clone, no layer construction.
@@ -464,9 +418,9 @@ impl Render for TerminalView {
             // different colour below its last row than inside it.
             .bg(rgb(pack(default_bg)))
             .text_color(rgb(pack(default_fg)))
-            .font_family(metrics.font_family.clone())
-            .text_size(metrics.font_size)
-            .line_height(metrics.cell_height)
+            .font_family(metrics.cells.family().clone())
+            .text_size(metrics.cells.font_size())
+            .line_height(metrics.cells.height())
             .track_focus(&self.focus)
             .on_drop(cx.listener(|view, paths: &ExternalPaths, _window, _cx| {
                 let text = dropped_paths_text(paths.paths());
@@ -613,9 +567,9 @@ impl Render for TerminalView {
                 // Both become whole terminal rows through the same accumulator.
                 let pixels = match event.delta {
                     ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                    ScrollDelta::Lines(delta) => delta.y * f32::from(view.cell_height),
+                    ScrollDelta::Lines(delta) => delta.y * f32::from(view.metrics.height()),
                 };
-                let rows = view.scroll.accumulate(pixels, view.cell_height);
+                let rows = view.scroll.accumulate(pixels, view.metrics.height());
                 if rows == 0 {
                     return;
                 }

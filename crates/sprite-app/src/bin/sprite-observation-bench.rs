@@ -24,7 +24,7 @@ use sprite_app::{
     Report, TabId, collect_panes, render_schema,
 };
 use sprite_term::{
-    CursorSnapshot, HistorySnapshot, PaneRow, PromptKind, ScreenKind, TerminalSize, Viewport,
+    CursorSnapshot, HistorySnapshot, PaneRow, PromptKind, ScreenKind, ValidTerminalSize, Viewport,
 };
 
 /// A regression budget leaves this much headroom above today's p95.
@@ -131,14 +131,14 @@ fn addresses(count: usize) -> Vec<PaneAddress> {
 fn snapshot(history: usize, width: usize) -> Arc<HistorySnapshot> {
     let rows: Vec<PaneRow> = (0..history + 40)
         .map(|index| PaneRow {
-            text: format!("{}{index}", "x".repeat(width)),
+            text: format!("{}{index}", "x".repeat(width)).into(),
             wrapped: false,
             prompt: PromptKind::None,
         })
         .collect();
     Arc::new(HistorySnapshot {
         generation: 1,
-        size: TerminalSize::DEFAULT,
+        size: ValidTerminalSize::DEFAULT,
         screen: ScreenKind::Primary,
         rows,
         history_rows: history,

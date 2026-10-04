@@ -10,10 +10,8 @@ use std::path::PathBuf;
 
 use crate::observation::request::Scope;
 use crate::pane_tree::PaneId;
-use crate::surface::channel::{
-    DEFAULT_DOCK_SIZE, MAX_DOCK_SIZE, MIN_DOCK_SIZE, Position as SurfacePosition,
-    Side as SurfaceSide,
-};
+use crate::surface::DockSize;
+use crate::surface::channel::{Position as SurfacePosition, Side as SurfaceSide};
 
 /// What the command line asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -334,7 +332,7 @@ fn surface_open(
 ) -> Result<SurfaceOpenArgs, UsageError> {
     let mut position = None;
     let mut side = SurfaceSide::Left;
-    let mut size = DEFAULT_DOCK_SIZE as u32;
+    let mut size = DockSize::default().pixels() as u32;
     let mut focus = true;
     while let Some(argument) = arguments.next() {
         match text(&argument).as_deref() {
@@ -351,14 +349,9 @@ fn surface_open(
             }
             Some("--size") => {
                 let pixels = number(&mut arguments, "--size")?;
-                let allowed = (MIN_DOCK_SIZE as u64)..=(MAX_DOCK_SIZE as u64);
-                if !allowed.contains(&pixels) {
-                    return Err(UsageError(format!(
-                        "--size is between {} and {} pixels",
-                        MIN_DOCK_SIZE as u64, MAX_DOCK_SIZE as u64
-                    )));
-                }
-                size = pixels as u32;
+                size = DockSize::try_from(pixels as f32)
+                    .map_err(|why| UsageError(format!("--{why}")))?
+                    .pixels() as u32;
             }
             Some("--no-focus") => focus = false,
             _ => {

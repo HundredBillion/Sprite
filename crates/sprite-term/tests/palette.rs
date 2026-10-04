@@ -20,9 +20,13 @@ fn args(values: &[&str]) -> Vec<OsString> {
 /// Runs one script and returns the bundle once `marker` is on screen.
 fn shown(script: &str, marker: &str) -> std::sync::Arc<sprite_term::SnapshotBundle> {
     let config = SessionConfig::command("/bin/sh", args(&["-c", script]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the coloured text", |bundle| {
         pane_text(bundle).contains(marker)

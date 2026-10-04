@@ -1,6 +1,6 @@
-//! The Croft Compatibility Gate.
+//! Optional Croft compatibility smoke test.
 //!
-//! Croft is unmodified upstream software used as an external acceptance
+//! Croft is unmodified upstream software used as an optional external smoke-test
 //! application: if a real full-screen program behaves correctly inside a
 //! Terminal Session, the seam is doing its job. Croft is never a Sprite runtime
 //! dependency, and nothing here imports it or reaches into private
@@ -68,9 +68,13 @@ fn croft_checkpoint_one_capabilities() {
     config.working_directory = Some(directory.clone());
     config.environment = identity;
 
-    let mut session = TerminalSession::spawn(config).expect("spawn Croft");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn Croft");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     // A full-screen editor takes the alternate screen and draws something.
@@ -88,12 +92,16 @@ fn croft_checkpoint_one_capabilities() {
     });
 
     // A resize is reflected in a newer, still-coherent snapshot.
-    let resized = TerminalSize {
-        rows: 40,
-        cols: 100,
-        cell_width_px: 8,
-        cell_height_px: 16,
-    };
+    let resized = sprite_term::ValidTerminalSize::new(
+        TerminalSize {
+            rows: 40,
+            cols: 100,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        },
+        "resize",
+    )
+    .expect("valid terminal size");
     session
         .send(TerminalCommand::Resize(resized))
         .expect("send the resize");

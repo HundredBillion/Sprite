@@ -117,9 +117,11 @@ fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
             ..
         } => {
             assert_eq!(pane, sprite_app::PaneId(4));
-            assert_eq!(open.position, sprite_app::SurfacePosition::Dock);
-            assert_eq!(open.side, sprite_app::SurfaceSide::Left);
-            assert_eq!(open.size, 220.0);
+            assert_eq!(open.placement.position(), sprite_app::SurfacePosition::Dock);
+            assert_eq!(open.placement.side(), sprite_app::SurfaceSide::Left);
+            assert!(
+                matches!(open.placement, sprite_app::SurfacePlacement::Dock { size, .. } if size.pixels() == 220.0)
+            );
             assert!(open.focus);
             assert_eq!(open.description["root"]["text"], "hello");
             reply.send(Ok(())).expect("reply");

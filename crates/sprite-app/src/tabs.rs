@@ -1,6 +1,6 @@
 //! A window's ordered tabs, each owning one pane tree.
 //!
-//! Generic over the payload for the same reason `PaneRegistry` is: the rules
+//! Generic over the payload for the same reason `PaneTree` is: the rules
 //! that matter here — closing a tab ends every session it owns and no others,
 //! switching tabs ends none, identity is never reused — are ownership rules,
 //! and a drop-recording payload turns each of them into an assertion that runs
@@ -11,8 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::pane_registry::PaneRegistry;
-use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneIds, Rect};
+use crate::pane_tree::{Direction, Divider, Orientation, PaneId, PaneIds, PaneTree, Rect};
 
 /// One tab within a window. Never reused once its tab has closed.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -20,9 +19,8 @@ pub struct TabId(pub u64);
 
 /// The tabs of one window, in the order they are shown.
 pub struct Tabs<T> {
-    tabs: Vec<(TabId, PaneRegistry<T>)>,
-    /// Index into `tabs`, not an ID: the active tab moves when others close.
-    active: usize,
+    tabs: Vec<(TabId, PaneTree<T>)>,
+    active: Option<TabId>,
     /// Names people gave tabs. Beside the tabs rather than inside a pane,
     /// because a name must survive the pane changing what it is doing and no
     /// pane type should have to remember it.
@@ -42,18 +40,18 @@ impl<T> Tabs<T> {
         let mut panes = PaneIds::new();
         let tab = TabId(0);
         let pane = panes.allocate();
-        let first = PaneRegistry::new(pane, content(tab, pane));
+        let first = PaneTree::new(pane, content(tab, pane));
         Self {
             tabs: vec![(tab, first)],
-            active: 0,
+            active: Some(tab),
             names: HashMap::new(),
             panes,
             next_tab: 1,
         }
     }
 
-    pub fn active_tab(&self) -> TabId {
-        self.tabs[self.active].0
+    pub fn active_tab(&self) -> Option<TabId> {
+        self.active
     }
 
     /// Tabs in window order, which is the order the schema promises.
@@ -69,8 +67,9 @@ impl<T> Tabs<T> {
         self.tabs.is_empty()
     }
 
-    pub fn active(&self) -> &PaneRegistry<T> {
-        &self.tabs[self.active].1
+    pub fn active(&self) -> Option<&PaneTree<T>> {
+        let index = self.index_of(self.active?)?;
+        Some(&self.tabs[index].1)
     }
 
     /// The name a person gave this tab, if any.
@@ -110,9 +109,9 @@ impl<T> Tabs<T> {
         let tab = TabId(self.next_tab);
         self.next_tab += 1;
         let pane = self.panes.allocate();
-        let registry = PaneRegistry::new(pane, content(tab, pane));
-        self.tabs.push((tab, registry));
-        self.active = self.tabs.len() - 1;
+        let tree = PaneTree::new(pane, content(tab, pane));
+        self.tabs.push((tab, tree));
+        self.active = Some(tab);
         tab
     }
 
@@ -124,18 +123,17 @@ impl<T> Tabs<T> {
         let Some(index) = self.index_of(tab) else {
             return Vec::new();
         };
-        let (_, registry) = self.tabs.remove(index);
+        let (_, tree) = self.tabs.remove(index);
         // Identity is never reused, so a name must not outlive its tab.
         self.names.remove(&tab);
-        // Below the active tab, the active one shifts down with it; at or above
-        // it, the selection stays put unless it ran off the end.
-        if index < self.active {
-            self.active -= 1;
+        if self.active == Some(tab) {
+            self.active = self
+                .tabs
+                .get(index)
+                .or_else(|| self.tabs.last())
+                .map(|(id, _)| *id);
         }
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len().saturating_sub(1);
-        }
-        registry.into_contents()
+        tree.into_contents()
     }
 
     /// Splits the active tab's focused pane.
@@ -143,10 +141,11 @@ impl<T> Tabs<T> {
         &mut self,
         orientation: Orientation,
         content: impl FnOnce(TabId, PaneId) -> T,
-    ) -> PaneId {
+    ) -> Option<PaneId> {
+        let tab = self.active_tab()?;
+        let index = self.index_of(tab)?;
         let pane = self.panes.allocate();
-        let tab = self.active_tab();
-        self.tabs[self.active]
+        self.tabs[index]
             .1
             .split(pane, orientation, || content(tab, pane))
     }
@@ -157,7 +156,7 @@ impl<T> Tabs<T> {
     /// caller must consult [`Tabs::is_empty`] afterwards: a window with no tabs
     /// left has nothing to show.
     pub fn close_focused_pane(&mut self) -> Option<T> {
-        self.close_pane(self.active_tab(), self.active().focus())
+        self.close_pane(self.active_tab()?, self.active()?.focus()?)
     }
 
     /// Closes a specific pane, including one in a tab that is not active.
@@ -172,17 +171,21 @@ impl<T> Tabs<T> {
     }
 
     pub fn focus_direction(&mut self, direction: Direction) -> Option<PaneId> {
-        self.tabs[self.active].1.focus_direction(direction)
+        let index = self.index_of(self.active?)?;
+        self.tabs[index].1.focus_direction(direction)
     }
 
     pub fn focus_pane(&mut self, pane: PaneId) -> bool {
-        self.tabs[self.active].1.focus_pane(pane)
+        let Some(index) = self.active.and_then(|tab| self.index_of(tab)) else {
+            return false;
+        };
+        self.tabs[index].1.focus_pane(pane)
     }
 
     pub fn focus_tab(&mut self, tab: TabId) -> bool {
         match self.index_of(tab) {
-            Some(index) => {
-                self.active = index;
+            Some(_) => {
+                self.active = Some(tab);
                 true
             }
             None => false,
@@ -190,41 +193,40 @@ impl<T> Tabs<T> {
     }
 
     /// Moves to the next tab, wrapping at the end.
-    pub fn next_tab(&mut self) -> TabId {
-        if !self.tabs.is_empty() {
-            self.active = (self.active + 1) % self.tabs.len();
-        }
-        self.active_tab()
+    pub fn next_tab(&mut self) -> Option<TabId> {
+        let index = self.index_of(self.active?)?;
+        self.active = Some(self.tabs[(index + 1) % self.tabs.len()].0);
+        self.active
     }
 
     /// Moves to the previous tab, wrapping at the start.
-    pub fn previous_tab(&mut self) -> TabId {
-        if !self.tabs.is_empty() {
-            self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
-        }
-        self.active_tab()
+    pub fn previous_tab(&mut self) -> Option<TabId> {
+        let index = self.index_of(self.active?)?;
+        self.active = Some(self.tabs[(index + self.tabs.len() - 1) % self.tabs.len()].0);
+        self.active
     }
 
     /// The active tab's panes with their normalised rectangles. Only the active
     /// tab is laid out: the others are running, not shown.
     pub fn layout(&self) -> Vec<(PaneId, Rect, &T)> {
-        self.active().layout()
+        self.active().map(PaneTree::layout).unwrap_or_default()
     }
 
     /// The active tab's boundaries. Only the active tab is laid out, so only
     /// its boundaries can be grabbed.
     pub fn dividers(&self) -> Vec<Divider> {
-        self.active().dividers()
+        self.active().map(PaneTree::dividers).unwrap_or_default()
     }
 
     pub fn divider(&self, pane: PaneId, direction: Direction) -> Option<Divider> {
-        self.active().divider(pane, direction)
+        self.active()?.divider(pane, direction)
     }
 
     pub fn set_divider_ratio(&mut self, pane: PaneId, direction: Direction, ratio: f32) -> bool {
-        self.tabs[self.active]
-            .1
-            .set_divider_ratio(pane, direction, ratio)
+        let Some(index) = self.active.and_then(|tab| self.index_of(tab)) else {
+            return false;
+        };
+        self.tabs[index].1.set_divider_ratio(pane, direction, ratio)
     }
 
     /// Every pane in the window, tabs in window order.
@@ -234,9 +236,8 @@ impl<T> Tabs<T> {
     pub fn all_panes(&self) -> Vec<(TabId, PaneId, &T)> {
         self.tabs
             .iter()
-            .flat_map(|(tab, registry)| {
-                registry
-                    .layout()
+            .flat_map(|(tab, tree)| {
+                tree.layout()
                     .into_iter()
                     .map(move |(pane, _, item)| (*tab, pane, item))
             })
@@ -252,12 +253,11 @@ impl<T> Tabs<T> {
         self.tabs
             .iter()
             .enumerate()
-            .flat_map(|(order, (_, registry))| {
-                let focus = registry.focus();
-                registry
-                    .layout()
+            .flat_map(|(order, (_, tree))| {
+                let focus = tree.focus();
+                tree.layout()
                     .into_iter()
-                    .map(move |(pane, rect, _)| (pane, order, rect, pane == focus))
+                    .map(move |(pane, rect, _)| (pane, order, rect, Some(pane) == focus))
             })
             .collect()
     }
@@ -302,7 +302,7 @@ mod tests {
         let tabs = Tabs::new(|_tab, _pane| spy("first", &log));
 
         assert_eq!(tabs.len(), 1);
-        assert_eq!(tabs.active().len(), 1);
+        assert_eq!(tabs.active().unwrap().len(), 1);
         assert!(ended(&log).is_empty());
     }
 
@@ -314,7 +314,7 @@ mod tests {
         let second = tabs.open(|_tab, _pane| spy("second", &log));
 
         assert_eq!(tabs.len(), 2);
-        assert_eq!(tabs.active_tab(), second);
+        assert_eq!(tabs.active_tab().unwrap(), second);
         assert_eq!(tabs.order(), vec![TabId(0), second]);
         assert!(ended(&log).is_empty(), "opening a tab ends nothing");
     }
@@ -324,7 +324,7 @@ mod tests {
     fn a_tab_keeps_the_name_it_is_given() {
         let log: Log = Rc::default();
         let mut tabs = Tabs::new(|_, _| spy("a", &log));
-        let first = tabs.active_tab();
+        let first = tabs.active_tab().unwrap();
         assert_eq!(tabs.name(first), None);
         assert!(tabs.set_name(first, Some("build".to_owned())));
         assert_eq!(tabs.name(first), Some("build"));
@@ -376,7 +376,11 @@ mod tests {
             "exactly the closed tab's sessions ended"
         );
         assert_eq!(tabs.len(), 1);
-        assert_eq!(tabs.active().len(), 2, "the other tab is untouched");
+        assert_eq!(
+            tabs.active().unwrap().len(),
+            2,
+            "the other tab is untouched"
+        );
     }
 
     #[test]
@@ -387,13 +391,21 @@ mod tests {
         let third = tabs.open(|_tab, _pane| spy("third", &log));
 
         tabs.focus_tab(second);
-        assert_eq!(tabs.active_tab(), second);
+        assert_eq!(tabs.active_tab().unwrap(), second);
         tabs.next_tab();
-        assert_eq!(tabs.active_tab(), third);
+        assert_eq!(tabs.active_tab().unwrap(), third);
         tabs.next_tab();
-        assert_eq!(tabs.active_tab(), TabId(0), "next wraps to the start");
+        assert_eq!(
+            tabs.active_tab().unwrap(),
+            TabId(0),
+            "next wraps to the start"
+        );
         tabs.previous_tab();
-        assert_eq!(tabs.active_tab(), third, "previous wraps to the end");
+        assert_eq!(
+            tabs.active_tab().unwrap(),
+            third,
+            "previous wraps to the end"
+        );
 
         assert!(
             ended(&log).is_empty(),
@@ -430,6 +442,7 @@ mod tests {
         let doomed = tabs.open(|_tab, _pane| spy("doomed", &log));
         let doomed_panes: Vec<PaneId> = tabs
             .active()
+            .unwrap()
             .layout()
             .into_iter()
             .map(|(p, _, _)| p)
@@ -439,6 +452,7 @@ mod tests {
         let reopened = tabs.open(|_tab, _pane| spy("reopened", &log));
         let reopened_panes: Vec<PaneId> = tabs
             .active()
+            .unwrap()
             .layout()
             .into_iter()
             .map(|(p, _, _)| p)
@@ -460,13 +474,16 @@ mod tests {
     fn close_pane_removes_only_the_named_background_pane() {
         let log: Log = Rc::default();
         let mut tabs = Tabs::new(|_, _| spy("first", &log));
-        let first = tabs.active_tab();
-        let pane = tabs.active().focus();
+        let first = tabs.active_tab().unwrap();
+        let pane = tabs.active().unwrap().focus().unwrap();
         tabs.open(|_, _| spy("second", &log));
         drop(tabs.close_pane(first, pane));
         assert_eq!(tabs.len(), 1);
         assert_eq!(ended(&log), vec!["first"]);
-        assert_eq!(tabs.active().focus(), tabs.all_panes()[0].1);
+        assert_eq!(
+            tabs.active().unwrap().focus().unwrap(),
+            tabs.all_panes()[0].1
+        );
     }
 
     #[test]
@@ -479,7 +496,7 @@ mod tests {
         drop(closed);
 
         assert_eq!(tabs.len(), 1, "the emptied tab went with its last pane");
-        assert_eq!(tabs.active_tab(), TabId(0));
+        assert_eq!(tabs.active_tab().unwrap(), TabId(0));
         assert_eq!(ended(&log), vec!["only-pane"]);
     }
 
@@ -496,17 +513,49 @@ mod tests {
     }
 
     #[test]
+    fn closed_last_tab_can_still_be_accessed_and_laid_out() {
+        let mut tabs = Tabs::new(|_, _| ());
+        tabs.close_focused_pane();
+        assert_eq!(tabs.active_tab(), None);
+        assert!(tabs.active().is_none());
+        assert_eq!(tabs.next_tab(), None);
+        assert_eq!(tabs.previous_tab(), None);
+        assert!(tabs.close_focused_pane().is_none());
+        assert!(tabs.split(Orientation::Horizontal, |_, _| ()).is_none());
+        assert!(tabs.dividers().is_empty());
+        let opened = tabs.open(|_, _| ());
+        assert_eq!(tabs.active_tab(), Some(opened));
+        assert_eq!(tabs.active().unwrap().len(), 1);
+        tabs.close_tab(opened);
+        assert!(tabs.layout().is_empty());
+    }
+
+    #[test]
     fn closing_a_tab_before_the_active_one_keeps_the_same_tab_active() {
         let log: Log = Rc::default();
         let mut tabs = Tabs::new(|_tab, _pane| spy("first", &log));
         let second = tabs.open(|_tab, _pane| spy("second", &log));
         let third = tabs.open(|_tab, _pane| spy("third", &log));
-        assert_eq!(tabs.active_tab(), third);
+        assert_eq!(tabs.active_tab().unwrap(), third);
 
         drop(tabs.close_tab(second));
 
-        assert_eq!(tabs.active_tab(), third, "the active tab did not change");
+        assert_eq!(
+            tabs.active_tab().unwrap(),
+            third,
+            "the active tab did not change"
+        );
         assert_eq!(tabs.order(), vec![TabId(0), third]);
+    }
+
+    #[test]
+    fn closing_after_active_identity_keeps_selection() {
+        let mut tabs = Tabs::new(|_, _| ());
+        let first = tabs.active_tab().unwrap();
+        let last = tabs.open(|_, _| ());
+        tabs.focus_tab(first);
+        tabs.close_tab(last);
+        assert_eq!(tabs.active_tab(), Some(first));
     }
 
     #[test]
@@ -518,10 +567,18 @@ mod tests {
 
         tabs.focus_tab(second);
         drop(tabs.close_tab(second));
-        assert_eq!(tabs.active_tab(), third, "selection moved to the next tab");
+        assert_eq!(
+            tabs.active_tab().unwrap(),
+            third,
+            "selection moved to the next tab"
+        );
 
         drop(tabs.close_tab(third));
-        assert_eq!(tabs.active_tab(), TabId(0), "and then to what remains");
+        assert_eq!(
+            tabs.active_tab().unwrap(),
+            TabId(0),
+            "and then to what remains"
+        );
     }
 
     #[test]
@@ -567,8 +624,8 @@ mod tests {
     #[test]
     fn a_boundary_moves_only_in_the_tab_that_owns_it() {
         let mut tabs = Tabs::new(|_, pane| pane);
-        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane);
-        let first_tab = tabs.active_tab();
+        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane).unwrap();
+        let first_tab = tabs.active_tab().unwrap();
         assert!(tabs.set_divider_ratio(split_pane, Direction::Left, 0.25));
 
         tabs.open(|_, pane| pane);
@@ -584,7 +641,7 @@ mod tests {
     #[test]
     fn evening_a_boundary_puts_it_back_where_a_split_starts_it() {
         let mut tabs = Tabs::new(|_, pane| pane);
-        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane);
+        let split_pane = tabs.split(Orientation::Horizontal, |_, pane| pane).unwrap();
         let fresh = tabs
             .divider(split_pane, Direction::Left)
             .expect("a split has a boundary")

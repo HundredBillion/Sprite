@@ -220,6 +220,7 @@ pub(crate) fn respond(
     panes: &dyn PaneSource,
     reload: &async_channel::Sender<ReloadRequest>,
     body: &str,
+    reply_connection: Option<crate::local_socket::ReplyConnection>,
 ) -> String {
     // One check, both verbs. Previously `broker::parse` compared the token to
     // PROTOCOL while `config_request` discarded it, so a newer client's config
@@ -239,7 +240,7 @@ pub(crate) fn respond(
     // rule observation lives by: a caller that could not read this window's
     // panes cannot reload its settings either.
     if let Some(verb) = config_request(body) {
-        return ask_window(reload, verb);
+        return ask_window(reload, verb, reply_connection);
     }
     let query = match parse(body) {
         Ok(query) => query,
@@ -306,14 +307,22 @@ fn config_request(body: &str) -> Option<ConfigVerb> {
 }
 
 /// Hands the question to the GPUI thread and waits, briefly, for its answer.
-fn ask_window(reload: &async_channel::Sender<ReloadRequest>, what: ConfigVerb) -> String {
-    let (reply, answer) = std::sync::mpsc::sync_channel(1);
-    if reload.send_blocking(ReloadRequest { what, reply }).is_err() {
-        return "this window is no longer answering".to_owned();
-    }
-    match answer.recv_timeout(RELOAD_TIMEOUT) {
+fn ask_window(
+    reload: &async_channel::Sender<ReloadRequest>,
+    what: ConfigVerb,
+    reply_connection: Option<crate::local_socket::ReplyConnection>,
+) -> String {
+    use crate::workspace::{RelayError, relay};
+    match relay(reload, RELOAD_TIMEOUT, |reply| ReloadRequest {
+        what,
+        reply,
+        reply_connection,
+    }) {
         Ok(answer) => answer,
-        Err(_) => "this window did not answer in time; nothing was changed".to_owned(),
+        Err(RelayError::Disconnected) => "this window is no longer answering".to_owned(),
+        Err(RelayError::Timeout) => {
+            "this window did not answer in time; nothing was changed".to_owned()
+        }
     }
 }
 
@@ -324,6 +333,23 @@ mod tests {
     };
     use crate::pane_tree::PaneId;
     use sprite_term::HistoryLines;
+
+    #[test]
+    fn surface_verbs_cannot_enter_the_observation_grammar() {
+        let (reload, requests) = async_channel::bounded(1);
+        for body in [
+            "open",
+            "focus",
+            "token",
+            "update",
+            "close",
+            "{\"type\":\"open\",\"version\":1}",
+        ] {
+            let answer = respond(&NoPanes, &reload, body, None);
+            assert!(answer.starts_with("malformed:"), "{body}: {answer}");
+            assert!(requests.try_recv().is_err());
+        }
+    }
 
     /// The grammar has two directions and they must be the same grammar.
     ///
@@ -491,7 +517,7 @@ mod tests {
             "sprite-observation/99 config reload",
             "sprite-observation/99 panes snapshot",
         ] {
-            let answer = respond(&NoPanes, &reload, body);
+            let answer = respond(&NoPanes, &reload, body, None);
             assert!(
                 answer.starts_with("unsupported protocol"),
                 "{body:?} was answered with {answer:?}"
@@ -511,7 +537,7 @@ mod tests {
             "sprite-observation/1 sprite-observation/999 config reload",
             "sprite-observation/1 sprite-observation/999 panes snapshot",
         ] {
-            let answer = respond(&NoPanes, &reload, body);
+            let answer = respond(&NoPanes, &reload, body, None);
             assert!(
                 answer.starts_with("unsupported protocol"),
                 "{body:?} was answered with {answer:?}"
@@ -527,6 +553,7 @@ mod tests {
             &NoPanes,
             &reload,
             "sprite-observation/1 panes snapshot --window",
+            None,
         );
         assert!(
             !answer.starts_with("unsupported protocol"),
@@ -552,7 +579,7 @@ mod tests {
             verb
         });
 
-        let answer = respond(&NoPanes, &reload, "sprite-observation/1 config print");
+        let answer = respond(&NoPanes, &reload, "sprite-observation/1 config print", None);
 
         assert_eq!(answer, "the window answered");
         assert_eq!(
@@ -570,7 +597,7 @@ mod tests {
     #[test]
     fn a_pane_this_window_cannot_see_is_refused() {
         let (reload, _keep_open) = async_channel::bounded(1);
-        let answer = respond(&NoPanes, &reload, "panes snapshot --from 42");
+        let answer = respond(&NoPanes, &reload, "panes snapshot --from 42", None);
         assert_eq!(
             answer, DENIED,
             "a pane outside this window must get the plain refusal"

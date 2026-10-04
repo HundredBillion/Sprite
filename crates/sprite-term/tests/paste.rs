@@ -13,7 +13,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
-fn session(script: &str) -> TerminalSession {
+fn session(script: &str) -> sprite_term::Spawned {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
 }
@@ -34,9 +34,13 @@ fn hex_reader(setup: &str, count: usize) -> String {
 /// data rather than typing.
 #[test]
 fn bracketed_paste_wraps_the_text() {
-    let mut session = session(&hex_reader("printf '\\033[?2004h';", 14));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("printf '\\033[?2004h';", 14));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -68,9 +72,13 @@ fn bracketed_paste_wraps_the_text() {
 /// and why paste protection is still owed (see the TSP).
 #[test]
 fn unbracketed_paste_converts_newlines_to_carriage_returns() {
-    let mut session = session(&hex_reader("", 3));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("", 3));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -92,9 +100,13 @@ fn unbracketed_paste_converts_newlines_to_carriage_returns() {
 /// and have the remainder run as a command.
 #[test]
 fn paste_cannot_escape_its_own_brackets() {
-    let mut session = session(&hex_reader("printf '\\033[?2004h';", 25));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("printf '\\033[?2004h';", 25));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -128,8 +140,12 @@ fn paste_cannot_escape_its_own_brackets() {
 /// to take cannot stall the pane (ADR 0015).
 #[test]
 fn a_large_paste_is_queued_rather_than_rejected() {
-    let mut session = session("stty -echo; cat > /tmp/sprite-paste-test.txt & sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots: _snapshots,
+    } = session("stty -echo; cat > /tmp/sprite-paste-test.txt & sleep 30");
+    let events = EventPump::new(events);
     events.expect_ready();
 
     let big = "x".repeat(64 * 1024);
@@ -141,9 +157,13 @@ fn a_large_paste_is_queued_rather_than_rejected() {
 /// Focus reporting only reaches a child that asked for it.
 #[test]
 fn focus_is_reported_only_when_the_child_asks() {
-    let mut session = session(&hex_reader("printf '\\033[?1004h';", 3));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("printf '\\033[?1004h';", 3));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -163,9 +183,13 @@ fn focus_is_reported_only_when_the_child_asks() {
 /// paste is withheld and reported, not performed.
 #[test]
 fn an_unsafe_unbracketed_paste_is_withheld_and_reported() {
-    let mut session = session(&hex_reader("", 3));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("", 3));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -206,9 +230,13 @@ fn an_unsafe_unbracketed_paste_is_withheld_and_reported() {
 /// person's decision, and Sprite performs it without further argument.
 #[test]
 fn a_confirmed_unsafe_paste_is_performed() {
-    let mut session = session(&hex_reader("", 3));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("", 3));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
@@ -228,9 +256,13 @@ fn a_confirmed_unsafe_paste_is_performed() {
 /// it contains newlines: the child is told where it starts and ends.
 #[test]
 fn a_bracketed_paste_with_newlines_needs_no_confirmation() {
-    let mut session = session(&hex_reader("printf '\\033[?2004h';", 15));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("printf '\\033[?2004h';", 15));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 

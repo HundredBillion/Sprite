@@ -1,10 +1,13 @@
 //! The Checkpoint 1 benchmark harness.
 //!
-//! It measures only through the public `TerminalSession` interface, so the
+//! Session timings measure through the public `TerminalSession` interface, so the
 //! numbers describe what an application actually experiences rather than the
 //! cost of some internal call. Output is stable JSON written with the standard
 //! library alone: these values become committed regression budgets, so the
 //! report must not depend on a serialization crate's formatting choices.
+
+#[path = "../test_allocations.rs"]
+mod allocations;
 
 use std::ffi::OsString;
 use std::fs;
@@ -40,7 +43,7 @@ fn main() {
         }
     };
 
-    let measurements: Vec<Measurement> = vec![
+    let mut measurements: Vec<Measurement> = vec![
         Measurement::collect("spawn_to_ready", options.samples, spawn_to_ready),
         Measurement::collect(
             "input_to_snapshot_idle",
@@ -69,6 +72,8 @@ fn main() {
         Measurement::collect("select_full_screen", options.samples, select_full_screen),
     ];
 
+    measurements.extend(isolated_capture(options.samples));
+
     if let Err(error) = write_report(&options.output, options.samples, &measurements) {
         eprintln!(
             "sprite-term-bench: writing {}: {error}",
@@ -79,8 +84,12 @@ fn main() {
 
     for measurement in &measurements {
         println!(
-            "{:<32} median {:>8.3} ms  p95 {:>8.3} ms  budget {:>8.3} ms",
-            measurement.name, measurement.median, measurement.p95, measurement.budget
+            "{:<32} median {:>8.3} {}  p95 {:>8.3}  budget {:>8.3}",
+            measurement.name,
+            measurement.median,
+            measurement.unit,
+            measurement.p95,
+            measurement.budget
         );
     }
 }
@@ -140,6 +149,7 @@ impl Options {
 }
 
 struct Measurement {
+    unit: &'static str,
     name: &'static str,
     median: f64,
     p95: f64,
@@ -164,6 +174,7 @@ impl Measurement {
         let max = milliseconds.last().copied().unwrap_or(0.0);
 
         Self {
+            unit: "ms",
             name,
             median,
             p95,
@@ -204,7 +215,7 @@ fn write_report(path: &PathBuf, samples: usize, measurements: &[Measurement]) ->
             ","
         };
         writeln!(file, "    \"{}\": {{", measurement.name)?;
-        writeln!(file, "      \"unit\": \"ms\",")?;
+        writeln!(file, "      \"unit\": \"{}\",", measurement.unit)?;
         writeln!(file, "      \"samples\": {},", measurement.samples)?;
         writeln!(file, "      \"median\": {:.6},", measurement.median)?;
         writeln!(file, "      \"p95\": {:.6},", measurement.p95)?;
@@ -235,10 +246,7 @@ fn fatal(what: &str) -> ! {
     process::exit(1);
 }
 
-fn await_ready(session: &mut TerminalSession) -> sprite_term::EventStream {
-    let mut events = session
-        .take_event_stream()
-        .unwrap_or_else(|error| fatal(&format!("event stream: {error}")));
+fn await_ready(mut events: sprite_term::EventStream) -> sprite_term::EventStream {
     let deadline = Instant::now() + SAMPLE_TIMEOUT;
     loop {
         if Instant::now() > deadline {
@@ -260,9 +268,13 @@ fn finish(mut session: TerminalSession) {
 
 fn spawn_to_ready() -> Duration {
     let started = Instant::now();
-    let mut session = TerminalSession::spawn(shell("exec sleep 30"))
+    let sprite_term::Spawned {
+        session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(shell("exec sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
+    let _events = await_ready(events);
     let elapsed = started.elapsed();
     finish(session);
     elapsed
@@ -271,12 +283,13 @@ fn spawn_to_ready() -> Duration {
 /// Time from one keystroke reaching the seam to the character being visible in
 /// a snapshot, on an otherwise quiet terminal.
 fn input_to_snapshot_idle() -> Duration {
-    let mut session = TerminalSession::spawn(shell("stty -icanon -echo min 1 time 0; cat"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("stty -icanon -echo min 1 time 0; cat"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     // Drain the generation-0 blank so the measured snapshot is the response.
     let _ = snapshots.next_blocking();
@@ -295,15 +308,16 @@ fn input_to_snapshot_idle() -> Duration {
 /// stops its own producer on receipt, so the marker survives long enough to be
 /// observed rather than scrolling away.
 fn input_to_snapshot_under_load() -> Duration {
-    let mut session = TerminalSession::spawn(shell(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell(
         "stty -echo; yes sprite-load-line & producer=$!; \
          read line; kill $producer 2>/dev/null; printf '\\nMARK:%s\\n' \"$line\"",
     ))
     .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     // Only measure once the flood is genuinely under way.
     let warmup = Instant::now();
@@ -329,12 +343,13 @@ fn output_to_final_snapshot(output_bytes: usize) -> Duration {
         "awk 'BEGIN{{s=sprintf(\"%79s\",\"\"); gsub(/ /,\"a\",s); \
          for(i=0;i<{lines};i++) print s}}'"
     );
-    let mut session = TerminalSession::spawn(shell(&script))
+    let sprite_term::Spawned {
+        session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell(&script))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let started = Instant::now();
     let mut last = started;
@@ -353,23 +368,28 @@ fn output_to_final_snapshot(output_bytes: usize) -> Duration {
     elapsed
 }
 
-/// One full capture of a 100 by 100 grid: 10,000 cells built into both owned
-/// projections.
+/// Legacy public-session timing for a capture request on a 100 by 100 grid.
+/// A pending same-generation snapshot can satisfy the wait before capture runs.
+/// Use `isolated_projector_capture` to measure projection work.
 fn capture_100x100_grid() -> Duration {
     let mut config = shell("stty -icanon -echo min 1 time 0; cat");
-    config.size = TerminalSize {
-        rows: 100,
-        cols: 100,
-        cell_width_px: 8,
-        cell_height_px: 16,
-    };
+    config.size = sprite_term::ValidTerminalSize::new(
+        TerminalSize {
+            rows: 100,
+            cols: 100,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        },
+        "resize",
+    )
+    .expect("valid terminal size");
 
-    let mut session =
-        TerminalSession::spawn(config).unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(config).unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
+    let _events = await_ready(events);
 
     let blank = snapshots
         .next_blocking()
@@ -416,16 +436,17 @@ fn capture_100x100_grid() -> Duration {
     elapsed
 }
 
-/// Capture cost once history is deep. Capture is meant to be proportional to
-/// the visible screen, not to retained scrollback, so this should track
-/// `capture_100x100_grid` rather than growing with history.
+/// Legacy public-session timing after more than 5,000 scrollback rows arrive.
+/// The wait requires a newer generation, which ongoing output can produce.
+/// This includes session scheduling and does not isolate projection work.
 fn capture_with_full_scrollback() -> Duration {
-    let mut session = TerminalSession::spawn(shell("seq 1 20000; sleep 30"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("seq 1 20000; sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let warmup = Instant::now();
     let deep = wait_for_predicate(&mut snapshots, warmup, |bundle| {
@@ -445,12 +466,13 @@ fn capture_with_full_scrollback() -> Duration {
 
 /// One scroll command to the snapshot that reflects it.
 fn scroll_round_trip() -> Duration {
-    let mut session = TerminalSession::spawn(shell("seq 1 5000; sleep 30"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("seq 1 5000; sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let warmup = Instant::now();
     let generation = wait_for_predicate(&mut snapshots, warmup, |bundle| {
@@ -469,26 +491,27 @@ fn scroll_round_trip() -> Duration {
 
 /// Selecting a whole visible screen, to the snapshot that marks it.
 fn select_full_screen() -> Duration {
-    let mut session = TerminalSession::spawn(shell("seq 1 200; sleep 30"))
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(shell("seq 1 200; sleep 30"))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(&mut session);
-    let mut snapshots = session
-        .take_snapshot_stream()
-        .unwrap_or_else(|error| fatal(&format!("snapshot stream: {error}")));
+    let _events = await_ready(events);
 
     let warmup = Instant::now();
     let generation = wait_for_predicate(&mut snapshots, warmup, |bundle| {
         bundle.render.rows.iter().any(|row| !row.cells.is_empty())
     });
-    let size = TerminalSize::DEFAULT;
+    let size = sprite_term::ValidTerminalSize::DEFAULT;
 
     let started = Instant::now();
     session
         .send(TerminalCommand::Select {
             anchor: CellPosition { row: 0, column: 0 },
             head: CellPosition {
-                row: size.rows - 1,
-                column: size.cols - 1,
+                row: size.rows() - 1,
+                column: size.cols() - 1,
             },
             mode: SelectionMode::Character,
             rectangle: false,
@@ -562,4 +585,42 @@ fn wait_for_text(
             fatal(&format!("timed out waiting for {needle}"));
         }
     }
+}
+
+fn isolated_capture(samples: usize) -> Vec<Measurement> {
+    let mut counts = Vec::with_capacity(samples);
+    let mut bytes = Vec::with_capacity(samples);
+    let mut times = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let mut driver = sprite_term::capture_benchmark::CaptureBenchmark::new().unwrap();
+        std::hint::black_box(driver.capture().unwrap());
+        let (elapsed, sample) = allocations::measure(|| {
+            let started = Instant::now();
+            std::hint::black_box(driver.capture().unwrap());
+            started.elapsed().as_secs_f64() * 1000.0
+        });
+        counts.push(sample.allocations as f64);
+        bytes.push(sample.bytes as f64);
+        times.push(elapsed);
+    }
+    [
+        ("allocations_per_capture", "Rust allocations", counts),
+        ("rust_bytes_per_capture", "requested Rust bytes", bytes),
+        ("isolated_projector_capture", "ms", times),
+    ]
+    .into_iter()
+    .map(|(name, unit, mut values)| {
+        values.sort_by(f64::total_cmp);
+        let p95 = percentile(&values, 0.95);
+        Measurement {
+            name,
+            unit,
+            samples,
+            median: percentile(&values, 0.5),
+            p95,
+            max: *values.last().unwrap(),
+            budget: p95 * BUDGET_MULTIPLIER,
+        }
+    })
+    .collect()
 }

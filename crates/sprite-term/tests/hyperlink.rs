@@ -14,7 +14,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
-fn session(script: &str) -> TerminalSession {
+fn session(script: &str) -> sprite_term::Spawned {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
 }
@@ -62,9 +62,13 @@ fn resolve(
 
 #[test]
 fn an_https_link_resolves_to_its_target() {
-    let mut session = session(&link_script("https://example.com/page", "click me"));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&link_script("https://example.com/page", "click me"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     assert_eq!(
@@ -75,9 +79,13 @@ fn an_https_link_resolves_to_its_target() {
 
 #[test]
 fn an_osc8_resolution_includes_the_visible_label_span() {
-    let mut session = session(&link_script("https://example.com/page", "click me"));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&link_script("https://example.com/page", "click me"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     assert!(matches!(
@@ -111,12 +119,16 @@ fn a_visible_link_span_contains_only_its_cells_on_its_row() {
 /// opened. Here the label impersonates a different, trusted destination.
 #[test]
 fn a_hostile_label_cannot_change_the_target() {
-    let mut session = session(&link_script(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&link_script(
         "https://evil.example/steal",
         "https://bank.example",
     ));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let resolved = resolve(&mut session, &events, &snapshots, 2);
@@ -131,9 +143,13 @@ fn a_hostile_label_cannot_change_the_target() {
 /// `file:` is not in the default scheme allowlist, so it resolves to nothing.
 #[test]
 fn a_file_link_is_denied_by_default() {
-    let mut session = session(&link_script("file:///etc/passwd", "harmless"));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&link_script("file:///etc/passwd", "harmless"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     assert_eq!(
@@ -146,9 +162,13 @@ fn a_file_link_is_denied_by_default() {
 /// A scheme that could execute rather than navigate is denied.
 #[test]
 fn an_executable_scheme_is_denied() {
-    let mut session = session(&link_script("javascript:alert(1)", "safe looking"));
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&link_script("javascript:alert(1)", "safe looking"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     assert_eq!(
@@ -161,9 +181,13 @@ fn an_executable_scheme_is_denied() {
 /// Ordinary text that is not a URL still resolves to nothing.
 #[test]
 fn ordinary_plain_text_is_not_a_link() {
-    let mut session = session("printf 'just ordinary text\\n'; printf 'DONE\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("printf 'just ordinary text\\n'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     assert_eq!(
@@ -177,10 +201,13 @@ fn ordinary_plain_text_is_not_a_link() {
 /// the user clicks a cell in the visible URL.
 #[test]
 fn a_visible_url_resolves_without_osc8_metadata() {
-    let mut session =
-        session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     assert_eq!(
@@ -191,10 +218,13 @@ fn a_visible_url_resolves_without_osc8_metadata() {
 
 #[test]
 fn a_visible_url_resolution_includes_its_cell_span() {
-    let mut session =
-        session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     assert!(matches!(

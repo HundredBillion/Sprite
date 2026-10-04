@@ -119,7 +119,7 @@ lines, updates in from standard input. The reference implementation of the
 Surface Channel; other clients may speak the socket directly.
 _Avoid_: the CLI (unqualified), sprite.nvim, the adapter
 
-**Croft Compatibility Gate**:
-Unmodified upstream Croft used as an external acceptance application against
-its moving `main`; it is not part of Sprite Terminal.
-_Avoid_: Croft dependency, Croft fork
+**Croft Compatibility Smoke Test**:
+Unmodified upstream Croft used as an optional, manually invoked check against
+its moving `main`; it is not part of Sprite Terminal or a required CI gate.
+_Avoid_: Croft dependency, Croft fork, required Croft gate

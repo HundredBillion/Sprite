@@ -42,11 +42,14 @@ fn input_the_child_is_not_reading_does_not_stall_its_output() {
     // `-echo` so what piles up is the input itself rather than the tty's copy.
     let script = "stty -icanon -echo min 1 time 0; i=0; \
                   while :; do i=$((i+1)); printf 'ALIVE%s\\n' $i; sleep 0.02; done";
-    let mut session =
-        TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-            .expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
+        .expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let started = snapshots.wait_for("the child to start counting", |bundle| {

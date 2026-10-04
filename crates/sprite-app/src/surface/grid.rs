@@ -10,6 +10,7 @@
 //! cell is, so the two paths cannot drift apart.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor, UnderlineStyle};
@@ -95,7 +96,7 @@ pub struct CursorOp {
 /// One cell as the program sent it. An empty `text` is the second column of
 /// the wide character before it, which is how Neovim spells width.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Cell {
+pub struct WireCell {
     pub text: String,
     pub hl: u32,
 }
@@ -112,7 +113,7 @@ pub struct RowChunk {
     pub row: u16,
     pub col: u16,
     /// Each cell and how many columns it fills; every count is at least one.
-    pub cells: Vec<(Cell, u32)>,
+    pub cells: Vec<(WireCell, u32)>,
 }
 
 impl RowChunk {
@@ -316,7 +317,7 @@ fn parse_chunk(value: &Value) -> Result<RowChunk, Refusal> {
                 .ok_or_else(|| malformed(format!("a cell's repeat is 1 to {MAX_COLS}")))?,
         };
         cells.push((
-            Cell {
+            WireCell {
                 text: text.to_owned(),
                 hl,
             },
@@ -377,12 +378,77 @@ fn cell_index(object: &serde_json::Map<String, Value>, key: &str) -> Result<u16,
         .ok_or_else(|| malformed(format!("{key} is a whole number of cells")))
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Cell {
+    text: u32,
+    pub hl: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TextEntry {
+    text: Arc<str>,
+    paint: sprite_term::CellText,
+    references: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TextPool {
+    entries: Vec<Option<TextEntry>>,
+    ids: HashMap<Arc<str>, u32>,
+    free: Vec<u32>,
+}
+
+impl TextPool {
+    // A live cell owns one reference; retired paint rows own their text independently.
+    fn intern(&mut self, text: &str) -> u32 {
+        if let Some(&id) = self.ids.get(text) {
+            self.retain(id);
+            return id;
+        }
+        let id = self.free.pop().unwrap_or(self.entries.len() as u32);
+        let text: Arc<str> = text.into();
+        let entry = TextEntry {
+            paint: text.as_ref().into(),
+            text: text.clone(),
+            references: 1,
+        };
+        self.ids.insert(text, id);
+        if id as usize == self.entries.len() {
+            self.entries.push(Some(entry));
+        } else {
+            self.entries[id as usize] = Some(entry);
+        }
+        id
+    }
+
+    fn retain(&mut self, id: u32) {
+        self.entries[id as usize].as_mut().unwrap().references += 1;
+    }
+
+    fn release(&mut self, id: u32) {
+        let entry = self.entries[id as usize].as_mut().unwrap();
+        entry.references -= 1;
+        if entry.references == 0 {
+            self.ids.remove(entry.text.as_ref());
+            self.entries[id as usize] = None;
+            self.free.push(id);
+        }
+    }
+
+    fn text(&self, id: u32) -> &sprite_term::CellText {
+        &self.entries[id as usize].as_ref().unwrap().paint
+    }
+}
+
 /// A program's grid as Sprite holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridSurface {
     cols: u16,
     rows: u16,
     cells: Vec<Vec<Cell>>,
+    texts: TextPool,
+    dirty: Vec<bool>,
+    theme: Option<Highlights>,
     attrs: HashMap<u32, Attrs>,
     /// Every group name an id has been given, in the order they arrived.
     ///
@@ -394,28 +460,44 @@ pub struct GridSurface {
     cursor: Cursor,
     /// The rows as the painter wants them, rebuilt only when something
     /// changed: a frame that repaints an idle grid costs no layout.
-    laid_out: Option<Vec<Vec<PositionedCell>>>,
-}
-
-fn blank() -> Cell {
-    Cell {
-        text: " ".to_owned(),
-        hl: 0,
-    }
+    laid_out: crate::grid::PositionedRows,
 }
 
 impl GridSurface {
     pub fn new(cols: u16, rows: u16) -> Self {
+        let mut texts = TextPool::default();
+        // Slot zero has one permanent reference so blanking never needs an allocation.
+        let blank = texts.intern(" ");
+        texts.entries[blank as usize].as_mut().unwrap().references =
+            usize::from(cols) * usize::from(rows) + 1;
+        let empty_row = Arc::new(Vec::new());
         Self {
             cols,
             rows,
-            cells: vec![vec![blank(); usize::from(cols)]; usize::from(rows)],
+            cells: vec![vec![Cell { text: blank, hl: 0 }; usize::from(cols)]; usize::from(rows)],
+            texts,
+            dirty: vec![true; usize::from(rows)],
+            theme: None,
             attrs: HashMap::new(),
             groups: HashMap::new(),
             defaults: Defaults::default(),
             cursor: Cursor::default(),
-            laid_out: None,
+            laid_out: vec![empty_row; usize::from(rows)].into(),
         }
+    }
+
+    fn replace(&mut self, row: usize, col: usize, cell: Cell) {
+        let old = self.cells[row][col];
+        if old != cell {
+            self.texts.retain(cell.text);
+            self.texts.release(old.text);
+            self.cells[row][col] = cell;
+            self.dirty[row] = true;
+        }
+    }
+
+    fn blank(&self) -> Cell {
+        Cell { text: 0, hl: 0 }
     }
 
     pub fn cols(&self) -> u16 {
@@ -465,21 +547,29 @@ impl GridSurface {
                     }
                 }
                 for chunk in chunks {
-                    let row = &mut self.cells[usize::from(chunk.row)];
                     let mut column = usize::from(chunk.col);
                     for (cell, repeat) in chunk.cells {
+                        let text = self.texts.intern(&cell.text);
                         for _ in 0..repeat {
-                            row[column] = cell.clone();
+                            self.replace(
+                                usize::from(chunk.row),
+                                column,
+                                Cell { text, hl: cell.hl },
+                            );
                             column += 1;
                         }
+                        self.texts.release(text);
                     }
                 }
             }
             Op::Highlights { define, groups } => {
+                let mut changed = false;
                 for (id, attrs) in define {
+                    changed |= self.attrs.get(&id) != Some(&attrs);
                     self.attrs.insert(id, attrs);
                 }
                 for (name, id) in groups {
+                    changed |= self.groups.get(&id).and_then(|names| names.last()) != Some(&name);
                     // A relink moves the name: an editor that now maps `Comment`
                     // to another attr id no longer means the old one by it.
                     for names in self.groups.values_mut() {
@@ -492,8 +582,12 @@ impl GridSurface {
                 // to apply, and the entry would outlive the only reason it
                 // existed.
                 self.groups.retain(|_, names| !names.is_empty());
+                if changed {
+                    self.invalidate();
+                }
             }
             Op::Defaults(defaults) => {
+                let old = self.defaults;
                 if defaults.fg.is_some() {
                     self.defaults.fg = defaults.fg;
                 }
@@ -502,6 +596,9 @@ impl GridSurface {
                 }
                 if defaults.sp.is_some() {
                     self.defaults.sp = defaults.sp;
+                }
+                if old != self.defaults {
+                    self.invalidate();
                 }
             }
             Op::Cursor(cursor) => {
@@ -529,13 +626,31 @@ impl GridSurface {
                         "a grid is 1 to {MAX_COLS} columns by 1 to {MAX_ROWS} rows, not {cols} by {rows}"
                     )));
                 }
-                for row in &mut self.cells {
-                    row.resize(usize::from(cols), blank());
+                if (cols, rows) != (self.cols, self.rows) {
+                    let mut resized = Self::new(cols, rows);
+                    for r in 0..usize::from(rows.min(self.rows)) {
+                        for c in 0..usize::from(cols.min(self.cols)) {
+                            let cell = self.cells[r][c];
+                            let text = resized.texts.intern(self.texts.text(cell.text).as_str());
+                            resized.replace(r, c, Cell { text, hl: cell.hl });
+                            resized.texts.release(text);
+                        }
+                    }
+                    if cols == self.cols {
+                        let rows = Arc::make_mut(&mut resized.laid_out);
+                        for (index, row) in rows.iter_mut().enumerate().take(usize::from(self.rows))
+                        {
+                            *row = self.laid_out[index].clone();
+                            resized.dirty[index] = self.dirty[index];
+                        }
+                    }
+                    self.cells = resized.cells;
+                    self.texts = resized.texts;
+                    self.dirty = resized.dirty;
+                    self.laid_out = resized.laid_out;
+                    self.cols = cols;
+                    self.rows = rows;
                 }
-                self.cells
-                    .resize(usize::from(rows), vec![blank(); usize::from(cols)]);
-                self.cols = cols;
-                self.rows = rows;
                 self.cursor.row = self.cursor.row.min(rows - 1);
                 self.cursor.col = self.cursor.col.min(cols - 1);
             }
@@ -559,56 +674,54 @@ impl GridSurface {
                 );
                 let height = bot - top;
                 let distance = rows.unsigned_abs() as usize;
-                if distance >= height {
-                    for row in &mut self.cells[top..bot] {
-                        row[left..right].fill(blank());
-                    }
-                } else if rows > 0 {
-                    // Content moves up: row r takes row r + distance.
-                    for r in top..bot - distance {
-                        let (upper, lower) = self.cells.split_at_mut(r + distance);
-                        upper[r][left..right].clone_from_slice(&lower[0][left..right]);
-                    }
-                    for row in &mut self.cells[bot - distance..bot] {
-                        row[left..right].fill(blank());
-                    }
-                } else if rows < 0 {
-                    // Content moves down: row r takes row r - distance.
-                    for r in (top + distance..bot).rev() {
-                        let (upper, lower) = self.cells.split_at_mut(r);
-                        lower[0][left..right].clone_from_slice(&upper[r - distance][left..right]);
-                    }
-                    for row in &mut self.cells[top..top + distance] {
-                        row[left..right].fill(blank());
+                for target in 0..height {
+                    let r = if rows < 0 {
+                        bot - 1 - target
+                    } else {
+                        top + target
+                    };
+                    for c in left..right {
+                        let source = if distance >= height {
+                            None
+                        } else if rows > 0 {
+                            (r + distance < bot).then_some(r + distance)
+                        } else {
+                            r.checked_sub(distance).filter(|source| *source >= top)
+                        };
+                        let cell =
+                            source.map_or_else(|| self.blank(), |source| self.cells[source][c]);
+                        self.replace(r, c, cell);
                     }
                 }
             }
             Op::Clear => {
-                for row in &mut self.cells {
-                    row.fill(blank());
+                for r in 0..usize::from(self.rows) {
+                    for c in 0..usize::from(self.cols) {
+                        self.replace(r, c, self.blank());
+                    }
                 }
             }
         }
-        self.laid_out = None;
         Ok(())
     }
 
-    /// Forgets the laid-out rows, for when the theme changed under them.
     pub fn invalidate(&mut self) {
-        self.laid_out = None;
+        self.dirty.fill(true);
     }
 
-    /// The rows as the painter takes them, laid out on demand.
-    pub fn positioned_rows(&mut self, theme: &Highlights) -> &[Vec<PositionedCell>] {
-        if self.laid_out.is_none() {
-            let rows = self
-                .cells
-                .iter()
-                .map(|row| self.lay_out(row, theme))
-                .collect();
-            self.laid_out = Some(rows);
+    pub fn positioned_rows(&mut self, theme: &Highlights) -> crate::grid::PositionedRows {
+        if self.theme.as_ref() != Some(theme) {
+            self.invalidate();
+            self.theme = Some(theme.clone());
         }
-        self.laid_out.as_deref().expect("laid out just above")
+        for index in 0..self.cells.len() {
+            if self.dirty[index] {
+                let row = Arc::new(self.lay_out(&self.cells[index], theme));
+                Arc::make_mut(&mut self.laid_out)[index] = row;
+                self.dirty[index] = false;
+            }
+        }
+        self.laid_out.clone()
     }
 
     fn lay_out(&self, row: &[Cell], theme: &Highlights) -> Vec<PositionedCell> {
@@ -616,14 +729,16 @@ impl GridSurface {
         for (column, cell) in row.iter().enumerate() {
             // An empty cell is the second half of the wide character before it;
             // that character already covers this column.
-            if cell.text.is_empty() {
+            if self.texts.text(cell.text).is_empty() {
                 continue;
             }
-            let wide = row.get(column + 1).is_some_and(|next| next.text.is_empty());
+            let wide = row
+                .get(column + 1)
+                .is_some_and(|next| self.texts.text(next.text).is_empty());
             placed.push(PositionedCell {
                 column: column as u16,
                 columns: if wide { 2 } else { 1 },
-                text: cell.text.clone(),
+                text: self.texts.text(cell.text).clone(),
                 style: self.style_for(cell.hl, theme),
                 selected: false,
                 hovered_link: false,
@@ -733,6 +848,227 @@ mod tests {
 
     fn refused(message: serde_json::Value) -> Refusal {
         parse_ops(&message).expect_err("invalid operations")
+    }
+
+    fn check_pool(grid: &GridSurface) {
+        let mut refs = vec![0usize; grid.texts.entries.len()];
+        refs[0] = 1;
+        for row in &grid.cells {
+            for cell in row {
+                refs[cell.text as usize] += 1;
+            }
+        }
+        for (id, entry) in grid.texts.entries.iter().enumerate() {
+            assert_eq!(entry.as_ref().map_or(0, |entry| entry.references), refs[id]);
+            if let Some(entry) = entry {
+                assert_eq!(grid.texts.ids.get(entry.text.as_ref()), Some(&(id as u32)));
+            }
+        }
+        assert!(grid.texts.entries.len() <= usize::from(grid.cols) * usize::from(grid.rows) + 2);
+        let bound = usize::from(grid.cols) * usize::from(grid.rows) + 2;
+        assert!(grid.texts.entries.capacity() <= bound.next_power_of_two().max(4));
+        assert!(grid.texts.free.capacity() <= bound.next_power_of_two().max(4));
+        assert!(grid.texts.ids.capacity() <= bound.next_power_of_two() * 2);
+        assert_eq!(
+            grid.texts.free.len() + grid.texts.ids.len(),
+            grid.texts.entries.len()
+        );
+    }
+
+    #[test]
+    fn compact_cells_reclaim_unique_text_without_mutating_held_frames() {
+        assert!(std::mem::size_of::<Cell>() <= 8);
+        let mut grid = GridSurface::new(3, 2);
+        let theme = Highlights::default();
+        let mut held = Vec::new();
+        for i in 0..10_000 {
+            let text = format!("👩‍💻-{i}");
+            grid.apply(Op::Rows(vec![RowChunk {
+                row: 0,
+                col: 0,
+                cells: vec![(
+                    WireCell {
+                        text: text.clone(),
+                        hl: i,
+                    },
+                    1,
+                )],
+            }]))
+            .unwrap();
+            let frame = grid.positioned_rows(&theme);
+            if i % 1000 == 0 {
+                held.push((frame, text));
+            }
+            check_pool(&grid);
+            assert!(grid.texts.ids.len() <= 2);
+        }
+        for (frame, text) in held {
+            assert_eq!(frame[0][0].text.as_str(), text);
+        }
+        grid.apply(Op::Clear).unwrap();
+        check_pool(&grid);
+        assert_eq!(grid.texts.ids.len(), 1);
+        grid.apply(Op::Resize { cols: 1, rows: 1 }).unwrap();
+        check_pool(&grid);
+        assert_eq!(grid.texts.entries.len(), 1);
+    }
+
+    #[test]
+    fn cached_rows_follow_actual_cell_and_theme_changes() {
+        let mut grid = GridSurface::new(4, 3);
+        let theme = Highlights::default();
+        let before = grid.positioned_rows(&theme);
+        grid.apply_all(ops(
+            json!({"type":"rows","rows":[{"row":1,"cells":[["é", 2],["界"],[""]]}]}),
+        ))
+        .unwrap();
+        let changed = grid.positioned_rows(&theme);
+        assert!(Arc::ptr_eq(&before[0], &changed[0]));
+        assert!(!Arc::ptr_eq(&before[1], &changed[1]));
+        assert!(Arc::ptr_eq(&before[2], &changed[2]));
+        assert_eq!(changed[1][0].text, "é");
+        assert_eq!(changed[1][1].columns, 2);
+        grid.apply_all(ops(
+            json!({"type":"rows","rows":[{"row":1,"cells":[["é", 2],["界"],[""]]}]}),
+        ))
+        .unwrap();
+        grid.apply_all(ops(json!({"type":"cursor","row":2,"col":3})))
+            .unwrap();
+        grid.apply(Op::Scroll {
+            top: 0,
+            bot: 3,
+            left: 0,
+            right: 4,
+            rows: 0,
+        })
+        .unwrap();
+        assert!(Arc::ptr_eq(&changed, &grid.positioned_rows(&theme)));
+        let before_bad = grid.positioned_rows(&theme);
+        assert!(grid.apply_all(ops(json!({"type":"rows","rows":[{"row":0,"cells":[["bad"]]},{"row":9,"cells":[["bad"]]}]}))).is_err());
+        assert!(Arc::ptr_eq(&before_bad, &grid.positioned_rows(&theme)));
+        grid.apply_all(ops(
+            json!({"type":"highlights","define":{"2":{"bold":true}},"groups":{"Comment":2}}),
+        ))
+        .unwrap();
+        let highlighted = grid.positioned_rows(&theme);
+        assert!(highlighted[1][0].style.bold);
+        assert!(!changed[1][0].style.bold);
+        let theme = Highlights::from_groups(vec![(
+            "Comment".into(),
+            HighlightStyle {
+                italic: Some(true),
+                ..Default::default()
+            },
+        )]);
+        let themed = grid.positioned_rows(&theme);
+        assert!(themed[1][0].style.italic);
+        assert!(!highlighted[1][0].style.italic);
+        assert!(Arc::ptr_eq(&themed, &grid.positioned_rows(&theme)));
+        grid.apply(Op::Resize { cols: 4, rows: 5 }).unwrap();
+        let grown = grid.positioned_rows(&theme);
+        for row in 0..3 {
+            assert!(Arc::ptr_eq(&themed[row], &grown[row]));
+        }
+        grid.apply(Op::Resize { cols: 4, rows: 2 }).unwrap();
+        let shrunk = grid.positioned_rows(&theme);
+        for row in 0..2 {
+            assert!(Arc::ptr_eq(&grown[row], &shrunk[row]));
+        }
+        check_pool(&grid);
+    }
+
+    #[test]
+    fn generated_grid_transitions_match_a_frozen_copy_oracle() {
+        for seed in 0..64u64 {
+            let mut random = seed + 1;
+            let mut next = || {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (random >> 32) as usize
+            };
+            let mut grid = GridSurface::new(7, 5);
+            let mut expected = vec![vec![(" ".to_owned(), 0); 7]; 5];
+            for step in 0..100 {
+                let rows = expected.len();
+                let cols = expected[0].len();
+                match next() % 5 {
+                    0 => {
+                        let r = next() % rows;
+                        let c = next() % cols;
+                        let text = ["", "x", "界", "é", "👩‍💻"][next() % 5].to_owned();
+                        let hl = next() as u32;
+                        expected[r][c] = (text.clone(), hl);
+                        grid.apply(Op::Rows(vec![RowChunk {
+                            row: r as u16,
+                            col: c as u16,
+                            cells: vec![(WireCell { text, hl }, 1)],
+                        }]))
+                        .unwrap();
+                    }
+                    1 => {
+                        let top = next() % rows;
+                        let bot = top + 1 + next() % (rows - top);
+                        let left = next() % cols;
+                        let right = left + 1 + next() % (cols - left);
+                        let distance = [i32::MIN, -3, -1, 0, 1, 3, i32::MAX][next() % 7];
+                        let old = expected.clone();
+                        for (r, row) in expected.iter_mut().enumerate().take(bot).skip(top) {
+                            for (c, cell) in row.iter_mut().enumerate().take(right).skip(left) {
+                                let source = r as i64 + i64::from(distance);
+                                *cell = if source >= top as i64 && source < bot as i64 {
+                                    old[source as usize][c].clone()
+                                } else {
+                                    (" ".into(), 0)
+                                };
+                            }
+                        }
+                        grid.apply(Op::Scroll {
+                            top: top as u16,
+                            bot: bot as u16,
+                            left: left as u16,
+                            right: right as u16,
+                            rows: distance,
+                        })
+                        .unwrap();
+                    }
+                    2 => {
+                        expected
+                            .iter_mut()
+                            .for_each(|row| row.fill((" ".into(), 0)));
+                        grid.apply(Op::Clear).unwrap();
+                    }
+                    3 => {
+                        let cols = 1 + next() % 9;
+                        let rows = 1 + next() % 7;
+                        for row in &mut expected {
+                            row.resize(cols, (" ".into(), 0));
+                        }
+                        expected.resize(rows, vec![(" ".into(), 0); cols]);
+                        grid.apply(Op::Resize {
+                            cols: cols as u16,
+                            rows: rows as u16,
+                        })
+                        .unwrap();
+                    }
+                    _ => {
+                        let before = grid.cells.clone();
+                        assert!(grid.apply(Op::Resize { cols: 0, rows: 1 }).is_err());
+                        assert_eq!(grid.cells, before);
+                    }
+                }
+                check_pool(&grid);
+                for (r, row) in expected.iter().enumerate() {
+                    for (c, (text, hl)) in row.iter().enumerate() {
+                        let cell = grid.cells[r][c];
+                        assert_eq!(
+                            (grid.texts.text(cell.text).as_str(), cell.hl),
+                            (text.as_str(), *hl),
+                            "seed={seed} shortest failing prefix={}",
+                            step + 1
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

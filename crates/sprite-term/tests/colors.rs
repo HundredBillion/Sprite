@@ -32,9 +32,13 @@ fn color(r: u8, g: u8, b: u8) -> Rgb {
 fn shown(colors: ColorDefaults, script: &str, marker: &str) -> Arc<SnapshotBundle> {
     let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
     config.colors = colors;
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains(marker))
 }
@@ -42,8 +46,10 @@ fn shown(colors: ColorDefaults, script: &str, marker: &str) -> Arc<SnapshotBundl
 #[test]
 fn configured_colours_are_what_a_pane_starts_with() {
     let colors = ColorDefaults {
-        foreground: Some(color(0x11, 0x22, 0x33)),
-        background: Some(color(0x44, 0x55, 0x66)),
+        base: Some(sprite_term::BaseColors {
+            foreground: color(0x11, 0x22, 0x33),
+            background: color(0x44, 0x55, 0x66),
+        }),
         cursor: Some(color(0x77, 0x88, 0x99)),
         palette: vec![(1, color(0xaa, 0xbb, 0xcc))],
     };
@@ -128,8 +134,10 @@ fn an_unconfigured_cursor_has_no_colour_of_its_own() {
 #[test]
 fn a_program_that_sets_its_own_colours_wins() {
     let colors = ColorDefaults {
-        foreground: Some(color(0x11, 0x22, 0x33)),
-        background: Some(color(0x44, 0x55, 0x66)),
+        base: Some(sprite_term::BaseColors {
+            foreground: color(0x11, 0x22, 0x33),
+            background: color(0x44, 0x55, 0x66),
+        }),
         cursor: Some(color(0x77, 0x88, 0x99)),
         palette: vec![(1, color(0xaa, 0xbb, 0xcc))],
     };
@@ -152,8 +160,10 @@ fn a_reset_returns_to_the_configured_colour() {
     let configured = color(0x44, 0x55, 0x66);
     let colors = ColorDefaults {
         // Both, because libghostty reports the pair only when it knows both.
-        foreground: Some(color(0x11, 0x22, 0x33)),
-        background: Some(configured),
+        base: Some(sprite_term::BaseColors {
+            foreground: color(0x11, 0x22, 0x33),
+            background: configured,
+        }),
         palette: vec![(1, color(0xaa, 0xbb, 0xcc))],
         ..ColorDefaults::default()
     };
@@ -177,15 +187,22 @@ fn a_reset_returns_to_the_configured_colour() {
 #[test]
 fn a_live_colour_reload_repaints_on_its_own() {
     let config = SessionConfig::command("/bin/sh", args(&["-c", "printf 'A\\n'; sleep 30"]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
-    snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains('A'));
+    let before = snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains('A'));
 
     session
         .send(sprite_term::TerminalCommand::SetColors(ColorDefaults {
-            foreground: Some(color(0x11, 0x22, 0x33)),
+            base: Some(sprite_term::BaseColors {
+                foreground: color(0x11, 0x22, 0x33),
+                background: before.render.default_background,
+            }),
             ..ColorDefaults::default()
         }))
         .expect("send SetColors");
@@ -195,4 +212,8 @@ fn a_live_colour_reload_repaints_on_its_own() {
         bundle.render.default_foreground == color(0x11, 0x22, 0x33)
     });
     assert_eq!(bundle.render.default_foreground, color(0x11, 0x22, 0x33));
+    assert!(
+        bundle.generation > before.generation,
+        "reload must advance the generation accepted by the view"
+    );
 }

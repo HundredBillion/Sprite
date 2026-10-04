@@ -18,6 +18,7 @@ use crate::cli::{SurfaceOpenArgs, TokenRegisterArgs};
 pub use crate::observation::client::Exit;
 use crate::observation::client::PANE_VARIABLE;
 use crate::surface::channel::{KEY_VARIABLE, SOCKET_VARIABLE, VERSION};
+use crate::surface::wire::versioned;
 
 /// For the one-exchange commands. A Surface's own connection has no timeout:
 /// it lives as long as the Surface.
@@ -188,7 +189,7 @@ pub fn run_surface_open(
                 break;
             }
         };
-        if !send_line(&stream, &message.to_string()) {
+        if !send_line(&stream, &versioned(message).to_string()) {
             break;
         }
     }
@@ -246,7 +247,10 @@ fn one_exchange(
         let _ = writeln!(errors, "sprite: could not read from the surface channel");
         return Exit::Unreachable;
     };
-    if !send_line(&stream, &format!("{} {message}", credentials.key)) {
+    if !send_line(
+        &stream,
+        &format!("{} {}", credentials.key, versioned(message.clone())),
+    ) {
         let _ = writeln!(
             errors,
             "sprite: the window closed the connection without answering"

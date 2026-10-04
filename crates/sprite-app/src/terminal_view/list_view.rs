@@ -120,9 +120,12 @@ fn revealed_pixel_offset(
     offset.clamp(0.0, (rows as f32 * row_height - viewport).max(0.0))
 }
 
+#[cfg(test)]
+thread_local! { pub(super) static TRUNCATE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 pub(super) struct VirtualListView {
     pub(super) model: ListModel,
-    config: ListConfig,
+    config: Arc<ListConfig>,
     surface: SurfaceId,
     host: WeakEntity<TerminalView>,
     pub(super) scroll: UniformListScrollHandle,
@@ -137,6 +140,18 @@ pub(super) struct VirtualListView {
 }
 
 impl VirtualListView {
+    #[cfg(test)]
+    pub(super) fn viewport_rows(&self) -> (usize, usize) {
+        let (top, _, visible) = scroll_anchor(
+            self.model.rows.len(),
+            self.config.row_height,
+            self.viewport
+                .map_or(0.0, |bounds| f32::from(bounds.size.height)),
+            f32::from(self.scroll.0.borrow().base_handle.offset().y),
+        );
+        (top, visible as usize)
+    }
+
     pub(super) fn new(
         config: ListConfig,
         surface: SurfaceId,
@@ -144,7 +159,7 @@ impl VirtualListView {
     ) -> Self {
         Self {
             model: ListModel::with_row_height(config.row_height),
-            config,
+            config: Arc::new(config),
             surface,
             host,
             scroll: UniformListScrollHandle::new(),
@@ -240,7 +255,7 @@ impl VirtualListView {
             });
         }
         self.model.set_row_height(config.row_height);
-        self.config = config;
+        self.config = Arc::new(config);
         if let Some(anchor) = &self.model.scroll
             && let Some(index) = self.model.index_of(&anchor.id)
         {
@@ -556,6 +571,8 @@ impl Render for VirtualListView {
                             - 2.0)
                             .max(0.0);
                         let label = if label_width > 0.0 {
+                            #[cfg(test)]
+                            TRUNCATE_CALLS.with(|n| n.set(n.get() + 1));
                             window
                                 .text_system()
                                 .line_wrapper(
@@ -833,6 +850,8 @@ fn header_element(
     let mut label_font = gpui::font(font_family.to_owned());
     label_font.weight = weight;
     let label = if label_width > 0.0 {
+        #[cfg(test)]
+        TRUNCATE_CALLS.with(|n| n.set(n.get() + 1));
         window
             .text_system()
             .line_wrapper(label_font, px(header.font_size.unwrap_or(config.font_size)))

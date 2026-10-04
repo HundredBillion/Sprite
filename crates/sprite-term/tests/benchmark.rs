@@ -7,7 +7,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Every metric the Checkpoint 1 report is required to carry.
-const REQUIRED_METRICS: [&str; 8] = [
+const REQUIRED_METRICS: [&str; 11] = [
+    "allocations_per_capture",
+    "rust_bytes_per_capture",
+    "isolated_projector_capture",
     "spawn_to_ready",
     "input_to_snapshot_idle",
     "input_to_snapshot_under_load",
@@ -93,7 +96,14 @@ fn the_report_carries_every_metric_with_finite_values() {
             if field == "unit" {
                 // `unit` is a string, so it is checked as text instead.
                 assert!(
-                    body.contains("\"unit\": \"ms\""),
+                    body.contains(&format!(
+                        "\"unit\": \"{}\"",
+                        match metric {
+                            "allocations_per_capture" => "Rust allocations",
+                            "rust_bytes_per_capture" => "requested Rust bytes",
+                            _ => "ms",
+                        }
+                    )),
                     "{metric} states its unit, got:\n{body}"
                 );
                 continue;

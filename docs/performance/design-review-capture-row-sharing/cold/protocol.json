@@ -1,0 +1,188 @@
+{
+  "scope": "First capture of fresh filled100x100 actual CaptureBenchmark, no warmup capture; one thread spawn/join before loop; CPU2, fixed ABBA BAAB,300samples each; allocation fixture excluded, timed bundle drop included. Diagnostic characterization, unchanged clean gate not applied to cold.",
+  "order": [
+    "A",
+    "B",
+    "B",
+    "A",
+    "B",
+    "A",
+    "A",
+    "B"
+  ],
+  "binaries": {
+    "A": {
+      "path": "/tmp/sprite-capture-cold-before",
+      "sha256": "4a50ddd13763ae4c69b7ba4a10c8f33ab97ecbcda976f26713c399c1e3011d28"
+    },
+    "B": {
+      "path": "/tmp/sprite-capture-cold-after",
+      "sha256": "a0e12c8ca9d1400718c5716946e83e3e0240a1ef2dd48b7fb51322c918faa042"
+    }
+  },
+  "runs": [
+    {
+      "index": 1,
+      "binary": "A",
+      "report": "01-A.json",
+      "log": "01-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-before",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/01-A.json"
+      ],
+      "return_code": 0
+    },
+    {
+      "index": 2,
+      "binary": "B",
+      "report": "02-B.json",
+      "log": "02-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-after",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/02-B.json"
+      ],
+      "return_code": 0
+    },
+    {
+      "index": 3,
+      "binary": "B",
+      "report": "03-B.json",
+      "log": "03-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-after",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/03-B.json"
+      ],
+      "return_code": 0
+    },
+    {
+      "index": 4,
+      "binary": "A",
+      "report": "04-A.json",
+      "log": "04-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-before",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/04-A.json"
+      ],
+      "return_code": 0
+    },
+    {
+      "index": 5,
+      "binary": "B",
+      "report": "05-B.json",
+      "log": "05-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-after",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/05-B.json"
+      ],
+      "return_code": 0
+    },
+    {
+      "index": 6,
+      "binary": "A",
+      "report": "06-A.json",
+      "log": "06-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-before",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/06-A.json"
+      ],
+      "return_code": 0
+    },
+    {
+      "index": 7,
+      "binary": "A",
+      "report": "07-A.json",
+      "log": "07-A.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-before",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/07-A.json"
+      ],
+      "return_code": 0
+    },
+    {
+      "index": 8,
+      "binary": "B",
+      "report": "08-B.json",
+      "log": "08-B.log",
+      "command": [
+        "taskset",
+        "-c",
+        "2",
+        "/tmp/sprite-capture-cold-after",
+        "--samples",
+        "300",
+        "--output",
+        "/home/hundredbillion/Projects/Sprite/.worktrees/issue-48-design/docs/performance/design-review-capture-row-sharing/cold/08-B.json"
+      ],
+      "return_code": 0
+    }
+  ],
+  "paired_B_over_A": [
+    {
+      "median": 1.0478755440402732,
+      "p95": 1.0368995642524514,
+      "max": 0.985413323367554
+    },
+    {
+      "median": 0.9832713597028657,
+      "p95": 0.8699677145406398,
+      "max": 0.8176703561075445
+    },
+    {
+      "median": 1.0026398820711881,
+      "p95": 1.0681327601059185,
+      "max": 1.1474785878186613
+    },
+    {
+      "median": 0.9932813545753286,
+      "p95": 0.9973024929954802,
+      "max": 1.013883015600413
+    }
+  ],
+  "median_paired_ratio": {
+    "median": 0.9979606183232583,
+    "p95": 1.017101028623966,
+    "max": 0.9996481694839836
+  }
+}

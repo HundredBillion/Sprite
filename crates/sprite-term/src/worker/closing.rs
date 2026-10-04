@@ -1,0 +1,224 @@
+use super::*;
+use crate::pty_unix::GroupSignal;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
+/// The bounded shutdown policy, measured from the moment shutdown is actually
+/// requested — not from the start of Closing. A pane whose child exits on its
+/// own may not be asked to shut down until much later, and starting the clock
+/// at Closing would spend the whole budget before the request arrives.
+const TERM_AFTER: Duration = Duration::from_secs(2);
+const KILL_AFTER: Duration = Duration::from_secs(3);
+
+/// Cleanup stops waiting here even if a group somehow survives KILL, so a
+/// worker can never hang forever.
+const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
+
+/// Short enough that escalation deadlines are re-checked promptly even under
+/// continuous output.
+const CLOSING_SLICE: Duration = Duration::from_millis(50);
+
+pub(super) fn close(runtime: Runtime) {
+    let Runtime {
+        started:
+            Started {
+                master,
+                master_fd: _,
+                process_group,
+                waiter,
+            },
+        mut pump,
+        inbox,
+        events,
+        shutdown,
+        mut exit_status,
+        mut pump_stopped,
+        mut fatal,
+    } = runtime;
+    // The pump may be parked on a PTY that a descendant keeps open forever, so
+    // it is woken now rather than waited on.
+    if let Some(pump) = &pump {
+        pump.cancel();
+    }
+
+    let groups = process_groups(master.as_ref(), process_group);
+    let closing_started = Instant::now();
+
+    // A hangup is the polite request every well-behaved program honours.
+    signal_groups(&groups, &GroupSignal::Hangup);
+    let mut escalation = 1_u8;
+
+    // Set the first time the flag is observed, so every escalation deadline is
+    // relative to the request rather than to the child's exit.
+    let mut requested_at: Option<Instant> = None;
+
+    loop {
+        // Read the flag every pass: a session may be told to shut down after
+        // its child has already exited on its own.
+        let requested = shutdown.load(Ordering::SeqCst);
+        if requested && requested_at.is_none() {
+            requested_at = Some(Instant::now());
+        }
+
+        // Checked before every receive, so continuous output cannot postpone
+        // escalation past its deadline.
+        if let Some(since) = requested_at {
+            let waited = since.elapsed();
+            if waited >= KILL_AFTER && escalation < 3 {
+                signal_groups(&groups, &GroupSignal::Kill);
+                escalation = 3;
+            } else if waited >= TERM_AFTER && escalation < 2 {
+                signal_groups(&groups, &GroupSignal::Terminate);
+                escalation = 2;
+            }
+        }
+
+        let settled = exit_status.is_some() && pump_stopped;
+        // A requested shutdown is not finished while anything the pane started
+        // is still running; a natural exit only owes the single hangup above.
+        let descendants_gone = !requested || groups.iter().all(|group| !group_is_alive(*group));
+        // A pane that was never asked to shut down still may not hang forever,
+        // so an unrequested close keeps its own deadline from Closing.
+        let exhausted = match requested_at {
+            Some(since) => since.elapsed() >= GIVE_UP_AFTER,
+            None => closing_started.elapsed() >= GIVE_UP_AFTER,
+        };
+        if (settled && descendants_gone) || exhausted {
+            break;
+        }
+
+        match inbox.recv_timeout(CLOSING_SLICE) {
+            Ok(Message::ChildExited(status)) => exit_status = Some(status),
+            Ok(Message::PumpStopped(outcome)) => {
+                if let Some(error) = pump_failure(outcome) {
+                    fatal.get_or_insert(error);
+                }
+                pump_stopped = true;
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    // The loop above can exit on its deadline without having seen PumpStopped.
+    // In that case the pump may be blocked sending into a full worker queue,
+    // and joining it while nothing drains would deadlock: its send waits for
+    // room, our join waits for its send.
+    //
+    // Joining ensures no I/O helper outlives the session's shutdown report.
+    // The queue must be drained before joining so the pump can finish its send.
+    if !pump_stopped {
+        if let Some(pump) = &pump {
+            pump.cancel();
+        }
+        let drain_deadline = Instant::now() + GIVE_UP_AFTER;
+        while !pump_stopped && Instant::now() < drain_deadline {
+            match inbox.recv_timeout(CLOSING_SLICE) {
+                Ok(Message::PumpStopped(outcome)) => {
+                    if let Some(error) = pump_failure(outcome) {
+                        fatal.get_or_insert(error);
+                    }
+                    pump_stopped = true;
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
+    if let Some(pump) = &mut pump {
+        pump.shutdown();
+    }
+    if exit_status.is_some() {
+        let _ = waiter.join();
+    }
+
+    // Only now, with every helper thread finished and the descendant policy
+    // complete, does the application hear how the session ended.
+    if let Some(error) = fatal {
+        let _ = emit(&events, TerminalEvent::Error(error));
+    }
+    let requested = shutdown.load(Ordering::SeqCst);
+    match exit_status {
+        Some(Ok(status)) => {
+            let _ = emit(
+                &events,
+                TerminalEvent::Exited(child_exit(&status, requested)),
+            );
+        }
+        Some(Err(error)) => {
+            let _ = emit(
+                &events,
+                TerminalEvent::Error(SessionError::new("wait_child", error)),
+            );
+        }
+        // A requested shutdown reaches here with no status when the child could
+        // not be reaped inside the budget. On macOS a process that has taken a
+        // fatal signal can linger unreapable — in the kernel's exit path, `ps`
+        // state `E` — while the PTY master is open, so its waiter never returns.
+        // The session has still ended at the caller's request, and the contract
+        // that every session ends with an `Exited` or an `Error` is kept by
+        // saying so, rather than leaving a consumer to infer it from the stream
+        // closing. Not synthesised for an *unrequested* give-up: that is a stuck
+        // session the caller did not ask to end, and inventing an exit for it
+        // would hide the fault.
+        None if shutdown.load(Ordering::SeqCst) => {
+            let _ = emit(
+                &events,
+                TerminalEvent::Exited(ChildExit {
+                    code: None,
+                    signal: None,
+                    requested: true,
+                }),
+            );
+        }
+        None => {}
+    }
+
+    drop(master);
+}
+
+/// The process groups descendant cleanup must reach.
+///
+/// The group recorded at spawn covers the shell and anything it started; the
+/// current foreground group covers an interactive program that moved itself
+/// into its own group since.
+fn process_groups(master: &(dyn MasterPty + Send), recorded: Option<i32>) -> Vec<i32> {
+    let mut groups = Vec::with_capacity(2);
+    if let Some(group) = recorded {
+        groups.push(group);
+    }
+    if let Some(foreground) = master.process_group_leader()
+        && !groups.contains(&foreground)
+    {
+        groups.push(foreground);
+    }
+    groups
+}
+
+fn signal_groups(groups: &[i32], signal: &GroupSignal) {
+    for group in groups {
+        pty_unix::signal_group(*group, signal);
+    }
+}
+
+fn group_is_alive(group: i32) -> bool {
+    pty_unix::group_is_alive(group)
+}
+
+/// Reports one cause, never two: a signalled child has no exit code.
+fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
+    match status.signal() {
+        Some(signal) => ChildExit {
+            code: None,
+            signal: Some(signal.to_owned()),
+            requested,
+        },
+        None => ChildExit {
+            code: Some(status.exit_code()),
+            signal: None,
+            requested,
+        },
+    }
+}

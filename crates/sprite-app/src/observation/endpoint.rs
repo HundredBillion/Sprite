@@ -13,14 +13,18 @@
 //! started". A test asserts the running process holds no TCP socket at all.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(test)]
+use std::fs;
+use std::io::Write;
+#[cfg(test)]
+use std::io::{BufReader, Read};
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::JoinHandle;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::pane_tree::PaneId;
@@ -50,135 +54,22 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 /// endpoint drops new connections without reading them.
 const MAX_CONNECTIONS: usize = 16;
 
-const KEY_BYTES: usize = 32;
-
-/// The longest socket path this platform can actually carry.
-///
-/// A Unix socket address keeps its path in `sockaddr_un.sun_path`, which is 108
-/// bytes on Linux and 104 on macOS, NUL terminator included — so the usable
-/// length is one less than the array.
-///
-/// This was a flat 100 on every platform, which is shorter than either, and the
-/// difference was not academic. macOS `$TMPDIR` is itself a ~49-byte path under
-/// `/var/folders`, so a socket nested one directory deeper than the product
-/// nests it exceeded 100 — which is exactly what the endpoint tests do, and why
-/// every one of them failed on macOS while passing on Linux. A limit that
-/// refuses paths the platform would accept is not a safety margin; it is a bug
-/// that only shows up where the base path is long.
-///
-/// Deliberately not read from `libc`: that would be a new direct dependency,
-/// and a third-party notice, for two integers each platform's headers fix.
-#[cfg(target_os = "macos")]
-pub(crate) const MAX_SOCKET_PATH: usize = 103;
-#[cfg(not(target_os = "macos"))]
-pub(crate) const MAX_SOCKET_PATH: usize = 107;
-
-/// A per-window secret, compared in constant time and wiped when dropped.
-pub struct ObservationKey {
-    bytes: [u8; KEY_BYTES],
-}
-
-impl ObservationKey {
-    /// Generates a key from the operating system's cryptographic source.
-    ///
-    /// Read straight from `/dev/urandom` rather than through a random-number
-    /// crate: this is the only randomness Sprite needs, and on Linux the device
-    /// is the same CSPRNG such a crate would reach for, so the dependency would
-    /// buy nothing and still have to be audited. It must never come from a
-    /// seeded or reproducible generator — an observer who can predict the key
-    /// can read every pane.
-    pub fn generate() -> std::io::Result<Self> {
-        let mut bytes = [0_u8; KEY_BYTES];
-        let mut source = File::open("/dev/urandom")?;
-        source.read_exact(&mut bytes)?;
-        Ok(Self { bytes })
-    }
-
-    /// The key as lowercase hex, which is the only form that leaves this type.
-    pub fn to_hex(&self) -> String {
-        let mut hex = String::with_capacity(KEY_BYTES * 2);
-        for byte in self.bytes {
-            hex.push(nibble(byte >> 4));
-            hex.push(nibble(byte & 0x0f));
-        }
-        hex
-    }
-
-    /// Whether `candidate` is this key, compared without leaking where it first
-    /// differs.
-    ///
-    /// A comparison that stops at the first wrong byte tells a caller how much
-    /// of a guess was right, which is enough to recover a key one byte at a
-    /// time. Every path through this function looks at all 32 bytes.
-    pub fn matches(&self, candidate: &str) -> bool {
-        let mut guess = [0_u8; KEY_BYTES];
-        // A malformed candidate is compared against zeroes rather than
-        // returning early, so a wrong length costs the same as a wrong key.
-        let well_formed = decode_hex(candidate, &mut guess);
-        let mut difference = 0_u8;
-        // Every byte, every time: `zip` over the full arrays visits all 32 just
-        // as unconditionally as an indexed loop, so no path returns early.
-        for (mine, theirs) in self.bytes.iter().zip(guess.iter()) {
-            difference |= mine ^ theirs;
-        }
-        difference == 0 && well_formed
-    }
-}
-
-impl Drop for ObservationKey {
-    fn drop(&mut self) {
-        // Closing the window destroys the key. Overwriting it means a later
-        // read of freed memory finds zeroes rather than a working secret.
-        self.bytes.fill(0);
-        // `black_box` so the compiler cannot decide the store above is dead and
-        // remove it. Deliberately not `write_volatile`: that would be the only
-        // `unsafe` outside the one audited descriptor borrow in `sprite-term`,
-        // and adding it here to wipe 32 bytes is a poor trade.
-        std::hint::black_box(&self.bytes);
-    }
-}
-
-fn nibble(value: u8) -> char {
-    char::from_digit(u32::from(value), 16).unwrap_or('0')
-}
-
-/// Decodes exactly `KEY_BYTES` of hex, reporting whether the input was valid.
-///
-/// Always fills `out` and always inspects the whole buffer.
-fn decode_hex(text: &str, out: &mut [u8; KEY_BYTES]) -> bool {
-    let bytes = text.as_bytes();
-    let mut valid = bytes.len() == KEY_BYTES * 2;
-    for (index, slot) in out.iter_mut().enumerate() {
-        let high = bytes.get(index * 2).copied().unwrap_or(b'!');
-        let low = bytes.get(index * 2 + 1).copied().unwrap_or(b'!');
-        match (hex_value(high), hex_value(low)) {
-            (Some(high), Some(low)) => *slot = (high << 4) | low,
-            _ => {
-                valid = false;
-                *slot = 0;
-            }
-        }
-    }
-    valid
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
+pub use crate::local_socket::ObservationKey;
+#[cfg(test)]
+use crate::local_socket::bind_private;
+use crate::local_socket::{Authenticated, LocalSocket, TransportPolicy};
+#[allow(unused_imports)]
+pub(crate) use crate::local_socket::{MAX_SOCKET_PATH, runtime_directory, sweep_dead_sockets};
 
 /// What an authenticated caller asked for.
 ///
 /// The key is already checked and deliberately absent: nothing downstream can
 /// re-examine or leak it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Request {
     /// Everything after the key, verbatim. Task 6 gives this meaning.
     pub body: String,
+    pub(crate) reply_connection: crate::local_socket::ReplyConnection,
 }
 
 /// One window's socket and key.
@@ -186,10 +77,7 @@ pub struct Request {
 /// Dropping or [`close`](Endpoint::close)ing it removes the socket from the
 /// filesystem and wipes the key, so a captured key stops working.
 pub struct Endpoint {
-    socket: PathBuf,
-    key: Arc<ObservationKey>,
-    running: Arc<AtomicBool>,
-    listener: Option<JoinHandle<()>>,
+    transport: LocalSocket,
 }
 
 impl Endpoint {
@@ -218,71 +106,32 @@ impl Endpoint {
     where
         H: Fn(Request) -> String + Send + Sync + 'static,
     {
-        // 0700: the socket's own mode is a second line of defence, but a
-        // directory nobody else may enter is what actually keeps other users
-        // off the socket, and it is set before the socket exists rather than
-        // after — there is no window in which the path is reachable.
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&directory)?;
-        // A directory that already existed may have a laxer mode.
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-
-        // A window that was killed rather than closed leaves its socket behind,
-        // because no destructor runs for a signal that cannot be caught. Such a
-        // file is harmless — nothing is listening, so nothing can be reached
-        // through it — but they accumulate, so each new endpoint clears the
-        // dead ones it finds.
-        sweep_dead_sockets(&directory);
-
-        let key = Arc::new(ObservationKey::generate()?);
-        // The filename is random, and deliberately *not* derived from the key:
-        // a path appears in the environment and in process listings, so a path
-        // that encoded the key would publish it.
-        let mut name = ObservationKey::generate()?.to_hex();
-        name.truncate(24);
-        let socket = directory.join(format!("{name}.sock"));
-        // Checked against what this platform's `sockaddr_un` actually holds, so
-        // the refusal is the kernel's rule rather than a number. `bind` would
-        // fail anyway; failing here says why, and names the limit.
-        let length = socket.as_os_str().len();
-        if length > MAX_SOCKET_PATH {
-            return Err(std::io::Error::other(format!(
-                "the observation socket path is {length} bytes and this platform's \
-                 sockaddr_un holds {MAX_SOCKET_PATH}: {}",
-                socket.display()
-            )));
-        }
-
-        let listener = UnixListener::bind(&socket)?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-
-        let running = Arc::new(AtomicBool::new(true));
-        let thread = std::thread::Builder::new()
-            .name("sprite-observation".to_owned())
-            .spawn({
-                let key = Arc::clone(&key);
-                let running = Arc::clone(&running);
-                let handler = Arc::new(handler);
-                move || serve(&listener, &key, &running, &handler)
-            })?;
-
-        Ok(Self {
-            socket,
-            key,
-            running,
-            listener: Some(thread),
-        })
+        let policy = TransportPolicy {
+            name: "sprite-observation",
+            filename_hex: 24,
+            suffix: ".sock",
+            max_connections: MAX_CONNECTIONS,
+            max_first_line: MAX_REQUEST_BYTES as usize,
+            handshake_timeout: CLIENT_TIMEOUT,
+            write_timeout: CLIENT_TIMEOUT,
+        };
+        let transport = LocalSocket::open_in(
+            directory,
+            Arc::new(ObservationKey::generate()?),
+            policy,
+            refuse,
+            move |connection| answer(connection, &handler),
+        )?;
+        Ok(Self { transport })
     }
 
     pub fn socket_path(&self) -> &Path {
-        &self.socket
+        self.transport.socket_path()
     }
 
     /// The key, for injection into this window's own children only.
     pub fn key_hex(&self) -> String {
-        self.key.to_hex()
+        self.transport.key_hex()
     }
 
     /// What one pane's session needs to talk to this endpoint.
@@ -294,7 +143,7 @@ impl Endpoint {
         vec![
             (
                 OsString::from("SPRITE_OBSERVATION_SOCKET"),
-                OsString::from(self.socket.as_os_str()),
+                OsString::from(self.socket_path().as_os_str()),
             ),
             (
                 OsString::from("SPRITE_OBSERVATION_KEY"),
@@ -314,122 +163,32 @@ impl Endpoint {
     /// Destroys the socket and stops serving. The key is wiped when the last
     /// reference to it drops.
     pub fn close(&mut self) {
-        if self.listener.is_none() {
-            return;
-        }
-        self.running.store(false, Ordering::SeqCst);
-        // The serving thread is parked in `accept`, so it has to be woken to
-        // notice. Connecting to our own socket does that without a second
-        // descriptor to poll on.
-        let _ = UnixStream::connect(&self.socket);
-        if let Some(thread) = self.listener.take() {
-            let _ = thread.join();
-        }
-        // Removed only after the thread has stopped, so nothing can connect to
-        // a socket whose server is already gone.
-        let _ = fs::remove_file(&self.socket);
+        self.transport.close();
+    }
 
-        // The **directory is deliberately left behind.** It is shared by every
-        // window this user has, and removing it here — on the assumption that
-        // an empty directory means the last window — races another window
-        // between its `create_dir_all` and its `bind`, which then fails with
-        // "no such file or directory" and starts with no observation at all.
-        // Parallel tests found exactly that. An empty `0700` directory in a
-        // runtime path the system already clears costs nothing; a window that
-        // silently loses its endpoint costs a feature.
+    pub(crate) fn close_after_reply(
+        &mut self,
+        reply: Option<&crate::local_socket::ReplyConnection>,
+    ) {
+        self.transport.close_after_reply(reply);
     }
 }
 
-impl Drop for Endpoint {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
-
-fn serve<H>(
-    listener: &UnixListener,
-    key: &Arc<ObservationKey>,
-    running: &Arc<AtomicBool>,
-    handler: &Arc<H>,
-) where
-    H: Fn(Request) -> String + Send + Sync + 'static,
-{
-    let in_flight = Arc::new(AtomicUsize::new(0));
-    for connection in listener.incoming() {
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
-        let Ok(stream) = connection else { continue };
-        // Serving on the accepting thread would let one client that connects
-        // and says nothing hold the endpoint for the whole client timeout, so
-        // every connection gets its own thread.
-        if in_flight.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-            // Busy: dropped without being read, and without an answer that
-            // would tell a caller anything about the window's state.
-            drop(stream);
-            continue;
-        }
-        let _ = stream.set_read_timeout(Some(CLIENT_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(CLIENT_TIMEOUT));
-
-        in_flight.fetch_add(1, Ordering::SeqCst);
-        let spawned = std::thread::Builder::new()
-            .name("sprite-observation-request".to_owned())
-            .spawn({
-                let key = Arc::clone(key);
-                let running = Arc::clone(running);
-                let handler = Arc::clone(handler);
-                let in_flight = Arc::clone(&in_flight);
-                move || {
-                    answer(stream, &key, &running, handler.as_ref());
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                }
-            });
-        if spawned.is_err() {
-            in_flight.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-}
-
-fn answer<H>(mut stream: UnixStream, key: &ObservationKey, running: &AtomicBool, handler: &H)
+fn answer<H>(connection: Authenticated, handler: &H)
 where
     H: Fn(Request) -> String,
 {
-    let mut line = String::new();
-    let read = BufReader::new(&stream)
-        .take(MAX_REQUEST_BYTES)
-        .read_line(&mut line);
-    if read.is_err() {
-        refuse(&mut stream);
-        return;
-    }
-
-    // The key is the first token; everything after it is the request. Splitting
-    // before authenticating means the body is never parsed for an unauthorised
-    // caller — it is not even looked at.
-    let line = line.trim_end_matches(['\r', '\n']);
-    let (presented, body) = match line.split_once(' ') {
-        Some((presented, body)) => (presented, body),
-        None => (line, ""),
-    };
-
-    // Closed while this request was in flight: the window is gone, so its key
-    // is worthless from this moment rather than whenever the last thread
-    // finishes.
-    if !running.load(Ordering::SeqCst) || !key.matches(presented) {
-        // No detail, and nothing about the request: a caller learns only that
-        // it was refused.
-        refuse(&mut stream);
-        return;
-    }
-
+    let Authenticated {
+        mut stream,
+        body,
+        reply_connection,
+        ..
+    } = connection;
     let response = handler(Request {
-        body: body.to_owned(),
+        body,
+        reply_connection,
     });
     let _ = writeln!(stream, "{response}");
-    // The write half is closed so a client knows the answer is complete. A
-    // response may be laid out over many lines, so "read one line" is not a
-    // frame a client can rely on; end of stream is.
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
@@ -438,84 +197,42 @@ fn refuse(stream: &mut UnixStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
-/// Removes socket files in `directory` that nothing is listening on.
-///
-/// A socket with a live window behind it accepts a connection and is left
-/// alone; only one that refuses is removed. That is what makes this safe to run
-/// while other windows are open.
-pub(crate) fn sweep_dead_sockets(directory: &Path) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "sock") {
-            continue;
-        }
-        // Connecting is the test, and a refusal is the strongest evidence
-        // available rather than proof: a listener that is gone refuses, but so
-        // does a live listener whose accept backlog is full — something a
-        // window that accepts and drops connections never lets happen in
-        // practice. A window that is alive accepts, and is not disturbed by a
-        // connection that is immediately dropped. Any other error — a machine
-        // out of descriptors, a path the socket layer cannot address — proves
-        // nothing, and a live window's socket is worth more than a tidy
-        // directory.
-        if let Err(error) = UnixStream::connect(&path)
-            && error.kind() == std::io::ErrorKind::ConnectionRefused
-        {
-            let _ = fs::remove_file(&path);
-        }
-    }
-}
-
-/// The per-user runtime directory this window's socket lives in.
-///
-/// On Linux, `XDG_RUNTIME_DIR`: a directory the system already guarantees is
-/// private to one user and cleaned up on logout. There is deliberately no fall
-/// back to a world-writable temporary directory: an endpoint nobody else can
-/// reach is the whole point, so it is better to have no observation surface
-/// than one in a place another user can reach.
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn runtime_directory() -> std::io::Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
-        std::io::Error::other(
-            "XDG_RUNTIME_DIR is not set, so there is no private directory for the \
-             observation socket; observation is unavailable rather than placed \
-             somewhere other users could reach",
-        )
-    })?;
-    Ok(PathBuf::from(base).join("sprite"))
-}
-
-/// The per-user runtime directory this window's socket lives in.
-///
-/// macOS has no `XDG_RUNTIME_DIR`, and the equivalent guarantee lives
-/// elsewhere: `TMPDIR` there is a per-user directory under `/var/folders`,
-/// created by the system and readable only by its owner — the same property
-/// `XDG_RUNTIME_DIR` is chosen for on Linux. Without this, observation would
-/// simply not exist on macOS, which is not parity.
-///
-/// `TMPDIR` is honoured because that is where the system publishes the path;
-/// the mode is not taken on trust either way, since [`Endpoint::open_in`]
-/// applies 0700 to the directory it is given before the socket exists.
-#[cfg(target_os = "macos")]
-pub(crate) fn runtime_directory() -> std::io::Result<PathBuf> {
-    let base = std::env::var_os("TMPDIR").ok_or_else(|| {
-        std::io::Error::other(
-            "TMPDIR is not set, so there is no private directory for the \
-             observation socket; observation is unavailable rather than placed \
-             somewhere other users could reach",
-        )
-    })?;
-    Ok(PathBuf::from(base).join("sprite"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::BufWriter;
     use std::sync::Mutex;
+
+    fn assert_denied_without_dispatch(body: &str) {
+        let (_scratch, endpoint, calls) = endpoint_with_spy();
+        let mut stream = UnixStream::connect(endpoint.socket_path()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // Rejection can close the peer before an oversized write finishes.
+        // The response and dispatch assertions below establish the outcome.
+        let _ = write!(stream, "{} {body}", endpoint.key_hex());
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut answer = String::new();
+        let _ = stream.read_to_string(&mut answer);
+        assert_eq!(answer.trim(), DENIED);
+        assert!(calls.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn incomplete_authenticated_lines_are_denied_before_dispatch() {
+        assert_denied_without_dispatch("hello");
+    }
+
+    #[test]
+    fn oversized_authenticated_lines_are_denied_before_dispatch() {
+        for size in [MAX_REQUEST_BYTES as usize, 1024 * 1024] {
+            assert_denied_without_dispatch(&format!("{}\n", "x".repeat(size)));
+        }
+    }
 
     /// A private directory of this test's own, removed when it is dropped.
     ///
@@ -630,7 +347,7 @@ mod tests {
         for _ in 0..64 {
             let key = ObservationKey::generate().expect("generate");
             let hex = key.to_hex();
-            assert_eq!(hex.len(), KEY_BYTES * 2, "32 bytes of key");
+            assert_eq!(hex.len(), 64, "32 bytes of key");
             assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(seen.insert(hex), "a key repeated, so it is not random");
         }
@@ -970,7 +687,7 @@ mod tests {
         // listening on it.
         let abandoned = directory.join("abandoned-by-a-killed-window.sock");
         {
-            let listener = UnixListener::bind(&abandoned).expect("bind");
+            let listener = bind_private(&abandoned).expect("bind");
             drop(listener);
         }
         assert!(abandoned.exists());
@@ -1007,7 +724,7 @@ mod tests {
         fs::write(&odd, b"").expect("write");
         // A socket nobody listens on any more: refused, so removed.
         let dead = directory.join("dead.sock");
-        drop(UnixListener::bind(&dead).expect("bind"));
+        drop(bind_private(&dead).expect("bind"));
 
         sweep_until_gone(&directory, &dead);
 
@@ -1028,6 +745,6 @@ mod tests {
             "a truncated key is not"
         );
         assert!(!key.matches(&format!("{hex}0")), "nor an extended one");
-        assert!(!key.matches(&"0".repeat(KEY_BYTES * 2)));
+        assert!(!key.matches(&"0".repeat(64)));
     }
 }

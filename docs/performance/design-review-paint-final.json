@@ -1,0 +1,179 @@
+{
+  "schema": 1,
+  "benchmark": "terminal_paint_preparation_and_decisions",
+  "sample_count": 30,
+  "fixture": {
+    "columns": 200,
+    "rows": 60
+  },
+  "metrics": {
+    "whole_first_frame": {
+      "samples": 30,
+      "transition": "fresh_driver_without_priming",
+      "timing": {
+        "unit": "ms",
+        "median": 0.45491,
+        "p95": 0.512864
+      },
+      "allocations": {
+        "median": 122,
+        "p95": 122,
+        "max": 122,
+        "budget": 135
+      },
+      "bytes": {
+        "median": 579376,
+        "p95": 579376,
+        "max": 579376,
+        "budget": 637314
+      }
+    },
+    "whole_same_generation_blink": {
+      "samples": 30,
+      "transition": "primed_generation_1_cursor_on_to_off",
+      "timing": {
+        "unit": "ms",
+        "median": 0.456195,
+        "p95": 0.48369
+      },
+      "allocations": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      },
+      "bytes": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      }
+    },
+    "whole_hover": {
+      "samples": 30,
+      "transition": "primed_generation_1_hover_off_to_on",
+      "timing": {
+        "unit": "ms",
+        "median": 0.476039,
+        "p95": 0.484024
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    },
+    "whole_one_row_change": {
+      "samples": 30,
+      "transition": "primed_generation_1_to_2_one_changed_row",
+      "timing": {
+        "unit": "ms",
+        "median": 0.47379699999999997,
+        "p95": 0.485768
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    },
+    "split_first_frame": {
+      "samples": 30,
+      "transition": "fresh_driver_without_priming",
+      "timing": {
+        "unit": "ms",
+        "median": 0.8177180000000001,
+        "p95": 0.833657
+      },
+      "allocations": {
+        "median": 122,
+        "p95": 122,
+        "max": 122,
+        "budget": 135
+      },
+      "bytes": {
+        "median": 579376,
+        "p95": 579376,
+        "max": 579376,
+        "budget": 637314
+      }
+    },
+    "split_same_generation_blink": {
+      "samples": 30,
+      "transition": "primed_generation_1_cursor_on_to_off",
+      "timing": {
+        "unit": "ms",
+        "median": 0.740533,
+        "p95": 1.079443
+      },
+      "allocations": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      },
+      "bytes": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      }
+    },
+    "split_hover": {
+      "samples": 30,
+      "transition": "primed_generation_1_hover_off_to_on",
+      "timing": {
+        "unit": "ms",
+        "median": 0.731528,
+        "p95": 0.749308
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    },
+    "split_one_row_change": {
+      "samples": 30,
+      "transition": "primed_generation_1_to_2_one_changed_row",
+      "timing": {
+        "unit": "ms",
+        "median": 0.7367889999999999,
+        "p95": 0.7906690000000001
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    }
+  }
+}

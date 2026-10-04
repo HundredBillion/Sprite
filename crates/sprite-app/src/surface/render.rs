@@ -15,7 +15,7 @@ use crate::config::Highlights;
 use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass, pack};
 use crate::surface::SurfaceId;
 use crate::surface::channel::{SurfaceConnection, event_click};
-use crate::surface::description::{Description, Element, Kind};
+use crate::surface::description::{Description, Element};
 use crate::surface::grid::GridSurface;
 use crate::surface::style;
 use crate::terminal_view::TerminalView;
@@ -108,10 +108,7 @@ pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<Ren
 /// What a grid borrows from the pane it lives in, so it is drawn with the same
 /// font, cell, colours, and blink phase as the terminal beside it.
 pub(crate) struct GridMetrics {
-    pub cell_width: Pixels,
-    pub cell_height: Pixels,
-    pub font_family: SharedString,
-    pub font_size: Pixels,
+    pub cells: crate::terminal_view::CellMetrics,
     /// The pane's default foreground and background, for a grid that set none.
     pub defaults: (Rgb, Rgb),
     pub blink_on: bool,
@@ -136,8 +133,8 @@ pub(crate) fn cells_that_fit(size: Size<Pixels>, metrics: &GridMetrics) -> (u16,
         }
     };
     (
-        fit(size.width, metrics.cell_width),
-        fit(size.height, metrics.cell_height),
+        fit(size.width, metrics.cells.width()),
+        fit(size.height, metrics.cells.height()),
     )
 }
 
@@ -162,8 +159,8 @@ pub(crate) fn grid_cell_under(
     crate::grid::cell_at(
         position,
         origin,
-        metrics.cell_width,
-        metrics.cell_height,
+        metrics.cells.width(),
+        metrics.cells.height(),
         size,
     )
     .map(|cell| (cell.row, cell.column))
@@ -198,7 +195,7 @@ pub(crate) fn render_grid(
     // and the pane keeps one whenever a hosted grid's cursor blinks, so this
     // holds even for a fill grid with no terminal cursor showing behind it.
     let cursor = Some(grid.cursor_snapshot()).filter(|cursor| metrics.blink_on || !cursor.blinking);
-    let rows = grid.positioned_rows(highlights).to_vec();
+    let rows = grid.positioned_rows(highlights);
     let paint = GridPaint::new(GridPaintSpec {
         rows,
         pass: RowPass::Whole,
@@ -207,13 +204,13 @@ pub(crate) fn render_grid(
         default_fg,
         default_bg,
         palette: None,
-        cell_width: metrics.cell_width,
-        cell_height: metrics.cell_height,
-        font_family: metrics.font_family.clone(),
-        font_size: metrics.font_size,
+        cell_width: metrics.cells.width(),
+        cell_height: metrics.cells.height(),
+        font_family: metrics.cells.family().clone(),
+        font_size: metrics.cells.font_size(),
     });
-    let width = px(f32::from(metrics.cell_width) * f32::from(grid.cols()));
-    let height = px(f32::from(metrics.cell_height) * f32::from(grid.rows()));
+    let width = px(f32::from(metrics.cells.width()) * f32::from(grid.cols()));
+    let height = px(f32::from(metrics.cells.height()) * f32::from(grid.rows()));
     div()
         .w(width)
         .h(height)
@@ -233,14 +230,27 @@ pub(crate) fn apply_described_style<E: Styled>(
     node: &Element,
     registry: &TokenRegistry,
 ) -> E {
-    target = style::apply_all(target, &node.style);
-    if let Some(color) = &node.color {
+    let (color, background, border) = match node {
+        Element::Box { style, .. }
+        | Element::List { style, .. }
+        | Element::Text { style, .. }
+        | Element::Button { style, .. }
+        | Element::Image { style, .. } => {
+            target = style::apply_all(target, &style.utilities);
+            (&style.color, &style.background, &style.border)
+        }
+        Element::Grid {
+            color, background, ..
+        } => (color, background, &None),
+        Element::VirtualList { .. } => return target,
+    };
+    if let Some(color) = color {
         target = target.text_color(rgb(pack(color.resolve(registry, Role::Text))));
     }
-    if let Some(background) = &node.background {
+    if let Some(background) = background {
         target = target.bg(rgb(pack(background.resolve(registry, Role::Fill))));
     }
-    if let Some(border) = &node.border {
+    if let Some(border) = border {
         target = target.border_color(rgb(pack(border.resolve(registry, Role::Fill))));
     }
     target
@@ -260,36 +270,56 @@ fn element(
     let index = *next;
     *next += 1;
 
-    if node.kind == Kind::Image {
-        let picture = images
-            .images
-            .entry(index)
-            .or_insert_with(|| node.svg.as_deref().and_then(|svg| render_svg(svg, None)));
-        if let Some(picture) = picture {
-            return style::apply_all(img(picture.clone()), &node.style).into_any_element();
+    let (mut boxed, text, on_click, children) = match node {
+        Element::Image { style, svg } => {
+            let picture = images
+                .images
+                .entry(index)
+                .or_insert_with(|| render_svg(svg, None));
+            return match picture {
+                Some(picture) => {
+                    style::apply_all(img(picture.clone()), &style.utilities).into_any_element()
+                }
+                None => div().into_any_element(),
+            };
         }
-        return div().into_any_element();
-    }
-
-    let mut boxed = div();
-    if node.kind == Kind::List {
-        boxed = boxed.flex().flex_col();
-    }
-    if node.kind == Kind::Button {
-        boxed = boxed.cursor_pointer();
-    }
+        Element::Box {
+            text,
+            on_click,
+            children,
+            ..
+        } => (div(), text.as_deref(), on_click, children.as_slice()),
+        Element::List {
+            text,
+            on_click,
+            children,
+            ..
+        } => (
+            div().flex().flex_col(),
+            text.as_deref(),
+            on_click,
+            children.as_slice(),
+        ),
+        Element::Text { text, on_click, .. } => (div(), Some(text.as_str()), on_click, &[][..]),
+        Element::Button { text, on_click, .. } => (
+            div().cursor_pointer(),
+            Some(text.as_str()),
+            on_click,
+            &[][..],
+        ),
+        Element::Grid { .. } | Element::VirtualList { .. } => return div().into_any_element(),
+    };
     boxed = apply_described_style(boxed, node, registry);
-    if let Some(text) = &node.text {
-        boxed = boxed.child(SharedString::from(text.clone()));
+    if let Some(text) = text {
+        boxed = boxed.child(SharedString::from(text.to_owned()));
     }
-    let children: Vec<AnyElement> = node
-        .children
-        .iter()
-        .map(|child| element(child, surface, registry, connection, host, next, images))
-        .collect();
-    boxed = boxed.children(children);
+    boxed = boxed.children(
+        children
+            .iter()
+            .map(|child| element(child, surface, registry, connection, host, next, images)),
+    );
 
-    match &node.on_click {
+    match on_click {
         None => boxed.into_any_element(),
         Some(name) => {
             let name = name.clone();
@@ -464,10 +494,7 @@ mod tests {
         use gpui::size;
 
         let metrics = GridMetrics {
-            cell_width: px(8.0),
-            cell_height: px(16.0),
-            font_family: "monospace".into(),
-            font_size: px(14.0),
+            cells: crate::terminal_view::CellMetrics::fixture(8.0, 16.0),
             defaults: (
                 crate::tokens::unpack(0xd8d8e0),
                 crate::tokens::unpack(0x101014),
@@ -499,8 +526,7 @@ mod tests {
 
         // A grid whose metrics have not been measured yet has no room at all.
         let unmeasured = GridMetrics {
-            cell_width: px(0.0),
-            cell_height: px(0.0),
+            cells: crate::terminal_view::CellMetrics::fixture(0.0, 0.0),
             ..metrics
         };
         assert_eq!(
@@ -512,7 +538,6 @@ mod tests {
     #[test]
     fn a_grid_becomes_an_element_without_a_window() {
         use crate::surface::grid::{GridSurface, parse_ops};
-        use gpui::px;
 
         let mut grid = GridSurface::new(4, 2);
         grid.apply_all(
@@ -525,10 +550,7 @@ mod tests {
         )
         .expect("apply");
         let metrics = GridMetrics {
-            cell_width: px(8.0),
-            cell_height: px(16.0),
-            font_family: "monospace".into(),
-            font_size: px(14.0),
+            cells: crate::terminal_view::CellMetrics::fixture(8.0, 16.0),
             defaults: (
                 crate::tokens::unpack(0xd8d8e0),
                 crate::tokens::unpack(0x101014),
@@ -542,10 +564,7 @@ mod tests {
 
     fn metrics(cell_width: f32, cell_height: f32) -> GridMetrics {
         GridMetrics {
-            cell_width: px(cell_width),
-            cell_height: px(cell_height),
-            font_family: "Menlo".into(),
-            font_size: px(14.0),
+            cells: crate::terminal_view::CellMetrics::fixture(cell_width, cell_height),
             defaults: (
                 Rgb { r: 0, g: 0, b: 0 },
                 Rgb {

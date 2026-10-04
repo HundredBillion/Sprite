@@ -48,7 +48,7 @@ struct Entry {
 }
 
 /// Where a pane sits in the window, as the schema reports it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     pub tab_order: usize,
     pub rect: Rect,
@@ -69,6 +69,8 @@ impl Default for Placement {
 #[derive(Default)]
 pub struct WindowPanes {
     entries: Mutex<HashMap<PaneId, Entry>>,
+    #[cfg(test)]
+    layout_publications: std::sync::atomic::AtomicUsize,
 }
 
 impl WindowPanes {
@@ -95,12 +97,21 @@ impl WindowPanes {
         );
     }
 
+    #[cfg(test)]
+    pub(crate) fn layout_publications(&self) -> usize {
+        self.layout_publications
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Records where the window's panes currently sit.
     ///
     /// Published by the window as the layout changes. Panes the window no
     /// longer has are ignored rather than added back: this reports placement,
     /// not membership.
     pub fn set_layout(&self, placements: &[(PaneId, Placement)]) {
+        #[cfg(test)]
+        self.layout_publications
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut entries = self
             .entries
             .lock()
@@ -221,16 +232,18 @@ impl PaneSource for WindowPanes {
 mod tests {
     use super::*;
     use crate::observation::endpoint::Endpoint;
-    use sprite_term::{PaneRow, PromptKind, ScreenKind, SessionConfig, TerminalSession};
+    use sprite_term::{
+        PaneRow, PromptKind, ScreenKind, SessionConfig, Spawned, TerminalEvent, TerminalSession,
+    };
     use std::time::Duration;
 
     fn snapshot() -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 1,
-            size: sprite_term::TerminalSize::DEFAULT,
+            size: sprite_term::ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
-                text: "answer".to_owned(),
+                text: "answer".into(),
                 wrapped: false,
                 prompt: PromptKind::None,
             }],
@@ -257,15 +270,19 @@ mod tests {
         })
     }
 
-    /// A real session, because a `CommandSender` cannot be fabricated — it is
-    /// only obtainable from one. The child does nothing; the test never waits
-    /// for it to answer, only for the plumbing around it.
-    fn session() -> TerminalSession {
-        TerminalSession::spawn(SessionConfig::command(
+    /// Keep both receivers alive so the worker can serve registry commands.
+    fn session() -> Spawned {
+        let mut spawned = TerminalSession::spawn(SessionConfig::command(
             "/bin/sh",
             vec!["-c".into(), "sleep 30".into()],
         ))
-        .expect("spawn a session")
+        .expect("spawn a session");
+        assert!(matches!(
+            spawned.events.next_blocking().expect("worker started"),
+            TerminalEvent::Ready
+        ));
+        spawned.snapshots.next_blocking().expect("initial snapshot");
+        spawned
     }
 
     #[test]
@@ -273,8 +290,8 @@ mod tests {
         let panes = WindowPanes::new();
         let first = session();
         let second = session();
-        panes.register(PaneId(5), TabId(1), first.commands());
-        panes.register(PaneId(2), TabId(0), second.commands());
+        panes.register(PaneId(5), TabId(1), first.session.commands());
+        panes.register(PaneId(2), TabId(0), second.session.commands());
 
         let listed = panes.panes();
         let order: Vec<(u64, u64)> = listed
@@ -299,7 +316,7 @@ mod tests {
     fn an_answer_reaches_the_caller_that_asked_for_it() {
         let panes = WindowPanes::new();
         let session = session();
-        panes.register(PaneId(0), TabId(0), session.commands());
+        panes.register(PaneId(0), TabId(0), session.session.commands());
 
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
@@ -310,7 +327,7 @@ mod tests {
             .answer
             .recv_timeout(Duration::from_secs(1))
             .expect("an answer arrived");
-        assert_eq!(answer.expect("a snapshot").rows[0].text, "answer");
+        assert_eq!(answer.expect("a snapshot").rows[0].text.as_ref(), "answer");
     }
 
     /// A session that errors must tell its waiter why, not leave it to time
@@ -319,7 +336,7 @@ mod tests {
     fn a_failure_reaches_the_caller_that_asked_for_it() {
         let panes = WindowPanes::new();
         let session = session();
-        panes.register(PaneId(0), TabId(0), session.commands());
+        panes.register(PaneId(0), TabId(0), session.session.commands());
 
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
@@ -343,7 +360,7 @@ mod tests {
     fn concurrent_requests_for_one_pane_are_answered_in_order() {
         let panes = WindowPanes::new();
         let session = session();
-        panes.register(PaneId(0), TabId(0), session.commands());
+        panes.register(PaneId(0), TabId(0), session.session.commands());
 
         let first = panes
             .begin(PaneId(0), HistoryLines::default())
@@ -378,7 +395,7 @@ mod tests {
     fn forgetting_a_pane_releases_whoever_was_waiting() {
         let panes = WindowPanes::new();
         let session = session();
-        panes.register(PaneId(0), TabId(0), session.commands());
+        panes.register(PaneId(0), TabId(0), session.session.commands());
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
             .expect("asked");
@@ -399,7 +416,7 @@ mod tests {
     fn a_session_keeps_running_when_observation_is_switched_off() {
         let panes = WindowPanes::new();
         let mut session = session();
-        panes.register(PaneId(0), TabId(0), session.commands());
+        panes.register(PaneId(0), TabId(0), session.session.commands());
 
         // What switching observation off does to a window: the endpoint is
         // destroyed. Nothing here touches the session.
@@ -410,10 +427,24 @@ mod tests {
         // The child is still there, and the session still takes commands.
         assert!(
             session
-                .send(TerminalCommand::Resize(sprite_term::TerminalSize::DEFAULT))
+                .session
+                .send(TerminalCommand::Resize(
+                    sprite_term::ValidTerminalSize::DEFAULT
+                ))
                 .is_ok(),
             "the session is alive and accepting commands"
         );
+        session
+            .session
+            .send(TerminalCommand::CaptureHistory(HistoryLines::default()))
+            .expect("request a fresh answer after disabling observation");
+        assert!(matches!(
+            session
+                .events
+                .next_blocking()
+                .expect("worker still answers"),
+            TerminalEvent::History(_)
+        ));
         assert_eq!(panes.panes().len(), 1, "and the pane is still a pane");
     }
 
@@ -421,7 +452,7 @@ mod tests {
     fn an_answer_nobody_is_waiting_for_is_discarded() {
         let panes = WindowPanes::new();
         let session = session();
-        panes.register(PaneId(0), TabId(0), session.commands());
+        panes.register(PaneId(0), TabId(0), session.session.commands());
 
         // No request outstanding: this must not panic, grow a queue, or be
         // handed to the next caller as a stale answer.

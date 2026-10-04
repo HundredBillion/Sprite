@@ -12,8 +12,10 @@ mod graphics_cache;
 mod grid;
 mod grid_paint;
 mod input;
+mod local_socket;
 mod observation;
-mod pane_registry;
+#[doc(hidden)]
+pub mod paint_benchmark;
 mod pane_tree;
 mod surface;
 mod tabs;
@@ -43,3 +45,10 @@ pub use surface::channel::{
 pub use surface::client::{run_surface_focus, run_surface_open, run_token_register};
 pub use tabs::TabId;
 pub use workspace::Workspace;
+
+pub use surface::channel::{
+    Open as SurfaceOpen, Ownership as SurfaceOwnership, Placement as SurfacePlacement,
+};
+
+#[cfg(test)]
+mod surface_performance;

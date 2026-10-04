@@ -59,9 +59,13 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
 fn counting_session(count: usize) -> (TerminalSession, EventPump, SnapshotPump) {
     let script = format!("for i in $(seq 1 {count}); do echo line-$i; done; exec sleep 300");
     let config = SessionConfig::command("/bin/sh", args(&["-c", &script]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     let marker = format!("line-{count}");
     snapshots.wait_for("the last printed line", |bundle| {
@@ -85,12 +89,12 @@ fn a_request_returns_the_active_screen_plus_the_lines_asked_for() {
     assert!(
         history.available >= 150,
         "200 lines on a {}-row screen leaves real scrollback, got {}",
-        history.size.rows,
+        history.size.rows(),
         history.available
     );
     assert_eq!(
         history.rows.len(),
-        history.history_rows + usize::from(history.size.rows),
+        history.history_rows + usize::from(history.size.rows()),
         "history followed by the whole active screen"
     );
 
@@ -141,7 +145,7 @@ fn a_request_for_no_history_returns_only_the_active_screen() {
     let history = wait_for_history(&events);
 
     assert_eq!(history.history_rows, 0);
-    assert_eq!(history.rows.len(), usize::from(history.size.rows));
+    assert_eq!(history.rows.len(), usize::from(history.size.rows()));
 }
 
 /// The clamp is a promise about refusal: an observer that guesses a large
@@ -184,9 +188,13 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
     config
         .environment
         .push((OsString::from("TERM"), OsString::from("xterm")));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("less to take the alternate screen", |bundle| {
@@ -209,7 +217,7 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
     let joined: String = history
         .rows
         .iter()
-        .map(|row| row.text.as_str())
+        .map(|row| row.text.as_ref())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
@@ -224,7 +232,7 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
         history.available, 0,
         "an alternate screen has no scrollback of its own, so there is no          history to return and none is borrowed from the screen behind it"
     );
-    assert_eq!(history.rows.len(), usize::from(history.size.rows));
+    assert_eq!(history.rows.len(), usize::from(history.size.rows()));
 }
 
 /// Rows are returned as they are: Unicode intact, whitespace intact, and a
@@ -239,9 +247,13 @@ fn unicode_whitespace_and_wrap_markers_survive() {
         "sleep 300"
     );
     let config = SessionConfig::command("/bin/sh", args(&["-c", script]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     snapshots.wait_for("the long line", |bundle| pane_text(bundle).contains("WWWW"));
 
@@ -255,7 +267,7 @@ fn unicode_whitespace_and_wrap_markers_survive() {
     let joined: String = history
         .rows
         .iter()
-        .map(|row| row.text.as_str())
+        .map(|row| row.text.as_ref())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
@@ -287,9 +299,9 @@ fn unicode_whitespace_and_wrap_markers_survive() {
     );
     for width in wrapped_widths {
         assert!(
-            width <= usize::from(history.size.cols),
+            width <= usize::from(history.size.cols()),
             "a row never exceeds the screen width: {width} > {}",
-            history.size.cols
+            history.size.cols()
         );
     }
 }
@@ -357,7 +369,7 @@ fn rows_are_not_padded_out_to_the_screen_width() {
         printed.text
     );
     assert!(
-        printed.text.chars().count() < usize::from(history.size.cols),
+        printed.text.chars().count() < usize::from(history.size.cols()),
         "and is shorter than the screen is wide"
     );
     assert!(
@@ -401,7 +413,7 @@ fn a_history_answer_carries_the_metadata_the_schema_needs() {
 
     assert!(history.viewport.total_rows >= history.rows.len());
     assert!(
-        history.cursor.row < history.size.rows,
+        history.cursor.row < history.size.rows(),
         "the cursor is on the screen it was captured from"
     );
     assert!(
@@ -436,9 +448,13 @@ fn a_small_scrollback_budget_holds_less_history() {
         let script = "for i in $(seq 1 5000); do echo line-$i; done; sleep 300";
         let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
         config.scrollback_bytes = scrollback_bytes;
-        let mut session = TerminalSession::spawn(config).expect("spawn session");
-        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-        let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots,
+        } = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(events);
+        let snapshots = SnapshotPump::new(snapshots);
         events.expect_ready();
         snapshots.wait_for("the last printed line", |bundle| {
             pane_text(bundle).contains("line-5000")

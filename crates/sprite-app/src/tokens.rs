@@ -91,9 +91,6 @@ pub enum Registration {
 
 /// A name registered again with a different default. The first stands, so no
 /// colour depends on which program started first.
-// Non-test callers discard `name` and `standing` behind `Refusal::TokenConflict`;
-// its fields are read by tests, via the `assert_eq!` on this struct below.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenConflict {
     pub name: String,
@@ -256,7 +253,7 @@ mod tests {
     fn the_theme_overrides_a_built_in_token_by_its_existing_colors_key() {
         let colors = Colors {
             background: Some(rgb(0x123456)),
-            palette: vec![(4, rgb(0xabcdef))],
+            palette: vec![(4, rgb(0xabcdef))].into(),
             ..Colors::default()
         };
         let registry = TokenRegistry::new(&colors);
@@ -282,7 +279,7 @@ mod tests {
         );
 
         let colors = Colors {
-            tokens: vec![("scm.added".to_owned(), rgb(0x40a02b))],
+            tokens: vec![("scm.added".to_owned(), rgb(0x40a02b))].into(),
             ..Colors::default()
         };
         registry.apply_theme(&colors);
@@ -354,7 +351,7 @@ mod tests {
     #[test]
     fn a_theme_only_token_counts_as_known() {
         let colors = Colors {
-            tokens: vec![("demo.label".to_owned(), rgb(0xc0caf5))],
+            tokens: vec![("demo.label".to_owned(), rgb(0xc0caf5))].into(),
             ..Colors::default()
         };
         let registry = TokenRegistry::new(&colors);

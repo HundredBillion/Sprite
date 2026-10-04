@@ -1,11 +1,9 @@
 //! The Surface Channel: the window's second endpoint, over which a program
 //! opens and drives Surfaces in its own pane.
 //!
-//! It shares the observation endpoint's key, directory, and authentication
-//! but not its grammar. That line is read-only by construction and stays so;
-//! this one is nothing but control. Keeping them apart means the read-only
-//! promise is true of a *socket*, not of some lines on one — a program or an
-//! LLM holding the observation socket still cannot draw, type, or take focus.
+//! It shares the observation endpoint's key type, directory, and authentication
+//! but not its grammar. Pane queries are read-only; observation also carries
+//! configuration print/reload. Only this adapter opens Surfaces or changes focus.
 //!
 //! One connection per Surface, alive for the Surface's life: the program
 //! streams updates down it and receives input and events up it, as
@@ -13,24 +11,22 @@
 //! removes the Surface, so nothing is ever left on screen without an owner.
 
 use std::ffi::OsString;
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use sprite_term::Rgb;
 
-use crate::config::Colors;
-use crate::observation::endpoint::{
-    MAX_SOCKET_PATH, ObservationKey, runtime_directory, sweep_dead_sockets,
+pub use super::wire::*;
+use super::wire::{FirstRequest, Message, first_line, stream_line};
+use crate::local_socket::{
+    Authenticated, LocalSocket, ObservationKey, TransportPolicy, runtime_directory,
 };
 use crate::pane_tree::PaneId;
 use crate::surface::{Refusal, SurfaceId};
@@ -40,11 +36,6 @@ use crate::tabs::TabId;
 pub const SOCKET_VARIABLE: &str = "SPRITE_SURFACE_SOCKET";
 pub const KEY_VARIABLE: &str = "SPRITE_SURFACE_KEY";
 
-/// The protocol this Sprite speaks; a message naming another is refused.
-pub const VERSION: u64 = 1;
-/// One message may be this large. A description carries inline SVG, and an
-/// icon set is measured in hundreds of kilobytes.
-pub const MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 /// Surfaces are long-lived, so this caps how many a window hosts at once.
 const MAX_CONNECTIONS: usize = 64;
 /// A client that will not accept an event for this long is treated as gone.
@@ -61,10 +52,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
 /// How long a connection waits for the window to answer a request.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub const DEFAULT_DOCK_SIZE: f32 = 240.0;
-pub const MIN_DOCK_SIZE: f32 = 64.0;
-pub const MAX_DOCK_SIZE: f32 = 4096.0;
 
 const NOT_ANSWERING: &str = "this window is no longer answering";
 const NO_ANSWER: &str = "this window did not answer in time";
@@ -147,16 +134,83 @@ pub enum ReturnTarget {
 /// on the GPUI thread, where the token registry lives.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Open {
-    pub position: Position,
-    pub side: Side,
-    /// A dock's width in logical pixels; ignored for the other positions.
-    pub size: f32,
+    pub placement: Placement,
     pub focus: bool,
-    /// A fill may register its process; a dock supplies all ownership fields.
-    pub owner_pid: Option<u32>,
-    pub return_target: Option<ReturnTarget>,
-    pub resizable: bool,
     pub description: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ownership {
+    Unowned,
+    Owned {
+        pid: u32,
+        return_target: ReturnTarget,
+    },
+}
+
+/// Placement constrains ownership to the positions that support it.
+///
+/// ```
+/// use sprite_app::{SurfacePlacement, SurfaceOwnership, SurfaceReturnTarget, SurfaceSide};
+/// let fill = SurfacePlacement::Fill { owner_pid: Some(41) };
+/// let dock = SurfacePlacement::Dock {
+///     side: SurfaceSide::Left, size: Default::default(),
+///     ownership: SurfaceOwnership::Owned { pid: 41, return_target: SurfaceReturnTarget::Terminal },
+/// };
+/// ```
+///
+/// ```compile_fail,E0559
+/// use sprite_app::{SurfacePlacement, SurfaceOwnership, SurfaceReturnTarget, SurfaceSide};
+/// let fill = SurfacePlacement::Fill {
+///     owner_pid: Some(41), return_target: SurfaceReturnTarget::Terminal,
+/// };
+/// ```
+///
+/// ```compile_fail,E0063
+/// use sprite_app::{SurfacePlacement, SurfaceOwnership, SurfaceReturnTarget, SurfaceSide};
+/// let dock = SurfacePlacement::Dock {
+///     side: SurfaceSide::Left, size: Default::default(),
+///     ownership: SurfaceOwnership::Owned { pid: 41 },
+/// };
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Placement {
+    Fill {
+        owner_pid: Option<u32>,
+    },
+    Dock {
+        side: Side,
+        size: super::DockSize,
+        ownership: Ownership,
+    },
+    Overlay,
+}
+
+impl Placement {
+    pub fn position(self) -> Position {
+        match self {
+            Self::Fill { .. } => Position::Fill,
+            Self::Dock { .. } => Position::Dock,
+            Self::Overlay => Position::Overlay,
+        }
+    }
+    pub fn side(self) -> Side {
+        match self {
+            Self::Dock { side, .. } => side,
+            Self::Fill { .. } | Self::Overlay => Side::Left,
+        }
+    }
+}
+
+pub(crate) const EVENT_BUFFER_BYTES: usize = 64 * 1024;
+
+fn append_event_line(buffer: &mut Vec<u8>, line: &str) {
+    let needed = buffer.len() + line.len() + 1;
+    if needed > buffer.capacity() {
+        buffer.reserve_exact(needed.next_power_of_two() - buffer.len());
+    }
+    buffer.extend_from_slice(line.as_bytes());
+    buffer.push(b'\n');
 }
 
 /// The stream a [`SurfaceConnection`] writes to, plus whatever a program has
@@ -176,7 +230,49 @@ struct Wire {
     /// Lines a program sent before `ready`, in the order they arrived.
     /// `establish` drains this onto the wire, after `opened` and before
     /// returning — a program does not wait for that to happen.
-    queued: Vec<String>,
+    queued: Vec<u8>,
+    buffer: Vec<u8>,
+}
+
+impl Wire {
+    fn fail(&mut self) -> bool {
+        self.dead = true;
+        self.buffer.clear();
+        self.queued.clear();
+        let _ = self.stream.shutdown(Shutdown::Both);
+        false
+    }
+
+    fn write_buffer(&mut self) -> bool {
+        let ok = self
+            .stream
+            .write_all(&self.buffer)
+            .and_then(|_| self.stream.flush())
+            .is_ok();
+        self.buffer.clear();
+        ok || self.fail()
+    }
+
+    fn buffer_line(&mut self, line: &str) -> bool {
+        if line.len() >= EVENT_BUFFER_BYTES {
+            if !self.write_buffer() {
+                return false;
+            }
+            // Large caller-owned lines need no equally large transport allocation.
+            let ok = self
+                .stream
+                .write_all(line.as_bytes())
+                .and_then(|_| self.stream.write_all(b"\n"))
+                .and_then(|_| self.stream.flush())
+                .is_ok();
+            return ok || self.fail();
+        }
+        if self.buffer.len() + line.len() + 1 > EVENT_BUFFER_BYTES && !self.write_buffer() {
+            return false;
+        }
+        append_event_line(&mut self.buffer, line);
+        self.buffer.len() != EVENT_BUFFER_BYTES || self.write_buffer()
+    }
 }
 
 /// The window's end of one Surface's connection: the only way events reach
@@ -191,6 +287,8 @@ struct Wire {
 /// `true` immediately; [`establish`](Self::establish) writes `opened`, then
 /// the queue, in order, so nothing a program sent ever arrives ahead of the
 /// confirmation that let it.
+/// Before acceptance, exceeding 64 KiB of queued events closes the connection:
+/// the queue cannot flush without putting events ahead of `opened`.
 #[derive(Clone)]
 pub struct SurfaceConnection {
     wire: Arc<Mutex<Wire>>,
@@ -206,36 +304,45 @@ impl SurfaceConnection {
                 ready: false,
                 dead: false,
                 queued: Vec::new(),
+                buffer: Vec::new(),
             })),
         })
     }
 
     /// Sends one event line, or queues it if `opened` has not gone out yet.
     /// `false` means the client is gone — refused, timed out, or the
-    /// connection has already closed — and nothing was queued or written.
+    /// connection has already closed. A write failure can leave a sent prefix.
     /// A failed write marks the connection dead: the socket is shut down so
     /// the connection thread's blocked read notices at once and reports the
     /// Surface closed, rather than every later `send` paying the write
     /// timeout again for a client that is never coming back.
     pub fn send(&self, line: &str) -> bool {
+        self.send_batch([line])
+    }
+
+    /// Keeps a complete gesture under one lock, flushing at most 64 KiB at a time.
+    /// A write failure stops consuming the event iterator immediately.
+    pub fn send_batch<'a>(&self, lines: impl IntoIterator<Item = &'a str>) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
         };
         if wire.dead {
             return false;
         }
-        if !wire.ready {
-            wire.queued.push(line.to_owned());
-            return true;
+        wire.buffer.clear();
+        for line in lines {
+            if wire.ready {
+                if !wire.buffer_line(line) {
+                    return false;
+                }
+            } else {
+                if line.len() >= EVENT_BUFFER_BYTES - wire.queued.len() {
+                    return wire.fail();
+                }
+                append_event_line(&mut wire.queued, line);
+            }
         }
-        let ok = writeln!(wire.stream, "{line}")
-            .and_then(|_| wire.stream.flush())
-            .is_ok();
-        if !ok {
-            wire.dead = true;
-            let _ = wire.stream.shutdown(Shutdown::Both);
-        }
-        ok
+        !wire.ready || wire.write_buffer()
     }
 
     /// Writes the connection's first line, then every line a program queued
@@ -243,27 +350,26 @@ impl SurfaceConnection {
     /// thread that decided to accept the Surface — never by the program.
     /// Stops at the first failed write and marks the wire dead, as `send`
     /// does: a client that is gone is not written to a thousand more times.
-    fn establish(&self, line: &str) -> bool {
+    pub(crate) fn establish(&self, line: &str) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
         };
-        let mut ok = writeln!(wire.stream, "{line}")
-            .and_then(|_| wire.stream.flush())
-            .is_ok();
-        for queued in std::mem::take(&mut wire.queued) {
-            if !ok {
-                break;
-            }
-            ok = writeln!(wire.stream, "{queued}")
-                .and_then(|_| wire.stream.flush())
-                .is_ok();
+        if wire.dead {
+            return false;
         }
         wire.ready = true;
-        if !ok {
-            wire.dead = true;
-            let _ = wire.stream.shutdown(Shutdown::Both);
+        if !wire.buffer_line(line) || !wire.write_buffer() {
+            return false;
         }
-        ok
+        let Wire { queued, buffer, .. } = &mut *wire;
+        std::mem::swap(buffer, queued);
+        wire.write_buffer()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_buffer_state(&self) -> (bool, usize, usize) {
+        let wire = self.wire.lock().unwrap();
+        (wire.dead, wire.buffer.capacity(), wire.queued.capacity())
     }
 
     #[cfg(test)]
@@ -357,13 +463,52 @@ pub enum SurfaceRequest {
     },
 }
 
+impl SurfaceRequest {
+    pub(crate) fn pane(&self) -> Option<PaneId> {
+        match self {
+            Self::Capabilities { pane, .. }
+            | Self::Open { pane, .. }
+            | Self::Update { pane, .. }
+            | Self::Focus { pane, .. }
+            | Self::Close { pane, .. }
+            | Self::Closed { pane, .. }
+            | Self::FocusPane { pane, .. }
+            | Self::Grid { pane, .. }
+            | Self::List { pane, .. } => Some(*pane),
+            Self::RegisterToken { .. } => None,
+        }
+    }
+
+    pub(crate) fn refuse_with(self, refusal: Refusal) {
+        match self {
+            Self::Capabilities { reply, .. } => {
+                let _ = reply.send(Err(refusal));
+            }
+            Self::Open { reply, .. }
+            | Self::FocusPane { reply, .. }
+            | Self::RegisterToken { reply, .. } => {
+                let _ = reply.send(Err(refusal));
+            }
+            Self::Update { .. }
+            | Self::Focus { .. }
+            | Self::Close { .. }
+            | Self::Closed { .. }
+            | Self::Grid { .. }
+            | Self::List { .. } => {}
+        }
+    }
+}
+
+impl sprite_pane::PaneRequest for SurfaceRequest {
+    fn refuse(self) {
+        self.refuse_with(Refusal::NotATerminal);
+    }
+}
+
 /// The listening end: a private socket, the window's key, one thread asleep
 /// in `accept`, and one thread per live Surface.
 pub struct SurfaceEndpoint {
-    socket: PathBuf,
-    key: Arc<ObservationKey>,
-    running: Arc<AtomicBool>,
-    listener: Option<JoinHandle<()>>,
+    transport: LocalSocket,
 }
 
 impl SurfaceEndpoint {
@@ -379,53 +524,31 @@ impl SurfaceEndpoint {
         key: Arc<ObservationKey>,
         requests: async_channel::Sender<SurfaceRequest>,
     ) -> std::io::Result<Self> {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&directory)?;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-        sweep_dead_sockets(&directory);
-
-        // Named at random and not from the key, as the observation socket is,
-        // so learning the path teaches nothing about the key.
-        let mut name = ObservationKey::generate()?.to_hex();
-        name.truncate(SOCKET_HEX);
-        let socket = directory.join(format!("{name}.surface.sock"));
-        let length = socket.as_os_str().len();
-        if length > MAX_SOCKET_PATH {
-            return Err(std::io::Error::other(format!(
-                "the surface socket path is {length} bytes and this platform's \
-                 sockaddr_un holds {MAX_SOCKET_PATH}: {}",
-                socket.display()
-            )));
-        }
-
-        let listener = UnixListener::bind(&socket)?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-
-        let running = Arc::new(AtomicBool::new(true));
-        let thread = std::thread::Builder::new()
-            .name("sprite-surface".to_owned())
-            .spawn({
-                let key = Arc::clone(&key);
-                let running = Arc::clone(&running);
-                move || serve(&listener, &key, &running, &requests)
-            })?;
-
-        Ok(Self {
-            socket,
+        let policy = TransportPolicy {
+            name: "sprite-surface",
+            filename_hex: SOCKET_HEX,
+            suffix: ".surface.sock",
+            max_connections: MAX_CONNECTIONS,
+            max_first_line: MAX_MESSAGE_BYTES as usize,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+            write_timeout: WRITE_TIMEOUT,
+        };
+        let transport = LocalSocket::open_in(
+            directory,
             key,
-            running,
-            listener: Some(thread),
-        })
+            policy,
+            |stream| refuse(stream, &Refusal::Denied.reason()),
+            move |connection| converse(connection, &requests),
+        )?;
+        Ok(Self { transport })
     }
 
     pub fn socket_path(&self) -> &Path {
-        &self.socket
+        self.transport.socket_path()
     }
 
     pub fn key_hex(&self) -> String {
-        self.key.to_hex()
+        self.transport.key_hex()
     }
 
     /// What one pane's session needs to open Surfaces in itself. `SPRITE_TAB`
@@ -435,7 +558,7 @@ impl SurfaceEndpoint {
         vec![
             (
                 OsString::from(SOCKET_VARIABLE),
-                OsString::from(self.socket.as_os_str()),
+                OsString::from(self.socket_path().as_os_str()),
             ),
             (OsString::from(KEY_VARIABLE), OsString::from(self.key_hex())),
             (
@@ -450,172 +573,74 @@ impl SurfaceEndpoint {
     }
 
     pub fn close(&mut self) {
-        if self.listener.is_none() {
-            return;
-        }
-        self.running.store(false, Ordering::SeqCst);
-        // Wakes the thread parked in `accept`, which then sees `running` down.
-        let _ = UnixStream::connect(&self.socket);
-        if let Some(thread) = self.listener.take() {
-            let _ = thread.join();
-        }
-        let _ = fs::remove_file(&self.socket);
-    }
-}
-
-impl Drop for SurfaceEndpoint {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
-
-fn serve(
-    listener: &UnixListener,
-    key: &Arc<ObservationKey>,
-    running: &Arc<AtomicBool>,
-    requests: &async_channel::Sender<SurfaceRequest>,
-) {
-    let live = Arc::new(AtomicUsize::new(0));
-    for connection in listener.incoming() {
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
-        let Ok(stream) = connection else { continue };
-        if live.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-            drop(stream);
-            continue;
-        }
-        live.fetch_add(1, Ordering::SeqCst);
-        let spawned = std::thread::Builder::new()
-            .name("sprite-surface-connection".to_owned())
-            .spawn({
-                let key = Arc::clone(key);
-                let running = Arc::clone(running);
-                let requests = requests.clone();
-                let live = Arc::clone(&live);
-                move || {
-                    converse(stream, &key, &running, &requests);
-                    live.fetch_sub(1, Ordering::SeqCst);
-                }
-            });
-        if spawned.is_err() {
-            live.fetch_sub(1, Ordering::SeqCst);
-        }
+        self.transport.close();
     }
 }
 
 static NEXT_SURFACE: AtomicU64 = AtomicU64::new(1);
 
-fn converse(
-    mut stream: UnixStream,
-    key: &ObservationKey,
-    running: &AtomicBool,
-    requests: &async_channel::Sender<SurfaceRequest>,
-) {
-    let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
-        return;
-    };
-    // Only the handshake is timed: once a Surface is open its program may be
-    // silent for hours, and the read must block. A failure to set the
-    // timeout is not worth refusing over; the read simply blocks as before.
-    let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-    let mut line = String::new();
-    if (&mut reader)
-        .take(MAX_MESSAGE_BYTES)
-        .read_line(&mut line)
-        .is_err()
-    {
-        refuse(&mut stream, &Refusal::Denied.reason());
-        return;
-    }
-    // The key is the first token; the message follows it. Split before
-    // authenticating so an unauthorised caller's message is never parsed.
-    let line = line.trim_end_matches(['\r', '\n']);
-    let (presented, body) = line.split_once(' ').unwrap_or((line, ""));
-    if !running.load(Ordering::SeqCst) || !key.matches(presented) {
-        refuse(&mut stream, &Refusal::Denied.reason());
-        return;
-    }
-    let _ = stream.set_read_timeout(None);
-
-    let message: Value = match serde_json::from_str(body) {
-        Ok(message) => message,
-        Err(error) => {
-            refuse(
-                &mut stream,
-                &Refusal::Malformed(format!("the first message is not JSON: {error}")).reason(),
-            );
-            return;
+fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceRequest>) {
+    let Authenticated {
+        mut stream,
+        reader,
+        body,
+        ..
+    } = connection;
+    match first_line(&body) {
+        Ok(FirstRequest::Open { pane, open }) => {
+            serve_surface(stream, reader, pane, open, requests)
         }
-    };
-    match message.get("type").and_then(Value::as_str) {
-        Some("open") => serve_surface(stream, reader, &message, requests),
-        Some("capabilities") => json_one_shot(&mut stream, requests, |reply| {
-            capabilities_request(&message, reply)
-        }),
-        Some("focus") => one_shot(&mut stream, requests, event_focused(), |reply| {
-            let pane = pane_of(&message)?;
-            let target = focus_target(&message)?;
-            Ok(SurfaceRequest::FocusPane {
+        Ok(FirstRequest::Capabilities {
+            pane,
+            owner_pid,
+            return_target,
+        }) => one_shot(
+            &mut stream,
+            requests,
+            |reply| SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target,
+                reply,
+            },
+            |value: Value| value.to_string(),
+        ),
+        Ok(FirstRequest::Focus { pane, target }) => one_shot(
+            &mut stream,
+            requests,
+            |reply| SurfaceRequest::FocusPane {
                 pane,
                 target,
                 reply,
-            })
-        }),
-        Some("token") => one_shot(&mut stream, requests, event_registered(), |reply| {
-            register_request(&message, reply)
-        }),
-        other => refuse(
-            &mut stream,
-            &Refusal::Malformed(format!(
-                "the first message is open, capabilities, focus, or token, not {}",
-                other.unwrap_or("nothing")
-            ))
-            .reason(),
+            },
+            |_| event_focused(),
         ),
-    }
-}
-
-fn json_one_shot(
-    stream: &mut UnixStream,
-    requests: &async_channel::Sender<SurfaceRequest>,
-    request: impl FnOnce(JsonReply) -> Result<SurfaceRequest, Refusal>,
-) {
-    let (reply, answer) = std::sync::mpsc::sync_channel(1);
-    let request = match request(reply) {
-        Ok(request) => request,
-        Err(refusal) => {
-            refuse(stream, &refusal.reason());
-            return;
-        }
-    };
-    if requests.send_blocking(request).is_err() {
-        refuse(stream, NOT_ANSWERING);
-        return;
-    }
-    match answer.recv_timeout(REPLY_TIMEOUT) {
-        Ok(Ok(answer)) => {
-            let _ = writeln!(stream, "{answer}");
-            let _ = stream.shutdown(Shutdown::Write);
-        }
-        Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
-        Err(_) => refuse(stream, NO_ANSWER),
+        Ok(FirstRequest::Token {
+            name,
+            default,
+            description,
+        }) => one_shot(
+            &mut stream,
+            requests,
+            |reply| SurfaceRequest::RegisterToken {
+                name,
+                default,
+                description,
+                reply,
+            },
+            |_| event_registered(),
+        ),
+        Err(refusal) => refuse(&mut stream, &refusal.reason()),
     }
 }
 
 fn serve_surface(
     mut stream: UnixStream,
     mut reader: BufReader<UnixStream>,
-    message: &Value,
+    pane: PaneId,
+    open: Open,
     requests: &async_channel::Sender<SurfaceRequest>,
 ) {
-    let (pane, open) = match parse_open(message) {
-        Ok(parsed) => parsed,
-        Err(refusal) => {
-            refuse(&mut stream, &refusal.reason());
-            return;
-        }
-    };
     let Ok(connection) = SurfaceConnection::new(&stream) else {
         return;
     };
@@ -626,22 +651,14 @@ fn serve_surface(
     // do, or the two race for the socket exactly as they used to.
     let handle = connection.clone();
     let id = SurfaceId(NEXT_SURFACE.fetch_add(1, Ordering::SeqCst));
-    let (reply, answer) = std::sync::mpsc::sync_channel(1);
-    if requests
-        .send_blocking(SurfaceRequest::Open {
-            id,
-            pane,
-            open,
-            connection,
-            reply,
-        })
-        .is_err()
-    {
-        handle.abandon();
-        refuse(&mut stream, NOT_ANSWERING);
-        return;
-    }
-    match answer.recv_timeout(REPLY_TIMEOUT) {
+    use crate::workspace::{RelayError, relay};
+    match relay(requests, REPLY_TIMEOUT, |reply| SurfaceRequest::Open {
+        id,
+        pane,
+        open,
+        connection,
+        reply,
+    }) {
         Ok(Ok(())) => {
             let _ = handle.establish(&event_opened(id));
         }
@@ -650,7 +667,12 @@ fn serve_surface(
             refuse(&mut stream, &refusal.reason());
             return;
         }
-        Err(_) => {
+        Err(RelayError::Disconnected) => {
+            handle.abandon();
+            refuse(&mut stream, NOT_ANSWERING);
+            return;
+        }
+        Err(RelayError::Timeout) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
             // The `Open` may still be sitting in the window's queue and get
@@ -668,78 +690,21 @@ fn serve_surface(
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        let message: Value = match serde_json::from_str(line.trim()) {
-            Ok(message) => message,
-            Err(error) => {
-                if handle.send(&event_refused(
-                    &Refusal::Malformed(error.to_string()).reason(),
-                )) {
-                    continue;
-                }
-                break;
-            }
-        };
-        let request = match message.get("type").and_then(Value::as_str) {
-            Some("update") => match message.get("description") {
-                Some(description) => SurfaceRequest::Update {
-                    id,
-                    pane,
-                    description: description.clone(),
-                },
-                None => {
-                    if handle.send(&event_refused(
-                        &Refusal::Malformed("update needs a description".to_owned()).reason(),
-                    )) {
-                        continue;
-                    }
-                    break;
-                }
+        let request = match stream_line(line.trim()) {
+            Ok(Message::Update(description)) => SurfaceRequest::Update {
+                id,
+                pane,
+                description,
             },
-            Some("focus") => match focus_target(&message) {
-                Ok(target) => SurfaceRequest::Focus { id, pane, target },
-                Err(refusal) => {
-                    if handle.send(&event_refused(&refusal.reason())) {
-                        continue;
-                    }
-                    break;
-                }
-            },
-            Some(kind) if crate::surface::grid::is_op(kind) => {
-                match crate::surface::grid::parse_ops(&message) {
-                    Ok(ops) => SurfaceRequest::Grid { id, pane, ops },
-                    Err(refusal) => {
-                        if handle.send(&event_refused(&refusal.reason())) {
-                            continue;
-                        }
-                        break;
-                    }
-                }
-            }
-            Some(kind) if crate::surface::list::is_op(kind) => {
-                match crate::surface::list::parse_op(&message) {
-                    Ok(op) => SurfaceRequest::List { id, pane, op },
-                    Err(refusal) => {
-                        if handle.send(&event_refused(&refusal.reason())) {
-                            continue;
-                        }
-                        break;
-                    }
-                }
-            }
-            Some("close") => {
-                // The window answers `closed` through the connection and drops
-                // its end; this thread has nothing more to read.
+            Ok(Message::Focus(target)) => SurfaceRequest::Focus { id, pane, target },
+            Ok(Message::Grid(ops)) => SurfaceRequest::Grid { id, pane, ops },
+            Ok(Message::List(op)) => SurfaceRequest::List { id, pane, op },
+            Ok(Message::Close) => {
                 let _ = requests.send_blocking(SurfaceRequest::Close { id, pane });
                 return;
             }
-            other => {
-                if handle.send(&event_refused(
-                    &Refusal::Malformed(format!(
-                        "a message is update, focus, close, a grid operation, or a list operation, not {}",
-                        other.unwrap_or("nothing")
-                    ))
-                    .reason(),
-                )) {
+            Err(refusal) => {
+                if handle.send(&event_refused(&refusal.reason())) {
                     continue;
                 }
                 break;
@@ -753,393 +718,27 @@ fn serve_surface(
 }
 
 /// Asks the window once and relays its answer, then ends the connection.
-fn one_shot(
+fn one_shot<T>(
     stream: &mut UnixStream,
     requests: &async_channel::Sender<SurfaceRequest>,
-    success: String,
-    request: impl FnOnce(Reply) -> Result<SurfaceRequest, Refusal>,
+    request: impl FnOnce(SyncSender<Result<T, Refusal>>) -> SurfaceRequest,
+    success: impl FnOnce(T) -> String,
 ) {
-    let (reply, answer) = std::sync::mpsc::sync_channel(1);
-    let request = match request(reply) {
-        Ok(request) => request,
-        Err(refusal) => {
-            refuse(stream, &refusal.reason());
-            return;
-        }
-    };
-    if requests.send_blocking(request).is_err() {
-        refuse(stream, NOT_ANSWERING);
-        return;
-    }
-    match answer.recv_timeout(REPLY_TIMEOUT) {
-        Ok(Ok(())) => {
-            let _ = writeln!(stream, "{success}");
+    use crate::workspace::{RelayError, relay};
+    match relay(requests, REPLY_TIMEOUT, request) {
+        Ok(Ok(value)) => {
+            let _ = writeln!(stream, "{}", success(value));
             let _ = stream.shutdown(Shutdown::Write);
         }
         Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
-        Err(_) => refuse(stream, NO_ANSWER),
+        Err(RelayError::Disconnected) => refuse(stream, NOT_ANSWERING),
+        Err(RelayError::Timeout) => refuse(stream, NO_ANSWER),
     }
 }
 
 fn refuse(stream: &mut UnixStream, reason: &str) {
     let _ = writeln!(stream, "{}", event_refused(reason));
     let _ = stream.shutdown(Shutdown::Write);
-}
-
-fn pane_of(message: &Value) -> Result<PaneId, Refusal> {
-    message
-        .get("pane")
-        .and_then(Value::as_u64)
-        .map(PaneId)
-        .ok_or_else(|| Refusal::Malformed("a pane id is needed".to_owned()))
-}
-
-const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-
-fn safe_integer(value: Option<&Value>, reason: &str) -> Result<u64, Refusal> {
-    value
-        .and_then(Value::as_u64)
-        .filter(|value| *value <= MAX_SAFE_INTEGER)
-        .ok_or_else(|| Refusal::Malformed(reason.to_owned()))
-}
-
-fn capabilities_request(message: &Value, reply: JsonReply) -> Result<SurfaceRequest, Refusal> {
-    if safe_integer(message.get("version"), "a version is needed")? != VERSION {
-        return Err(Refusal::UnsupportedVersion);
-    }
-    let pane = safe_integer(message.get("pane"), "a pane id is needed").map(PaneId)?;
-    let owner_pid = safe_integer(
-        message.get("owner_pid"),
-        "owner_pid is a positive process id",
-    )?;
-    let owner_pid = u32::try_from(owner_pid)
-        .ok()
-        .filter(|pid| *pid > 0)
-        .ok_or_else(|| Refusal::Malformed("owner_pid is a positive process id".to_owned()))?;
-    let return_target = match message.get("return_target") {
-        Some(Value::String(target)) if target == "terminal" => ReturnTarget::Terminal,
-        Some(value) => safe_integer(Some(value), "return_target is \"terminal\" or a Surface id")
-            .and_then(|id| {
-            (id > 0)
-                .then_some(ReturnTarget::Surface(SurfaceId(id)))
-                .ok_or_else(|| {
-                    Refusal::Malformed("return_target is \"terminal\" or a Surface id".to_owned())
-                })
-        })?,
-        None => {
-            return Err(Refusal::Malformed(
-                "return_target is \"terminal\" or a Surface id".to_owned(),
-            ));
-        }
-    };
-    Ok(SurfaceRequest::Capabilities {
-        pane,
-        owner_pid,
-        return_target,
-        reply,
-    })
-}
-
-pub(crate) fn capabilities(eligible: bool) -> Value {
-    json!({
-        "type": "capabilities",
-        "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1"],
-        "limits": {
-            "message_bytes": MAX_MESSAGE_BYTES,
-            "list_rows": 100_000,
-            "asset_bytes": 67_108_864,
-            "asset_count": 4_096
-        },
-        "eligible": eligible
-    })
-}
-
-/// Where a `focus` message points: absent or `"terminal"` for the pane's
-/// terminal, a number for another Surface the pane hosts.
-fn focus_target(message: &Value) -> Result<FocusTarget, Refusal> {
-    match message.get("target") {
-        None => Ok(FocusTarget::Terminal),
-        Some(Value::String(name)) if name == "terminal" => Ok(FocusTarget::Terminal),
-        Some(Value::Number(number)) if number.as_u64().is_some() => Ok(FocusTarget::Surface(
-            SurfaceId(number.as_u64().expect("checked")),
-        )),
-        Some(_) => Err(Refusal::Malformed(
-            "a focus target is \"terminal\" or a Surface id".to_owned(),
-        )),
-    }
-}
-
-fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
-    if message.get("version").and_then(Value::as_u64) != Some(VERSION) {
-        return Err(Refusal::UnsupportedVersion);
-    }
-    let pane = pane_of(message)?;
-    let position = message
-        .get("position")
-        .and_then(Value::as_str)
-        .and_then(Position::parse)
-        .ok_or_else(|| Refusal::Malformed("position is fill, dock, or overlay".to_owned()))?;
-    let side = match message.get("side").and_then(Value::as_str) {
-        None => Side::Left,
-        Some(name) => Side::parse(name)
-            .ok_or_else(|| Refusal::Malformed("side is left or right".to_owned()))?,
-    };
-    let size = match message.get("size") {
-        None => DEFAULT_DOCK_SIZE,
-        Some(value) => value
-            .as_f64()
-            .map(|size| (size as f32).clamp(MIN_DOCK_SIZE, MAX_DOCK_SIZE))
-            .ok_or_else(|| Refusal::Malformed("size is a number of pixels".to_owned()))?,
-    };
-    let focus = match message.get("focus") {
-        None => true,
-        Some(Value::Bool(focus)) => *focus,
-        Some(_) => return Err(Refusal::Malformed("focus is true or false".to_owned())),
-    };
-    let owner_pid = match message.get("owner_pid") {
-        None => None,
-        value => Some(
-            u32::try_from(safe_integer(value, "owner_pid is a positive process id")?)
-                .ok()
-                .filter(|pid| *pid > 0)
-                .ok_or_else(|| {
-                    Refusal::Malformed("owner_pid is a positive process id".to_owned())
-                })?,
-        ),
-    };
-    let return_target = match message.get("return_target") {
-        None => None,
-        Some(Value::String(target)) if target == "terminal" => Some(ReturnTarget::Terminal),
-        Some(value) => Some(
-            safe_integer(Some(value), "return_target is \"terminal\" or a Surface id").and_then(
-                |id| {
-                    (id > 0)
-                        .then_some(ReturnTarget::Surface(SurfaceId(id)))
-                        .ok_or_else(|| {
-                            Refusal::Malformed(
-                                "return_target is \"terminal\" or a Surface id".to_owned(),
-                            )
-                        })
-                },
-            )?,
-        ),
-    };
-    let resizable = match message.get("resizable") {
-        None => false,
-        Some(Value::Bool(resizable)) => *resizable,
-        Some(_) => return Err(Refusal::Malformed("resizable is true or false".to_owned())),
-    };
-    let ownership_is_valid = match position {
-        Position::Fill => return_target.is_none() && !resizable,
-        Position::Dock => {
-            let legacy = owner_pid.is_none() && return_target.is_none() && !resizable;
-            let owned = owner_pid.is_some() && return_target.is_some() && resizable;
-            legacy || owned
-        }
-        Position::Overlay => owner_pid.is_none() && return_target.is_none() && !resizable,
-    };
-    if !ownership_is_valid {
-        return Err(Refusal::Malformed(
-            "owned docks need owner_pid, return_target, and resizable true".to_owned(),
-        ));
-    }
-    let description = message
-        .get("description")
-        .cloned()
-        .ok_or_else(|| Refusal::Malformed("open needs a description".to_owned()))?;
-    Ok((
-        pane,
-        Open {
-            position,
-            side,
-            size,
-            focus,
-            owner_pid,
-            return_target,
-            resizable,
-            description,
-        },
-    ))
-}
-
-fn register_request(message: &Value, reply: Reply) -> Result<SurfaceRequest, Refusal> {
-    let name = message
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| {
-            !name.is_empty()
-                && name.len() <= 128
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        })
-        .ok_or_else(|| {
-            Refusal::Malformed(
-                "a token name is 1 to 128 letters, digits, dots, underscores, or dashes".to_owned(),
-            )
-        })?;
-    let default = message
-        .get("default")
-        .and_then(Value::as_str)
-        .and_then(Colors::parse_hex)
-        .ok_or_else(|| Refusal::Malformed("default is a #rrggbb colour".to_owned()))?;
-    let description = message
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    Ok(SurfaceRequest::RegisterToken {
-        name: name.to_owned(),
-        default,
-        description,
-        reply,
-    })
-}
-
-// Events, one JSON line each. `json!` in this workspace writes object keys
-// in source order, not sorted, so each literal puts `"type"` first: a reader
-// can tell what a line is without scanning the rest of it.
-
-pub fn event_opened(id: SurfaceId) -> String {
-    json!({ "type": "opened", "surface": id.0 }).to_string()
-}
-
-pub fn event_refused(reason: &str) -> String {
-    json!({ "type": "refused", "reason": reason }).to_string()
-}
-
-pub fn event_applied(operation: &str, revision: Option<u64>) -> String {
-    match revision {
-        Some(revision) => {
-            json!({ "type": "applied", "operation": operation, "revision": revision })
-        }
-        None => json!({ "type": "applied", "operation": operation }),
-    }
-    .to_string()
-}
-
-pub fn event_list_click(
-    revision: u64,
-    id: &str,
-    count: u32,
-    button: &str,
-    modifiers: &str,
-) -> String {
-    json!({ "type": "list_click", "revision": revision, "id": id, "count": count, "button": button, "modifiers": modifiers }).to_string()
-}
-
-pub fn event_list_action(revision: u64, action: &str) -> String {
-    json!({ "type": "list_action", "revision": revision, "action": action }).to_string()
-}
-
-pub fn event_list_scroll(revision: u64, top: &str, offset: f32, visible_rows: u32) -> String {
-    json!({ "type": "list_scroll", "revision": revision, "top": top, "offset": offset, "visible_rows": visible_rows }).to_string()
-}
-
-pub fn event_dock_size(width: u32) -> String {
-    json!({ "type": "dock_size", "width": width }).to_string()
-}
-
-pub fn event_registered() -> String {
-    json!({ "type": "registered" }).to_string()
-}
-
-pub fn event_focused() -> String {
-    json!({ "type": "focused" }).to_string()
-}
-
-/// A key press on a Surface. `text` is what the press typed, with the
-/// keyboard layout applied — `!` for shift-1 on a US layout — and is absent
-/// for a press that typed nothing, such as `ctrl-a` or `escape`. A program
-/// that wants what the person typed reads `text`; one that wants the key
-/// reads `key`. A committed composition arrives through `event_text`.
-pub fn event_input(keystroke: &gpui::Keystroke) -> String {
-    match keystroke
-        .key_char
-        .as_deref()
-        .filter(|text| !text.is_empty())
-    {
-        Some(text) => json!({ "type": "input", "key": keystroke.unparse(), "text": text }),
-        None => json!({ "type": "input", "key": keystroke.unparse() }),
-    }
-    .to_string()
-}
-
-/// The clipboard, pasted while a Surface held the keyboard. Sent to the
-/// Surface rather than written to the pty, whose reader — the shell — would
-/// otherwise receive it after the program that owned the Surface exited.
-pub fn event_paste(text: &str) -> String {
-    json!({ "type": "paste", "text": text }).to_string()
-}
-
-/// Text an input method committed while a Surface held the keyboard: a dead
-/// key sequence or a conversion. No `key`, because no single key produced it.
-pub fn event_text(text: &str) -> String {
-    json!({ "type": "input", "text": text }).to_string()
-}
-
-/// The pointer on a grid Surface, in cells. `button` is `left`, `right`,
-/// `middle`, or `wheel`; `action` is `press`, `drag`, or `release` for a
-/// button and `up`, `down`, `left`, or `right` for the wheel. Written in the
-/// order a reader scans: what, where.
-pub fn event_mouse(button: &str, action: &str, modifiers: &str, row: u16, col: u16) -> String {
-    json!({
-        "type": "mouse", "button": button, "action": action,
-        "modifiers": modifiers, "row": row, "col": col,
-    })
-    .to_string()
-}
-
-/// Modifiers as Neovim's `nvim_input_mouse` spells them: one letter each,
-/// joined by dashes, in Neovim's own order. `D` is the platform key, which
-/// Neovim calls "command" on a Mac and "super" elsewhere.
-pub fn neovim_modifiers(modifiers: &gpui::Modifiers) -> String {
-    let mut letters = Vec::with_capacity(4);
-    if modifiers.control {
-        letters.push("C");
-    }
-    if modifiers.shift {
-        letters.push("S");
-    }
-    if modifiers.alt {
-        letters.push("A");
-    }
-    if modifiers.platform {
-        letters.push("D");
-    }
-    letters.join("-")
-}
-
-pub fn event_resize(width: u32, height: u32) -> String {
-    json!({ "type": "resize", "width": width, "height": height }).to_string()
-}
-
-/// A grid Surface's size in cells as well as pixels, so an editor's adapter
-/// can resize its grid without knowing the pane's cell metrics.
-pub fn event_grid_resize(width: u32, height: u32, cols: u16, rows: u16) -> String {
-    json!({ "type": "resize", "width": width, "height": height, "cols": cols, "rows": rows })
-        .to_string()
-}
-
-pub fn event_click(name: &str) -> String {
-    json!({ "type": "event", "name": name }).to_string()
-}
-
-pub fn event_focus() -> String {
-    json!({ "type": "focus" }).to_string()
-}
-
-pub fn event_blur() -> String {
-    json!({ "type": "blur" }).to_string()
-}
-
-pub fn event_warning(message: &str) -> String {
-    json!({ "type": "warning", "message": message }).to_string()
-}
-
-pub fn event_closed() -> String {
-    json!({ "type": "closed" }).to_string()
 }
 
 #[cfg(test)]
@@ -1151,52 +750,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
-
-    #[test]
-    fn shared_wire_fixture_matches_discovery_and_outbound_serialization() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/surface-list-v1.json"
-        ))
-        .expect("shared fixture");
-        let request = &fixture["capabilities"]["request"];
-        let (reply, _receiver) = mpsc::sync_channel(1);
-        assert!(matches!(
-            capabilities_request(request, reply),
-            Ok(SurfaceRequest::Capabilities {
-                pane: PaneId(9),
-                owner_pid: 1234,
-                return_target: ReturnTarget::Terminal,
-                ..
-            })
-        ));
-        assert_eq!(capabilities(true), fixture["capabilities"]["reply"]);
-        for pair in fixture["operations"].as_array().expect("operations") {
-            let expected = &pair["reply"];
-            if expected["type"] == "applied" {
-                let operation = pair["request"]["type"].as_str().expect("operation");
-                let revision = pair["request"]["revision"].as_u64();
-                let actual: Value =
-                    serde_json::from_str(&event_applied(operation, revision)).unwrap();
-                assert_eq!(&actual, expected);
-            } else {
-                let actual: Value =
-                    serde_json::from_str(&event_refused(expected["reason"].as_str().unwrap()))
-                        .unwrap();
-                assert_eq!(&actual, expected);
-            }
-        }
-        let events = fixture["events"].as_array().expect("events");
-        let emitted = [
-            event_list_click(1, "r2", 1, "left", ""),
-            event_list_action(1, "root-toggle"),
-            event_list_scroll(1, "r2", 3.0, 24),
-            event_dock_size(300),
-        ];
-        assert_eq!(emitted.len(), events.len());
-        for (actual, expected) in emitted.iter().zip(events) {
-            assert_eq!(&serde_json::from_str::<Value>(actual).unwrap(), expected);
-        }
-    }
 
     /// A private directory of this test's own, removed when it is dropped.
     /// Named as short as the observation tests name theirs, because it sits
@@ -1277,55 +830,348 @@ mod tests {
     }
 
     #[test]
-    fn an_owned_dock_open_carries_its_owner_return_target_and_resize_policy() {
-        let mut message = open_message(3);
-        message["owner_pid"] = json!(41);
-        message["return_target"] = json!(7);
-        message["resizable"] = json!(true);
-
-        let (pane, open) = parse_open(&message).expect("owned open");
-        assert_eq!(pane, PaneId(3));
-        assert_eq!(open.owner_pid, Some(41));
-        assert_eq!(
-            open.return_target,
-            Some(ReturnTarget::Surface(SurfaceId(7)))
+    fn a_huge_batch_stops_consuming_when_the_peer_stops_reading() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        let line = "x".repeat(1023);
+        let consumed = std::cell::Cell::new(0usize);
+        let lines = std::iter::repeat_n(line.as_str(), 1_000_000_000).inspect(|_| {
+            consumed.set(consumed.get() + 1);
+            assert!(
+                consumed.get() <= 4096,
+                "iterator consumed past the bounded transport window"
+            );
+        });
+        assert!(!connection.send_batch(lines));
+        assert!(connection.is_dead());
+        let (_, buffer, queued) = connection.test_buffer_state();
+        assert!(buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
+        println!(
+            "backpressured batch consumed {} of 1000000000 lines",
+            consumed.get()
         );
-        assert!(open.resizable);
     }
 
     #[test]
-    fn partial_or_misplaced_ownership_is_refused_during_open_parsing() {
-        let mut owner_only_dock = open_message(3);
-        owner_only_dock["owner_pid"] = json!(41);
-        let mut target_only_dock = open_message(3);
-        target_only_dock["return_target"] = json!("terminal");
-        let mut fixed_owned_dock = open_message(3);
-        fixed_owned_dock["owner_pid"] = json!(41);
-        fixed_owned_dock["return_target"] = json!("terminal");
-        fixed_owned_dock["resizable"] = json!(false);
-        let mut owned_overlay = open_message(3);
-        owned_overlay["position"] = json!("overlay");
-        owned_overlay["owner_pid"] = json!(41);
-
-        for message in [
-            owner_only_dock,
-            target_only_dock,
-            fixed_owned_dock,
-            owned_overlay,
-        ] {
-            assert!(matches!(parse_open(&message), Err(Refusal::Malformed(_))));
-        }
-
-        let mut registered_fill = open_message(3);
-        registered_fill["position"] = json!("fill");
-        registered_fill["owner_pid"] = json!(41);
-        assert_eq!(
-            parse_open(&registered_fill)
-                .expect("registered fill")
-                .1
-                .owner_pid,
-            Some(41)
+    fn a_failed_chunk_does_not_consume_the_remaining_iterator() {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        drop(peer);
+        let line = "x".repeat(1023);
+        let consumed = std::cell::Cell::new(0);
+        assert!(
+            !connection.send_batch(
+                std::iter::repeat_n(line.as_str(), 1_000_000_000)
+                    .inspect(|_| consumed.set(consumed.get() + 1))
+            )
         );
+        assert_eq!(consumed.get(), EVENT_BUFFER_BYTES / 1024);
+        assert!(connection.is_dead());
+    }
+
+    #[test]
+    fn pre_open_overflow_discards_the_queue_and_cannot_establish_later() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let line = "x".repeat(1023);
+        assert!(connection.send_batch(std::iter::repeat_n(
+            line.as_str(),
+            EVENT_BUFFER_BYTES / 1024
+        )));
+        assert_eq!(
+            connection.wire.lock().unwrap().queued.len(),
+            EVENT_BUFFER_BYTES
+        );
+        assert!(!connection.send("overflow"));
+        assert_eq!(connection.wire.lock().unwrap().queued.len(), 0);
+        assert!(!connection.establish(&event_opened(SurfaceId(1))));
+        let (dead, buffer, queued) = connection.test_buffer_state();
+        assert!(dead && buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).unwrap();
+        assert!(
+            received.is_empty(),
+            "neither opened nor queued suffix may escape"
+        );
+    }
+
+    #[test]
+    fn pre_open_gestures_stop_at_the_queue_limit_without_collecting_the_iterator() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let line = "x".repeat(1023);
+        let consumed = std::cell::Cell::new(0);
+        assert!(
+            !connection.send_batch(
+                std::iter::repeat_n(line.as_str(), 1_000_000_000)
+                    .inspect(|_| consumed.set(consumed.get() + 1))
+            )
+        );
+        assert_eq!(consumed.get(), EVENT_BUFFER_BYTES / 1024 + 1);
+        assert!(connection.is_dead());
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(!connection.send(&"x".repeat(EVENT_BUFFER_BYTES)));
+        assert_eq!(connection.test_buffer_state(), (true, 0, 0));
+    }
+
+    #[test]
+    fn chunked_batches_keep_the_gesture_lock_across_every_flush() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        let reader = std::thread::spawn(move || {
+            let mut wire = String::new();
+            peer.read_to_string(&mut wire).unwrap();
+            wire.lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        });
+        std::thread::scope(|scope| {
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            for sender in 0..4 {
+                let connection = connection.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    let line = json!({"sender":sender,"payload":"x".repeat(1024)}).to_string();
+                    barrier.wait();
+                    assert!(connection.send_batch(std::iter::repeat_n(line.as_str(), 128)));
+                });
+            }
+        });
+        connection
+            .wire
+            .lock()
+            .unwrap()
+            .stream
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        let events = reader.join().unwrap();
+        assert_eq!(events.len(), 513);
+        assert_eq!(events[0]["type"], "opened");
+        let mut senders = std::collections::HashSet::new();
+        for chunk in events[1..].chunks_exact(128) {
+            assert!(senders.insert(chunk[0]["sender"].as_u64().unwrap()));
+            assert!(
+                chunk
+                    .iter()
+                    .all(|event| event["sender"] == chunk[0]["sender"])
+            );
+        }
+        let (dead, buffer, queued) = connection.test_buffer_state();
+        assert!(!dead && buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn batches_follow_opened_and_keep_concurrent_gestures_contiguous() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(
+            connection.send_batch([r#"{"type":"queued","n":1}"#, r#"{"type":"queued","n":2}"#])
+        );
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        std::thread::scope(|scope| {
+            for sender in 0..4 {
+                let connection = connection.clone();
+                scope.spawn(move || {
+                    let lines = (0..10)
+                        .map(|i| json!({"sender":sender,"i":i}).to_string())
+                        .collect::<Vec<_>>();
+                    assert!(connection.send_batch(lines.iter().map(String::as_str)));
+                });
+            }
+        });
+        connection
+            .wire
+            .lock()
+            .unwrap()
+            .stream
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        let mut received = String::new();
+        std::io::Read::read_to_string(&mut peer, &mut received).unwrap();
+        let messages = received
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 43);
+        assert_eq!(messages[0]["type"], "opened");
+        assert_eq!(messages[1]["n"], 1);
+        assert_eq!(messages[2]["n"], 2);
+        let mut senders = std::collections::HashSet::new();
+        for chunk in messages[3..].chunks_exact(10) {
+            assert!(senders.insert(chunk[0]["sender"].as_u64().unwrap()));
+            for (i, event) in chunk.iter().enumerate() {
+                assert_eq!(event["sender"], chunk[0]["sender"]);
+                assert_eq!(event["i"], i);
+            }
+        }
+    }
+
+    #[test]
+    fn batch_buffer_is_reused_and_closed_peers_stop_further_sends() {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.send_batch(["one", "two"]));
+        let (pointer, capacity) = {
+            let wire = connection.wire.lock().unwrap();
+            (wire.buffer.as_ptr(), wire.buffer.capacity())
+        };
+        assert!(connection.send_batch(["abc", "def"]));
+        {
+            let wire = connection.wire.lock().unwrap();
+            assert_eq!(
+                (wire.buffer.as_ptr(), wire.buffer.capacity()),
+                (pointer, capacity)
+            );
+        }
+        drop(peer);
+        assert!(!connection.send_batch(["gone"]));
+        assert!(connection.is_dead());
+        assert!(!connection.send_batch(["later"]));
+    }
+
+    #[test]
+    fn a_large_batch_delivers_every_byte_while_the_peer_drains_in_small_chunks() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let opened = event_opened(SurfaceId(1));
+        assert!(connection.establish(&opened));
+        let line = json!({"payload":"x".repeat(2*1024*1024)}).to_string();
+        let expected = format!("{opened}\n{line}\n{line}\n");
+        let reader = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                let count = peer.read(&mut chunk).unwrap();
+                if count == 0 {
+                    break;
+                }
+                received.extend_from_slice(&chunk[..count]);
+            }
+            received
+        });
+        assert!(connection.send_batch([line.as_str(), line.as_str()]));
+        connection
+            .wire
+            .lock()
+            .unwrap()
+            .stream
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        assert_eq!(reader.join().unwrap(), expected.as_bytes());
+    }
+
+    #[test]
+    fn a_backpressured_batch_keeps_its_written_prefix_and_shuts_down_on_timeout() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let opened = event_opened(SurfaceId(1));
+        assert!(connection.establish(&opened));
+        let line = "x".repeat(2 * 1024 * 1024);
+        let expected = format!("{opened}\n{line}\n");
+        assert!(!connection.send_batch([line.as_str()]));
+        assert!(connection.is_dead());
+        assert!(!connection.send("later"));
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).unwrap();
+        assert!(received.len() > opened.len() + 1);
+        assert!(received.len() < expected.len());
+        assert!(expected.as_bytes().starts_with(&received));
+    }
+
+    #[test]
+    fn surface_socket_permissions_and_platform_path_limit_match_observation() {
+        use crate::local_socket::MAX_SOCKET_PATH;
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new();
+        for length in [MAX_SOCKET_PATH, MAX_SOCKET_PATH + 1] {
+            let padding = length - scratch.0.as_os_str().len() - 2 - SOCKET_NAME_BYTES;
+            let directory = scratch.0.join("p".repeat(padding));
+            let (tx, _rx) = async_channel::unbounded();
+            let endpoint = SurfaceEndpoint::open_in(
+                directory.clone(),
+                Arc::new(ObservationKey::generate().unwrap()),
+                tx,
+            );
+            if length > MAX_SOCKET_PATH {
+                assert!(endpoint.is_err());
+            } else {
+                let endpoint = endpoint.unwrap();
+                assert_eq!(endpoint.socket_path().as_os_str().len(), length);
+                assert_eq!(
+                    std::fs::metadata(endpoint.socket_path())
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+                assert_eq!(
+                    std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pipelined_open_update_and_close_survive_authentication_read_ahead() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (seen, received) = mpsc::channel();
+        let worker = window(rx, move |request| {
+            match request {
+                SurfaceRequest::Open { reply, .. } => {
+                    reply.send(Ok(())).unwrap();
+                }
+                SurfaceRequest::Update { description, .. } => {
+                    seen.send(description).unwrap();
+                }
+                SurfaceRequest::Close { .. } => return false,
+                other => panic!("unexpected request: {other:?}"),
+            }
+            true
+        });
+        let (mut stream, mut reader) = connect(&endpoint);
+        write!(stream, "{} {}\n{{\"type\":\"update\",\"description\":{{\"sentinel\":42}}}}\n{{\"type\":\"close\"}}\n", endpoint.key_hex(), open_message(3)).unwrap();
+        assert_eq!(line(&mut reader)["type"], "opened");
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            json!({"sentinel":42})
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn incomplete_and_oversized_first_lines_never_reach_the_window() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        for terminated in [false, true] {
+            let (mut stream, mut reader) = connect(&endpoint);
+            let body = if terminated {
+                "x".repeat(MAX_MESSAGE_BYTES as usize)
+            } else {
+                open_message(3).to_string()
+            };
+            let _ = write!(stream, "{} {body}", endpoint.key_hex());
+            if terminated {
+                let _ = writeln!(stream);
+            }
+            let _ = stream.shutdown(Shutdown::Write);
+            assert_eq!(
+                line(&mut reader),
+                json!({"type":"refused", "reason":"denied"})
+            );
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     #[test]
@@ -1484,9 +1330,11 @@ mod tests {
                 reply,
             } => {
                 assert_eq!(pane, PaneId(3));
-                assert_eq!(open.position, Position::Dock);
-                assert_eq!(open.side, Side::Left);
-                assert_eq!(open.size, 200.0);
+                assert_eq!(open.placement.position(), Position::Dock);
+                assert_eq!(open.placement.side(), Side::Left);
+                assert!(
+                    matches!(open.placement, Placement::Dock { size, .. } if size.pixels() == 200.0)
+                );
                 assert!(!open.focus);
                 reply.send(Ok(())).expect("reply");
                 assert!(connection.send(&event_focus()));
@@ -2017,135 +1865,5 @@ mod tests {
             line(&mut reader)["reason"],
             "malformed: a focus target is \"terminal\" or a Surface id"
         );
-    }
-
-    #[test]
-    fn every_event_is_one_json_line_with_a_type() {
-        for event in [
-            event_opened(SurfaceId(7)),
-            event_refused("denied"),
-            event_registered(),
-            event_focused(),
-            event_resize(240, 812),
-            event_grid_resize(240, 812, 30, 40),
-            event_click("row-1"),
-            event_paste("x"),
-            event_text("x"),
-            event_mouse("left", "press", "", 0, 0),
-            event_focus(),
-            event_blur(),
-            event_warning("unknown token x; using terminal.foreground"),
-            event_closed(),
-        ] {
-            assert!(!event.contains('\n'), "{event}");
-            let value: Value = serde_json::from_str(&event).expect("json");
-            assert!(value["type"].is_string(), "{event}");
-        }
-        // `json!` in this workspace preserves source order, because the
-        // workspace asks `serde_json` for `preserve_order`: the order is
-        // Sprite's own guarantee, so an exact-text check below is legitimate
-        // and not a hostage to some other crate's feature list. The two
-        // checks that follow compare parsed values anyway, since what they
-        // are about is the shape rather than the order.
-        assert_eq!(
-            serde_json::from_str::<Value>(&event_opened(SurfaceId(7))).expect("json"),
-            json!({"surface":7,"type":"opened"})
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(&event_click("row-1")).expect("json"),
-            json!({"name":"row-1","type":"event"})
-        );
-        assert_eq!(
-            event_grid_resize(240, 812, 30, 40),
-            r#"{"type":"resize","width":240,"height":812,"cols":30,"rows":40}"#
-        );
-    }
-
-    fn keystroke(key: &str, key_char: Option<&str>, modifiers: gpui::Modifiers) -> gpui::Keystroke {
-        gpui::Keystroke {
-            modifiers,
-            key: key.to_owned(),
-            key_char: key_char.map(str::to_owned),
-        }
-    }
-
-    #[test]
-    fn a_key_that_produced_text_carries_it() {
-        let shift = gpui::Modifiers {
-            shift: true,
-            ..gpui::Modifiers::default()
-        };
-        assert_eq!(
-            serde_json::from_str::<Value>(&event_input(&keystroke("1", Some("!"), shift)))
-                .expect("json"),
-            json!({"type":"input","key":"shift-1","text":"!"})
-        );
-    }
-
-    #[test]
-    fn a_key_that_produced_no_text_carries_none() {
-        let control = gpui::Modifiers {
-            control: true,
-            ..gpui::Modifiers::default()
-        };
-        assert_eq!(
-            serde_json::from_str::<Value>(&event_input(&keystroke("a", None, control)))
-                .expect("json"),
-            json!({"type":"input","key":"ctrl-a"})
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(&event_input(&keystroke(
-                "escape",
-                Some(""),
-                gpui::Modifiers::default()
-            )))
-            .expect("json"),
-            json!({"type":"input","key":"escape"})
-        );
-    }
-
-    #[test]
-    fn a_paste_is_one_line_with_its_text() {
-        let event = event_paste("ls -la\n<b>");
-        assert!(!event.contains('\n'), "{event}");
-        assert_eq!(
-            serde_json::from_str::<Value>(&event).expect("json"),
-            json!({"type":"paste","text":"ls -la\n<b>"})
-        );
-    }
-
-    #[test]
-    fn a_committed_composition_is_text_without_a_key() {
-        let event = event_text("é");
-        assert!(!event.contains('\n'), "{event}");
-        let value: Value = serde_json::from_str(&event).expect("json");
-        assert_eq!(value, json!({"type":"input","text":"é"}));
-        assert!(value.get("key").is_none());
-    }
-
-    #[test]
-    fn a_mouse_event_names_button_action_modifiers_and_cell() {
-        assert_eq!(
-            event_mouse("left", "press", "C-S", 3, 17),
-            r#"{"type":"mouse","button":"left","action":"press","modifiers":"C-S","row":3,"col":17}"#
-        );
-    }
-
-    #[test]
-    fn modifiers_are_spelled_as_neovim_spells_them() {
-        let all = gpui::Modifiers {
-            control: true,
-            alt: true,
-            shift: true,
-            platform: true,
-            ..gpui::Modifiers::default()
-        };
-        assert_eq!(neovim_modifiers(&all), "C-S-A-D");
-        assert_eq!(neovim_modifiers(&gpui::Modifiers::default()), "");
-        let shift = gpui::Modifiers {
-            shift: true,
-            ..gpui::Modifiers::default()
-        };
-        assert_eq!(neovim_modifiers(&shift), "S");
     }
 }

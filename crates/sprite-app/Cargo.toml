@@ -1,7 +1,7 @@
 [package]
 name = "sprite-app"
-# The crate ships a second binary for the observation benchmark, so without
-# this `cargo run -p sprite-app` cannot tell which one is meant.
+# The crate ships benchmark binaries, so `cargo run -p sprite-app` needs
+# an explicit default to choose the application.
 default-run = "sprite"
 version.workspace = true
 edition.workspace = true
@@ -16,7 +16,12 @@ path = "src/main.rs"
 name = "sprite-observation-bench"
 path = "src/bin/sprite-observation-bench.rs"
 
+[[bin]]
+name = "sprite-paint-bench"
+path = "src/bin/sprite-paint-bench.rs"
+
 [dependencies]
+serde = { workspace = true }
 async-channel = { workspace = true }
 image = { workspace = true }
 resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
@@ -26,6 +31,7 @@ sprite-pane = { workspace = true }
 sprite-term = { workspace = true }
 
 [dev-dependencies]
+proptest = { version = "=1.10.0", default-features = false, features = ["std"] }
 serde_json = { workspace = true }
 gpui = { workspace = true, features = ["test-support"] }
 

@@ -67,9 +67,13 @@ fn interactive_shell() -> (TerminalSession, SnapshotPump) {
     // `-i` because job control is what puts a started program into its own
     // process group; a shell without it runs everything in its own.
     let config = SessionConfig::command("/bin/sh", args(&["-i"]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     session

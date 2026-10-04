@@ -16,8 +16,12 @@ fn args(values: &[&str]) -> Vec<OsString> {
 #[test]
 fn child_exit_is_reported() {
     let config = SessionConfig::command("/bin/sh", args(&["-c", "exit 7"]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
 
     events.expect_ready();
 
@@ -38,8 +42,12 @@ fn child_exit_is_reported() {
 #[test]
 fn missing_executable_reports_spawn_error() {
     let config = SessionConfig::command("/nonexistent/sprite-missing-program", Vec::new());
-    let mut session = TerminalSession::spawn(config).expect("spawn returns before the child runs");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(config).expect("spawn returns before the child runs");
+    let events = EventPump::new(events);
 
     match events.next() {
         TerminalEvent::Error(error) => {
@@ -60,27 +68,13 @@ fn missing_executable_reports_spawn_error() {
 }
 
 #[test]
-fn each_stream_is_taken_once() {
-    let config = SessionConfig::command("/bin/sh", args(&["-c", "exit 0"]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-
-    assert!(session.take_event_stream().is_ok());
-    assert!(
-        session.take_event_stream().is_err(),
-        "the event stream has a single owner"
-    );
-
-    assert!(session.take_snapshot_stream().is_ok());
-    assert!(
-        session.take_snapshot_stream().is_err(),
-        "the snapshot stream has a single owner"
-    );
-}
-
-#[test]
 fn begin_shutdown_is_idempotent() {
     let config = SessionConfig::command("/bin/sh", args(&["-c", "exit 0"]));
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
+    let sprite_term::Spawned {
+        mut session,
+        events: _events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
 
     let handle = session
         .begin_shutdown()
@@ -110,10 +104,13 @@ fn the_login_shell_carries_sprite_identity() {
         .to_owned();
 
     let config = SessionConfig::login_shell().expect("resolve a login shell");
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots =
-        support::SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = support::SnapshotPump::new(snapshots);
     events.expect_ready();
 
     // Every marker is written as two adjacent shell strings, so the command the
@@ -212,14 +209,17 @@ fn marker_fields(text: &str, marker: &str) -> Vec<String> {
 fn shutdown_reaps_the_child_and_is_idempotent() {
     // `exec` replaces the shell, so the recorded child is the sleeping process
     // itself rather than a shell that would exit on its own.
-    let mut session = TerminalSession::spawn(SessionConfig::command(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
         "/bin/sh",
         args(&["-c", "printf 'PID''S:%s\\n' \"$$\"; exec sleep 60"]),
     ))
     .expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots =
-        support::SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = support::SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("the child's reported pid", |bundle| {
@@ -258,12 +258,16 @@ fn shutdown_reaps_the_child_and_is_idempotent() {
 fn dropping_after_a_shutdown_request_finishes_quickly() {
     let started = std::time::Instant::now();
     {
-        let mut session = TerminalSession::spawn(SessionConfig::command(
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots: _snapshots,
+        } = TerminalSession::spawn(SessionConfig::command(
             "/bin/sh",
             args(&["-c", "exec sleep 60"]),
         ))
         .expect("spawn session");
-        let events = EventPump::new(session.take_event_stream().expect("take event stream"));
+        let events = EventPump::new(events);
         events.expect_ready();
 
         let handle = session
@@ -287,7 +291,11 @@ fn dropping_after_a_shutdown_request_finishes_quickly() {
 /// because the descendant holds the PTY open long after the shell exits.
 #[test]
 fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
-    let mut session = TerminalSession::spawn(SessionConfig::command(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
         "/bin/sh",
         args(&[
             "-c",
@@ -299,9 +307,8 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
         ]),
     ))
     .expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots =
-        support::SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = support::SnapshotPump::new(snapshots);
     events.expect_ready();
 
     let bundle = snapshots.wait_for("the shell and descendant pids", |bundle| {

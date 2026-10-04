@@ -6,8 +6,8 @@
 //! tools integrate through this command's JSON rather than by connecting to the
 //! socket themselves.
 //!
-//! **It never hangs.** Every step has a timeout, because this runs inside a
-//! shell where a command that never returns is worse than one that fails.
+//! Socket reads and writes have inactivity timeouts so a silent peer cannot
+//! stall the shell. These are per-operation limits, not a total exchange deadline.
 
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -25,9 +25,8 @@ pub const SOCKET_VARIABLE: &str = "SPRITE_OBSERVATION_SOCKET";
 pub const KEY_VARIABLE: &str = "SPRITE_OBSERVATION_KEY";
 pub const PANE_VARIABLE: &str = "SPRITE_PANE";
 
-/// Generous next to the window's own 500 ms deadline: this bounds the whole
-/// exchange including encoding a response that may be megabytes, and exists to
-/// prevent a hang rather than to enforce a schedule.
+/// Generous next to the window's own 500 ms deadline, because a response may
+/// span megabytes. Each blocking socket operation gets this inactivity budget.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What the command should exit with.

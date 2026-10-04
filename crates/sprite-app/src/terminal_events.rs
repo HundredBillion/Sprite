@@ -349,10 +349,10 @@ mod tests {
     fn snapshot() -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 1,
-            size: sprite_term::TerminalSize::DEFAULT,
+            size: sprite_term::ValidTerminalSize::DEFAULT,
             screen: sprite_term::ScreenKind::Primary,
             rows: vec![sprite_term::PaneRow {
-                text: "answer".to_owned(),
+                text: "answer".into(),
                 wrapped: false,
                 prompt: sprite_term::PromptKind::None,
             }],

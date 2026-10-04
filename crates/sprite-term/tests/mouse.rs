@@ -16,7 +16,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
-fn session(script: &str) -> TerminalSession {
+fn session(script: &str) -> sprite_term::Spawned {
     TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
         .expect("spawn session")
 }
@@ -37,12 +37,16 @@ fn click(row: u16, column: u16, shift: bool) -> TerminalCommand {
 #[test]
 fn a_child_with_reporting_enabled_receives_mouse_events() {
     // Enable X10 mouse reporting, then dump what arrives as hex.
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 6 time 0; printf '\\033[?1000h'; printf 'READY\\n'; \
          head -c 6 | od -An -tx1 | tr -s ' '",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the child's ready marker", |bundle| {
@@ -65,12 +69,16 @@ fn a_child_with_reporting_enabled_receives_mouse_events() {
 /// belongs to Sprite's selection instead.
 #[test]
 fn a_child_without_reporting_receives_no_mouse_events() {
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 1 time 0; printf 'READY\\n'; \
          head -c 1 | od -An -tx1 | tr -s ' '; printf 'GOT-INPUT\\n'",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the child's ready marker", |bundle| {
@@ -98,12 +106,16 @@ fn a_child_without_reporting_receives_no_mouse_events() {
 /// child is reporting, and the child must not also see it.
 #[test]
 fn the_override_modifier_withholds_the_event_from_the_child() {
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 1 time 0; printf '\\033[?1000h'; printf 'READY\\n'; \
          head -c 1 | od -An -tx1 | tr -s ' '; printf 'GOT-INPUT\\n'",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the child's ready marker", |bundle| {
@@ -145,12 +157,16 @@ fn wheel(rows: i32, shift: bool) -> TerminalCommand {
 /// nowhere to go.
 #[test]
 fn a_child_with_reporting_enabled_receives_the_wheel() {
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 6 time 0; printf '\\033[?1049h\\033[?1000h'; printf 'READY\\n'; \
          head -c 6 | od -An -tx1 | tr -s ' '",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the child's ready marker", |bundle| {
@@ -174,12 +190,16 @@ fn a_child_with_reporting_enabled_receives_the_wheel() {
 /// reporting on, so the mouse-report path alone would leave it dead.
 #[test]
 fn a_full_screen_child_without_reporting_receives_arrow_keys() {
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 3 time 0; printf '\\033[?1049h'; printf 'READY\\n'; \
          head -c 3 | od -An -tx1 | tr -s ' '",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the child's ready marker", |bundle| {
@@ -205,12 +225,16 @@ fn a_full_screen_child_without_reporting_receives_arrow_keys() {
 fn the_wheel_is_not_sent_to_a_child_on_the_primary_screen() {
     // min 0 time 10 makes the read return after a second whether or not
     // anything arrived, so the absence of input is observable.
-    let mut session = session(
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
         "stty -icanon -echo min 0 time 10; printf 'READY\\n'; \
          head -c 3 | od -An -tx1 | tr -s ' '; printf 'QUIET\\n'",
     );
-    let events = EventPump::new(session.take_event_stream().expect("take event stream"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
     snapshots.wait_for("the child's ready marker", |bundle| {

@@ -1,14 +1,13 @@
 //! The audited Unix PTY I/O pump.
 //!
-//! This is the only module that borrows a raw descriptor, and it never touches
-//! libghostty. The pump blocks in `poll` on the PTY, a wake socket and a
+//! This module owns the pump descriptor and never touches libghostty. The pump blocks in `poll` on the PTY, a wake socket and a
 //! cancellation socket, so it is always joinable even when a descendant keeps
 //! the PTY open — no periodic wake-up, no async runtime, and no detached thread.
 //!
 //! It carries both directions. Output is read under a permit scheme rather than
 //! queue capacity: the pump must hold one of sixteen tokens before it waits for
-//! readability, and the worker returns that token only after it has applied or
-//! discarded the resulting chunk. At most sixteen 16 KiB chunks can therefore
+//! readability, and dropping the resulting chunk returns its buffer and token.
+//! At most sixteen 16 KiB chunks can therefore
 //! occupy the 17-slot worker queue, which structurally reserves the last slot
 //! for input and lifecycle work.
 //!
@@ -20,9 +19,11 @@
 //! queue, the child blocked on an output queue the worker was no longer
 //! draining, and the pane froze for good (ADR 0015).
 
+#![deny(unsafe_code)]
+
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,17 +55,45 @@ const OUTPUT_PERMITS: usize = 16;
 const INPUT_BACKLOG_BYTES: usize = 1024 * 1024;
 
 /// The worker's handle on the pump thread.
-///
-/// # Safety invariant
-///
-/// The worker owns the PTY master and this handle, and drops neither until
-/// after [`Pump::shutdown`] returns. The pump therefore only ever borrows a
-/// descriptor that is still open for the whole of its life.
 pub(crate) struct Pump {
     cancel: UnixStream,
-    permits: SyncSender<()>,
     input: InputQueue,
     thread: Option<JoinHandle<()>>,
+}
+
+/// Output owns its pooled buffer until parsing or discarding has finished.
+pub(crate) struct OutputChunk {
+    permit: Permit,
+    len: usize,
+}
+
+impl OutputChunk {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.permit.buffer.as_ref().expect("live permit")[..self.len]
+    }
+}
+
+#[derive(Clone)]
+struct BufferPool {
+    returned: SyncSender<Vec<u8>>,
+    wake: Arc<UnixStream>,
+}
+
+struct Permit {
+    buffer: Option<Vec<u8>>,
+    pool: BufferPool,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            // Publish the buffer before waking a pump that has exhausted its permits.
+            // A closed pump or full wake socket must never block the consumer's Drop.
+            if self.pool.returned.try_send(buffer).is_ok() {
+                poke(&self.pool.wake);
+            }
+        }
+    }
 }
 
 /// The worker's way of handing bytes to the pump for the PTY.
@@ -123,16 +152,14 @@ fn poke(wake: &UnixStream) {
 impl Pump {
     /// Starts the pump for an open PTY master.
     ///
-    /// `master_fd` must be the master's descriptor and `reader` a handle onto
-    /// the same open file description, both owned by the caller for at least as
-    /// long as the returned `Pump`. The master is switched to non-blocking here,
-    /// for the whole open file description: nothing this thread does may stall,
-    /// and a reader that shares the flag simply polls again on `WouldBlock`.
+    /// The pump duplicates `master_fd` before starting its thread.
+    /// Nonblocking mode is shared by every descriptor for the same open file description.
     pub(crate) fn start(
         master_fd: RawFd,
-        reader: Box<dyn Read + Send>,
         commands: SyncSender<Message>,
     ) -> Result<Self, SessionError> {
+        let master = duplicate(master_fd)
+            .ok_or_else(|| SessionError::new("pump_duplicate", std::io::Error::last_os_error()))?;
         let (cancel, pump_cancel) =
             UnixStream::pair().map_err(|error| SessionError::new("pump_cancel_socket", error))?;
         let (wake, pump_wake) =
@@ -141,12 +168,12 @@ impl Pump {
             end.set_nonblocking(true)
                 .map_err(|error| SessionError::new("pump_wake_socket", error))?;
         }
-        set_nonblocking(master_fd)?;
+        set_nonblocking(master.as_fd())?;
 
         let (permits, permit_rx) = sync_channel(OUTPUT_PERMITS);
         for _ in 0..OUTPUT_PERMITS {
             permits
-                .send(())
+                .send(vec![0; READ_CHUNK_BYTES])
                 .map_err(|_| SessionError::new("pump_permits", "permit channel closed"))?;
         }
         let (queue, input_rx) = channel();
@@ -160,16 +187,18 @@ impl Pump {
             .name("sprite-term-pty-pump".to_owned())
             .stack_size(HELPER_STACK_BYTES)
             .spawn({
-                let permits = permits.clone();
+                let pool = BufferPool {
+                    returned: permits,
+                    wake: Arc::clone(&input.wake),
+                };
                 let waiting = Arc::clone(&input.waiting);
                 move || {
                     let outcome = run(Ends {
-                        master_fd,
-                        reader,
+                        master,
                         cancel: &pump_cancel,
                         wake: &pump_wake,
                         permit_rx: &permit_rx,
-                        permit_tx: &permits,
+                        pool: &pool,
                         input_rx: &input_rx,
                         waiting: &waiting,
                         commands: &commands,
@@ -182,7 +211,6 @@ impl Pump {
 
         Ok(Self {
             cancel,
-            permits,
             input,
             thread: Some(thread),
         })
@@ -191,15 +219,6 @@ impl Pump {
     /// The handle the worker writes input through.
     pub(crate) fn input(&self) -> InputQueue {
         self.input.clone()
-    }
-
-    /// Returns the permit that arrived with one output chunk.
-    pub(crate) fn return_permit(&self) {
-        // Only fails once the pump has gone, which needs no permit.
-        let _ = self.permits.send(());
-        // A pump waiting without a permit is not watching the PTY for output;
-        // this is what tells it to start again.
-        poke(&self.input.wake);
     }
 
     /// Wakes the pump out of `poll` without waiting for it.
@@ -234,12 +253,11 @@ impl Drop for Pump {
 
 /// Everything the pump thread holds, named so `run` reads as one loop.
 struct Ends<'a> {
-    master_fd: RawFd,
-    reader: Box<dyn Read + Send>,
+    master: OwnedFd,
     cancel: &'a UnixStream,
     wake: &'a UnixStream,
-    permit_rx: &'a Receiver<()>,
-    permit_tx: &'a SyncSender<()>,
+    permit_rx: &'a Receiver<Vec<u8>>,
+    pool: &'a BufferPool,
     input_rx: &'a Receiver<Vec<u8>>,
     waiting: &'a AtomicUsize,
     commands: &'a SyncSender<Message>,
@@ -247,24 +265,20 @@ struct Ends<'a> {
 
 fn run(ends: Ends<'_>) -> PumpOutcome {
     let Ends {
-        master_fd,
-        mut reader,
+        master,
         cancel,
         wake,
         permit_rx,
-        permit_tx,
+        pool,
         input_rx,
         waiting,
         commands,
     } = ends;
-    let cancel_fd = cancel.as_raw_fd();
-    let wake_fd = wake.as_raw_fd();
-    let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
     // Input in the order it was queued; `written` is how much of the front
     // entry the kernel has already taken.
     let mut backlog: VecDeque<Vec<u8>> = VecDeque::new();
     let mut written = 0_usize;
-    let mut permit_held = false;
+    let mut permit: Option<Permit> = None;
     // Set once the PTY reports a hangup while no permit is held: the hangup
     // would otherwise be reported again by every poll, and there is nothing
     // to do about it until a permit arrives and the read can see the EOF.
@@ -277,31 +291,26 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
         while let Ok(chunk) = input_rx.try_recv() {
             backlog.push_back(chunk);
         }
-        if !permit_held && permit_rx.try_recv().is_ok() {
-            permit_held = true;
+        if permit.is_none()
+            && let Ok(buffer) = permit_rx.try_recv()
+        {
+            permit = Some(Permit {
+                buffer: Some(buffer),
+                pool: pool.clone(),
+            });
             hung_up = false;
         }
 
         let watch = Watch {
-            master_fd: (!hung_up).then_some(master_fd),
-            read: permit_held,
+            master_fd: (!hung_up).then(|| master.as_fd()),
+            read: permit.is_some(),
             write: !backlog.is_empty(),
-            wake_fd,
-            cancel_fd,
+            wake_fd: wake.as_fd(),
+            cancel_fd: cancel.as_fd(),
         };
         let ready = match wait_for_readiness(&watch) {
-            Wait::Cancelled => {
-                if permit_held {
-                    let _ = permit_tx.send(());
-                }
-                return PumpOutcome::Canceled;
-            }
-            Wait::Failed(error) => {
-                if permit_held {
-                    let _ = permit_tx.send(());
-                }
-                return PumpOutcome::ReadError(error);
-            }
+            Wait::Cancelled => return PumpOutcome::Canceled,
+            Wait::Failed(error) => return PumpOutcome::ReadError(error),
             Wait::Ready(ready) => ready,
         };
 
@@ -316,43 +325,37 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
             backlog.clear();
             written = 0;
             waiting.fetch_sub(dropped, Ordering::AcqRel);
-            if !permit_held {
+            if permit.is_none() {
                 hung_up = true;
             }
         }
 
         if ready.writable
-            && let Err(error) = write_some(master_fd, &mut backlog, &mut written, waiting)
+            && let Err(error) = write_some(master.as_fd(), &mut backlog, &mut written, waiting)
         {
-            if permit_held {
-                let _ = permit_tx.send(());
-            }
             return PumpOutcome::WriteError(error);
         }
 
         if ready.readable {
-            match read_once(&mut reader, &mut buffer) {
-                // The reader shares the master's non-blocking flag; a
-                // readiness that was consumed before the read got there is
-                // not an error, just a reason to poll again.
+            let buffer = permit
+                .as_mut()
+                .expect("read readiness requires a permit")
+                .buffer
+                .as_mut()
+                .expect("live permit");
+            match read_once(master.as_fd(), buffer) {
+                // Another reader can consume readiness before this nonblocking read.
                 ReadResult::NotReady => {}
-                // A closed slave surfaces as EIO on Linux and as a zero-length
-                // read elsewhere; both mean the same thing here.
-                ReadResult::Eof => {
-                    let _ = permit_tx.send(());
-                    return PumpOutcome::Eof;
-                }
-                ReadResult::Failed(error) => {
-                    let _ = permit_tx.send(());
-                    return PumpOutcome::ReadError(error);
-                }
-                ReadResult::Chunk(chunk) => {
-                    // The permit travels with the chunk; the worker returns it
-                    // once the chunk has been applied or discarded.
+                ReadResult::Eof => return PumpOutcome::Eof,
+                ReadResult::Failed(error) => return PumpOutcome::ReadError(error),
+                ReadResult::Chunk(len) => {
+                    let chunk = OutputChunk {
+                        permit: permit.take().expect("read owns a permit"),
+                        len,
+                    };
                     if commands.send(Message::PtyOutput(chunk)).is_err() {
                         return PumpOutcome::Canceled;
                     }
-                    permit_held = false;
                 }
             }
         }
@@ -360,13 +363,13 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
 }
 
 /// What one pass of the pump is waiting for.
-struct Watch {
+struct Watch<'a> {
     /// `None` leaves the PTY out of the poll entirely.
-    master_fd: Option<RawFd>,
+    master_fd: Option<BorrowedFd<'a>>,
     read: bool,
     write: bool,
-    wake_fd: RawFd,
-    cancel_fd: RawFd,
+    wake_fd: BorrowedFd<'a>,
+    cancel_fd: BorrowedFd<'a>,
 }
 
 struct Readiness {
@@ -383,17 +386,11 @@ enum Wait {
 }
 
 /// Blocks until something the pump can act on happens, retrying on EINTR.
-fn wait_for_readiness(watch: &Watch) -> Wait {
+fn wait_for_readiness(watch: &Watch<'_>) -> Wait {
     loop {
-        // SAFETY: every descriptor here is owned by the worker, which keeps the
-        // PTY master and both sockets alive until after this thread is joined
-        // (see the `Pump` safety invariant). The borrows do not outlive this
-        // call.
-        let cancel = unsafe { BorrowedFd::borrow_raw(watch.cancel_fd) };
-        let wake = unsafe { BorrowedFd::borrow_raw(watch.wake_fd) };
-        let master = watch
-            .master_fd
-            .map(|fd| unsafe { BorrowedFd::borrow_raw(fd) });
+        let cancel = watch.cancel_fd;
+        let wake = watch.wake_fd;
+        let master = watch.master_fd;
 
         let mut master_flags = PollFlags::empty();
         if watch.read {
@@ -403,15 +400,14 @@ fn wait_for_readiness(watch: &Watch) -> Wait {
             master_flags |= PollFlags::POLLOUT;
         }
 
-        let mut fds = vec![
+        let mut fds = [
             PollFd::new(cancel, PollFlags::POLLIN),
             PollFd::new(wake, PollFlags::POLLIN),
+            PollFd::new(master.unwrap_or(cancel), master_flags),
         ];
-        if let Some(master) = master {
-            fds.push(PollFd::new(master, master_flags));
-        }
+        let watched = if master.is_some() { 3 } else { 2 };
 
-        match poll(&mut fds, PollTimeout::NONE) {
+        match poll(&mut fds[..watched], PollTimeout::NONE) {
             Ok(_) => {}
             Err(Errno::EINTR) => continue,
             Err(error) => return Wait::Failed(error.to_string()),
@@ -463,14 +459,12 @@ fn drain(wake: &UnixStream) {
 /// time, and `WouldBlock` is where it says "no more" — the next poll reports
 /// when that changes. Nothing here can block.
 fn write_some(
-    master_fd: RawFd,
+    master: BorrowedFd<'_>,
     backlog: &mut VecDeque<Vec<u8>>,
     written: &mut usize,
     waiting: &AtomicUsize,
 ) -> Result<(), String> {
     while let Some(front) = backlog.front() {
-        // SAFETY: see `wait_for_readiness`; the master outlives this thread.
-        let master = unsafe { BorrowedFd::borrow_raw(master_fd) };
         match nix::unistd::write(master, &front[*written..]) {
             Ok(0) => break,
             Ok(count) => {
@@ -490,32 +484,32 @@ fn write_some(
 }
 
 /// Puts the master's open file description into non-blocking mode.
-fn set_nonblocking(fd: RawFd) -> Result<(), SessionError> {
-    let flags = fcntl(fd, FcntlArg::F_GETFL)
+fn set_nonblocking(fd: BorrowedFd<'_>) -> Result<(), SessionError> {
+    let flags = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL)
         .map_err(|error| SessionError::new("pty_nonblocking", error))?;
     let flags = OFlag::from_bits_retain(flags) | OFlag::O_NONBLOCK;
-    fcntl(fd, FcntlArg::F_SETFL(flags))
+    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags))
         .map_err(|error| SessionError::new("pty_nonblocking", error))?;
     Ok(())
 }
 
 enum ReadResult {
-    Chunk(Vec<u8>),
+    Chunk(usize),
     NotReady,
     Eof,
     Failed(String),
 }
 
-fn read_once(reader: &mut Box<dyn Read + Send>, buffer: &mut [u8]) -> ReadResult {
+fn read_once(master: BorrowedFd<'_>, buffer: &mut [u8]) -> ReadResult {
     loop {
-        match reader.read(buffer) {
+        match nix::unistd::read(master.as_raw_fd(), buffer) {
             Ok(0) => return ReadResult::Eof,
-            Ok(count) => return ReadResult::Chunk(buffer[..count].to_vec()),
-            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == ErrorKind::WouldBlock => return ReadResult::NotReady,
+            Ok(count) => return ReadResult::Chunk(count),
+            Err(Errno::EINTR) => continue,
+            Err(Errno::EAGAIN) => return ReadResult::NotReady,
             // Linux reports the closed slave this way rather than with a
             // zero-length read; it is an ordinary end of session, not a fault.
-            Err(error) if error.raw_os_error() == Some(Errno::EIO as i32) => {
+            Err(Errno::EIO) => {
                 return ReadResult::Eof;
             }
             Err(error) => return ReadResult::Failed(error.to_string()),
@@ -554,6 +548,7 @@ impl From<&GroupSignal> for Signal {
 /// so this adds no dependency.
 pub(crate) fn process_name(pid: i32) -> Option<String> {
     #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
     {
         use nix::libc;
 
@@ -588,9 +583,10 @@ pub(crate) fn process_name(pid: i32) -> Option<String> {
 /// number is reused the moment it is free — so asking a stale number what is
 /// running on it could answer for an unrelated file. Holding a duplicate means
 /// the question is always asked of this session's terminal or of nothing.
+#[allow(unsafe_code)]
 pub(crate) fn duplicate(fd: RawFd) -> Option<OwnedFd> {
-    let copy = nix::unistd::dup(fd).ok()?;
-    // SAFETY: `dup` returns a freshly allocated descriptor that no other owner
+    let copy = fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(0)).ok()?;
+    // SAFETY: F_DUPFD_CLOEXEC returns a fresh descriptor that no other owner
     // holds, and ownership passes to this `OwnedFd` and nowhere else.
     Some(unsafe { OwnedFd::from_raw_fd(copy) })
 }
@@ -619,4 +615,263 @@ pub(crate) fn signal_group(group: i32, signal: &GroupSignal) {
 /// Whether any process remains in the group, probed with the null signal.
 pub(crate) fn group_is_alive(group: i32) -> bool {
     killpg(Pid::from_raw(group), None).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn pump_delivers_more_than_forty_chunks_when_consumers_only_drop_messages() {
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("write deadline");
+        let (commands, inbox) = sync_channel(crate::WORKER_QUEUE_CAPACITY);
+        let mut pump = Pump::start(master.as_raw_fd(), commands).expect("pump");
+        let inbox = inbox;
+        let mut delivered = 0;
+        for _ in 0..64 {
+            peer.write_all(b"drop-only output").expect("output");
+            match inbox.recv_timeout(Duration::from_secs(2)) {
+                Ok(Message::PtyOutput(bytes)) => {
+                    let valid = bytes.as_bytes() == b"drop-only output";
+                    drop(bytes);
+                    if !valid {
+                        break;
+                    }
+                    delivered += 1;
+                }
+                _ => break,
+            }
+        }
+        // Disconnect before joining so a failing assertion cannot leave a full inbox.
+        drop(inbox);
+        pump.shutdown();
+        assert_eq!(delivered, 64);
+    }
+
+    #[test]
+    fn outstanding_chunks_reserve_a_command_slot_and_return_on_inbox_drop() {
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        let (commands, inbox) = sync_channel(crate::WORKER_QUEUE_CAPACITY);
+        let mut pump = Pump::start(master.as_raw_fd(), commands.clone()).expect("pump");
+        let inbox = inbox;
+        let mut held = Vec::new();
+        for _ in 0..OUTPUT_PERMITS {
+            peer.write_all(b"x").expect("output");
+            held.push(inbox.recv_timeout(Duration::from_secs(2)).expect("chunk"));
+        }
+        peer.write_all(b"blocked").expect("pending output");
+        assert!(matches!(
+            inbox.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(held.pop().expect("held chunk"));
+        let resumed = inbox
+            .recv_timeout(Duration::from_secs(2))
+            .expect("returned permit wakes pump");
+        assert!(matches!(&resumed, Message::PtyOutput(chunk) if chunk.as_bytes() == b"blocked"));
+        held.push(resumed);
+        for message in held {
+            assert!(commands.try_send(message).is_ok());
+        }
+        assert!(commands.try_send(Message::Shutdown).is_ok());
+        assert!(matches!(
+            commands.try_send(Message::Shutdown),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+        drop(inbox);
+        pump.shutdown();
+        assert!(pump.thread.is_none());
+    }
+
+    #[test]
+    fn rejected_output_returns_its_buffer_and_stops_the_pump() {
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        let (commands, inbox) = sync_channel(crate::WORKER_QUEUE_CAPACITY);
+        let mut pump = Pump::start(master.as_raw_fd(), commands).expect("pump");
+        let inbox = inbox;
+        drop(inbox);
+        peer.write_all(b"rejected").expect("output");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !pump.thread.as_ref().expect("thread").is_finished()
+            && std::time::Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        let stopped = pump.thread.as_ref().expect("thread").is_finished();
+        pump.shutdown();
+        assert!(stopped, "a rejected send must stop without cancellation");
+    }
+
+    #[test]
+    fn chunks_can_outlive_the_stopped_pump() {
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        let (commands, inbox) = sync_channel(crate::WORKER_QUEUE_CAPACITY);
+        let mut pump = Pump::start(master.as_raw_fd(), commands).expect("pump");
+        let inbox = inbox;
+        peer.write_all(b"held through shutdown").expect("output");
+        let message = inbox.recv_timeout(Duration::from_secs(2)).expect("chunk");
+        drop(inbox);
+        pump.shutdown();
+        drop(pump);
+        let Message::PtyOutput(chunk) = message else {
+            panic!("expected output");
+        };
+        assert_eq!(chunk.as_bytes(), b"held through shutdown");
+        drop(chunk);
+    }
+
+    #[test]
+    fn dropping_a_chunk_returns_its_allocation_before_waking() {
+        let (wake, mut pump_wake) = UnixStream::pair().expect("wake pair");
+        wake.set_nonblocking(true).expect("nonblocking wake");
+        pump_wake
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("wake deadline");
+        let (returned, buffers) = sync_channel(OUTPUT_PERMITS);
+        let buffer = vec![0; READ_CHUNK_BYTES];
+        let pointer = buffer.as_ptr();
+        let chunk = OutputChunk {
+            permit: Permit {
+                buffer: Some(buffer),
+                pool: BufferPool {
+                    returned,
+                    wake: Arc::new(wake),
+                },
+            },
+            len: 3,
+        };
+        drop(chunk);
+        pump_wake.read_exact(&mut [0]).expect("return wake");
+        let buffer = buffers.try_recv().expect("buffer returned before wake");
+        assert_eq!(buffer.as_ptr(), pointer);
+        assert_eq!(buffer.len(), READ_CHUNK_BYTES);
+    }
+
+    #[test]
+    fn returning_a_buffer_does_not_wait_for_wake_socket_space() {
+        let (wake, _pump_wake) = UnixStream::pair().expect("wake pair");
+        wake.set_nonblocking(true).expect("nonblocking wake");
+        while (&wake).write(&[0; 1024]).is_ok() {}
+        let (returned, buffers) = sync_channel(OUTPUT_PERMITS);
+        let chunk = OutputChunk {
+            permit: Permit {
+                buffer: Some(vec![0; READ_CHUNK_BYTES]),
+                pool: BufferPool {
+                    returned,
+                    wake: Arc::new(wake),
+                },
+            },
+            len: 0,
+        };
+        drop(chunk);
+        assert_eq!(
+            buffers.try_recv().expect("returned buffer").len(),
+            READ_CHUNK_BYTES
+        );
+    }
+
+    #[test]
+    fn steady_state_pump_delivers_sixty_four_chunks_without_allocating() {
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("write deadline");
+        set_nonblocking(master.as_fd()).expect("nonblocking master");
+        let (cancel, pump_cancel) = UnixStream::pair().expect("cancel pair");
+        let (wake, pump_wake) = UnixStream::pair().expect("wake pair");
+        wake.set_nonblocking(true).expect("nonblocking wake");
+        pump_wake.set_nonblocking(true).expect("nonblocking wake");
+        let (returned, buffers) = sync_channel(OUTPUT_PERMITS);
+        for _ in 0..OUTPUT_PERMITS {
+            returned.send(vec![0; READ_CHUNK_BYTES]).expect("buffer");
+        }
+        let pool = BufferPool {
+            returned,
+            wake: Arc::new(wake),
+        };
+        let (commands, inbox) = sync_channel(crate::WORKER_QUEUE_CAPACITY);
+        let (_input, input_rx) = channel();
+        let waiting = AtomicUsize::new(0);
+        let consumer = thread::spawn(move || {
+            let mut delivered = 0;
+            for _ in 0..64 {
+                peer.write_all(b"measured output").expect("output");
+                match inbox.recv_timeout(Duration::from_secs(2)) {
+                    Ok(Message::PtyOutput(chunk)) => {
+                        let valid = chunk.as_bytes() == b"measured output";
+                        drop(chunk);
+                        if !valid {
+                            break;
+                        }
+                        delivered += 1;
+                    }
+                    _ => break,
+                }
+            }
+            drop(inbox);
+            let _ = (&cancel).write_all(&[0]);
+            delivered
+        });
+        let (outcome, allocations) = crate::test_allocations::measure(|| {
+            run(Ends {
+                master: master.into(),
+                cancel: &pump_cancel,
+                wake: &pump_wake,
+                permit_rx: &buffers,
+                pool: &pool,
+                input_rx: &input_rx,
+                waiting: &waiting,
+                commands: &commands,
+            })
+        });
+        let delivered = consumer.join().expect("consumer joined");
+        assert!(matches!(outcome, PumpOutcome::Canceled));
+        assert_eq!(delivered, 64);
+        eprintln!(
+            "{delivered} deliveries: {} allocations, {} bytes",
+            allocations.allocations, allocations.bytes
+        );
+        assert_eq!(allocations.allocations, 0);
+        assert_eq!(allocations.bytes, 0);
+    }
+
+    #[test]
+    fn duplicated_endpoint_is_closed_on_exec() {
+        let (master, _peer) = UnixStream::pair().expect("socket pair");
+        let copy = duplicate(master.as_raw_fd()).expect("duplicate");
+        let flags = fcntl(copy.as_raw_fd(), FcntlArg::F_GETFD).expect("descriptor flags");
+        assert!(
+            nix::fcntl::FdFlag::from_bits_retain(flags).contains(nix::fcntl::FdFlag::FD_CLOEXEC)
+        );
+    }
+
+    #[test]
+    fn pump_keeps_its_endpoint_alive_after_the_callers_descriptor_closes() {
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        peer.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read deadline");
+        let (commands, inbox) = sync_channel(17);
+        let mut pump = Pump::start(master.as_raw_fd(), commands).expect("pump");
+        let inbox = inbox;
+        drop(master);
+        pump.input()
+            .write(b"owned endpoint".to_vec())
+            .expect("queue input");
+        let mut output = [0; 14];
+        let read = peer.read_exact(&mut output);
+        if read.is_ok() {
+            peer.write_all(b"child output").expect("output");
+            assert!(matches!(inbox.recv_timeout(Duration::from_secs(2)),
+                Ok(Message::PtyOutput(bytes)) if bytes.as_bytes() == b"child output"));
+        }
+        pump.shutdown();
+        assert!(matches!(
+            inbox.recv_timeout(Duration::from_secs(2)),
+            Ok(Message::PumpStopped(PumpOutcome::Canceled))
+        ));
+        read.expect("pump writes through its own descriptor");
+        assert_eq!(&output, b"owned endpoint");
+    }
 }

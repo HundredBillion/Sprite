@@ -17,9 +17,10 @@ use gpui::{
 use super::list_view::VirtualListView;
 use crate::config::Highlights;
 use crate::surface::channel::{
-    FocusTarget, Open, Position, ReturnTarget, Side, SurfaceConnection, event_applied, event_blur,
-    event_closed, event_dock_size, event_focus, event_grid_resize, event_input, event_mouse,
-    event_paste, event_refused, event_resize, event_warning, neovim_modifiers,
+    FocusTarget, Open, Ownership, Placement, Position, ReturnTarget, Side, SurfaceConnection,
+    SurfaceRequest, event_applied, event_blur, event_closed, event_dock_size, event_focus,
+    event_grid_resize, event_input, event_mouse, event_paste, event_refused, event_resize,
+    event_warning, neovim_modifiers,
 };
 use crate::surface::description::{self, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -35,7 +36,7 @@ pub(super) enum Body {
         images: crate::surface::render::ElementImageCache,
     },
     Grid {
-        grid: GridSurface,
+        grid: Box<GridSurface>,
         /// The description's root element, kept for the `bg` and `color` it
         /// may carry: a grid's wrapper takes its colours from them, the way an
         /// element root's box does. A grid root refuses `style` and `border`,
@@ -49,18 +50,19 @@ pub(super) enum Body {
     },
 }
 
+type ResizeDimensions = (u32, u32, Option<(u16, u16)>);
+
 /// A Surface this pane is drawing, and the connection that owns it.
 pub(super) struct HostedSurface {
     id: SurfaceId,
     pub(super) body: Body,
     connection: SurfaceConnection,
     focus: FocusHandle,
-    /// A dock's requested width in logical pixels; unused elsewhere.
-    pub(super) size: f32,
+    placement: HostedPlacement,
     /// The last `resize` event this Surface was sent, so the next frame sends
     /// one only when the text would differ: a font change changes the cell
     /// count in it, a colour-only reload changes nothing.
-    pub(super) told: Option<String>,
+    pub(super) told: Option<ResizeDimensions>,
     /// For an overlay: who had the keyboard before it opened, to give it back.
     previous_focus: Option<FocusHandle>,
     /// Keeps the focus and blur listeners alive for as long as the Surface.
@@ -79,9 +81,41 @@ pub(super) struct HostedSurface {
     /// become whole cells exactly as they do for the terminal.
     wheel_rows: crate::grid::ScrollAccumulator,
     wheel_cols: crate::grid::ScrollAccumulator,
-    owner: Option<Owner>,
-    registered_owner: Option<(u32, i32)>,
-    resizable: bool,
+}
+
+enum HostedPlacement {
+    Fill {
+        registered_owner: Option<(u32, i32)>,
+    },
+    Dock {
+        width: f32,
+        owner: Option<Owner>,
+    },
+    Overlay,
+}
+
+impl HostedSurface {
+    pub(super) fn size(&self) -> f32 {
+        match self.placement {
+            HostedPlacement::Dock { width, .. } => width,
+            HostedPlacement::Fill { .. } | HostedPlacement::Overlay => 0.0,
+        }
+    }
+    fn owner(&self) -> Option<Owner> {
+        match self.placement {
+            HostedPlacement::Dock { owner, .. } => owner,
+            HostedPlacement::Fill { .. } | HostedPlacement::Overlay => None,
+        }
+    }
+    fn registered_owner(&self) -> Option<(u32, i32)> {
+        match self.placement {
+            HostedPlacement::Fill { registered_owner } => registered_owner,
+            HostedPlacement::Dock { .. } | HostedPlacement::Overlay => None,
+        }
+    }
+    fn resizable(&self) -> bool {
+        self.owner().is_some()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -192,18 +226,67 @@ fn eligible_owner_group(
 }
 
 impl TerminalView {
+    pub(super) fn serve_surface_request(
+        &mut self,
+        request: SurfaceRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match request {
+            SurfaceRequest::Capabilities {
+                owner_pid,
+                return_target,
+                reply,
+                ..
+            } => {
+                let answer = self.capability_owner_group(owner_pid, return_target);
+                let _ = reply.send(answer.map(|_| crate::surface::channel::capabilities(true)));
+            }
+            SurfaceRequest::Open {
+                id,
+                open,
+                connection,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(self.open_surface(id, open, connection, window, cx));
+            }
+            SurfaceRequest::Update {
+                id, description, ..
+            } => self.update_surface(id, description, cx),
+            SurfaceRequest::Focus { id, target, .. } => {
+                if let Err(refusal) = self.focus_from_surface(id, target, window, cx) {
+                    self.refuse_on(id, &refusal);
+                }
+            }
+            SurfaceRequest::Close { id, .. } | SurfaceRequest::Closed { id, .. } => {
+                self.close_surface(id, window, cx);
+            }
+            SurfaceRequest::FocusPane { target, reply, .. } => {
+                let _ = reply.send(self.focus_target(target, window, cx));
+            }
+            SurfaceRequest::Grid { id, ops, .. } => self.grid_operations(id, ops, cx),
+            SurfaceRequest::List { id, op, .. } => self.list_operation(id, op, cx),
+            request @ SurfaceRequest::RegisterToken { .. } => {
+                sprite_pane::PaneRequest::refuse(request);
+            }
+        }
+    }
+
     fn resize_dock(&mut self, id: SurfaceId, width: f32, cx: &mut Context<Self>) {
         let Some(surface) = self
             .surfaces
-            .get_mut(|surface| surface.id == id && surface.resizable)
+            .get_mut(|surface| surface.id == id && surface.resizable())
         else {
             return;
         };
-        if surface.size == width {
+        if surface.size() == width {
             return;
         }
-        let old_reported = surface.size.round() as u32;
-        surface.size = width;
+        let old_reported = surface.size().round() as u32;
+        if let HostedPlacement::Dock { width: current, .. } = &mut surface.placement {
+            *current = width;
+        }
         let reported = width.round() as u32;
         if reported != old_reported {
             surface.connection.send(&event_dock_size(reported));
@@ -279,7 +362,7 @@ impl TerminalView {
             .surfaces
             .fill
             .as_ref()
-            .map(|fill| (fill.id, fill.registered_owner));
+            .map(|fill| (fill.id, fill.registered_owner()));
         eligible_owner_group(owner_pid, return_target, fill, |pid| {
             self.foreground_owner_group(pid)
         })
@@ -290,7 +373,7 @@ impl TerminalView {
             FocusTarget::Terminal => self.surfaces.fill.is_none().then(|| self.focus.clone()),
             FocusTarget::Surface(id) => {
                 let fill = self.surfaces.fill.as_ref().filter(|fill| fill.id == id)?;
-                let (pid, group) = fill.registered_owner?;
+                let (pid, group) = fill.registered_owner()?;
                 (group == owner.group && self.foreground_owner_group(pid) == Some(group))
                     .then(|| fill.focus.clone())
             }
@@ -303,8 +386,8 @@ impl TerminalView {
             .iter()
             .find(|surface| surface.id == id)
             .ok_or(Refusal::Ineligible)?;
-        let Some(owner) = surface.owner else {
-            return match surface.registered_owner {
+        let Some(owner) = surface.owner() else {
+            return match surface.registered_owner() {
                 Some((pid, group)) if self.foreground_owner_group(pid) != Some(group) => {
                     Err(Refusal::Ineligible)
                 }
@@ -358,27 +441,33 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), Refusal> {
-        let registered_owner = match open.owner_pid {
-            Some(pid) if open.position == Position::Fill => Some((
-                pid,
-                self.foreground_owner_group(pid)
-                    .ok_or(Refusal::Ineligible)?,
-            )),
-            _ => None,
-        };
-        let owner = match (open.owner_pid, open.return_target) {
-            (Some(pid), Some(return_target)) => {
-                let group = self.capability_owner_group(pid, return_target)?;
-                Some(Owner {
-                    pid,
-                    group,
-                    return_target: match return_target {
-                        ReturnTarget::Terminal => FocusTarget::Terminal,
-                        ReturnTarget::Surface(id) => FocusTarget::Surface(id),
-                    },
-                })
-            }
-            _ => None,
+        let placement = match open.placement {
+            Placement::Fill { owner_pid } => HostedPlacement::Fill {
+                registered_owner: owner_pid
+                    .map(|pid| {
+                        self.foreground_owner_group(pid)
+                            .map(|group| (pid, group))
+                            .ok_or(Refusal::Ineligible)
+                    })
+                    .transpose()?,
+            },
+            Placement::Dock {
+                size, ownership, ..
+            } => HostedPlacement::Dock {
+                width: size.pixels(),
+                owner: match ownership {
+                    Ownership::Unowned => None,
+                    Ownership::Owned { pid, return_target } => Some(Owner {
+                        pid,
+                        group: self.capability_owner_group(pid, return_target)?,
+                        return_target: match return_target {
+                            ReturnTarget::Terminal => FocusTarget::Terminal,
+                            ReturnTarget::Surface(id) => FocusTarget::Surface(id),
+                        },
+                    }),
+                },
+            },
+            Placement::Overlay => HostedPlacement::Overlay,
         };
         let parsed = description::parse(&open.description, cx.global::<TokenRegistry>())?;
         let focus = cx.focus_handle();
@@ -392,26 +481,30 @@ impl TerminalView {
                 view.dispatch_surface_event(id, &event_blur(), window, cx);
             }
         });
-        let previous_focus = match open.position {
+        let previous_focus = match open.placement.position() {
             Position::Overlay => window.focused(cx),
             Position::Fill | Position::Dock => None,
         };
         let warnings = parsed.warnings;
         let root = parsed.description.root;
-        let body = match root.grid {
-            Some(size) => Body::Grid {
-                grid: GridSurface::new(size.cols, size.rows),
+        let body = match &root {
+            Element::Grid { size, .. } => Body::Grid {
+                grid: Box::new(GridSurface::new(size.cols, size.rows)),
                 root,
             },
-            None if root.list.is_some() => {
-                let config = root.list.as_ref().expect("checked").clone();
+            Element::VirtualList { config } => {
+                let config = config.as_ref().clone();
                 let host = cx.entity().downgrade();
                 Body::List {
                     root,
                     view: cx.new(|_| VirtualListView::new(config, id, host)),
                 }
             }
-            None => Body::Elements {
+            Element::Box { .. }
+            | Element::List { .. }
+            | Element::Text { .. }
+            | Element::Button { .. }
+            | Element::Image { .. } => Body::Elements {
                 description: Description { root },
                 images: Default::default(),
             },
@@ -421,7 +514,7 @@ impl TerminalView {
             body,
             connection: connection.clone(),
             focus: focus.clone(),
-            size: open.size,
+            placement,
             told: None,
             previous_focus,
             _focus_events: [on_focus, on_blur],
@@ -429,11 +522,9 @@ impl TerminalView {
             pressed: None,
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
-            owner,
-            registered_owner,
-            resizable: open.resizable,
         };
-        self.surfaces.place(open.position, open.side, hosted)?;
+        self.surfaces
+            .place(open.placement.position(), open.placement.side(), hosted)?;
         for warning in warnings {
             connection.send(&event_warning(&warning));
         }
@@ -538,21 +629,40 @@ impl TerminalView {
         let (dx, dy) = match event.delta {
             gpui::ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
             gpui::ScrollDelta::Lines(delta) => (
-                delta.x * f32::from(metrics.cell_width),
-                delta.y * f32::from(metrics.cell_height),
+                delta.x * f32::from(metrics.cells.width()),
+                delta.y * f32::from(metrics.cells.height()),
             ),
         };
-        let rows = surface.wheel_rows.accumulate(dy, metrics.cell_height);
-        let cols = surface.wheel_cols.accumulate(dx, metrics.cell_width);
+        let rows = surface.wheel_rows.accumulate(dy, metrics.cells.height());
+        let cols = surface.wheel_cols.accumulate(dx, metrics.cells.width());
         let turns = [
             crate::surface::render::wheel_turns(rows, "up", "down"),
             crate::surface::render::wheel_turns(cols, "left", "right"),
         ];
-        for (direction, count) in turns.into_iter().flatten() {
-            for _ in 0..count {
-                self.report_grid_mouse(id, event.position, "wheel", direction, &event.modifiers);
-            }
-        }
+        let (Body::Grid { grid, .. }, Some(origin)) = (&surface.body, surface.origin) else {
+            return;
+        };
+        let Some((row, col)) = crate::surface::render::grid_cell_under(
+            event.position,
+            origin,
+            &metrics,
+            grid.cols(),
+            grid.rows(),
+        ) else {
+            return;
+        };
+        let modifiers = neovim_modifiers(&event.modifiers);
+        let lines = turns.map(|turn| {
+            turn.map(|(direction, count)| {
+                (event_mouse("wheel", direction, &modifiers, row, col), count)
+            })
+        });
+        surface.connection.send_batch(
+            lines
+                .iter()
+                .flatten()
+                .flat_map(|(line, count)| std::iter::repeat_n(line.as_str(), *count as usize)),
+        );
     }
 
     /// Replaces a Surface's whole description. A description that does not
@@ -579,7 +689,7 @@ impl TerminalView {
         match parsed {
             Ok(parsed) => {
                 if let Body::List { root, view } = &mut surface.body {
-                    if parsed.description.root.list.is_none() {
+                    if parsed.description.root.list().is_none() {
                         surface.connection.send(&event_refused(
                             &Refusal::Malformed(
                                 "a virtual_list update keeps kind virtual_list".to_owned(),
@@ -588,16 +698,10 @@ impl TerminalView {
                         ));
                         return;
                     }
-                    let config = parsed
-                        .description
-                        .root
-                        .list
-                        .as_ref()
-                        .expect("checked")
-                        .clone();
+                    let config = parsed.description.root.list().expect("checked").clone();
                     *root = parsed.description.root;
                     view.update(cx, |view, cx| view.reconfigure(config, cx));
-                } else if parsed.description.root.list.is_some() {
+                } else if parsed.description.root.list().is_some() {
                     surface.connection.send(&event_refused(
                         &Refusal::Malformed(
                             "a virtual_list update needs a virtual_list Surface".to_owned(),
@@ -614,7 +718,7 @@ impl TerminalView {
                 for warning in parsed.warnings {
                     surface.connection.send(&event_warning(&warning));
                 }
-                if surface.owner.is_some() {
+                if surface.owner().is_some() {
                     surface.connection.send(&event_applied("update", None));
                 }
                 cx.notify();
@@ -743,7 +847,7 @@ impl TerminalView {
             closes_fill,
             self.surfaces
                 .iter()
-                .map(|surface| (surface.id, surface.owner.map(|owner| owner.return_target))),
+                .map(|surface| (surface.id, surface.owner().map(|owner| owner.return_target))),
         );
         for dependent in plan.dependents {
             self.close_surface(dependent, window, cx);
@@ -760,7 +864,7 @@ impl TerminalView {
             // else — or a previous holder that has since closed — falls back to
             // the terminal, which is always there.
             let previous = surface
-                .owner
+                .owner()
                 .and_then(|owner| self.valid_return_handle(owner))
                 .or_else(|| match position {
                     Position::Overlay => surface.previous_focus.filter(|handle| {
@@ -783,7 +887,7 @@ impl TerminalView {
         let invalid = self
             .surfaces
             .iter()
-            .filter(|surface| surface.owner.is_some() || surface.registered_owner.is_some())
+            .filter(|surface| surface.owner().is_some() || surface.registered_owner().is_some())
             .filter_map(|surface| {
                 self.validate_surface_owner(surface.id)
                     .is_err()
@@ -840,7 +944,7 @@ impl TerminalView {
             .surfaces
             .left
             .as_ref()
-            .filter(|surface| surface.resizable)
+            .filter(|surface| surface.resizable())
         {
             dock_edges.push(self.dock_edge(surface.id, Side::Left, left_width, allocated, cx));
         }
@@ -848,7 +952,7 @@ impl TerminalView {
             .surfaces
             .right
             .as_ref()
-            .filter(|surface| surface.resizable)
+            .filter(|surface| surface.resizable())
         {
             dock_edges.push(self.dock_edge(surface.id, Side::Right, right_width, allocated, cx));
         }
@@ -985,16 +1089,16 @@ impl TerminalView {
             f32::from(size.width).round() as u32,
             f32::from(size.height).round() as u32,
         );
-        let event = match &surface.body {
-            Body::Grid { .. } => {
-                let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
-                event_grid_resize(told.0, told.1, cols, rows)
-            }
-            Body::Elements { .. } | Body::List { .. } => event_resize(told.0, told.1),
-        };
-        if surface.told.as_deref() != Some(event.as_str()) {
+        let cells = matches!(surface.body, Body::Grid { .. })
+            .then(|| crate::surface::render::cells_that_fit(size, metrics));
+        let told = (told.0, told.1, cells);
+        if surface.told != Some(told) {
+            let event = match cells {
+                Some((cols, rows)) => event_grid_resize(told.0, told.1, cols, rows),
+                None => event_resize(told.0, told.1),
+            };
             surface.connection.send(&event);
-            surface.told = Some(event);
+            surface.told = Some(told);
         }
         let body = match &mut surface.body {
             Body::Elements {
@@ -1028,9 +1132,11 @@ impl TerminalView {
                 Some(
                     div()
                         .absolute()
-                        .top(px(f32::from(cursor.row) * f32::from(metrics.cell_height)))
-                        .left(px(f32::from(cursor.column) * f32::from(metrics.cell_width)))
-                        .h(metrics.cell_height)
+                        .top(px(f32::from(cursor.row) * f32::from(metrics.cells.height())))
+                        .left(px(
+                            f32::from(cursor.column) * f32::from(metrics.cells.width())
+                        ))
+                        .h(metrics.cells.height())
                         .bg(rgb(crate::grid_paint::pack(default_fg)))
                         .text_color(rgb(crate::grid_paint::pack(default_bg)))
                         .underline()
@@ -1476,13 +1582,8 @@ mod tests {
             view.open_surface(
                 SurfaceId(1),
                 Open {
-                    position: Position::Fill,
-                    side: Side::Left,
-                    size: 0.0,
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None },
                     focus: false,
-                    owner_pid: None,
-                    return_target: None,
-                    resizable: false,
                     description: fixture["description"].clone(),
                 },
                 connection,
@@ -1529,13 +1630,8 @@ mod tests {
             view.open_surface(
                 SurfaceId(2),
                 Open {
-                    position: Position::Fill,
-                    side: Side::Left,
-                    size: 0.0,
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None },
                     focus: false,
-                    owner_pid: None,
-                    return_target: None,
-                    resizable: false,
                     description: document("blue"),
                 },
                 connection,
@@ -1606,6 +1702,626 @@ mod tests {
             view.close_surface(SurfaceId(2), window, cx)
         });
         assert!(host.read_with(cx, |view, _| view.surfaces.fill.is_none()));
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    fn dispatch(
+        host: &Entity<TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+        request: SurfaceRequest,
+    ) {
+        let handle: &dyn sprite_pane::PaneHandle<Request = SurfaceRequest> = host;
+        cx.update(|window, cx| handle.surface_request(request, window, cx));
+    }
+
+    fn open_request(
+        host: &Entity<TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+        id: SurfaceId,
+        open: Open,
+    ) -> (Result<(), Refusal>, std::os::unix::net::UnixStream) {
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            host,
+            cx,
+            SurfaceRequest::Open {
+                pane: crate::pane_tree::PaneId(1),
+                id,
+                open,
+                connection: connection.clone(),
+                reply,
+            },
+        );
+        let answer = receiver.try_recv().unwrap();
+        if answer.is_ok() {
+            let opened = crate::surface::channel::event_opened(id);
+            assert!(connection.establish(&opened));
+            draw_test_window(cx);
+            let initial = events(&mut peer);
+            assert_eq!(
+                initial.first(),
+                Some(&serde_json::from_str::<serde_json::Value>(&opened).unwrap())
+            );
+        }
+        (answer, peer)
+    }
+
+    fn open_description(description: serde_json::Value) -> Open {
+        Open {
+            placement: crate::surface::channel::Placement::Fill { owner_pid: None },
+            focus: false,
+            description,
+        }
+    }
+
+    fn draw_test_window(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    fn events(peer: &mut std::os::unix::net::UnixStream) -> Vec<serde_json::Value> {
+        use std::io::Read;
+        let mut wire = String::new();
+        if let Err(error) = peer.read_to_string(&mut wire) {
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        }
+        wire.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn surface_wheel_syscall_probe(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(987),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update(cx, |host, _| {
+            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0), px(0.0)));
+            eprintln!("SURFACE_GESTURE_BEGIN");
+            host.report_grid_wheel(
+                SurfaceId(987),
+                &ScrollWheelEvent {
+                    position: gpui::point(px(1.0), px(1.0)),
+                    delta: gpui::ScrollDelta::Lines(gpui::point(2.0, 3.0)),
+                    ..Default::default()
+                },
+            );
+            eprintln!("SURFACE_GESTURE_END");
+        });
+        let messages = events(&mut peer);
+        assert_eq!(messages.len(), 5);
+        for (event, action) in messages.iter().zip(["up", "up", "up", "left", "left"]) {
+            assert_eq!(event["action"], action);
+        }
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn surface_resize_events_dedupe_pixels_and_track_cell_metric_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(990),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        let registry = TokenRegistry::new(&settings.colors);
+        host.update(cx, |host, cx| {
+            for (width, cell_width) in [(160.0, 8.0), (160.0, 8.0), (240.0, 8.0), (240.0, 10.0)] {
+                let metrics = crate::surface::render::GridMetrics {
+                    cells: super::super::CellMetrics::fixture(cell_width, 16.0),
+                    ..host.grid_metrics()
+                };
+                let surface = host.surfaces.fill.as_mut().unwrap();
+                let _ = TerminalView::surface_element(
+                    surface,
+                    gpui::size(px(width), px(160.0)),
+                    &registry,
+                    &metrics,
+                    &settings.highlights,
+                    None,
+                    None,
+                    cx,
+                    true,
+                );
+            }
+        });
+        let messages = events(&mut peer);
+        assert_eq!(
+            messages,
+            vec![
+                serde_json::json!({"type":"resize","width":160,"height":160,"cols":20,"rows":10}),
+                serde_json::json!({"type":"resize","width":240,"height":160,"cols":30,"rows":10}),
+                serde_json::json!({"type":"resize","width":240,"height":160,"cols":24,"rows":10}),
+            ]
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn a_huge_finite_grid_wheel_stops_at_backpressure_with_bounded_storage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(989),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update(cx, |host, _| {
+            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0),px(0.0)));
+            let started = std::time::Instant::now();
+            host.report_grid_wheel(SurfaceId(989), &ScrollWheelEvent {position:gpui::point(px(1.0),px(1.0)),delta:gpui::ScrollDelta::Lines(gpui::point(0.0,1_000_000_000.0)),..Default::default()});
+            let elapsed = started.elapsed();
+            let (dead, buffer, queued) = host.surfaces.fill.as_ref().unwrap().connection.test_buffer_state();
+            println!("huge wheel: elapsed={elapsed:?} buffer_capacity={buffer} queued_capacity={queued} dead={dead}");
+            assert!(dead);
+            assert!(buffer <= crate::surface::channel::EVENT_BUFFER_BYTES);
+            assert!(queued <= crate::surface::channel::EVENT_BUFFER_BYTES);
+            assert!(elapsed < std::time::Duration::from_secs(5));
+        });
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn surface_list_100k_virtualization_probe(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(988),
+            open_description(fixture["description"].clone()),
+        );
+        assert_eq!(answer, Ok(()));
+        let rows = (0..100_000).map(|i| serde_json::json!({"id":format!("r{i}"),"text":"a long shared row label","indent":0,"guides":[]})).collect::<Vec<_>>();
+        let op = crate::surface::list::parse_op(
+            &serde_json::json!({"type":"list_rows","revision":1,"rows":rows,"selected":"r99999"}),
+        )
+        .unwrap();
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::List {
+                id: SurfaceId(988),
+                pane: crate::pane_tree::PaneId(1),
+                op,
+            },
+        );
+        for target in ["r0", "r50000", "r99999"] {
+            let op = crate::surface::list::parse_op(
+                &serde_json::json!({"type":"list_state","revision":1,"reveal":target}),
+            )
+            .unwrap();
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::List {
+                    id: SurfaceId(988),
+                    pane: crate::pane_tree::PaneId(1),
+                    op,
+                },
+            );
+            draw_test_window(cx);
+            super::super::list_view::TRUNCATE_CALLS.with(|n| n.set(0));
+            draw_test_window(cx);
+            let calls = super::super::list_view::TRUNCATE_CALLS.with(|n| n.get());
+            let (top, visible) = host.read_with(cx, |host, cx| {
+                let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                    panic!("list")
+                };
+                view.read(cx).viewport_rows()
+            });
+            println!(
+                "list 100k target={target} actual truncate_line calls={calls} top={top} visible_rows={visible}"
+            );
+            let target_index: usize = target[1..].parse().unwrap();
+            assert!(top <= target_index && target_index < top + visible + 1);
+            assert!(calls > 0);
+            assert!(
+                calls <= visible + 16,
+                "{calls} truncations for {visible} visible rows"
+            );
+        }
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn pane_handle_routes_terminal_surface_verbs_and_ordered_events(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.focus(&host.read(cx).focus);
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let pane = crate::pane_tree::PaneId(1);
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid: std::process::id(),
+                return_target: ReturnTarget::Terminal,
+                reply,
+            },
+        );
+        assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
+        let mut owned = open_description(
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"owned"}}),
+        );
+        owned.placement = Placement::Fill {
+            owner_pid: Some(std::process::id()),
+        };
+        assert_eq!(
+            open_request(&host, cx, SurfaceId(100), owned).0,
+            Err(Refusal::Ineligible)
+        );
+        let id = SurfaceId(101);
+        let text = |text| serde_json::json!({"version":1,"root":{"kind":"text","text":text}});
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(text("before")));
+        assert_eq!(answer, Ok(()));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: text("after"),
+            },
+        );
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: serde_json::Value::Null,
+            },
+        );
+        assert_eq!(events(&mut peer)[0]["type"], "refused");
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Focus {
+                id,
+                pane,
+                target: FocusTarget::Surface(id),
+            },
+        );
+        cx.update(|window, cx| {
+            assert!(
+                host.read(cx)
+                    .surfaces
+                    .fill
+                    .as_ref()
+                    .unwrap()
+                    .focus
+                    .is_focused(window)
+            )
+        });
+        cx.update(|window, _| assert!(window.is_window_active(), "test window must be active"));
+        draw_test_window(cx);
+        assert_eq!(events(&mut peer), vec![serde_json::json!({"type":"focus"})]);
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::FocusPane {
+                pane,
+                target: FocusTarget::Terminal,
+                reply,
+            },
+        );
+        assert_eq!(receiver.try_recv().unwrap(), Ok(()));
+        draw_test_window(cx);
+        assert_eq!(events(&mut peer), vec![serde_json::json!({"type":"blur"})]);
+        cx.update(|window, cx| {
+            let handle: &dyn sprite_pane::PaneHandle<Request = SurfaceRequest> = &host;
+            handle.cycle_surface_focus(window, cx);
+        });
+        draw_test_window(cx);
+        assert_eq!(events(&mut peer), vec![serde_json::json!({"type":"focus"})]);
+        dispatch(&host, cx, SurfaceRequest::Close { id, pane });
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"closed"})]
+        );
+        cx.update(|window, cx| assert!(host.read(cx).focus.is_focused(window)));
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+
+        let id = SurfaceId(102);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":2,"rows":2}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![Op::Resize { cols: 7, rows: 3 }],
+            },
+        );
+        host.read_with(cx, |host, _| {
+            let Body::Grid { grid, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid Surface")
+            };
+            assert_eq!((grid.cols(), grid.rows()), (7, 3));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![Op::Resize { cols: 0, rows: 3 }],
+            },
+        );
+        assert_eq!(events(&mut peer)[0]["type"], "refused");
+        dispatch(&host, cx, SurfaceRequest::Closed { id, pane });
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"closed"})]
+        );
+
+        let id = SurfaceId(103);
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(fixture["description"].clone()),
+        );
+        assert_eq!(answer, Ok(()));
+        for operation in &fixture["operations"].as_array().unwrap()[..2] {
+            let op = crate::surface::list::parse_op(&operation["request"]).unwrap();
+            dispatch(&host, cx, SurfaceRequest::List { id, pane, op });
+            let reported = events(&mut peer);
+            assert_eq!(reported.first(), Some(&operation["reply"]));
+            assert!(
+                reported[1..]
+                    .iter()
+                    .all(|event| event["type"] == "list_scroll")
+            );
+        }
+        host.read_with(cx, |host, cx| {
+            let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("list Surface")
+            };
+            assert_eq!(view.read(cx).model.revision, 1);
+            assert_eq!(view.read(cx).model.rows.len(), 2);
+        });
+        let list = host.read_with(cx, |host, _| {
+            let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("list Surface")
+            };
+            view.downgrade()
+        });
+        drop(peer);
+        dispatch(&host, cx, SurfaceRequest::Closed { id, pane });
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+        assert!(list.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn pane_handle_preserves_live_owner_checks_and_ended_refusals(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (sender, _exits) = async_channel::unbounded();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::new(
+                Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf '\033]0;%s\007' "$$"; exec /bin/cat"#.into(),
+                ]),
+                settings,
+                Vec::new(),
+                None,
+                super::super::PaneExit {
+                    sender,
+                    identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                },
+                window,
+                cx,
+            )
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        executor.block_test(host.condition::<()>(cx, |host, _| {
+            host.bundle
+                .as_ref()
+                .is_some_and(|bundle| bundle.pane.title.is_some())
+        }));
+        let owner_pid = host.read_with(cx, |host, _| {
+            host.bundle
+                .as_ref()
+                .unwrap()
+                .pane
+                .title
+                .as_ref()
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        });
+        let pane = crate::pane_tree::PaneId(1);
+        for (pid, expected) in [(owner_pid, true), (std::process::id(), false)] {
+            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Capabilities {
+                    pane,
+                    owner_pid: pid,
+                    return_target: ReturnTarget::Terminal,
+                    reply,
+                },
+            );
+            let answer = receiver.try_recv().unwrap();
+            if expected {
+                assert_eq!(answer.unwrap(), crate::surface::channel::capabilities(true));
+            } else {
+                assert_eq!(answer, Err(Refusal::Ineligible));
+            }
+        }
+        let make_owned = |pid| {
+            let mut open = open_description(
+                serde_json::json!({"version":1,"root":{"kind":"text","text":"owned"}}),
+            );
+            open.placement = Placement::Dock {
+                side: Side::Left,
+                size: crate::surface::DockSize::default(),
+                ownership: Ownership::Owned {
+                    pid,
+                    return_target: ReturnTarget::Terminal,
+                },
+            };
+            open
+        };
+        assert_eq!(
+            open_request(&host, cx, SurfaceId(201), make_owned(std::process::id())).0,
+            Err(Refusal::Ineligible)
+        );
+        let (answer, mut peer) = open_request(&host, cx, SurfaceId(202), make_owned(owner_pid));
+        assert_eq!(answer, Ok(()));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id: SurfaceId(202),
+                pane,
+                description: serde_json::json!({"version":1,"root":{"kind":"text","text":"changed"}}),
+            },
+        );
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"applied","operation":"update"})]
+        );
+        host.update(cx, |host, _| {
+            let SessionState::Running(session) =
+                std::mem::replace(&mut host.session, SessionState::NeverStarted)
+            else {
+                panic!("running session")
+            };
+            host.session = SessionState::Ended(session);
+        });
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Capabilities {
+                pane,
+                owner_pid,
+                return_target: ReturnTarget::Terminal,
+                reply,
+            },
+        );
+        assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
+        assert_eq!(
+            open_request(&host, cx, SurfaceId(203), make_owned(owner_pid)).0,
+            Err(Refusal::Ineligible)
+        );
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Focus {
+                id: SurfaceId(202),
+                pane,
+                target: FocusTarget::Surface(SurfaceId(202)),
+            },
+        );
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"closed"})]
+        );
+        assert!(host.read_with(cx, |host, _| host.surfaces.iter().next().is_none()));
         cx.update(|window, _| window.remove_window());
         drop(host);
     }

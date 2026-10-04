@@ -18,7 +18,7 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListRow {
     pub id: String,
-    pub text: String,
+    pub text: Arc<str>,
     pub indent: f32,
     pub icon: Option<String>,
     pub leading: Option<String>,
@@ -38,11 +38,17 @@ pub struct ScrollAnchor {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct IndexedRows {
+    rows: Vec<ListRow>,
+    ids: HashMap<String, usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ListOp {
     Assets(BTreeMap<String, String>),
     Rows {
         revision: u64,
-        rows: Vec<ListRow>,
+        rows: IndexedRows,
         selected: Option<String>,
     },
     State {
@@ -141,20 +147,20 @@ impl ListModel {
     fn apply_rows(
         &mut self,
         revision: u64,
-        rows: Vec<ListRow>,
+        rows: IndexedRows,
         selected: Option<String>,
     ) -> Result<(), Refusal> {
+        let IndexedRows { rows, ids } = rows;
         if revision <= self.revision {
             return Err(malformed("a row revision strictly increases"));
         }
-        let ids = id_index(&rows)?;
         if selected
             .as_ref()
             .is_some_and(|selected| !ids.contains_key(selected))
         {
             return Err(malformed("selected row does not exist"));
         }
-        let scroll = preserved_anchor(&self.rows, &rows, self.scroll.as_ref());
+        let scroll = preserved_anchor(&self.rows, &rows, &self.ids, &ids, self.scroll.as_ref());
         self.revision = revision;
         self.rows = Arc::new(rows);
         self.ids = ids;
@@ -270,14 +276,14 @@ fn parse_rows(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
         .iter()
         .map(parse_row)
         .collect::<Result<Vec<_>, _>>()?;
-    id_index(&rows)?;
+    let ids = id_index(&rows)?;
     let selected = object
         .get("selected")
         .ok_or_else(|| malformed("list_rows needs selected, a row id or null"))
         .and_then(|value| nullable_string(value, "selected"))?;
     Ok(ListOp::Rows {
         revision,
-        rows,
+        rows: IndexedRows { rows, ids },
         selected,
     })
 }
@@ -326,8 +332,12 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
         .ok_or_else(|| malformed("a list row is an object"))?;
     let id = string(object, "id")?;
     validate_row_string(&id, "id")?;
-    let text = string(object, "text")?;
-    validate_row_string(&text, "text")?;
+    let text = object
+        .get("text")
+        .ok_or_else(|| malformed("a list row needs text"))?
+        .as_str()
+        .ok_or_else(|| malformed("text is a string"))?;
+    validate_row_string(text, "text")?;
     let indent = finite(object.get("indent"), "indent", 0.0, MAX_OFFSET)?;
     let icon = optional_string(object, "icon")?;
     let leading = optional_string(object, "leading")?;
@@ -360,7 +370,7 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ListRow {
         id,
-        text,
+        text: text.into(),
         indent,
         icon,
         leading,
@@ -387,7 +397,12 @@ fn parse_active_guides(value: &Value) -> Result<HashSet<String>, Refusal> {
     Ok(ids)
 }
 
+#[cfg(test)]
+thread_local! { static INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn id_index(rows: &[ListRow]) -> Result<HashMap<String, usize>, Refusal> {
+    #[cfg(test)]
+    INDEX_BUILDS.with(|count| count.set(count.get() + 1));
     let mut ids = HashMap::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
         if ids.insert(row.id.clone(), index).is_some() {
@@ -400,11 +415,12 @@ fn id_index(rows: &[ListRow]) -> Result<HashMap<String, usize>, Refusal> {
 fn preserved_anchor(
     old: &[ListRow],
     new: &[ListRow],
+    old_ids: &HashMap<String, usize>,
+    new_ids: &HashMap<String, usize>,
     anchor: Option<&ScrollAnchor>,
 ) -> Option<ScrollAnchor> {
     let anchor = anchor?;
-    let old_index = old.iter().position(|row| row.id == anchor.id)?;
-    let new_ids: HashMap<&str, ()> = new.iter().map(|row| (row.id.as_str(), ())).collect();
+    let old_index = *old_ids.get(&anchor.id)?;
     old[old_index..]
         .iter()
         .chain(old[..old_index].iter().rev())
@@ -519,6 +535,35 @@ fn malformed(why: impl Into<String>) -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_replacements_build_one_index_and_state_reuses_it() {
+        let mut model = ListModel::default();
+        let entries = (0..MAX_ROWS).map(|i| serde_json::json!({"id":format!("r{i}"),"text":"shared text","indent":0,"guides":[]})).collect::<Vec<_>>();
+        let mut message =
+            serde_json::json!({"type":"list_rows","revision":1,"rows":entries,"selected":"r99999"});
+        INDEX_BUILDS.with(|count| count.set(0));
+        model.apply(parse_op(&message).unwrap()).unwrap();
+        assert_eq!(INDEX_BUILDS.with(|count| count.get()), 1);
+        model.scroll = Some(ScrollAnchor {
+            id: "r50000".into(),
+            offset: 3.0,
+        });
+        message["revision"] = 2.into();
+        message["rows"].as_array_mut().unwrap().reverse();
+        model.apply(parse_op(&message).unwrap()).unwrap();
+        assert_eq!(INDEX_BUILDS.with(|count| count.get()), 2);
+        assert_eq!(model.index_of("r50000"), Some(49_999));
+        assert_eq!(model.scroll.as_ref().unwrap().id, "r50000");
+        let storage = model.ids.get("r1").unwrap() as *const usize;
+        let rows = model.rows.clone();
+        model.apply(parse_op(&serde_json::json!({"type":"list_state","revision":2,"selected":"r1","scroll":{"id":"r50000","offset":2.0}})).unwrap()).unwrap();
+        assert_eq!(INDEX_BUILDS.with(|count| count.get()), 2);
+        assert_eq!(model.ids.get("r1").unwrap() as *const usize, storage);
+        assert!(Arc::ptr_eq(&rows, &model.rows));
+        let text = model.rows[0].text.clone();
+        assert!(Arc::ptr_eq(&text, &model.rows[0].text));
+    }
 
     #[test]
     fn shared_wire_fixture_applies_atomically_and_retains_last_good_state() {

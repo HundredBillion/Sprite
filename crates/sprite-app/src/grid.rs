@@ -9,10 +9,47 @@
 //! position depends only on the terminal grid. A glyph that renders wider than
 //! its cell is clipped rather than allowed to displace its neighbours.
 
+use std::sync::Arc;
+
 use gpui::{Pixels, Point, Size, px, size};
 use sprite_term::{
-    CellStyle, CellWidth, HyperlinkSpan, RenderRow, SnapshotColor, TerminalSize, UnderlineStyle,
+    CellStyle, CellWidth, HyperlinkSpan, RenderRow, RenderSnapshot, SnapshotColor, UnderlineStyle,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub(crate) struct Snapped(Pixels);
+
+impl Snapped {
+    pub(crate) fn snap(value: Pixels, scale: f32) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        Self(px((f32::from(value) * scale).round() / scale))
+    }
+    pub(crate) fn pixels(self) -> Pixels {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Col(pub u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Row(pub usize);
+
+pub(crate) fn column_edge(origin: Pixels, width: Pixels, column: Col, scale: f32) -> Snapped {
+    Snapped::snap(
+        px(f32::from(origin) + column.0 as f32 * f32::from(width)),
+        scale,
+    )
+}
+pub(crate) fn row_edge(origin: Pixels, height: Pixels, row: Row, scale: f32) -> Snapped {
+    Snapped::snap(
+        px(f32::from(origin) + row.0 as f32 * f32::from(height)),
+        scale,
+    )
+}
 
 /// One drawable cell, positioned in grid columns.
 #[derive(Clone, Debug, PartialEq)]
@@ -21,7 +58,7 @@ pub(crate) struct PositionedCell {
     pub column: u16,
     /// How many columns it occupies: 1 for narrow, 2 for wide.
     pub columns: u16,
-    pub text: String,
+    pub text: sprite_term::CellText,
     pub style: CellStyle,
     pub selected: bool,
     pub hovered_link: bool,
@@ -71,10 +108,76 @@ pub(crate) fn lay_out_row(row: &RenderRow) -> Vec<PositionedCell> {
     placed
 }
 
-pub(crate) fn style_hyperlink_span(rows: &mut [Vec<PositionedCell>], span: HyperlinkSpan) {
-    let Some(row) = rows.get_mut(usize::from(span.row)) else {
-        return;
+pub(crate) type PositionedRows = Arc<[Arc<Vec<PositionedCell>>]>;
+
+#[derive(Default)]
+pub(crate) struct LayoutCache {
+    sources: Vec<Arc<RenderRow>>,
+    hovered: Option<HyperlinkSpan>,
+    rows: PositionedRows,
+}
+
+pub(crate) fn prepare_rows(
+    cache: &mut LayoutCache,
+    snapshot: Option<&RenderSnapshot>,
+    hovered_link: Option<(u64, HyperlinkSpan)>,
+) -> PositionedRows {
+    let Some(snapshot) = snapshot else {
+        if !cache.sources.is_empty() {
+            *cache = LayoutCache::default();
+        }
+        return Arc::clone(&cache.rows);
     };
+    let hovered = hovered_link
+        .filter(|(generation, _)| *generation == snapshot.generation)
+        .map(|(_, span)| span);
+    let row_hover = |span: Option<HyperlinkSpan>, index: usize| {
+        span.filter(|span| usize::from(span.row) == index)
+    };
+    let unchanged = |index: usize, source: &Arc<RenderRow>| {
+        cache
+            .sources
+            .get(index)
+            .is_some_and(|old| Arc::ptr_eq(old, source))
+            && row_hover(cache.hovered, index) == row_hover(hovered, index)
+    };
+    if cache.sources.len() == snapshot.rows.len()
+        && snapshot
+            .rows
+            .iter()
+            .enumerate()
+            .all(|(index, source)| unchanged(index, source))
+    {
+        return Arc::clone(&cache.rows);
+    }
+    cache.rows = snapshot
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            if unchanged(index, source) {
+                return Arc::clone(&cache.rows[index]);
+            }
+            let mut row = lay_out_row(source);
+            if let Some(span) = row_hover(hovered, index) {
+                style_hyperlink_row(&mut row, span);
+            }
+            Arc::new(row)
+        })
+        .collect();
+    cache.sources.clone_from(&snapshot.rows);
+    cache.hovered = hovered;
+    Arc::clone(&cache.rows)
+}
+
+#[cfg(test)]
+fn style_hyperlink_span(rows: &mut [Vec<PositionedCell>], span: HyperlinkSpan) {
+    if let Some(row) = rows.get_mut(usize::from(span.row)) {
+        style_hyperlink_row(row, span);
+    }
+}
+
+fn style_hyperlink_row(row: &mut [PositionedCell], span: HyperlinkSpan) {
     for cell in row {
         let cell_span = cell.span();
         if cell_span.start < u32::from(span.end_column)
@@ -116,7 +219,7 @@ mod tests {
         let cell = |column| PositionedCell {
             column,
             columns: 1,
-            text: "x".to_owned(),
+            text: "x".into(),
             style: style(),
             selected: false,
             hovered_link: false,
@@ -145,7 +248,7 @@ mod tests {
 
     fn cell(text: &str, width: CellWidth) -> RenderCell {
         RenderCell {
-            text: text.to_owned(),
+            text: text.into(),
             width,
             style: style(),
             selected: false,
@@ -381,7 +484,7 @@ pub(crate) fn content_area(available: Size<Pixels>, padding: f32) -> Size<Pixels
 /// left can match the gap on the right at every window width.
 pub(crate) fn grid_origin(
     available: Size<Pixels>,
-    grid: TerminalSize,
+    grid: sprite_term::ValidTerminalSize,
     cell_width: Pixels,
     cell_height: Pixels,
     padding: f32,
@@ -397,8 +500,8 @@ pub(crate) fn grid_origin(
     };
 
     Point {
-        x: centre(available.width, grid.cols, cell_width),
-        y: centre(available.height, grid.rows, cell_height),
+        x: centre(available.width, grid.cols(), cell_width),
+        y: centre(available.height, grid.rows(), cell_height),
     }
 }
 
@@ -441,13 +544,17 @@ mod padding_tests {
     use crate::config::Grid;
     use gpui::size;
 
-    fn grid(cols: u16, rows: u16) -> TerminalSize {
-        TerminalSize {
-            rows,
-            cols,
-            cell_width_px: 8,
-            cell_height_px: 16,
-        }
+    fn grid(cols: u16, rows: u16) -> sprite_term::ValidTerminalSize {
+        sprite_term::ValidTerminalSize::new(
+            sprite_term::TerminalSize {
+                rows,
+                cols,
+                cell_width_px: 8,
+                cell_height_px: 16,
+            },
+            "resize",
+        )
+        .expect("valid terminal size")
     }
 
     #[test]
@@ -559,10 +666,9 @@ mod padding_tests {
 mod hit_tests {
     use super::*;
     use gpui::point;
-    use sprite_term::TerminalSize;
 
-    fn size() -> TerminalSize {
-        TerminalSize {
+    fn size() -> sprite_term::TerminalSize {
+        sprite_term::TerminalSize {
             rows: 24,
             cols: 80,
             cell_width_px: 8,
@@ -636,5 +742,53 @@ mod hit_tests {
             )
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn generation_checked_hover_selection_and_empty_snapshot_invalidate_only_affected_rows() {
+        let mut snapshot = crate::paint_benchmark::fixture();
+        let mut cache = LayoutCache::default();
+        let original = prepare_rows(&mut cache, Some(&snapshot), None);
+        let span = HyperlinkSpan {
+            row: 1,
+            start_column: 2,
+            end_column: 5,
+        };
+        let stale = prepare_rows(&mut cache, Some(&snapshot), Some((0, span)));
+        assert!(Arc::ptr_eq(&original, &stale));
+        let hovered = prepare_rows(&mut cache, Some(&snapshot), Some((1, span)));
+        assert!(hovered[1][2].hovered_link);
+        assert!(!Arc::ptr_eq(&original[1], &hovered[1]));
+        snapshot.generation += 1;
+        Arc::make_mut(&mut snapshot.rows[3]).cells[0].selected = true;
+        let selected = prepare_rows(&mut cache, Some(&snapshot), Some((1, span)));
+        assert!(!selected[1][2].hovered_link);
+        assert!(selected[3][0].selected);
+        for index in 0..snapshot.rows.len() {
+            assert_eq!(
+                Arc::ptr_eq(&hovered[index], &selected[index]),
+                index != 1 && index != 3
+            );
+        }
+        snapshot.default_background.r ^= 0xff;
+        Arc::make_mut(&mut snapshot.palette)[12].r ^= 0xff;
+        let recolored = prepare_rows(&mut cache, Some(&snapshot), None);
+        assert!(
+            Arc::ptr_eq(&selected, &recolored),
+            "paint resolves colors from each current snapshot"
+        );
+        snapshot.rows.truncate(2);
+        let shortened = prepare_rows(&mut cache, Some(&snapshot), None);
+        assert_eq!(shortened.len(), 2);
+        assert!(Arc::ptr_eq(&shortened[0], &recolored[0]));
+        assert!(prepare_rows(&mut cache, None, None).is_empty());
+        let restored = prepare_rows(&mut cache, Some(&snapshot), None);
+        assert_eq!(shortened, restored);
+        assert!(!Arc::ptr_eq(&shortened[0], &restored[0]));
     }
 }

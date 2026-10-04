@@ -12,6 +12,9 @@ mod render;
 mod surfaces;
 mod theme;
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use gpui::{
@@ -32,16 +35,22 @@ use input::Drag;
 use render::BLINK_INTERVAL;
 use surfaces::DockDrag;
 use surfaces::HostedSurface;
-use theme::{chosen_family, measure_cell_width, unpack};
+pub(crate) use theme::CellMetrics;
+use theme::{chosen_family, unpack};
+
+enum SessionState {
+    NeverStarted,
+    Running(TerminalSession),
+    Ended(TerminalSession),
+}
 
 pub struct TerminalView {
-    /// The pane's terminal, or `None` for a view that never started one.
+    applied_settings: crate::config::Settings,
+    /// An ended pane keeps its worker handle until cleanup can join it.
     ///
     /// A pane whose configured program could not be run still has to draw the
     /// reason it could not, and nothing it draws needs a terminal behind it.
-    session: Option<TerminalSession>,
-    /// Set as soon as the worker reports exit, before the workspace removes us.
-    ended: bool,
+    session: SessionState,
     bundle: Option<Arc<SnapshotBundle>>,
     /// Textures for the images this pane is showing.
     ///
@@ -50,18 +59,9 @@ pub struct TerminalView {
     /// forget to call.
     textures: crate::graphics_cache::GraphicsCache,
     focus: FocusHandle,
-    /// The configured text size, which the cell metrics follow.
-    font_size: Pixels,
-    /// Measured from the font actually rendered, in logical pixels.
-    cell_width: Pixels,
-    cell_height: Pixels,
-    /// The configured line-height ratio, kept so a size change re-derives the
-    /// cell height from the same ratio the theme asked for.
-    line_height: f32,
+    metrics: CellMetrics,
     /// The configured gap around the grid, in logical pixels.
     padding: f32,
-    /// Resolved once, then used for both measuring and drawing.
-    font_family: SharedString,
     /// Foreground and background to use before the first snapshot arrives.
     ///
     /// Configured colours are held here as well as sent to the terminal, so a
@@ -69,7 +69,7 @@ pub struct TerminalView {
     /// dark.
     fallback_colors: (Rgb, Rgb),
     /// The last size successfully sent, so an unchanged layout sends nothing.
-    size: Option<TerminalSize>,
+    size: Option<sprite_term::ValidTerminalSize>,
     /// How this pane is reached by observation, if the window has an endpoint.
     observation: Option<crate::observation::panes::PaneLink>,
     /// What programs have asked this pane to draw beside or over its grid.
@@ -86,6 +86,7 @@ pub struct TerminalView {
     ///
     /// `None` means unknown, never a guess: the engine's own rule, kept here.
     title: Option<SharedString>,
+    display_title: Option<SharedString>,
     /// Sub-row scroll remainder, so trackpad gestures are not rounded away.
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
@@ -94,6 +95,7 @@ pub struct TerminalView {
     /// The most recent click awaiting terminal link resolution.
     pending_link_click: Option<u64>,
     hovered_cell: Option<sprite_term::CellPosition>,
+    layout_cache: crate::grid::LayoutCache,
     hovered_link: Option<(u64, sprite_term::HyperlinkSpan)>,
     hover_request: Option<(u64, sprite_term::CellPosition)>,
     next_link_request: u64,
@@ -135,6 +137,13 @@ pub(crate) struct PaneExit {
     pub identity: (crate::tabs::TabId, crate::pane_tree::PaneId),
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TITLE_STRINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static TITLE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static FOREGROUND_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl TerminalView {
     fn request_hover_link(&mut self, position: sprite_term::CellPosition) {
         self.hovered_link = None;
@@ -171,11 +180,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let applied_settings = settings.clone();
+        let defaults = theme::session_defaults(&settings);
         let crate::config::Settings {
             font,
             graphics,
-            colors,
-            cursor,
             shell,
             scrollback,
             grid,
@@ -184,9 +193,13 @@ impl TerminalView {
 
         // The cell is shaped before the session starts, so the child never
         // observes scale-1 metrics for a moment on a HiDPI display.
-        let font_size = px(font.size);
         let (font_family, mut complaints) = chosen_family(window, font.family.as_deref());
-        let cell_width = measure_cell_width(window, &font_family, font_size);
+        let metrics = CellMetrics::measure(
+            window,
+            font_family.clone(),
+            font.size.get(),
+            font.line_height.get(),
+        );
         let scale_factor = window.scale_factor();
 
         // A window told what to run gives every one of its panes the same
@@ -198,7 +211,7 @@ impl TerminalView {
             }
             // A preference that cannot be honoured falls back and says so
             // rather than leaving a pane that will not open.
-            None => match SessionConfig::shell(&shell) {
+            None => match SessionConfig::shell(&shell.session_preference()) {
                 Ok((config, refused)) => {
                     complaints.extend(refused);
                     config
@@ -208,52 +221,35 @@ impl TerminalView {
         };
         // The initial 24x80 grid is kept; only the physical cell metrics are
         // corrected for the display this window opened on.
-        config.size = TerminalSize {
-            cell_width_px: physical(cell_width, scale_factor),
-            cell_height_px: physical(
-                px(crate::config::Font::cell_height(
-                    font.size,
-                    font.line_height,
-                )),
-                scale_factor,
-            ),
-            ..config.size
+        config.size = match sprite_term::ValidTerminalSize::new(
+            TerminalSize {
+                cell_width_px: physical(metrics.width(), scale_factor),
+                cell_height_px: physical(metrics.height(), scale_factor),
+                ..config.size.dimensions()
+            },
+            "resize",
+        ) {
+            Ok(size) => size,
+            Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
         };
         // The terminal's own limit: how much decoded image it will hold.
         config.graphics = sprite_term::GraphicsPolicy {
             enabled: graphics.enabled,
-            storage_bytes: graphics.storage_bytes,
+            storage_bytes: graphics.storage_bytes.get(),
             ..sprite_term::GraphicsPolicy::default()
         };
-        // Kept for the frames before the first snapshot, when there is no
-        // terminal state to ask.
-        let fallback_colors = (
-            colors.foreground.unwrap_or_else(|| unpack(FOREGROUND)),
-            colors.background.unwrap_or_else(|| unpack(BACKGROUND)),
-        );
-        // Written into the pane's *default* colours, so a program that sets its
-        // own still wins.
-        //
-        // Foreground and background are always supplied, configured or not:
-        // libghostty reports the pair only when it knows both, and a pane that
-        // supplied neither would draw its cells in the placeholder black a
-        // render state starts with while its window drew Sprite's own colour
-        // behind them.
-        config.colors = sprite_term::ColorDefaults {
-            foreground: Some(fallback_colors.0),
-            background: Some(fallback_colors.1),
-            cursor: colors.cursor,
-            palette: colors.palette,
-        };
-        config.cursor = sprite_term::CursorDefaults {
-            style: cursor.style,
-            blink: cursor.blink,
-        };
-        config.scrollback_bytes = scrollback.bytes;
+        let fallback_colors = defaults.fallback_colors;
+        config.colors = defaults.colors;
+        config.cursor = defaults.cursor;
+        config.scrollback_bytes = scrollback.bytes.get();
         config.environment.extend(environment);
         let initial_size = config.size;
 
-        let mut session = match TerminalSession::spawn(config) {
+        let sprite_term::Spawned {
+            session,
+            mut events,
+            mut snapshots,
+        } = match TerminalSession::spawn(config) {
             Ok(session) => session,
             Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
         };
@@ -264,15 +260,22 @@ impl TerminalView {
             link.panes.register(link.pane, link.tab, session.commands());
         }
 
-        let events = session.take_event_stream();
-        let snapshots = session.take_snapshot_stream();
-
         let event_task = cx.spawn(async move |view, cx| {
-            let Ok(mut events) = events else { return };
             loop {
                 let decision = crate::terminal_events::decide(events.next().await);
                 if decision.stop {
-                    let _ = view.update(cx, |view, _| view.ended = true);
+                    let _ = view.update(cx, |view, cx| {
+                        view.session = match std::mem::replace(
+                            &mut view.session,
+                            SessionState::NeverStarted,
+                        ) {
+                            SessionState::Running(session) | SessionState::Ended(session) => {
+                                SessionState::Ended(session)
+                            }
+                            SessionState::NeverStarted => SessionState::NeverStarted,
+                        };
+                        view.refresh_display_title(cx);
+                    });
                 }
                 if decision.close_pane {
                     let _ = exit.sender.try_send(exit.identity);
@@ -298,7 +301,6 @@ impl TerminalView {
         });
 
         let snapshot_task = cx.spawn(async move |view, cx| {
-            let Ok(mut snapshots) = snapshots else { return };
             while let Ok(bundle) = snapshots.next().await {
                 let generation = bundle.generation;
                 if view
@@ -313,6 +315,7 @@ impl TerminalView {
                         if newer {
                             view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
+                            view.refresh_display_title(cx);
                             if view.hover_request.is_none()
                                 && let Some(cell) = view.hovered_cell
                             {
@@ -338,40 +341,37 @@ impl TerminalView {
             });
 
         Self {
-            session: Some(session),
-            ended: false,
+            applied_settings,
+            session: SessionState::Running(session),
             observation,
             surfaces: SurfaceHost::default(),
             dock_drag: None,
-            font_size,
+            metrics,
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
             status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
             bundle: None,
             // The renderer's own limit, separate from the terminal's above.
-            textures: crate::graphics_cache::GraphicsCache::with_budget(graphics.texture_bytes),
+            textures: crate::graphics_cache::GraphicsCache::with_budget(
+                graphics.texture_bytes.get(),
+            ),
             focus: cx.focus_handle(),
-            cell_width,
-            cell_height: px(crate::config::Font::cell_height(
-                font.size,
-                font.line_height,
-            )),
-            line_height: font.line_height,
-            font_family,
             fallback_colors,
             size: Some(initial_size),
             allocated: None,
             title: None,
+            display_title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
             plain_link_click: input::PlainLinkClick::default(),
             pending_link_click: None,
             hovered_cell: None,
             hovered_link: None,
+            layout_cache: Default::default(),
             hover_request: None,
             next_link_request: 1,
-            origin: point(px(grid.padding), px(grid.padding)),
-            padding: grid.padding,
+            origin: point(px(grid.padding.get()), px(grid.padding.get())),
+            padding: grid.padding.get(),
             content_origin: None,
             pending_unsafe_paste: None,
             preedit: None,
@@ -424,27 +424,26 @@ impl TerminalView {
                 view.apply_settings(&settings, window, cx);
             });
         Self {
-            session: None,
-            ended: true,
+            applied_settings: crate::config::Settings::default(),
+            session: SessionState::NeverStarted,
             // A view that never started a session has nothing to observe.
             observation: None,
             surfaces: SurfaceHost::default(),
             dock_drag: None,
-            font_size: px(crate::config::Font::DEFAULT_SIZE),
+            metrics: CellMetrics::measure(
+                window,
+                font_family,
+                crate::config::Font::DEFAULT_SIZE,
+                crate::config::Font::DEFAULT_LINE_HEIGHT,
+            ),
             bundle: None,
             textures: crate::graphics_cache::GraphicsCache::default(),
             focus: cx.focus_handle(),
-            cell_width: px(8.0),
-            cell_height: px(crate::config::Font::cell_height(
-                crate::config::Font::DEFAULT_SIZE,
-                crate::config::Font::DEFAULT_LINE_HEIGHT,
-            )),
-            line_height: crate::config::Font::DEFAULT_LINE_HEIGHT,
-            font_family,
             fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
             allocated: None,
             title: None,
+            display_title: None,
             status: Some(message.into()),
             scroll: ScrollAccumulator::default(),
             drag: None,
@@ -452,6 +451,7 @@ impl TerminalView {
             pending_link_click: None,
             hovered_cell: None,
             hovered_link: None,
+            layout_cache: Default::default(),
             hover_request: None,
             next_link_request: 1,
             origin: point(
@@ -476,7 +476,10 @@ impl TerminalView {
         use crate::terminal_events::Effect;
         match effect {
             Effect::Status(line) => self.status = Some(line),
-            Effect::Title(title) => self.title = title.map(SharedString::from),
+            Effect::Title(title) => {
+                self.title = title.map(SharedString::from);
+                self.refresh_display_title(cx);
+            }
             Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
             Effect::HyperlinkResolved {
                 position,
@@ -528,20 +531,25 @@ impl TerminalView {
 
     /// Hands over the worker so the window can wait for it off the GPUI thread.
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
+        // Retained view handles must not keep a closed pane reachable by commands.
+        if let Some(link) = self.observation.take() {
+            link.panes.forget(link.pane);
+        }
         // A view with no session has no worker to wait for, so there is
         // nothing to hand over.
-        let session = self.session.as_mut()?;
-        session.begin_shutdown().ok().flatten()
+        match &mut self.session {
+            SessionState::NeverStarted => None,
+            SessionState::Running(session) | SessionState::Ended(session) => {
+                session.begin_shutdown().ok().flatten()
+            }
+        }
     }
 
     fn send(&mut self, command: TerminalCommand) {
         // Sending to a view with no session is a no-op, not an error: a failed
         // pane has nothing to send to, and reporting a send failure over its
         // status line would replace the reason it failed with a symptom.
-        if self.ended {
-            return;
-        }
-        let Some(session) = self.session.as_mut() else {
+        let SessionState::Running(session) = &mut self.session else {
             return;
         };
         if let Err(error) = session.send(command) {
@@ -552,19 +560,24 @@ impl TerminalView {
     /// What this pane is running, asked of the kernel rather than of the
     /// worker — see [`sprite_term::ForegroundWatch`].
     pub fn foreground(&self) -> sprite_term::ForegroundState {
+        #[cfg(test)]
+        FOREGROUND_QUERIES.with(|count| count.set(count.get() + 1));
         // Nothing is running in a pane that never started, so closing it must
         // not ask for confirmation.
-        let Some(session) = self.session.as_ref() else {
-            return sprite_term::ForegroundState::Idle;
-        };
-        session.foreground()
+        match &self.session {
+            SessionState::NeverStarted | SessionState::Ended(_) => {
+                sprite_term::ForegroundState::Idle
+            }
+            SessionState::Running(session) => session.foreground(),
+        }
     }
 
     /// Returns the process group when `pid` owns this pane's foreground.
     pub fn foreground_owner_group(&self, pid: u32) -> Option<i32> {
-        self.session
-            .as_ref()
-            .and_then(|session| session.foreground_owner_group(pid))
+        match &self.session {
+            SessionState::NeverStarted | SessionState::Ended(_) => None,
+            SessionState::Running(session) => session.foreground_owner_group(pid),
+        }
     }
 
     /// What this pane is called, as the tab and the window title will show it.
@@ -574,14 +587,39 @@ impl TerminalView {
     /// for. Then nothing — the workspace falls back to the tab's index, and
     /// this view does not invent a word to save it the trouble.
     pub fn title(&self) -> Option<SharedString> {
-        if let Some(title) = &self.title {
-            return Some(title.clone());
+        #[cfg(test)]
+        TITLE_QUERIES.with(|count| count.set(count.get() + 1));
+        self.display_title.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocated_for_test(&self) -> Option<Size<Pixels>> {
+        self.allocated
+    }
+
+    fn refresh_display_title(&mut self, cx: &mut Context<Self>) {
+        let wanted = if let Some(title) = &self.title {
+            Some(title.clone())
+        } else {
+            let foreground = self.foreground();
+            let program = foreground.program();
+            if self.display_title.as_ref().map(|title| title.as_ref()) == program {
+                return;
+            }
+            program.map(|program| {
+                #[cfg(test)]
+                TITLE_STRINGS.with(|count| count.set(count.get() + 1));
+                SharedString::from(program.to_owned())
+            })
+        };
+        if wanted != self.display_title {
+            self.display_title = wanted;
+            cx.emit(sprite_pane::TitleChanged(self.display_title.clone()));
         }
-        self.foreground()
-            .program()
-            .map(|program| SharedString::from(program.to_owned()))
     }
 }
+
+impl gpui::EventEmitter<sprite_pane::TitleChanged> for TerminalView {}
 
 impl Drop for TerminalView {
     fn drop(&mut self) {
@@ -601,6 +639,21 @@ impl Focusable for TerminalView {
 }
 
 impl sprite_pane::Pane for TerminalView {
+    type Request = crate::surface::channel::SurfaceRequest;
+
+    fn surface_request(
+        &mut self,
+        request: Self::Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.serve_surface_request(request, window, cx);
+    }
+
+    fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_focus(window, cx);
+    }
+
     fn title(&self) -> Option<SharedString> {
         TerminalView::title(self)
     }

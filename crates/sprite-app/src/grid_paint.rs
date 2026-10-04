@@ -57,11 +57,14 @@ use gpui::{
     SharedString, StrikethroughStyle, Style, TextRun, Window, fill, outline, point, px, relative,
     rgb,
 };
-use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor, UnderlineStyle};
+use sprite_term::{
+    CellStyle, CursorSnapshot, CursorStyle, RenderSnapshot, Rgb, SnapshotColor, UnderlineStyle,
+};
 
 use crate::block_elements::{block_fill, fill_rects};
 use crate::box_drawing::{self, box_glyph, box_outlines, box_rects};
 use crate::grid::PositionedCell;
+use crate::grid::{Col, Row, Snapped, column_edge, row_edge};
 
 /// How thick a bar or underline cursor is drawn, as a fraction of a cell.
 ///
@@ -189,7 +192,7 @@ pub(crate) fn decorations(
 
 /// The grid of one pane, painted without a layout pass.
 pub(crate) struct GridPaint {
-    rows: Vec<Vec<PositionedCell>>,
+    rows: crate::grid::PositionedRows,
     pass: RowPass,
     cursor: Option<CursorSnapshot>,
     cursor_color: Option<Rgb>,
@@ -208,7 +211,7 @@ pub(crate) struct GridPaint {
 /// and three are lengths, so at a call site the positional form is unreadable
 /// and a transposition would be invisible.
 pub(crate) struct GridPaintSpec {
-    pub rows: Vec<Vec<PositionedCell>>,
+    pub rows: crate::grid::PositionedRows,
     pub pass: RowPass,
     pub cursor: Option<CursorSnapshot>,
     pub cursor_color: Option<Rgb>,
@@ -222,6 +225,77 @@ pub(crate) struct GridPaintSpec {
 }
 
 impl GridPaint {
+    pub(crate) fn prepare(
+        snapshot: Option<&RenderSnapshot>,
+        rows: crate::grid::PositionedRows,
+        metrics: &crate::surface::render::GridMetrics,
+        split: bool,
+    ) -> (Self, Option<Self>) {
+        let cursor = snapshot
+            .map(|snapshot| snapshot.cursor)
+            .filter(|cursor| metrics.blink_on || !cursor.blinking);
+        let cursor_color = snapshot.and_then(|snapshot| snapshot.cursor_color);
+        let palette = snapshot.map(|snapshot| Arc::clone(&snapshot.palette));
+        Self::prepare_spec(
+            GridPaintSpec {
+                rows,
+                pass: RowPass::Whole,
+                cursor,
+                cursor_color,
+                default_fg: metrics.defaults.0,
+                default_bg: metrics.defaults.1,
+                palette,
+                cell_width: metrics.cells.width(),
+                cell_height: metrics.cells.height(),
+                font_family: metrics.cells.family(),
+                font_size: metrics.cells.font_size(),
+            },
+            split,
+        )
+    }
+
+    pub(crate) fn prepare_spec(mut spec: GridPaintSpec, split: bool) -> (Self, Option<Self>) {
+        if split {
+            let background = Self::new(GridPaintSpec {
+                rows: spec.rows.clone(),
+                pass: RowPass::Background,
+                palette: spec.palette.clone(),
+                font_family: spec.font_family.clone(),
+                ..spec
+            });
+            spec.pass = RowPass::Text;
+            (background, Some(Self::new(spec)))
+        } else {
+            (Self::new(spec), None)
+        }
+    }
+
+    fn resolve_row<'a>(
+        &'a self,
+        index: usize,
+        cells: &'a [PositionedCell],
+    ) -> impl Iterator<Item = Drawn> + Clone + 'a {
+        let on_cursor = self
+            .cursor
+            .filter(|cursor| cursor.visible && usize::from(cursor.row) == index);
+        cells.iter().map(move |cell| self.draw(cell, on_cursor))
+    }
+
+    /// Exercises the same decision passes as live painting, without glyph or GPU work.
+    pub(crate) fn benchmark_draw_decisions(&self) {
+        for (index, cells) in self.rows.iter().enumerate() {
+            let resolved = self.resolve_row(index, cells);
+            for drawn in resolved.clone() {
+                std::hint::black_box(drawn);
+            }
+            if self.pass != RowPass::Background {
+                for drawn in resolved {
+                    std::hint::black_box(drawn);
+                }
+            }
+        }
+    }
+
     pub(crate) fn new(spec: GridPaintSpec) -> Self {
         Self {
             rows: spec.rows,
@@ -381,10 +455,10 @@ struct Run {
 /// site is exactly the kind of argument list a transposition hides in.
 #[derive(Clone, Copy)]
 struct CellBounds {
-    left: Pixels,
-    right: Pixels,
-    top: Pixels,
-    bottom: Pixels,
+    left: Snapped,
+    right: Snapped,
+    top: Snapped,
+    bottom: Snapped,
 }
 
 impl Element for GridPaint {
@@ -454,28 +528,16 @@ impl Element for GridPaint {
             return;
         }
 
-        let left_of = |column: u32| px(f32::from(bounds.origin.x) + column as f32 * width);
-        let top_of = |row: usize| px(f32::from(bounds.origin.y) + row as f32 * height);
+        let edge = |column: Col| column_edge(bounds.origin.x, self.cell_width, column, scale);
+        let row_edge = |row: Row| row_edge(bounds.origin.y, self.cell_height, row, scale);
 
-        // The edge of a column, and the only place one is worked out. A cell's
-        // right edge is its neighbour's left edge by construction, so the two
-        // can never be computed to different answers.
-        let edge = |column: u32| snap(left_of(column), scale);
-
-        let rows = std::mem::take(&mut self.rows);
-        // One row's worth, reused: a resolved cell is wanted twice, and
-        // resolving it twice would mean resolving a palette colour twice for
-        // every cell on screen.
-        let mut resolved: Vec<Drawn> = Vec::new();
+        let rows = Arc::clone(&self.rows);
+        // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
-            let on_cursor = self
-                .cursor
-                .filter(|c| c.visible && usize::from(c.row) == index);
-            let top = snap(top_of(index), scale);
-            let bottom = snap(top_of(index + 1), scale);
+            let top = row_edge(Row(index));
+            let bottom = row_edge(Row(index + 1));
 
-            resolved.clear();
-            resolved.extend(cells.iter().map(|cell| self.draw(cell, on_cursor)));
+            let resolved = self.resolve_row(index, cells);
 
             // The ground first, for the whole row, so that a glyph is never
             // covered by the cell painted after it.
@@ -483,11 +545,14 @@ impl Element for GridPaint {
             let flush = |run: Option<Run>, window: &mut Window| {
                 let Some(run) = run else { return };
                 window.paint_quad(fill(
-                    Bounds::from_corners(point(edge(run.start), top), point(edge(run.end), bottom)),
+                    Bounds::from_corners(
+                        point(edge(Col(run.start)).pixels(), top.pixels()),
+                        point(edge(Col(run.end)).pixels(), bottom.pixels()),
+                    ),
                     run.color,
                 ));
             };
-            for (cell, drawn) in cells.iter().zip(&resolved) {
+            for (cell, drawn) in cells.iter().zip(resolved.clone()) {
                 let span = cell.span();
                 let (start, end) = (span.start, span.end);
                 match drawn.background {
@@ -519,19 +584,18 @@ impl Element for GridPaint {
                 continue;
             }
 
-            for (cell, drawn) in cells.iter().zip(&resolved) {
+            for (cell, drawn) in cells.iter().zip(resolved.clone()) {
                 let span = cell.span();
                 let bounds = CellBounds {
-                    left: edge(span.start),
-                    right: edge(span.end),
+                    left: edge(Col(span.start)),
+                    right: edge(Col(span.end)),
                     top,
                     bottom,
                 };
-                self.paint_glyph(cell, drawn, bounds, scale, window, cx);
-                self.paint_cursor(drawn, bounds, scale, window);
+                self.paint_glyph(cell, &drawn, bounds, scale, window, cx);
+                self.paint_cursor(&drawn, bounds, scale, window);
             }
         }
-        self.rows = rows;
     }
 }
 
@@ -571,7 +635,7 @@ impl GridPaint {
             return;
         }
 
-        let text = SharedString::from(cell.text.clone());
+        let text = SharedString::from(cell.text.as_str().to_owned());
         let (underline, strikethrough) = decorations(
             &cell.style,
             drawn.foreground,
@@ -607,7 +671,7 @@ impl GridPaint {
         // continuous. The cell *width* is still the font's own 8.4, so the
         // columns do not drift: only where each one starts is rounded, by less
         // than half a device pixel.
-        let origin = point(bounds.left, bounds.top);
+        let origin = point(bounds.left.pixels(), bounds.top.pixels());
 
         // Every cell is clipped to its own column, not only the ones holding a
         // glyph too wide for it. A character that fills its cell — a rule, a
@@ -620,10 +684,10 @@ impl GridPaint {
         // between them exactly.
         let mask = ContentMask {
             bounds: Bounds::from_corners(
-                point(bounds.left, bounds.top),
+                point(bounds.left.pixels(), bounds.top.pixels()),
                 point(
-                    bounds.right,
-                    px(f32::from(bounds.top) + f32::from(self.cell_height)),
+                    bounds.right.pixels(),
+                    px(f32::from(bounds.top.pixels()) + f32::from(self.cell_height)),
                 ),
             ),
         };
@@ -660,10 +724,10 @@ impl GridPaint {
         };
         for (left, top, right, bottom) in fill_rects(
             &shape,
-            f32::from(bounds.left),
-            f32::from(bounds.top),
-            f32::from(bounds.right),
-            f32::from(bounds.bottom),
+            f32::from(bounds.left.pixels()),
+            f32::from(bounds.top.pixels()),
+            f32::from(bounds.right.pixels()),
+            f32::from(bounds.bottom.pixels()),
         ) {
             let (left, right) = snapped_span(left, right, scale);
             let (top, bottom) = snapped_span(top, bottom, scale);
@@ -692,12 +756,7 @@ impl GridPaint {
             return false;
         };
 
-        let area = box_drawing::Cell {
-            left: f32::from(bounds.left),
-            top: f32::from(bounds.top),
-            right: f32::from(bounds.right),
-            bottom: f32::from(bounds.bottom),
-        };
+        let area = box_drawing::Cell::new(bounds.left, bounds.top, bounds.right, bounds.bottom);
         let strokes = stroke_widths(self.cell_width, self.cell_height, scale);
         let color = drawn.foreground;
 
@@ -743,6 +802,8 @@ impl GridPaint {
             top,
             bottom,
         } = bounds;
+        let (left, right, top, bottom) =
+            (left.pixels(), right.pixels(), top.pixels(), bottom.pixels());
         // At least one logical pixel: a stroke that rounds to nothing is a
         // cursor nobody can find.
         let stroke = |extent: Pixels| px((f32::from(extent) * CURSOR_STROKE).max(1.0));
@@ -799,6 +860,71 @@ impl IntoElement for GridPaint {
 mod tests {
     use super::*;
     use crate::tokens::unpack;
+
+    #[test]
+    fn benchmark_samples_prepare_real_blink_hover_and_one_row_transitions() {
+        use crate::paint_benchmark::{PaintBenchmark, Scenario};
+
+        for split in [false, true] {
+            let mut benchmark = PaintBenchmark::new();
+            let (first, first_text) = benchmark.prepare(Scenario::FirstFrame, split);
+            assert!(first.cursor.is_some());
+            assert_eq!(first_text.is_some(), split);
+            let (blink, _) = benchmark.prepare(Scenario::SameGenerationBlink, split);
+            assert!(blink.cursor.is_none());
+            assert_eq!(first.rows, blink.rows);
+            assert!(Arc::ptr_eq(&first.rows, &blink.rows));
+            assert!(Arc::ptr_eq(
+                first.palette.as_ref().unwrap(),
+                blink.palette.as_ref().unwrap()
+            ));
+            if let Some(text) = &first_text {
+                assert!(Arc::ptr_eq(&first.rows, &text.rows));
+            }
+            let (hover, _) = benchmark.prepare(Scenario::Hover, split);
+            assert!(!Arc::ptr_eq(&first.rows[12], &hover.rows[12]));
+            assert!(
+                first
+                    .rows
+                    .iter()
+                    .zip(hover.rows.iter())
+                    .enumerate()
+                    .all(|(index, (before, after))| index == 12 || Arc::ptr_eq(before, after))
+            );
+            assert!(hover.rows[12].iter().any(|cell| cell.hovered_link));
+            assert!(
+                hover
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != 12)
+                    .all(|(_, row)| row.iter().all(|cell| !cell.hovered_link))
+            );
+            let (unhover, _) = benchmark.prepare(Scenario::FirstFrame, split);
+            assert_eq!(first.rows, unhover.rows);
+            let (changed, _) = benchmark.prepare(Scenario::OneRowChange, split);
+            let changed_rows: Vec<_> = first
+                .rows
+                .iter()
+                .zip(changed.rows.iter())
+                .enumerate()
+                .filter_map(|(index, (before, after))| (before != after).then_some(index))
+                .collect();
+            assert_eq!(changed_rows, [30]);
+            assert!(
+                unhover
+                    .rows
+                    .iter()
+                    .zip(changed.rows.iter())
+                    .enumerate()
+                    .all(|(index, (before, after))| Arc::ptr_eq(before, after) == (index != 30))
+            );
+            assert_eq!(changed.rows[30][10].text, "Z");
+            let (fresh, _) = PaintBenchmark::new().prepare(Scenario::FirstFrame, split);
+            assert_eq!(first.rows, fresh.rows);
+            assert_eq!(first.cursor, fresh.cursor);
+        }
+    }
 
     #[test]
     fn image_placeholders_leave_no_glyph_under_transparent_pixels() {

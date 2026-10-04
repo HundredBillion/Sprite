@@ -18,9 +18,13 @@ use support::{EventPump, SnapshotPump, base64, kitty, pane_text, png_bytes};
 fn start(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {
     let mut config = SessionConfig::command("/bin/sh", Vec::<OsString>::new());
     config.graphics = policy;
-    let mut session = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(session.take_event_stream().expect("events"));
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("snapshots"));
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     session
         // Split by a `%s` for the reason `marker_command` gives: the tty echoes

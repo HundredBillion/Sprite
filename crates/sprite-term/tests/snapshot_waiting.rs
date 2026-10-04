@@ -31,12 +31,16 @@ fn a_child_still_producing_output_is_not_timed_out() {
         "i=0; while [ $i -lt {ticks} ]; do printf 'filler %d\\n' \"$i\"; \
          i=$((i+1)); sleep 0.1; done; printf 'ARRIVED\\n'; sleep 30"
     );
-    let mut session = TerminalSession::spawn(SessionConfig::command(
+    let sprite_term::Spawned {
+        session: _session,
+        events: _events,
+        snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
         "/bin/sh",
         vec![OsString::from("-c"), OsString::from(script)],
     ))
     .expect("spawn session");
-    let snapshots = SnapshotPump::new(session.take_snapshot_stream().expect("take snapshots"));
+    let snapshots = SnapshotPump::new(snapshots);
 
     let started = Instant::now();
     let bundle = snapshots.wait_for("the child to arrive", |bundle| {
