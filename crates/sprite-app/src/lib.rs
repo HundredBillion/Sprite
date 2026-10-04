@@ -13,6 +13,8 @@ mod grid;
 mod grid_paint;
 mod input;
 mod observation;
+#[doc(hidden)]
+pub mod paint_benchmark;
 mod pane_registry;
 mod pane_tree;
 mod surface;

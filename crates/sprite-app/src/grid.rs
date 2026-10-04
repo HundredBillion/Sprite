@@ -11,7 +11,8 @@
 
 use gpui::{Pixels, Point, Size, px, size};
 use sprite_term::{
-    CellStyle, CellWidth, HyperlinkSpan, RenderRow, SnapshotColor, TerminalSize, UnderlineStyle,
+    CellStyle, CellWidth, HyperlinkSpan, RenderRow, RenderSnapshot, SnapshotColor, TerminalSize,
+    UnderlineStyle,
 };
 
 /// One drawable cell, positioned in grid columns.
@@ -69,6 +70,22 @@ pub(crate) fn lay_out_row(row: &RenderRow) -> Vec<PositionedCell> {
     }
 
     placed
+}
+
+pub(crate) fn prepare_rows(
+    snapshot: Option<&RenderSnapshot>,
+    hovered_link: Option<(u64, HyperlinkSpan)>,
+) -> Vec<Vec<PositionedCell>> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let mut rows: Vec<_> = snapshot.rows.iter().map(lay_out_row).collect();
+    if let Some((generation, span)) = hovered_link
+        && generation == snapshot.generation
+    {
+        style_hyperlink_span(&mut rows, span);
+    }
+    rows
 }
 
 pub(crate) fn style_hyperlink_span(rows: &mut [Vec<PositionedCell>], span: HyperlinkSpan) {

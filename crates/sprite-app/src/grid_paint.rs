@@ -57,7 +57,9 @@ use gpui::{
     SharedString, StrikethroughStyle, Style, TextRun, Window, fill, outline, point, px, relative,
     rgb,
 };
-use sprite_term::{CellStyle, CursorSnapshot, CursorStyle, Rgb, SnapshotColor, UnderlineStyle};
+use sprite_term::{
+    CellStyle, CursorSnapshot, CursorStyle, RenderSnapshot, Rgb, SnapshotColor, UnderlineStyle,
+};
 
 use crate::block_elements::{block_fill, fill_rects};
 use crate::box_drawing::{self, box_glyph, box_outlines, box_rects};
@@ -222,6 +224,59 @@ pub(crate) struct GridPaintSpec {
 }
 
 impl GridPaint {
+    pub(crate) fn prepare(
+        snapshot: Option<&RenderSnapshot>,
+        rows: Vec<Vec<PositionedCell>>,
+        metrics: &crate::surface::render::GridMetrics,
+        split: bool,
+    ) -> (Self, Option<Self>) {
+        let cursor = snapshot
+            .map(|snapshot| snapshot.cursor)
+            .filter(|cursor| metrics.blink_on || !cursor.blinking);
+        let cursor_color = snapshot.and_then(|snapshot| snapshot.cursor_color);
+        let palette = snapshot.map(|snapshot| Arc::new(*snapshot.palette.clone()));
+        let build = |pass, rows| {
+            Self::new(GridPaintSpec {
+                rows,
+                pass,
+                cursor,
+                cursor_color,
+                default_fg: metrics.defaults.0,
+                default_bg: metrics.defaults.1,
+                palette: palette.clone(),
+                cell_width: metrics.cell_width,
+                cell_height: metrics.cell_height,
+                font_family: metrics.font_family.clone(),
+                font_size: metrics.font_size,
+            })
+        };
+        if split {
+            (
+                build(RowPass::Background, rows.clone()),
+                Some(build(RowPass::Text, rows)),
+            )
+        } else {
+            (build(RowPass::Whole, rows), None)
+        }
+    }
+
+    fn resolve_row(&self, index: usize, cells: &[PositionedCell], resolved: &mut Vec<Drawn>) {
+        let on_cursor = self
+            .cursor
+            .filter(|cursor| cursor.visible && usize::from(cursor.row) == index);
+        resolved.clear();
+        resolved.extend(cells.iter().map(|cell| self.draw(cell, on_cursor)));
+    }
+
+    /// Runs the live cell decisions and row scratch allocation without a Window.
+    pub(crate) fn benchmark_draw_decisions(&self) {
+        let mut resolved = Vec::new();
+        for (index, cells) in self.rows.iter().enumerate() {
+            self.resolve_row(index, cells, &mut resolved);
+            std::hint::black_box(&resolved);
+        }
+    }
+
     pub(crate) fn new(spec: GridPaintSpec) -> Self {
         Self {
             rows: spec.rows,
@@ -468,14 +523,10 @@ impl Element for GridPaint {
         // every cell on screen.
         let mut resolved: Vec<Drawn> = Vec::new();
         for (index, cells) in rows.iter().enumerate() {
-            let on_cursor = self
-                .cursor
-                .filter(|c| c.visible && usize::from(c.row) == index);
             let top = snap(top_of(index), scale);
             let bottom = snap(top_of(index + 1), scale);
 
-            resolved.clear();
-            resolved.extend(cells.iter().map(|cell| self.draw(cell, on_cursor)));
+            self.resolve_row(index, cells, &mut resolved);
 
             // The ground first, for the whole row, so that a glyph is never
             // covered by the cell painted after it.
@@ -799,6 +850,46 @@ impl IntoElement for GridPaint {
 mod tests {
     use super::*;
     use crate::tokens::unpack;
+
+    #[test]
+    fn benchmark_samples_prepare_real_blink_hover_and_one_row_transitions() {
+        use crate::paint_benchmark::{PaintBenchmark, Scenario};
+
+        for split in [false, true] {
+            let mut benchmark = PaintBenchmark::new();
+            let (first, first_text) = benchmark.prepare(Scenario::FirstFrame, split);
+            assert!(first.cursor.is_some());
+            assert_eq!(first_text.is_some(), split);
+            let (blink, _) = benchmark.prepare(Scenario::SameGenerationBlink, split);
+            assert!(blink.cursor.is_none());
+            assert_eq!(first.rows, blink.rows);
+            let (hover, _) = benchmark.prepare(Scenario::Hover, split);
+            assert!(hover.rows[12].iter().any(|cell| cell.hovered_link));
+            assert!(
+                hover
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != 12)
+                    .all(|(_, row)| row.iter().all(|cell| !cell.hovered_link))
+            );
+            let (unhover, _) = benchmark.prepare(Scenario::FirstFrame, split);
+            assert_eq!(first.rows, unhover.rows);
+            let (changed, _) = benchmark.prepare(Scenario::OneRowChange, split);
+            let changed_rows: Vec<_> = first
+                .rows
+                .iter()
+                .zip(&changed.rows)
+                .enumerate()
+                .filter_map(|(index, (before, after))| (before != after).then_some(index))
+                .collect();
+            assert_eq!(changed_rows, [30]);
+            assert_eq!(changed.rows[30][10].text, "Z");
+            let (fresh, _) = PaintBenchmark::new().prepare(Scenario::FirstFrame, split);
+            assert_eq!(first.rows, fresh.rows);
+            assert_eq!(first.cursor, fresh.cursor);
+        }
+    }
 
     #[test]
     fn image_placeholders_leave_no_glyph_under_transparent_pixels() {
