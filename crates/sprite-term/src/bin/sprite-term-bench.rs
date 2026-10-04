@@ -368,8 +368,9 @@ fn output_to_final_snapshot(output_bytes: usize) -> Duration {
     elapsed
 }
 
-/// One full capture of a 100 by 100 grid: 10,000 cells built into both owned
-/// projections.
+/// Legacy public-session timing for a capture request on a 100 by 100 grid.
+/// A pending same-generation snapshot can satisfy the wait before capture runs.
+/// Use `isolated_projector_capture` to measure projection work.
 fn capture_100x100_grid() -> Duration {
     let mut config = shell("stty -icanon -echo min 1 time 0; cat");
     config.size = sprite_term::ValidTerminalSize::new(
@@ -435,9 +436,9 @@ fn capture_100x100_grid() -> Duration {
     elapsed
 }
 
-/// Capture cost once history is deep. Capture is meant to be proportional to
-/// the visible screen, not to retained scrollback, so this should track
-/// `capture_100x100_grid` rather than growing with history.
+/// Legacy public-session timing after more than 5,000 scrollback rows arrive.
+/// The wait requires a newer generation, which ongoing output can produce.
+/// This includes session scheduling and does not isolate projection work.
 fn capture_with_full_scrollback() -> Duration {
     let sprite_term::Spawned {
         mut session,
