@@ -337,26 +337,26 @@ reload,pane_factory,surface_routing}.rs. Wire split is already Task 3.
 returns Flow; event emission has one fallible helper. Pure close-gate and divider
 logic remains Window-free. Avoid pass-through wrappers around moved code.
 
-- [ ] Inventory remaining production/test responsibilities and move each with its
+- [x] Inventory remaining production/test responsibilities and move each with its
   tests. Share hyperlink scheme allow-list with its actual consumers. Keep the
   worker's shutdown escalation policy together in closing; preserve 2s/3s/6s timing.
-- [ ] Move runtime worker state into Session; `handle` owns message transitions and
+- [x] Move runtime worker state into Session; `handle` owns message transitions and
   returns Continue/Stop via Flow. Consolidate repeated send-or-break error handling
   without changing final-snapshot/Exited/Error ordering or callback lifetime.
-- [ ] Move workspace keymap/divider/rename/title/reload/factory/routing logic to
+- [x] Move workspace keymap/divider/rename/title/reload/factory/routing logic to
   named files. Make CloseGate::decide pure and keep both mouse/keyboard divider
   adapters on shared arithmetic. Reuse PaneServices construction in the factory.
   Aim for the requested roughly 600-line workspace wiring module; move covering
   tests with their responsibilities rather than leaving a monolithic test tail.
   Dispatch modal keyboard behavior with one exhaustive `Mode` match, preserving
   rename, confirmation, idle and divider-drag key behavior with interface tests.
-- [ ] Run all offline gates: fmt, clippy --workspace --all-targets -D warnings,
+- [x] Run all offline gates: fmt, clippy --workspace --all-targets -D warnings,
   test --workspace --no-fail-fast, build --workspace, cargo tree duplicates/features,
   plus CI forbidden-state checks. Run paint/capture/Surface budget checks.
-- [ ] Confirm source census: one generation increment; no manual return_permit;
+- [x] Confirm source census: one generation increment; no manual return_permit;
   no workspace downcast; one UnixListener::bind site and one production key.matches;
   lib.rs re-exports; no PaneRegistry; size validation only in validated constructor.
-- [ ] Write issue-item-to-proof coverage record in docs/performance/design-review.md
+- [x] Write issue-item-to-proof coverage record in docs/performance/design-review.md
   or a linked implementation record. Update all plan checkboxes from evidence.
 - [ ] Obtain independent whole-branch review, resolve important findings, repeat
   affected checks, and commit final docs. Push branch and open one PR for #48 using
