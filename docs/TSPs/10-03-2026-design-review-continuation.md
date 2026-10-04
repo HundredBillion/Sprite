@@ -78,13 +78,13 @@ crates/sprite-term/src/bin/sprite-term-bench.rs if measurement support is needed
 Drop returns its buffer/token and wakes the pump. OutputChunk exposes bytes by
 slice only. No manual return_permit call remains outside Drop.
 
-- [ ] Write a pump test consuming/dropping >=40 chunks without calling a return
+- [x] Write a pump test consuming/dropping >=40 chunks without calling a return
   method; verify all bytes arrive and cancellation joins. Cover inbox rejection
   and unread queued messages dropped during shutdown. Observe old behavior fail.
-- [ ] Enforce the Unix pump safety boundary with `#![deny(unsafe_code)]` and
+- [x] Enforce the Unix pump safety boundary with `#![deny(unsafe_code)]` and
   narrowly scoped allowances for the descriptor-duplication and macOS process-name
   FFI boundaries; the pump otherwise uses owned safe descriptor APIs.
-- [ ] Pool the existing fixed number of 16 KiB buffers at startup. Read directly
+- [x] Pool the existing fixed number of 16 KiB buffers at startup. Read directly
   into a checked-out buffer; send ownership rather than to_vec().
 
 ```rust
@@ -93,10 +93,10 @@ struct OutputChunk { buffer: Vec<u8>, len: usize, permit: Permit }
 // an Option-owned buffer or Permit-owned buffer avoids taking through a borrow.
 ```
 
-- [ ] Preserve available-permit backpressure and the reserved command queue slot.
+- [x] Preserve available-permit backpressure and the reserved command queue slot.
   A lost consumer/cancelled pump must not block in Drop; use bounded nonblocking
   return with closed-channel cleanup. No cycles retain the pump thread.
-- [ ] Count steady-state buffer allocations across >40 deliveries; assert zero.
+- [x] Count steady-state buffer allocations across >40 deliveries; assert zero.
   Run pump, lifecycle, session_output, input_backpressure and graphics-transfer
   tests, plus term all-target clippy. Commit evidence and implementation.
 
@@ -161,7 +161,7 @@ pub trait PaneRequest { fn refuse(self); }
 
 **Blocked by:** Task 4
 
-**Files:** surface/{description,render,host,channel,wire}.rs; terminal_view
+**Files:** surface/{description,style,render,host,channel,wire}.rs; terminal_view
 {theme,render,surfaces,geometry}.rs; grid.rs; grid_paint.rs; box_drawing.rs;
 sprite-term size/config/command definitions and consumers.
 
@@ -176,7 +176,9 @@ are used at the geometry edge.
   where clients rely on it. Match exhaustively in rendering and host management.
 - [ ] Replace the option bag with variants for stack/text/image/grid/list and their
   valid attributes. Parse wire data once into valid values. Route all consumers
-  through variants; do not recreate independent kind/payload pairs.
+  through variants; do not recreate independent kind/payload pairs. Parse utility
+  styles into valid values once, replacing validated strings that are parsed again
+  during rendering; preserve the existing utility vocabulary and error messages.
 - [ ] Replace independent font/cell fields with measured CellMetrics. Startup and
   reload assign one measured value; tests change font family/size/line height and
   verify terminal and Surface use matching metrics.
@@ -341,6 +343,8 @@ logic remains Window-free. Avoid pass-through wrappers around moved code.
 - [ ] Move workspace keymap/divider/rename/title/reload/factory/routing logic to
   named files. Make CloseGate::decide pure and keep both mouse/keyboard divider
   adapters on shared arithmetic. Reuse PaneServices construction in the factory.
+  Aim for the requested roughly 600-line workspace wiring module; move covering
+  tests with their responsibilities rather than leaving a monolithic test tail.
   Dispatch modal keyboard behavior with one exhaustive `Mode` match, preserving
   rename, confirmation, idle and divider-drag key behavior with interface tests.
 - [ ] Run all offline gates: fmt, clippy --workspace --all-targets -D warnings,
