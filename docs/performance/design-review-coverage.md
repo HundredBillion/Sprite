@@ -35,9 +35,12 @@ native compositor or macOS acceptance from the Linux headless harness.
 The actual authenticated self-disable test is now
 `workspace::reload::tests::reload_reconciles_observation_endpoint_and_revokes_old_credentials`.
 Its subprocess filter was updated and the parent also asserts that exactly one
-test ran. It proves the initiating reply arrives before EOF, other clients are
-cancelled, the old socket disappears, and reenabling produces a new key. The
-opaque ReplyConnection is preserved unchanged from transport through request and
+test ran. It proves the initiating reply arrives before EOF, the old socket
+disappears, and reenabling produces a new key. The separate
+[local_socket.rs](../../crates/sprite-app/src/local_socket.rs) test
+`closing_for_one_reply_cancels_other_clients_and_preserves_write_timeout` proves
+other clients are cancelled while the initiating reply retains its write timeout.
+The opaque ReplyConnection is preserved unchanged from transport through request and
 relay. LocalSocket tests reject foreign, stale and reopened identities;
 [type_invariants.rs](../../crates/sprite-app/tests/type_invariants.rs) preserves the
 opaque-identity compile proof, positive controls, exact diagnostics and required

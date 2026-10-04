@@ -26,7 +26,7 @@ pub enum TerminalEvent {
     TitleChanged(Option<String>),
     /// The answer to one [`crate::TerminalCommand::CaptureHistory`].
     History(Arc<HistorySnapshot>),
-    /// The answer to one [`TerminalCommand::CaptureGraphics`].
+    /// The answer to one [`crate::TerminalCommand::CaptureGraphics`].
     Graphics(Arc<GraphicsSnapshot>),
     /// The child reported a new working directory.
     WorkingDirectoryChanged(Option<String>),

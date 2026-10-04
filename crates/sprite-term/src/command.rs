@@ -167,7 +167,7 @@ pub enum TerminalCommand {
     },
     Capture,
     /// Ask for the active screen plus up to N lines of history, answered once
-    /// with [`TerminalEvent::History`].
+    /// with [`crate::TerminalEvent::History`].
     ///
     /// Deliberately not part of the render bundle. Snapshots carry no history
     /// because rebuilding a full scrollback on every capture would cost
@@ -176,7 +176,7 @@ pub enum TerminalCommand {
     /// when it asks.
     CaptureHistory(HistoryLines),
     /// Ask what images this pane is holding, answered once with
-    /// [`TerminalEvent::Graphics`].
+    /// [`crate::TerminalEvent::Graphics`].
     ///
     /// Carries no image data: it reports identities, sizes and placements so a
     /// caller can see *that* an image is held, which is what the graphics
