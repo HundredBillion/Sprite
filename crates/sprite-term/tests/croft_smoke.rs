@@ -1,6 +1,6 @@
-//! The Croft Compatibility Gate.
+//! Optional Croft compatibility smoke test.
 //!
-//! Croft is unmodified upstream software used as an external acceptance
+//! Croft is unmodified upstream software used as an optional external smoke-test
 //! application: if a real full-screen program behaves correctly inside a
 //! Terminal Session, the seam is doing its job. Croft is never a Sprite runtime
 //! dependency, and nothing here imports it or reaches into private

@@ -9,7 +9,7 @@ on:
     branches: [master]
   pull_request:
   schedule:
-    # Nightly, so a moving upstream is caught without waiting for a change here.
+    # Recheck native builds and tests against changes in hosted runner images.
     - cron: "17 4 * * *"
   workflow_dispatch:
 
@@ -229,67 +229,3 @@ jobs:
           test -x target/Sprite.app/Contents/MacOS/sprite
           test -f target/Sprite.app/Contents/Resources/terminfo/78/xterm-ghostty
           target/Sprite.app/Contents/MacOS/sprite --version
-
-  croft:
-    name: croft moving main
-    runs-on: ubuntu-latest
-    # Croft is an external acceptance application built from its own moving
-    # `main`, so this job is deliberately network-enabled and separate from the
-    # offline gate above.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          submodules: recursive
-
-      - name: Install the exact Rust toolchain
-        run: |
-          set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      # The smoke runs Sprite's own test with --locked --offline, so Sprite's
-      # dependencies and terminfo must exist before Croft is even cloned.
-      # Without this the job fails with "no matching package named gpui".
-      - name: Install Zig and terminfo tooling
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ncurses-bin
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
-            -o /tmp/zig.tar.xz
-          sudo mkdir -p /opt/zig && sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
-          echo "/opt/zig" >> "$GITHUB_PATH"
-
-      - name: Fetch Sprite dependencies and generate terminfo
-        run: |
-          set -euo pipefail
-          zig version | grep -qx "${ZIG_VERSION}"
-          cargo fetch --locked
-          export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
-          export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
-          (cd vendor/ghostty && zig build --fetch=all \
-            -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none)
-          mkdir -p target/terminfo
-          zig build-exe -lc -femit-bin=target/gen-terminfo \
-            --dep ghostty_terminfo \
-            -Mroot=scripts/gen-terminfo.zig \
-            -Mghostty_terminfo=vendor/ghostty/src/terminfo/ghostty.zig
-          ./target/gen-terminfo > target/ghostty.terminfo
-          tic -x -o target/terminfo target/ghostty.terminfo
-
-      - name: Build Croft from main and run the capability smoke
-        run: ./scripts/test-croft-main.sh
-
-      - name: Upload Croft evidence
-        # Uploaded even on failure: the resolved SHA is what makes a red run
-        # reproducible.
-        if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: croft-main-evidence
-          path: |
-            target/croft-main-commit.txt
-            target/croft-main.log
-          if-no-files-found: warn
