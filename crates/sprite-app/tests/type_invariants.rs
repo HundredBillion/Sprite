@@ -133,3 +133,186 @@ fn private_type_contracts_compile_only_valid_constructions() {
     assert_eq!((controls, refusals), (2, 5));
     std::fs::remove_dir_all(scratch).unwrap();
 }
+
+fn public_examples(source: &str, marker: &str) -> Vec<(String, String)> {
+    let docs = source
+        .split_once(marker)
+        .expect("public contract documentation marker")
+        .1
+        .split_once("#[derive")
+        .expect("public contract declaration boundary")
+        .0
+        .lines()
+        .map(|line| line.strip_prefix("///").unwrap_or(line).trim_start())
+        .collect::<Vec<_>>()
+        .join("\n");
+    docs.split("```")
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 1)
+        .map(|(_, block)| {
+            let (header, body) = block.split_once('\n').unwrap();
+            (header.to_owned(), body.to_owned())
+        })
+        .collect()
+}
+
+fn compile_public(
+    scratch: &Path,
+    dependencies: &Path,
+    externs: &[String],
+    name: &str,
+    body: &str,
+) -> std::process::Output {
+    let source = scratch.join(format!("{name}.rs"));
+    std::fs::write(
+        &source,
+        format!(
+            "#![allow(unused_imports, unused_variables, dead_code)]\nfn proof() {{\n{body}\n}}"
+        ),
+    )
+    .unwrap();
+    let mut command = rustc();
+    command
+        .args([
+            "--edition=2024",
+            "--crate-type=lib",
+            "--emit=metadata",
+            "--error-format=json",
+        ])
+        .arg(&source)
+        .arg("--out-dir")
+        .arg(scratch)
+        .arg("-L")
+        .arg(format!("dependency={}", dependencies.display()));
+    for external in externs {
+        command.arg("--extern").arg(external);
+    }
+    command.output().unwrap()
+}
+
+fn intended_public_refusal(output: &std::process::Output, code: &str, subject: &str) -> bool {
+    let diagnostics: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("rustc JSON diagnostic"))
+        .filter(|diagnostic: &serde_json::Value| diagnostic["level"] == "error")
+        .collect();
+    let matches = |diagnostic: &serde_json::Value| {
+        diagnostic["code"]["code"] == code
+            && diagnostic["rendered"]
+                .as_str()
+                .is_some_and(|message| message.contains(subject))
+    };
+    !output.status.success()
+        && diagnostics.iter().any(&matches)
+        && diagnostics.iter().all(|diagnostic| {
+            matches(diagnostic)
+                || (diagnostic["code"].is_null()
+                    && diagnostic["message"]
+                        .as_str()
+                        .is_some_and(|message| message.starts_with("aborting due to")))
+        })
+}
+
+#[test]
+fn public_doctests_fail_for_the_documented_contract_and_no_other_error() {
+    let scratch =
+        std::env::temp_dir().join(format!("sprite-public-type-proofs-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let dependencies = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    let externs: Vec<_> = ["sprite_app", "sprite_term"]
+        .map(|name| {
+            format!(
+                "{name}={}",
+                dependency(&dependencies, &scratch, name).display()
+            )
+        })
+        .into();
+    let contracts = [
+        (
+            "placement",
+            public_examples(
+                include_str!("../src/surface/channel.rs"),
+                "/// Placement constrains ownership to the positions that support it.",
+            ),
+            vec![("E0559", "return_target"), ("E0063", "return_target")],
+        ),
+        (
+            "terminal_size",
+            public_examples(
+                include_str!("../../sprite-term/src/lib.rs"),
+                "/// Dimensions accepted by both terminal backends.",
+            ),
+            vec![("E0308", "ValidTerminalSize")],
+        ),
+    ];
+    for (name, examples, expectations) in contracts {
+        assert_eq!(examples.len(), expectations.len() + 1);
+        assert_eq!(examples[0].0, "");
+        let imports = |body: &str| {
+            body.lines()
+                .filter(|line| line.starts_with("use "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let control = compile_public(&scratch, &dependencies, &externs, name, &examples[0].1);
+        assert!(
+            control.status.success(),
+            "{name} control: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        for (index, ((header, body), (code, subject))) in
+            examples[1..].iter().zip(expectations).enumerate()
+        {
+            assert_eq!(header, &format!("compile_fail,{code}"));
+            assert_eq!(
+                imports(body),
+                imports(&examples[0].1),
+                "{name} control imports"
+            );
+            let output = compile_public(
+                &scratch,
+                &dependencies,
+                &externs,
+                &format!("{name}_{index}"),
+                body,
+            );
+            assert!(
+                intended_public_refusal(&output, code, subject),
+                "{name} negative {index}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let unrelated = compile_public(
+                &scratch,
+                &dependencies,
+                &externs,
+                &format!("{name}_{index}_unrelated"),
+                &format!("{}\nlet value = unrelated_symbol;", imports(body)),
+            );
+            assert!(
+                intended_public_refusal(&unrelated, "E0425", "unrelated_symbol"),
+                "sensitivity fixture: {}",
+                String::from_utf8_lossy(&unrelated.stderr)
+            );
+            assert!(
+                !intended_public_refusal(&unrelated, code, subject),
+                "{name} accepted an unrelated error"
+            );
+            let mixed = compile_public(
+                &scratch,
+                &dependencies,
+                &externs,
+                &format!("{name}_{index}_mixed"),
+                &format!("{body}\nlet value = unrelated_symbol;"),
+            );
+            assert!(
+                !intended_public_refusal(&mixed, code, subject),
+                "{name} accepted an additional unrelated error"
+            );
+        }
+    }
+    std::fs::remove_dir_all(scratch).unwrap();
+}

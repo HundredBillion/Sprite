@@ -18,6 +18,13 @@ The runner requires the indicated Rust diagnostic and its subject, so a missing
 module or dependency cannot count as proof. These are internal examples because
 Surface descriptions and grid painting are private application implementation.
 Public ownership and terminal size contracts also have paired rustdoc tests.
+The integration test extracts those exact public snippets from `channel.rs` and
+`sprite-term/src/lib.rs` and compiles them against the real public crates.
+Stable rustdoc accepts any compile failure even when an error code is annotated,
+so the integration test additionally requires the intended JSON diagnostic code
+and subject, with no additional compiler errors. Same-import controls must compile.
+Sensitivity cases verify that an unrelated E0425 failure, alone or alongside the
+intended failure, cannot satisfy any public negative expectation.
 
 ## Element payloads
 
