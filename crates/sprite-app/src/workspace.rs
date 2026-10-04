@@ -595,14 +595,13 @@ impl Workspace {
                 let answer = cx
                     .global_mut::<TokenRegistry>()
                     .register(&name, default, &description)
-                    .map(|_| ())
-                    .map_err(|_| Refusal::TokenConflict);
-                if answer.is_ok() {
+                    .map_err(Refusal::TokenConflict);
+                if answer == Ok(crate::tokens::Registration::New) {
                     // A Surface already drawn with this name's fallback picks up
                     // the real colour on its next frame.
                     self.repaint_terminals(cx);
                 }
-                let _ = reply.send(answer);
+                let _ = reply.send(answer.map(|_| ()));
             }
         }
     }
@@ -1882,6 +1881,68 @@ mod tests {
                 .unwrap()
                 .focus_handle(cx)
         })
+    }
+
+    #[gpui::test]
+    fn duplicate_token_registration_does_not_repaint_terminals(cx: &mut gpui::TestAppContext) {
+        use crate::surface::channel::SurfaceRequest;
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        let terminal = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .terminal(workspace.tabs.active().unwrap().focus())
+                .unwrap()
+        });
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = notifications.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.observe(&terminal, move |_, _| {
+                observed.set(observed.get() + 1);
+            })
+        });
+        for (index, color) in [0x12ab03, 0x12ab03, 0xff0000].into_iter().enumerate() {
+            notifications.set(0);
+            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.serve_surface_request(
+                    SurfaceRequest::RegisterToken {
+                        name: "demo.accent".into(),
+                        default: crate::tokens::unpack(color),
+                        description: "Accent".into(),
+                        reply,
+                    },
+                    window,
+                    cx,
+                );
+            });
+            let result = receiver.recv().unwrap();
+            if index < 2 {
+                assert_eq!(result, Ok(()));
+            } else {
+                let refusal = result.unwrap_err();
+                let wire: serde_json::Value = serde_json::from_str(
+                    &crate::surface::channel::event_refused(&refusal.reason()),
+                )
+                .unwrap();
+                assert_eq!(
+                    wire["reason"],
+                    "token conflict: demo.accent already registered as #12ab03"
+                );
+            }
+            assert_eq!(
+                notifications.get(),
+                usize::from(index == 0),
+                "registration {index}"
+            );
+        }
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<crate::tokens::TokenRegistry>()
+                    .resolve("demo.accent", crate::tokens::Role::Text)
+                    .color,
+                crate::tokens::unpack(0x12ab03),
+            )
+        });
     }
 
     #[gpui::test]

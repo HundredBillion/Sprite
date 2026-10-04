@@ -33,7 +33,7 @@ use crate::observation::endpoint::{
     MAX_SOCKET_PATH, ObservationKey, runtime_directory, sweep_dead_sockets,
 };
 use crate::pane_tree::PaneId;
-use crate::surface::{Refusal, SurfaceId};
+use crate::surface::{DockSize, Refusal, SurfaceId};
 use crate::tabs::TabId;
 
 /// The environment a window gives each of its sessions.
@@ -61,10 +61,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
 /// How long a connection waits for the window to answer a request.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub const DEFAULT_DOCK_SIZE: f32 = 240.0;
-pub const MIN_DOCK_SIZE: f32 = 64.0;
-pub const MAX_DOCK_SIZE: f32 = 4096.0;
 
 const NOT_ANSWERING: &str = "this window is no longer answering";
 const NO_ANSWER: &str = "this window did not answer in time";
@@ -886,11 +882,15 @@ fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
             .ok_or_else(|| Refusal::Malformed("side is left or right".to_owned()))?,
     };
     let size = match message.get("size") {
-        None => DEFAULT_DOCK_SIZE,
-        Some(value) => value
-            .as_f64()
-            .map(|size| (size as f32).clamp(MIN_DOCK_SIZE, MAX_DOCK_SIZE))
-            .ok_or_else(|| Refusal::Malformed("size is a number of pixels".to_owned()))?,
+        None => DockSize::default().pixels(),
+        Some(value) => {
+            let size = value
+                .as_f64()
+                .ok_or_else(|| Refusal::Malformed("size is a number of pixels".to_owned()))?;
+            DockSize::try_from(size as f32)
+                .map_err(|why| Refusal::Malformed(why.to_owned()))?
+                .pixels()
+        }
     };
     let focus = match message.get("focus") {
         None => true,
@@ -1274,6 +1274,81 @@ mod tests {
             "type": "capabilities", "version": VERSION, "pane": pane,
             "owner_pid": owner_pid, "return_target": return_target
         })
+    }
+
+    #[test]
+    fn open_sizes_are_validated_consistently_with_the_cli() {
+        for position in ["dock", "fill", "overlay"] {
+            for (size, accepted) in [
+                (1, false),
+                (63, false),
+                (64, true),
+                (240, true),
+                (4096, true),
+                (4097, false),
+            ] {
+                let mut message = open_message(3);
+                message["position"] = json!(position);
+                message["size"] = json!(size);
+                let args: Vec<std::ffi::OsString> = if position == "dock" {
+                    vec![
+                        "surface".into(),
+                        "open".into(),
+                        "--dock".into(),
+                        "left".into(),
+                        "--size".into(),
+                        size.to_string().into(),
+                    ]
+                } else {
+                    vec![
+                        "surface".into(),
+                        "open".into(),
+                        format!("--{position}").into(),
+                        "--size".into(),
+                        size.to_string().into(),
+                    ]
+                };
+                assert_eq!(
+                    crate::cli::parse_arguments(args).is_ok(),
+                    accepted,
+                    "CLI {position} {size}"
+                );
+                assert_eq!(
+                    parse_open(&message).is_ok(),
+                    accepted,
+                    "wire {position} {size}"
+                );
+            }
+            let mut message = open_message(3);
+            message["position"] = json!(position);
+            message.as_object_mut().unwrap().remove("size");
+            assert_eq!(parse_open(&message).unwrap().1.size, 240.0);
+        }
+    }
+
+    #[test]
+    fn wire_and_cli_reject_nonfinite_sizes() {
+        for text in ["NaN", "inf", "-inf", "1e300", "-1e300"] {
+            assert!(
+                crate::cli::parse_arguments(["surface", "open", "--dock", "left", "--size", text])
+                    .is_err()
+            );
+        }
+        for size in [
+            Value::Null,
+            json!("NaN"),
+            json!("inf"),
+            json!("-inf"),
+            json!(1e300),
+            json!(-1e300),
+        ] {
+            let mut message = open_message(3);
+            message["size"] = size.clone();
+            assert!(parse_open(&message).is_err(), "{size}");
+        }
+        let mut message = open_message(3);
+        message["size"] = json!(240.5);
+        assert_eq!(parse_open(&message).unwrap().1.size, 240.5);
     }
 
     #[test]

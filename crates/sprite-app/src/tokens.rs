@@ -91,9 +91,6 @@ pub enum Registration {
 
 /// A name registered again with a different default. The first stands, so no
 /// colour depends on which program started first.
-// Non-test callers discard `name` and `standing` behind `Refusal::TokenConflict`;
-// its fields are read by tests, via the `assert_eq!` on this struct below.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenConflict {
     pub name: String,
