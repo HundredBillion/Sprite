@@ -237,15 +237,15 @@ observation/panes.rs; sprite-pane interface if title change events need it.
 single publication owner triggered by tree/size/tab mutations. Render consumes
 cached titles/layout and never re-polls foreground or publishes identical layout.
 
-- [ ] Instrument test counters for set_layout and title/foreground queries.
+- [x] Instrument test counters for set_layout and title/foreground queries.
   Assert idle render produces no layout publication or title String allocation.
-- [ ] Push existing Effect::Title updates through pane notifications. Preserve
+- [x] Push existing Effect::Title updates through pane notifications. Preserve
   foreground fallback for shells without OSC title; trigger updates on actual
   terminal foreground/activity changes, not a new idle polling timer.
-- [ ] Publish layout from one mutation-driven path, including resize, split,
+- [x] Publish layout from one mutation-driven path, including resize, split,
   divider drag, close, tab switch and observation re-enable. Cache render layout
   without forgetting pane allocated sizes or observation ordering.
-- [ ] Test all mutation classes and title fallback; assert publication counts
+- [x] Test all mutation classes and title fallback; assert publication counts
   match actual changed layouts. Run observation and workspace/GPUI tests; commit.
 
 ### Task 8: Reduce Surface grid/list work and batch outgoing events
