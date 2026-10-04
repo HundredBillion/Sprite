@@ -36,7 +36,7 @@ pub(super) enum Body {
         images: crate::surface::render::ElementImageCache,
     },
     Grid {
-        grid: GridSurface,
+        grid: Box<GridSurface>,
         /// The description's root element, kept for the `bg` and `color` it
         /// may carry: a grid's wrapper takes its colours from them, the way an
         /// element root's box does. A grid root refuses `style` and `border`,
@@ -50,6 +50,8 @@ pub(super) enum Body {
     },
 }
 
+type ResizeDimensions = (u32, u32, Option<(u16, u16)>);
+
 /// A Surface this pane is drawing, and the connection that owns it.
 pub(super) struct HostedSurface {
     id: SurfaceId,
@@ -60,7 +62,7 @@ pub(super) struct HostedSurface {
     /// The last `resize` event this Surface was sent, so the next frame sends
     /// one only when the text would differ: a font change changes the cell
     /// count in it, a colour-only reload changes nothing.
-    pub(super) told: Option<String>,
+    pub(super) told: Option<ResizeDimensions>,
     /// For an overlay: who had the keyboard before it opened, to give it back.
     previous_focus: Option<FocusHandle>,
     /// Keeps the focus and blur listeners alive for as long as the Surface.
@@ -487,7 +489,7 @@ impl TerminalView {
         let root = parsed.description.root;
         let body = match &root {
             Element::Grid { size, .. } => Body::Grid {
-                grid: GridSurface::new(size.cols, size.rows),
+                grid: Box::new(GridSurface::new(size.cols, size.rows)),
                 root,
             },
             Element::VirtualList { config } => {
@@ -637,11 +639,30 @@ impl TerminalView {
             crate::surface::render::wheel_turns(rows, "up", "down"),
             crate::surface::render::wheel_turns(cols, "left", "right"),
         ];
-        for (direction, count) in turns.into_iter().flatten() {
-            for _ in 0..count {
-                self.report_grid_mouse(id, event.position, "wheel", direction, &event.modifiers);
-            }
-        }
+        let (Body::Grid { grid, .. }, Some(origin)) = (&surface.body, surface.origin) else {
+            return;
+        };
+        let Some((row, col)) = crate::surface::render::grid_cell_under(
+            event.position,
+            origin,
+            &metrics,
+            grid.cols(),
+            grid.rows(),
+        ) else {
+            return;
+        };
+        let modifiers = neovim_modifiers(&event.modifiers);
+        let lines = turns.map(|turn| {
+            turn.map(|(direction, count)| {
+                (event_mouse("wheel", direction, &modifiers, row, col), count)
+            })
+        });
+        surface.connection.send_batch(
+            lines
+                .iter()
+                .flatten()
+                .flat_map(|(line, count)| std::iter::repeat_n(line.as_str(), *count as usize)),
+        );
     }
 
     /// Replaces a Surface's whole description. A description that does not
@@ -1068,16 +1089,16 @@ impl TerminalView {
             f32::from(size.width).round() as u32,
             f32::from(size.height).round() as u32,
         );
-        let event = match &surface.body {
-            Body::Grid { .. } => {
-                let (cols, rows) = crate::surface::render::cells_that_fit(size, metrics);
-                event_grid_resize(told.0, told.1, cols, rows)
-            }
-            Body::Elements { .. } | Body::List { .. } => event_resize(told.0, told.1),
-        };
-        if surface.told.as_deref() != Some(event.as_str()) {
+        let cells = matches!(surface.body, Body::Grid { .. })
+            .then(|| crate::surface::render::cells_that_fit(size, metrics));
+        let told = (told.0, told.1, cells);
+        if surface.told != Some(told) {
+            let event = match cells {
+                Some((cols, rows)) => event_grid_resize(told.0, told.1, cols, rows),
+                None => event_resize(told.0, told.1),
+            };
             surface.connection.send(&event);
-            surface.told = Some(event);
+            surface.told = Some(told);
         }
         let body = match &mut surface.body {
             Body::Elements {
@@ -1827,13 +1848,41 @@ mod tests {
                 op,
             },
         );
-        draw_test_window(cx);
-        super::super::list_view::TRUNCATE_CALLS.with(|n| n.set(0));
-        draw_test_window(cx);
-        let calls = super::super::list_view::TRUNCATE_CALLS.with(|n| n.get());
-        assert!(calls > 0);
-        println!("list 100k actual truncate_line calls={calls}");
-        assert!(calls <= 100, "bounded visible rendering");
+        for target in ["r0", "r50000", "r99999"] {
+            let op = crate::surface::list::parse_op(
+                &serde_json::json!({"type":"list_state","revision":1,"reveal":target}),
+            )
+            .unwrap();
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::List {
+                    id: SurfaceId(988),
+                    pane: crate::pane_tree::PaneId(1),
+                    op,
+                },
+            );
+            draw_test_window(cx);
+            super::super::list_view::TRUNCATE_CALLS.with(|n| n.set(0));
+            draw_test_window(cx);
+            let calls = super::super::list_view::TRUNCATE_CALLS.with(|n| n.get());
+            let (top, visible) = host.read_with(cx, |host, cx| {
+                let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                    panic!("list")
+                };
+                view.read(cx).viewport_rows()
+            });
+            println!(
+                "list 100k target={target} actual truncate_line calls={calls} top={top} visible_rows={visible}"
+            );
+            let target_index: usize = target[1..].parse().unwrap();
+            assert!(top <= target_index && target_index < top + visible + 1);
+            assert!(calls > 0);
+            assert!(
+                calls <= visible + 16,
+                "{calls} truncations for {visible} visible rows"
+            );
+        }
         cx.update(|window, _| window.remove_window());
         drop(host);
     }

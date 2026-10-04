@@ -195,12 +195,7 @@ pub(crate) fn render_grid(
     // and the pane keeps one whenever a hosted grid's cursor blinks, so this
     // holds even for a fill grid with no terminal cursor showing behind it.
     let cursor = Some(grid.cursor_snapshot()).filter(|cursor| metrics.blink_on || !cursor.blinking);
-    let rows = grid
-        .positioned_rows(highlights)
-        .iter()
-        .cloned()
-        .map(std::sync::Arc::new)
-        .collect();
+    let rows = grid.positioned_rows(highlights);
     let paint = GridPaint::new(GridPaintSpec {
         rows,
         pass: RowPass::Whole,

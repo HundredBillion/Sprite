@@ -219,7 +219,23 @@ struct Wire {
     /// Lines a program sent before `ready`, in the order they arrived.
     /// `establish` drains this onto the wire, after `opened` and before
     /// returning — a program does not wait for that to happen.
-    queued: Vec<String>,
+    queued: Vec<u8>,
+    buffer: Vec<u8>,
+}
+
+impl Wire {
+    fn write_buffer(&mut self) -> bool {
+        let ok = self
+            .stream
+            .write_all(&self.buffer)
+            .and_then(|_| self.stream.flush())
+            .is_ok();
+        if !ok {
+            self.dead = true;
+            let _ = self.stream.shutdown(Shutdown::Both);
+        }
+        ok
+    }
 }
 
 /// The window's end of one Surface's connection: the only way events reach
@@ -249,6 +265,7 @@ impl SurfaceConnection {
                 ready: false,
                 dead: false,
                 queued: Vec::new(),
+                buffer: Vec::new(),
             })),
         })
     }
@@ -261,24 +278,28 @@ impl SurfaceConnection {
     /// Surface closed, rather than every later `send` paying the write
     /// timeout again for a client that is never coming back.
     pub fn send(&self, line: &str) -> bool {
+        self.send_batch([line])
+    }
+
+    /// Keeps a complete event gesture contiguous with respect to other senders.
+    pub fn send_batch<'a>(&self, lines: impl IntoIterator<Item = &'a str>) -> bool {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
         };
         if wire.dead {
             return false;
         }
+        wire.buffer.clear();
+        for line in lines {
+            wire.buffer.extend_from_slice(line.as_bytes());
+            wire.buffer.push(b'\n');
+        }
         if !wire.ready {
-            wire.queued.push(line.to_owned());
+            let Wire { queued, buffer, .. } = &mut *wire;
+            queued.extend_from_slice(buffer);
             return true;
         }
-        let ok = writeln!(wire.stream, "{line}")
-            .and_then(|_| wire.stream.flush())
-            .is_ok();
-        if !ok {
-            wire.dead = true;
-            let _ = wire.stream.shutdown(Shutdown::Both);
-        }
-        ok
+        wire.write_buffer()
     }
 
     /// Writes the connection's first line, then every line a program queued
@@ -290,23 +311,16 @@ impl SurfaceConnection {
         let Ok(mut wire) = self.wire.lock() else {
             return false;
         };
-        let mut ok = writeln!(wire.stream, "{line}")
-            .and_then(|_| wire.stream.flush())
-            .is_ok();
-        for queued in std::mem::take(&mut wire.queued) {
-            if !ok {
-                break;
-            }
-            ok = writeln!(wire.stream, "{queued}")
-                .and_then(|_| wire.stream.flush())
-                .is_ok();
+        if wire.dead {
+            return false;
         }
+        wire.buffer.clear();
+        wire.buffer.extend_from_slice(line.as_bytes());
+        wire.buffer.push(b'\n');
+        let Wire { queued, buffer, .. } = &mut *wire;
+        buffer.append(queued);
         wire.ready = true;
-        if !ok {
-            wire.dead = true;
-            let _ = wire.stream.shutdown(Shutdown::Both);
-        }
-        ok
+        wire.write_buffer()
     }
 
     #[cfg(test)]
@@ -763,6 +777,127 @@ mod tests {
             "type": "capabilities", "version": VERSION, "pane": pane,
             "owner_pid": owner_pid, "return_target": return_target
         })
+    }
+
+    #[test]
+    fn batches_follow_opened_and_keep_concurrent_gestures_contiguous() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(
+            connection.send_batch([r#"{"type":"queued","n":1}"#, r#"{"type":"queued","n":2}"#])
+        );
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        std::thread::scope(|scope| {
+            for sender in 0..4 {
+                let connection = connection.clone();
+                scope.spawn(move || {
+                    let lines = (0..10)
+                        .map(|i| json!({"sender":sender,"i":i}).to_string())
+                        .collect::<Vec<_>>();
+                    assert!(connection.send_batch(lines.iter().map(String::as_str)));
+                });
+            }
+        });
+        connection
+            .wire
+            .lock()
+            .unwrap()
+            .stream
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        let mut received = String::new();
+        std::io::Read::read_to_string(&mut peer, &mut received).unwrap();
+        let messages = received
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 43);
+        assert_eq!(messages[0]["type"], "opened");
+        assert_eq!(messages[1]["n"], 1);
+        assert_eq!(messages[2]["n"], 2);
+        let mut senders = std::collections::HashSet::new();
+        for chunk in messages[3..].chunks_exact(10) {
+            assert!(senders.insert(chunk[0]["sender"].as_u64().unwrap()));
+            for (i, event) in chunk.iter().enumerate() {
+                assert_eq!(event["sender"], chunk[0]["sender"]);
+                assert_eq!(event["i"], i);
+            }
+        }
+    }
+
+    #[test]
+    fn batch_buffer_is_reused_and_closed_peers_stop_further_sends() {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.send_batch(["one", "two"]));
+        let (pointer, capacity) = {
+            let wire = connection.wire.lock().unwrap();
+            (wire.buffer.as_ptr(), wire.buffer.capacity())
+        };
+        assert!(connection.send_batch(["abc", "def"]));
+        {
+            let wire = connection.wire.lock().unwrap();
+            assert_eq!(
+                (wire.buffer.as_ptr(), wire.buffer.capacity()),
+                (pointer, capacity)
+            );
+        }
+        drop(peer);
+        assert!(!connection.send_batch(["gone"]));
+        assert!(connection.is_dead());
+        assert!(!connection.send_batch(["later"]));
+    }
+
+    #[test]
+    fn a_large_batch_delivers_every_byte_while_the_peer_drains_in_small_chunks() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let opened = event_opened(SurfaceId(1));
+        assert!(connection.establish(&opened));
+        let line = json!({"payload":"x".repeat(2*1024*1024)}).to_string();
+        let expected = format!("{opened}\n{line}\n{line}\n");
+        let reader = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                let count = peer.read(&mut chunk).unwrap();
+                if count == 0 {
+                    break;
+                }
+                received.extend_from_slice(&chunk[..count]);
+            }
+            received
+        });
+        assert!(connection.send_batch([line.as_str(), line.as_str()]));
+        connection
+            .wire
+            .lock()
+            .unwrap()
+            .stream
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        assert_eq!(reader.join().unwrap(), expected.as_bytes());
+    }
+
+    #[test]
+    fn a_backpressured_batch_keeps_its_written_prefix_and_shuts_down_on_timeout() {
+        use std::io::Read;
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let opened = event_opened(SurfaceId(1));
+        assert!(connection.establish(&opened));
+        let line = "x".repeat(2 * 1024 * 1024);
+        let expected = format!("{opened}\n{line}\n");
+        assert!(!connection.send_batch([line.as_str()]));
+        assert!(connection.is_dead());
+        assert!(!connection.send("later"));
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).unwrap();
+        assert!(received.len() > opened.len() + 1);
+        assert!(received.len() < expected.len());
+        assert!(expected.as_bytes().starts_with(&received));
     }
 
     #[test]

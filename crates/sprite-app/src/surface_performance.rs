@@ -104,12 +104,14 @@ fn surface_allocation_probe() {
     println!("grid first render allocations={a} bytes={b}");
     let (_, a, b) = measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics));
     println!("grid idle render allocations={a} bytes={b}");
+    assert!(a <= 1 && b <= 1_024);
     let op = parse_ops(&json!({"type":"rows","rows":[{"row":30,"cells":[["👩‍💻",2]]}]})).unwrap();
     let (_, a, b) = measure(|| {
         grid.apply_all(op).unwrap();
         render::render_grid(&mut grid, &Highlights::default(), &metrics)
     });
     println!("grid one-row update/render allocations={a} bytes={b}");
+    assert!(a <= 8 && b <= 12_000);
     let rows = (0..100_000)
         .map(|i| json!({"id":format!("r{i}"),"text":"shared row text","indent":0,"guides":[]}))
         .collect::<Vec<_>>();
@@ -117,6 +119,7 @@ fn surface_allocation_probe() {
     let mut model = list::ListModel::default();
     let (_, a, b) = measure(|| model.apply(list::parse_op(&message).unwrap()).unwrap());
     println!("list parse/apply 100k allocations={a} bytes={b}");
+    assert!(a <= 300_025 && b <= 41_000_000);
     model.scroll = Some(list::ScrollAnchor {
         id: "r50000".into(),
         offset: 3.0,
@@ -125,7 +128,9 @@ fn surface_allocation_probe() {
     message2["revision"] = 2.into();
     let (_, a, b) = measure(|| model.apply(list::parse_op(&message2).unwrap()).unwrap());
     println!("list replace with anchor 100k allocations={a} bytes={b}");
+    assert!(a <= 300_025 && b <= 41_000_000);
     let state = json!({"type":"list_state","revision":2,"selected":"r99999","scroll":{"id":"r50000","offset":3.0}});
     let (_, a, b) = measure(|| model.apply(list::parse_op(&state).unwrap()).unwrap());
     println!("list state 100k allocations={a} bytes={b}");
+    assert!(a <= 16 && b <= 1_000);
 }
