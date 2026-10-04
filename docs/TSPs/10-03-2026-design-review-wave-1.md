@@ -16,7 +16,8 @@ public terminal and GPUI interfaces. No Wave 2/3 work.
 - Preserve separate Surface Channel and Pane Observation grammars.
 - Keep latest-only snapshot coalescing and ordered lifecycle delivery.
 - Use the existing vocabulary in crates/CONTEXT.md.
-- Baseline graphics_tmux failures are recorded in the PRD; all other targets pass.
+- Run test commands with TERM=xterm-ghostty: inherited TERM=dumb caused the
+  recorded baseline graphics_tmux failures, and both pass with terminal identity.
 - Tests run with --locked --offline. Report every failure; do not mask it.
 - Read source requirements from /tmp/sprite-issue-48.json when exact review detail
   is needed. Verify claims against code; the issue is explicitly an unrun review.

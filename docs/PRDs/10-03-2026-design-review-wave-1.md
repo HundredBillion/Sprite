@@ -51,6 +51,8 @@ forbidden-states commands. Record pre-existing failures separately.
 
 Baseline: full suite at cee803a passed all targets except graphics_tmux's two
 integration tests (snapshot stream ends early). Repeating without TMUX/TMUX_PANE
-also fails. Evidence: /tmp/sprite-48-baseline.log and /tmp/sprite-48-tmux-baseline.log.
+also fails. These tests inherit TERM=dumb from the tool shell; rerunning with
+TERM=xterm-ghostty passes both unchanged tests. Use that identity for the full
+verification suite. Evidence: /tmp/sprite-48-baseline.log and /tmp/sprite-48-tmux-baseline.log.
 The strengthened live-colour integration test fails in 0.01s because the reload's
 generation equals its predecessor (/tmp/sprite-48-repro.log).
