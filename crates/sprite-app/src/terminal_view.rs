@@ -546,15 +546,18 @@ impl TerminalView {
     }
 
     fn send(&mut self, command: TerminalCommand) {
-        // Sending to a view with no session is a no-op, not an error: a failed
-        // pane has nothing to send to, and reporting a send failure over its
-        // status line would replace the reason it failed with a symptom.
+        let _ = self.submit(command);
+    }
+
+    fn submit(&mut self, command: TerminalCommand) -> bool {
         let SessionState::Running(session) = &mut self.session else {
-            return;
+            return true;
         };
-        if let Err(error) = session.send(command) {
+        if let Err(error) = session.try_send(command) {
             self.status = Some(error.to_string().into());
+            return false;
         }
+        true
     }
 
     /// What this pane is running, asked of the kernel rather than of the
@@ -678,5 +681,68 @@ impl sprite_pane::Pane for TerminalView {
                 .program()
                 .map(|program| SharedString::from(program.to_owned())),
         })
+    }
+}
+
+#[cfg(test)]
+mod submission_regressions {
+    use super::*;
+
+    #[gpui::test]
+    fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+        let (sender, _exits) = async_channel::unbounded();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::new(
+                Some(vec!["/bin/sleep".into(), "30".into()]),
+                settings.clone(),
+                Vec::new(),
+                None,
+                PaneExit {
+                    sender,
+                    identity: (crate::tabs::TabId(0), crate::pane_tree::PaneId(0)),
+                },
+                window,
+                cx,
+            )
+        });
+        let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        snapshots.next_blocking().unwrap();
+        let guard = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            drop(events);
+        });
+        let mut reloaded = settings.clone();
+        reloaded.cursor.blink = Some(false);
+        view.update_in(cx, |view, window, cx| {
+            view.session = SessionState::Running(session);
+            view.status = None;
+            let started = std::time::Instant::now();
+            view.send(TerminalCommand::Input(b"x".to_vec()));
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(200),
+                "GPUI submission waited for the worker"
+            );
+            assert!(
+                view.status
+                    .as_ref()
+                    .is_some_and(|status| status.contains("queue is full"))
+            );
+            view.apply_settings(&reloaded, window, cx);
+            assert_eq!(
+                view.applied_settings.cursor.blink, settings.cursor.blink,
+                "refused reload remains unapplied"
+            );
+            assert!(
+                view.status
+                    .as_ref()
+                    .is_some_and(|status| status.contains("queue is full"))
+            );
+            view.begin_shutdown();
+        });
+        guard.join().unwrap();
     }
 }

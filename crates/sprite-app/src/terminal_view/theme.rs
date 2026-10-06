@@ -233,22 +233,21 @@ impl TerminalView {
             self.invalidate_grids();
         }
         let defaults = session_defaults(settings);
+        let mut submitted = true;
         if changes.has(LiveChange::Colors) {
             self.fallback_colors = defaults.fallback_colors;
-            if let SessionState::Running(session) = &mut self.session {
-                let _ = session.send(TerminalCommand::SetColors(defaults.colors));
-            }
+            submitted &= self.submit(TerminalCommand::SetColors(defaults.colors));
         }
-        if changes.has(LiveChange::Cursor)
-            && let SessionState::Running(session) = &mut self.session
-        {
-            let _ = session.send(TerminalCommand::SetCursor(defaults.cursor));
+        if changes.has(LiveChange::Cursor) {
+            submitted &= self.submit(TerminalCommand::SetCursor(defaults.cursor));
         }
         if changes.has(LiveChange::TextureBudget) {
             self.textures
                 .set_budget(settings.graphics.texture_bytes.get());
         }
-        self.applied_settings = settings.clone();
+        if submitted {
+            self.applied_settings = settings.clone();
+        }
         cx.notify();
     }
 

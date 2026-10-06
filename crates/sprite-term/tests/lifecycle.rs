@@ -339,3 +339,34 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
         other => panic!("expected Exited, got {other:?}"),
     }
 }
+
+#[test]
+fn natural_exit_drains_final_output_when_a_descendant_keeps_the_pty_open() {
+    let sprite_term::Spawned { mut session, events, mut snapshots } = TerminalSession::spawn(
+        SessionConfig::command("/bin/sh", args(&["-c", "(trap '' HUP TERM; exec sleep 30) & printf 'DESC:%s\\n' \"$!\"; sleep 0.1; head -c 262144 /dev/zero; printf '\\033]2;FINAL_TITLE\\007FINAL_OUTPUT\\n'; exit 7"])),
+    ).unwrap();
+    let events = EventPump::new(events);
+    events.expect_ready();
+    let mut final_title = false;
+    let exit = loop {
+        match events.next() {
+            TerminalEvent::TitleChanged(Some(title)) => final_title |= title == "FINAL_TITLE",
+            TerminalEvent::Exited(exit) => break exit,
+            other => panic!("unexpected event {other:?}"),
+        }
+    };
+    assert_eq!(exit.code, Some(7));
+    assert!(!exit.requested);
+    assert!(final_title);
+    let bundle = snapshots.next_blocking().unwrap();
+    let text = support::pane_text(&bundle);
+    assert!(
+        text.contains("FINAL_OUTPUT"),
+        "final output survives: {text}"
+    );
+    let descendant = marker_fields(&text, "DESC:")[0].clone();
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", &descendant])
+        .status();
+    session.begin_shutdown().unwrap().unwrap().wait().unwrap();
+}

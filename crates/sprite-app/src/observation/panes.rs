@@ -220,7 +220,10 @@ impl PaneSource for WindowPanes {
             rect: entry.placement.rect,
             focused: entry.placement.focused,
         };
-        if let Err(error) = entry.commands.send(TerminalCommand::CaptureHistory(lines)) {
+        if let Err(error) = entry
+            .commands
+            .try_send(TerminalCommand::CaptureHistory(lines))
+        {
             entry.waiting.pop_back();
             return Err(error.to_string());
         }
@@ -283,6 +286,40 @@ mod tests {
         ));
         spawned.snapshots.next_blocking().expect("initial snapshot");
         spawned
+    }
+
+    #[test]
+    fn saturated_observation_refuses_without_holding_the_ui_registry() {
+        let mut spawned = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        spawned.snapshots.next_blocking().unwrap();
+        let panes = WindowPanes::new();
+        panes.register(PaneId(0), TabId(0), spawned.session.commands());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let registry = Arc::clone(&panes);
+        std::thread::spawn(move || {
+            let result = registry
+                .begin(PaneId(0), HistoryLines::default())
+                .map(|_| ());
+            let _ = tx.send(result);
+        });
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        spawned
+            .session
+            .begin_shutdown()
+            .unwrap()
+            .unwrap()
+            .wait()
+            .unwrap();
+        let refusal = result
+            .expect("observation submission must release the UI registry promptly")
+            .expect_err("saturated queue refuses observation");
+        assert!(refusal.contains("queue is full"));
+        let entries = panes.entries.lock().unwrap();
+        assert!(
+            entries[&PaneId(0)].waiting.is_empty(),
+            "a refused request leaves no waiter"
+        );
     }
 
     #[test]
