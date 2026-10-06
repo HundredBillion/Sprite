@@ -27,8 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - name: Test release version helpers
-        run: python3 -m unittest scripts.test_release_automation -v
+      - name: Install shell integration test dependencies
+        run: sudo apt-get update && sudo apt-get install -y fish zsh
+      - name: Test release, packaging and optional shell integration
+        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration -v
 
   arch:
     name: arch linux

@@ -13,8 +13,8 @@ __sprite_osc7() { printf '\033]7;file://%s%s\007' "${HOST:-}" "$PWD"; }
 __sprite_preexec() { printf '\033]133;C\007'; }
 
 __sprite_precmd() {
-  local status=$?
-  printf '\033]133;D;%s\007' "$status"
+  local exit_code=$?
+  printf '\033]133;D;%s\007' "$exit_code"
   __sprite_osc7
   printf '\033]133;A\007'
 }

@@ -43,23 +43,23 @@ crates/sprite-term/tests/graphics_tmux.rs; packaging documentation/CI as needed.
 quoted arguments; updater supplies existing default paths. Shell integration
 remains optional. No Rust public interface change.
 
-- [ ] Extract the actual install transaction and reproduce failed copy with
+- [x] Extract the actual install transaction and reproduce failed copy with
   a real temporary old bundle/link. Add failed replacement and rollback cases
   using only fixture command failures, plus successful replacement.
-- [ ] Stage sibling destination via mktemp, copy with ditto first, rename old
+- [x] Stage sibling destination via mktemp, copy with ditto first, rename old
   into retained backup, then rename staged app into place. Restore backup on
   ordinary replacement failure; preserve/report backup if recovery fails.
   Trap cleanup only for owned staging artifacts; never delete a working old
   bundle on a failed staged copy.
-- [ ] Exercise actual optional Fish/Zsh scripts using installed or explicitly
+- [x] Exercise actual optional Fish/Zsh scripts using installed or explicitly
   supplied temporary binaries. Record red for nested/inherited Fish and Zsh
   prompt callback. Guard Fish by local installed functions and unexport marker;
   use an ordinary Zsh exit-code variable. Repeat-source and interactive control
   must pass without touching user configs.
-- [ ] Add actual tmux regression with spaced/metacharacter fixture directory.
+- [x] Add actual tmux regression with spaced/metacharacter fixture directory.
   Pass script arguments rather than interpolate unquoted filenames through its
   two shell layers. Normal and spaced controls must both pass.
-- [ ] Run Python automation/shell tests, shell syntax and actual tmux tests;
+- [x] Run Python automation/shell tests, shell syntax and actual tmux tests;
   save exact commands/results and red/green logs in task report; commit task.
 
 ## Task 2: Native ranges, mouse payloads and confirmation geometry (SPR-017/018/020)

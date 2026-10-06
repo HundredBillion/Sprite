@@ -52,10 +52,17 @@ fn kitty_image(id: u32, size: u32) -> String {
 
 /// Runs tmux with passthrough on or off, showing it an image, and reports what
 /// the pane ends up holding.
-fn images_through_tmux(passthrough: bool) -> GraphicsSnapshot {
+fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapshot {
     let tmux = tmux().expect("checked by the caller");
-    let directory =
-        std::env::temp_dir().join(format!("sprite-tmux-{}-{passthrough}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!(
+        "sprite-tmux-{}-{passthrough}-{special_path}{}",
+        std::process::id(),
+        if special_path {
+            " space ; ' $ ` (café)"
+        } else {
+            ""
+        }
+    ));
     std::fs::create_dir_all(&directory).expect("a directory for the fixtures");
 
     // The image is `cat`ed from a file so the payload is never typed as a
@@ -70,15 +77,29 @@ fn images_through_tmux(passthrough: bool) -> GraphicsSnapshot {
     std::fs::write(&config, format!("set -g allow-passthrough {setting}\n"))
         .expect("write the configuration");
 
-    let script = format!(
-        "{tmux} -L sprite-test-{}-{passthrough} -f {} new-session -- sh -c 'cat {}; printf DONE; sleep 300'",
-        std::process::id(),
-        config.display(),
-        image.display(),
+    let socket = format!(
+        "sprite-test-{}-{passthrough}-{special_path}",
+        std::process::id()
     );
     let mut config_session = SessionConfig::terminal_command(
         "/bin/sh",
-        vec![OsString::from("-c"), OsString::from(&script)],
+        vec![
+            OsString::from("-c"),
+            OsString::from("exec \"$@\""),
+            OsString::from("sprite-tmux-fixture"),
+            OsString::from(&tmux),
+            OsString::from("-L"),
+            OsString::from(&socket),
+            OsString::from("-f"),
+            config.into_os_string(),
+            OsString::from("new-session"),
+            OsString::from("--"),
+            OsString::from("sh"),
+            OsString::from("-c"),
+            OsString::from("cat \"$1\"; printf DONE; sleep 300"),
+            OsString::from("sprite-image-fixture"),
+            image.into_os_string(),
+        ],
     );
     config_session.graphics = GraphicsPolicy::default();
 
@@ -110,11 +131,7 @@ fn images_through_tmux(passthrough: bool) -> GraphicsSnapshot {
 
     // Leave no server behind on the machine running the tests.
     let _ = std::process::Command::new(&tmux)
-        .args([
-            "-L",
-            &format!("sprite-test-{}-{passthrough}", std::process::id()),
-            "kill-server",
-        ])
+        .args(["-L", &socket, "kill-server"])
         .output();
     let _ = std::fs::remove_dir_all(&directory);
 
@@ -128,7 +145,7 @@ fn an_image_survives_tmux_when_passthrough_is_enabled() {
         return;
     };
 
-    let graphics = images_through_tmux(true);
+    let graphics = images_through_tmux(true, false);
 
     assert!(
         graphics.holds(1),
@@ -146,11 +163,21 @@ fn an_image_does_not_survive_tmux_without_passthrough() {
         return;
     };
 
-    let graphics = images_through_tmux(false);
+    let graphics = images_through_tmux(false, false);
 
     assert!(
         !graphics.holds(1),
         "tmux withheld the sequence, which is its documented behaviour and not \
          something Sprite works around: {graphics:?}"
     );
+}
+
+#[test]
+fn an_image_survives_tmux_with_shell_metacharacters_in_fixture_paths() {
+    let Some(_) = tmux() else {
+        eprintln!("skipping: this machine has no tmux, so passthrough cannot be exercised");
+        return;
+    };
+    let graphics = images_through_tmux(true, true);
+    assert!(graphics.holds(1), "tmux forwarded the image: {graphics:?}");
 }

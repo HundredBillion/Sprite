@@ -3,10 +3,11 @@
 # Loaded by Sprite into shells it launches. Sprite never edits or appends to a
 # user configuration file.
 
-if set -q SPRITE_SHELL_INTEGRATION
-    exit 0
+# A child may inherit the marker without inheriting any event handlers.
+if functions -q __sprite_osc7 __sprite_preexec __sprite_precmd
+    return 0
 end
-set -gx SPRITE_SHELL_INTEGRATION 1
+set -gu SPRITE_SHELL_INTEGRATION 1
 
 function __sprite_osc7 --on-variable PWD
     printf '\033]7;file://%s%s\007' (hostname) "$PWD"
