@@ -151,8 +151,13 @@ their public result types. Mailbox owns cancellation/final-outcome ordering.
   cancelling; final error/exit outcomes must not await consumer room.
 - [ ] Route actual UI input/resize/settings and observation enqueue through
   nonblocking admission. Expose refusal and retain pending/unapplied live
-  settings for recoverable latest-value retry; do not mark failed updates
-  applied. Retry is bounded/coalesced per view, never unbounded threads/tasks.
+  settings and Resize for recoverable latest-value retry; do not mark failed
+  updates applied. geometry.rs currently advances self.size before send: only
+  advance that admission cache when accepted, and retry unchanged desired size
+  after pressure clears. Retry is bounded/coalesced per view, never unbounded
+  threads/tasks. Record successful settings admission per worker-facing field,
+  so partial color success followed by cursor refusal and a revert to original
+  settings still restores actual worker defaults.
 - [ ] Prove settings eventually match latest requested values after pressure
   clears, shutdown cancels blocked publication, final outcomes remain visible,
   natural output tail and existing throughput/input benchmark still pass.
@@ -183,6 +188,12 @@ and accepts ordinary native replace calls regardless of preedit.
   Cocoa ordinary insertText uses active native key scope and exact text match,
   invalidated by marking/transformed composition. Independent insertions remain
   native commits. Scope save/restore handles nested dispatch; no frame timers.
+- [ ] Preserve Wayland one-byte composition commits: capture composing state
+  before CommitString resets it. Only uncomposed one-byte text synthesizes the
+  existing ordinary KeyDown; active-composition commits route directly to
+  InsertText. Terminal and Surface preedit listeners otherwise suppress that
+  synthetic key. Include default-client compatibility and CommitString→Done
+  regression traces rather than only direct application replacement tests.
 - [ ] Audit every fallback/native caller, add bridge/native-classification tests
   and verification against pinned upstream/recorded patch. Preserve other GPUI
   clients through default forwarding. Source-inspect Darwin and run available
@@ -193,9 +204,9 @@ and accepts ordinary native replace calls regardless of preedit.
 
 ## Plan review and final verification
 
-- [ ] Self-review PRD coverage: Task1 014/015/016/022; Task2 017/018/020;
+- [x] Self-review PRD coverage: Task1 014/015/016/022; Task2 017/018/020;
   Task3 021; Task4 023; Task5 019. No confirmed ID omitted.
-- [ ] Independent plan review including GUI compatibility seam, session scope,
+- [x] Independent plan review including GUI compatibility seam, session scope,
   rollback recovery, settings retries and original bug invariants.
 - [ ] Complete independent task spec/quality reviews and resolve substantive
   findings; maintain plan-local progress ledger and audit verification statuses.
@@ -207,3 +218,5 @@ and accepts ordinary native replace calls regardless of preedit.
   safe staged installation as appropriate. Inspect actual command outputs.
 - [ ] Update findings, ADRs/context and PR evidence; commit remaining docs,
   push branch and open PR against current origin/master without merging it.
+
+Independent plan review: `/tmp/sprite-gap-plan-review.md`; three corrections adopted before implementation: retain latest refused Resize, route one-byte Wayland composition commits natively, and track partial settings admission across a latest-value revert. All ten IDs covered. Task1 has no remaining plan blocker.
