@@ -34,8 +34,8 @@
 - Retains: `send`, `EventStream::next`, `EventStream::next_blocking`, `begin_shutdown`, `ShutdownHandle::wait` public behavior.
 - Internal mailbox publication accepts a whole produced event batch; seal/finalize publishes terminal errors and exit without waiting for consumption.
 
-- [ ] Write and run a regression based on `/tmp/sprite-term-review-ui-cycle.rs`: distinct OSC2 titles plus sustained PTY output, event receiver held, capture request occupying the reserved inbox slot. One UI submission must return promptly as accepted or an explicit saturation error, never block.
-- [ ] Implement the nonblocking method using the existing validated `try_send` primitive:
+- [x] Write and run a regression based on `/tmp/sprite-term-review-ui-cycle.rs`: distinct OSC2 titles plus sustained PTY output, event receiver held, capture request occupying the reserved inbox slot. One UI submission must return promptly as accepted or an explicit saturation error, never block.
+- [x] Implement the nonblocking method using the existing validated `try_send` primitive:
 
 ```rust
 match self.commands.try_send(worker::Message::Command(command)) {
@@ -47,11 +47,11 @@ match self.commands.try_send(worker::Message::Command(command)) {
 
 Share validation between submission methods. Cover Input, Paste, PasteConfirmed, CommitText, and key text where variable-sized. Convert GPUI-thread callers to nonblocking submission; surface errors visibly or refuse requests.
 
-- [ ] Write and run an undrained-events shutdown regression. It must join within the existing cleanup bound, then drain the retained events and final outcome in order. Add coverage for a batch larger than normal event capacity, receiver drop, and resumed consumption.
-- [ ] Implement a mutex-owned bounded mailbox using the existing async-channel wake primitive and a condition variable for producer pressure. Retain one event batch when normal capacity is exhausted. Suspend further mutations until that batch drains; cancellation wakes publication without discarding the retained batch. Reserve final outcome storage and seal it after cleanup. Receiver drop wakes publication. Replace direct blocking channel emission in live and final paths.
-- [ ] Write and run a direct-child-exit test with a descendant ignoring HUP/TERM while retaining the PTY. Verify the original exit code, finite completion, and final output survival. Implement a finite natural-output drain state before cleanup, independent of EOF. Keep requested shutdown escalation behavior.
-- [ ] Run `cargo test -p sprite-term --locked --offline` and affected app submission tests. Inspect queue bounds and accepted-order behavior. Record exact commands and red/green outcomes.
-- [ ] Update ADR 0010/0011 or add ADR 0021 to explain the changed event retention/cancellation contract; commit only Task 1 files.
+- [x] Write and run an undrained-events shutdown regression. It must join within the existing cleanup bound, then drain the retained events and final outcome in order. Add coverage for a batch larger than normal event capacity, receiver drop, and resumed consumption.
+- [x] Implement a mutex-owned bounded mailbox using the existing async-channel wake primitive and a condition variable for producer pressure. Retain one event batch when normal capacity is exhausted. Suspend further mutations until that batch drains; cancellation wakes publication without discarding the retained batch. Reserve final outcome storage and seal it after cleanup. Receiver drop wakes publication. Replace direct blocking channel emission in live and final paths.
+- [x] Write and run a direct-child-exit test with a descendant ignoring HUP/TERM while retaining the PTY. Verify the original exit code, finite completion, and final output survival. Implement a finite natural-output drain state before cleanup, independent of EOF. Keep requested shutdown escalation behavior.
+- [x] Run `cargo test -p sprite-term --locked --offline` and affected app submission tests. Inspect queue bounds and accepted-order behavior. Record exact commands and red/green outcomes.
+- [x] Update ADR 0010/0011 or add ADR 0021 to explain the changed event retention/cancellation contract; commit only Task 1 files.
 
 ### Task 2: UI state invariants and input/rendering correctness
 
@@ -65,13 +65,13 @@ Share validation between submission methods. Cover Input, Paste, PasteConfirmed,
 - Consumes: nonblocking session submission from Task 1; current `SnapshotBundle`, `Body`, description parser, GPUI `InputHandler`.
 - Produces: existing methods with repaired invariants; no external protocol changes.
 
-- [ ] Port the failing GPUI regressions from `/tmp/sprite-ui-review-n6i6uf40` one at a time: UTF-16 caret/marked ranges and visible image recovery after budget zero/restoration. Run each red before its repair.
-- [ ] Change ranges to `text.encode_utf16().count()`. Add supplementary-plane and combining text checks through InputHandler.
-- [ ] Make a texture budget update rebuild from the retained bundle, retaining bounded cache behavior. Replace the eviction sentinel with `Option<u32>` so `u32::MAX` can be evicted, and cover that id through actual cache use.
-- [ ] Exercise valid element Surface followed by grid/list replacement; incompatible updates must refuse and preserve content. Make body-kind validation one owning operation, sharing specialized-root rules between opening and updating. Reject nested grid/list roots rather than allowing an element renderer to silently erase them.
-- [ ] Exercise pointer hover, drag, and press/release reporting at the UI routing seam. Preserve optional buttons and actual modifiers; route buttonless movement without interfering with hyperlink hover. Keep Shift selection override and ordinary selection semantics. Support Left/Middle/Right consistently.
-- [ ] Exercise underlined whitespace in drawing preparation. Move decoration drawing outside glyph-only fast paths and preserve underline color, selection/cursor colors, strikethrough, and clipping. Keep normal blank cells cheap; no redundant glyph shaping for ordinary blanks.
-- [ ] Run `cargo test -p sprite-app --lib --locked --offline` plus affected terminal mouse tests; record results and commit Task 2.
+- [x] Port the failing GPUI regressions from `/tmp/sprite-ui-review-n6i6uf40` one at a time: UTF-16 caret/marked ranges and visible image recovery after budget zero/restoration. Run each red before its repair.
+- [x] Change ranges to `text.encode_utf16().count()`. Add supplementary-plane and combining text checks through InputHandler.
+- [x] Make a texture budget update rebuild from the retained bundle, retaining bounded cache behavior. Replace the eviction sentinel with `Option<u32>` so `u32::MAX` can be evicted, and cover that id through actual cache use.
+- [x] Exercise valid element Surface followed by grid/list replacement; incompatible updates must refuse and preserve content. Make body-kind validation one owning operation, sharing specialized-root rules between opening and updating. Reject nested grid/list roots rather than allowing an element renderer to silently erase them.
+- [x] Exercise pointer hover, drag, and press/release reporting at the UI routing seam. Preserve optional buttons and actual modifiers; route buttonless movement without interfering with hyperlink hover. Keep Shift selection override and ordinary selection semantics. Support Left/Middle/Right consistently.
+- [x] Exercise underlined whitespace in drawing preparation. Move decoration drawing outside glyph-only fast paths and preserve underline color, selection/cursor colors, strikethrough, and clipping. Keep normal blank cells cheap; no redundant glyph shaping for ordinary blanks.
+- [x] Run `cargo test -p sprite-app --lib --locked --offline` plus affected terminal mouse tests; record results and commit Task 2.
 
 ### Task 3: Cancellable Surface CLI and local correctness
 
@@ -86,12 +86,12 @@ Share validation between submission methods. Cover Input, Paste, PasteConfirmed,
 - Produces: descriptor-backed `run_surface_open` input contract used by `main.rs`; no blocked helper thread survives return.
 - Retains: JSON streaming, CLI exit codes, authentication, normal stdin EOF half-close/drain behavior.
 
-- [ ] Add a real-binary regression using the existing SurfaceEndpoint fixture: send `opened` then close while child stdin remains open. Repeat with a partial subsequent JSON document. Bound tests with cleanup so failures cannot hang the suite.
-- [ ] Implement cancellation-aware descriptor reading with OS `poll` on input plus a cancellation socket. Socket event EOF and output errors cancel input. Read descriptor bytes directly rather than mixing raw readiness with buffered `Stdin::read`. Join the events thread and distinguish canceled input from malformed JSON. Add nix as a direct target dependency from the existing workspace entry only if required.
-- [ ] Add a real endpoint wrong-key `sprite config print` regression, then validate configuration responses before printing; denied or malformed replies go to stderr and return refusal with empty stdout.
-- [ ] Extend existing release-preparation tests to include both recipes. Synchronize `PKGBUILD.local` to workspace version and include it in atomic preparation validation before any files are written.
-- [ ] Change Fish's sourced duplicate guard to `return 0` and keep its marker global but unexported (`set -g -u`) so child shells can install their own hooks. Exercise repeat/nested sourcing if Fish is available; otherwise record the missing runtime, do not invent an execution result.
-- [ ] Run `cargo test -p sprite-app --test client --locked --offline`, `python3 -m unittest discover -s scripts -p 'test_*.py'`, and shell syntax checks appropriate to installed runtimes; commit Task 3.
+- [x] Add a real-binary regression using the existing SurfaceEndpoint fixture: send `opened` then close while child stdin remains open. Repeat with a partial subsequent JSON document. Bound tests with cleanup so failures cannot hang the suite.
+- [x] Implement cancellation-aware descriptor reading with OS `poll` on input plus a cancellation socket. Socket event EOF and output errors cancel input. Read descriptor bytes directly rather than mixing raw readiness with buffered `Stdin::read`. Join the events thread and distinguish canceled input from malformed JSON. Add nix as a direct target dependency from the existing workspace entry only if required.
+- [x] Add a real endpoint wrong-key `sprite config print` regression, then validate configuration responses before printing; denied or malformed replies go to stderr and return refusal with empty stdout.
+- [x] Extend existing release-preparation tests to include both recipes. Synchronize `PKGBUILD.local` to workspace version and include it in atomic preparation validation before any files are written.
+- [x] Change Fish's sourced duplicate guard to `return 0` and keep its marker global but unexported (`set -g -u`) so child shells can install their own hooks. Exercise repeat/nested sourcing if Fish is available; otherwise record the missing runtime, do not invent an execution result.
+- [x] Run `cargo test -p sprite-app --test client --locked --offline`, `python3 -m unittest discover -s scripts -p 'test_*.py'`, and shell syntax checks appropriate to installed runtimes; commit Task 3.
 
 ### Task 4: Whole-change verification and independent review
 
@@ -104,7 +104,37 @@ Share validation between submission methods. Cover Input, Paste, PasteConfirmed,
 - Consumes: all repaired workflows and task reports.
 - Produces: verified branch, independent review verdict, final user handoff.
 
-- [ ] Run `cargo fmt --all -- --check`, `cargo test --workspace --locked --offline`, Python release tests, and focused original repro checks. Capture complete long output in evidence files and inspect failure counts and exit status.
-- [ ] Generate whole-branch review package from recorded starting commit to HEAD. Independent reviewer traces actual callers, cancellation interleavings, bounded memory, and unchanged consumers; review both spec compliance and code quality.
-- [ ] Fix substantive review findings, repeat covering checks, and request focused re-review. Do not claim the whole class is eliminated beyond the explicitly enforced invariants.
-- [ ] Record completed tasks, commits, validation, runtime limitations, and any deviations. Keep the branch local and provide the worktree path; publishing and installation remain out of scope.
+- [x] Run `cargo fmt --all -- --check`, `cargo test --workspace --locked --offline`, Python release tests, and focused original repro checks. Capture complete long output in evidence files and inspect failure counts and exit status.
+- [x] Generate whole-branch review package from recorded starting commit to HEAD. Independent reviewer traces actual callers, cancellation interleavings, bounded memory, and unchanged consumers; review both spec compliance and code quality.
+- [x] Fix substantive review findings, repeat covering checks, and request focused re-review. Do not claim the whole class is eliminated beyond the explicitly enforced invariants.
+- [x] Record completed tasks, commits, validation, runtime limitations, and any deviations. Keep the branch local and provide the worktree path; publishing and installation remain out of scope.
+
+
+## Completion evidence — 2026-10-05
+
+All four tasks are complete. The independent whole-branch review traced the changed callers and lifecycle contracts from `eaa553e` through `8d1f76c`. It found two additional caller-state defects, repaired at `38bdf89`; the focused re-review cleared both with no open Critical, Important, or Minor findings. Fresh workspace verification passed at final runtime head `38bdf89918f02470c343f110b1c27681a354bef3`. The branch remains local at `fix/review-bug-classes` in the worktree above.
+
+The final submission contract records acceptance by each owner. Local renderer state follows actual font, padding, fallback-color, and texture-budget changes; terminal cursor settings and ColorDefaults retain their independently accepted values. A partially refused reload can revert local state and retry terminal groups, and unchanged reloads preserve terminal defaults. Hyperlink hover/click owns a pending response only after a running worker accepts the request. Acceptance means queued, not completed. ADR 0021 records these refinements. Real GPUI/PTY red/green regressions cover rejected hyperlink recovery, partial reload reversion, and both cursor/color refusal orderings.
+
+Implementation and repair commits:
+
+- Task 1: `ad119fd` (bounded event delivery and cleanup), `353ff74` (refused resize/font retry).
+- Task 2: `090389e` (UI invariants/input/decorations), `b9dbd61` (owned graphics refusal status).
+- Task 3: `b33e594` (Surface cancellation/config/release/Fish), `ce79fbd` (confirmed blocked socket-write regression), `8d1f76c` (explicit package-list guidance). `6fd7875` records the Fish shell-local guard refinement.
+- Final review repair: `38bdf89` (per-owner terminal submission acceptance and accepted-only hyperlink response ownership).
+
+Verification evidence:
+
+| Command | Result | Complete log |
+| --- | --- | --- |
+| `TERM=xterm-256color cargo test --workspace --locked --offline` at `38bdf89` | exit 0; 43 groups, 802 passed, 0 failed, 2 existing ignored | `/tmp/sprite-task4-workspace-round1.log` |
+| `cargo fmt --all -- --check` at `38bdf89` | exit 0 | `/tmp/sprite-task4-fmt-round1.log` |
+| `git diff --check` at `38bdf89` | exit 0 | `/tmp/sprite-task4-diff-round1.log` |
+| Thirteen focused original-workflow Rust runs at `8d1f76c` | all exit 0; 33 passed, no zero-test filters | `/tmp/sprite-task4-focused-summary.log` and `/tmp/sprite-task4-focused-statuses.json` |
+| `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'` | exit 0; 10 passed | `/tmp/sprite-task4-python.log` |
+| `bash -n packaging/PKGBUILD`; `bash -n packaging/PKGBUILD.local`; `bash -n crates/sprite-term/shell-integration/sprite.bash` (issued individually) | each exit 0 | `/tmp/sprite-task4-bash-pkg.log`, `/tmp/sprite-task4-bash-local.log`, `/tmp/sprite-task4-bash-integration.log` |
+| `makepkg -p PKGBUILD.local --packagelist` from `packaging` | exit 0; Sprite and debug package paths both contain `0.2.2-1` | `/tmp/sprite-task4-packagelist.log` |
+
+The fresh final workspace includes and passes all three new submission regressions, the original process/stream/GPUI regressions, and the benchmark and tmux fixtures. Python, shell, and packaging files did not change in the final repair, so their successful evidence was retained. Workspace and both recipes are version 0.2.2; tools are Rust/Cargo 1.97.1, Python 3.14.7, Bash 5.3.15, and makepkg 7.1.0. Detailed eleven-finding/variant evidence and prior defect-specific red/green results are recorded in the ignored local task reports under `.superpowers/sdd/10-05-2026-review-bug-classes-a61253095fd69afa21b58c1ac7698c978ceda4ef/`.
+
+Verification limits remain explicit. Fish and Zsh are unavailable; Fish duplicate/nested sourcing and Fish/Zsh syntax execution are not claimed. macOS execution and live desktop pixels were unavailable; GPUI tests verify production decoration preparation and existing paint paths. The Linux blocked-write regression requires readable child procfs syscall/wchan and socket wait symbols. The pre-existing ignored tests are `croft_checkpoint_one_capabilities` (external Croft) and `measure_maximum_request` (largest-request measurement). The pinned `proc-macro-error2 v2.0.1` future-incompatibility warning remains. Produced event batches are retained within the bounded mailbox contract; finite natural draining does not promise retention of unlimited future unparsed output for a permanently stalled consumer. Release validation occurs before writes but does not provide transaction durability against disk failures. No publication, installation, merge, dependency upgrade, or original-checkout mutation was performed.
