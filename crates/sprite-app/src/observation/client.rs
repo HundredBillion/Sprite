@@ -176,6 +176,19 @@ pub fn run_config_print(
         (Some(socket), Some(key)) => {
             match exchange(&socket, &format!("{key} {PROTOCOL} config print")) {
                 Ok(answer) if !answer.trim().is_empty() => {
+                    let invalid = match crate::config::Settings::parse_candidate(&answer) {
+                        Ok((_, complaints)) if complaints.0.is_empty() => None,
+                        Ok((_, complaints)) => Some(complaints.0.join("; ")),
+                        Err(error) => Some(error),
+                    };
+                    if let Some(error) = invalid {
+                        let _ = writeln!(
+                            errors,
+                            "sprite: invalid configuration response: {} ({error})",
+                            answer.trim()
+                        );
+                        return Exit::Refused;
+                    }
                     let _ = writeln!(out, "# in effect in this window");
                     let _ = write!(out, "{}", answer.trim_end());
                     let _ = writeln!(out);

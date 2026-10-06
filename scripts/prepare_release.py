@@ -69,13 +69,15 @@ def prepare_release(root: Path, version: str) -> None:
     cargo_lock = root / "Cargo.lock"
     updated_lock = update_cargo_lock(cargo_lock.read_text(), current, version)
 
-    pkgbuild = root / "packaging" / "PKGBUILD"
-    updated_pkgbuild = replace_once(
-        pkgbuild.read_text(),
-        pkgbuild,
-        re.compile(r"(?m)^pkgver=" + re.escape(current) + r"$"),
-        f"pkgver={version}",
-    )
+    recipes = {}
+    for name in ("PKGBUILD", "PKGBUILD.local"):
+        recipe = root / "packaging" / name
+        recipes[recipe] = replace_once(
+            recipe.read_text(),
+            recipe,
+            re.compile(r"(?m)^pkgver=" + re.escape(current) + r"$"),
+            f"pkgver={version}",
+        )
     readme = root / "README.md"
     updated_readme = replace_once(
         readme.read_text(),
@@ -88,7 +90,8 @@ def prepare_release(root: Path, version: str) -> None:
 
     cargo_toml.write_text(updated_cargo)
     cargo_lock.write_text(updated_lock)
-    pkgbuild.write_text(updated_pkgbuild)
+    for recipe, content in recipes.items():
+        recipe.write_text(content)
     readme.write_text(updated_readme)
 
 

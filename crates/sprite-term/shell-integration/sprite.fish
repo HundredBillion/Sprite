@@ -4,9 +4,9 @@
 # user configuration file.
 
 if set -q SPRITE_SHELL_INTEGRATION
-    exit 0
+    return 0
 end
-set -gx SPRITE_SHELL_INTEGRATION 1
+set -g -u SPRITE_SHELL_INTEGRATION 1
 
 function __sprite_osc7 --on-variable PWD
     printf '\033]7;file://%s%s\007' (hostname) "$PWD"

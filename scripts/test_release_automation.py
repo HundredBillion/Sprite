@@ -9,6 +9,10 @@ REPO = Path(__file__).resolve().parents[1]
 PREPARE = REPO / "scripts" / "prepare_release.py"
 CHECK = REPO / "scripts" / "check_release_version.py"
 RELEASE_WORKFLOW = REPO / ".github" / "workflows" / "release-pr.yml"
+WORKSPACE_LOCK = "".join(
+    f'[[package]]\nname = "{name}"\nversion = "0.2.0"\n'
+    for name in ("sprite-app", "sprite-pane", "sprite-term")
+)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -44,6 +48,7 @@ class PrepareReleaseTests(unittest.TestCase):
             )
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
+            (root / "packaging" / "PKGBUILD.local").write_text("pkgver=0.2.0\n")
             (root / "README.md").write_text(
                 "sudo pacman -U sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )
@@ -56,6 +61,10 @@ class PrepareReleaseTests(unittest.TestCase):
             )
 
             self.assertIn('version = "0.2.1"', (root / "Cargo.toml").read_text())
+            self.assertEqual(
+                "pkgver=0.2.1\n",
+                (root / "packaging" / "PKGBUILD.local").read_text(),
+            )
             self.assertEqual(
                 3,
                 (root / "Cargo.lock").read_text().count('version = "0.2.1"'),
@@ -77,6 +86,7 @@ class PrepareReleaseTests(unittest.TestCase):
             )
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
+            (root / "packaging" / "PKGBUILD.local").write_text("pkgver=0.2.0\n")
             (root / "README.md").write_text(
                 "sudo pacman -U sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )
@@ -100,8 +110,10 @@ class PrepareReleaseTests(unittest.TestCase):
             original_cargo = '[workspace.package]\nversion = "0.2.0"\n'
             original_pkgbuild = "pkgver=0.2.0\n"
             (root / "Cargo.toml").write_text(original_cargo)
+            (root / "Cargo.lock").write_text(WORKSPACE_LOCK)
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text(original_pkgbuild)
+            (root / "packaging" / "PKGBUILD.local").write_text(original_pkgbuild)
             (root / "README.md").write_text("no package command here\n")
 
             result = subprocess.run(
@@ -127,8 +139,10 @@ class PrepareReleaseTests(unittest.TestCase):
                 "sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )
             (root / "Cargo.toml").write_text(original_cargo)
+            (root / "Cargo.lock").write_text(WORKSPACE_LOCK)
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text(original_pkgbuild)
+            (root / "packaging" / "PKGBUILD.local").write_text(original_pkgbuild)
             (root / "README.md").write_text(original_readme)
 
             result = subprocess.run(
@@ -140,6 +154,31 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertEqual(original_cargo, (root / "Cargo.toml").read_text())
             self.assertEqual(original_readme, (root / "README.md").read_text())
+
+    def test_invalid_local_recipe_prevents_every_write(self):
+        for local in [None, "pkgver=0.2.0\npkgver=0.2.0\n"]:
+            with self.subTest(local=local), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                (root / "packaging").mkdir()
+                files = {
+                    "Cargo.toml": '[workspace.package]\nversion = "0.2.0"\n',
+                    "Cargo.lock": WORKSPACE_LOCK,
+                    "packaging/PKGBUILD": "pkgver=0.2.0\n",
+                    "README.md": "sprite-0.2.0-1-x86_64.pkg.tar.zst\n",
+                }
+                if local is not None:
+                    files["packaging/PKGBUILD.local"] = local
+                for name, content in files.items():
+                    (root / name).write_text(content)
+                result = subprocess.run(
+                    [sys.executable, str(PREPARE), "0.2.1", "--root", str(root)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("PKGBUILD.local", result.stderr)
+                for name, content in files.items():
+                    self.assertEqual(content, (root / name).read_text())
 
     def test_updates_workspace_packages_in_cargo_lock(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -163,6 +202,7 @@ class PrepareReleaseTests(unittest.TestCase):
             )
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
+            (root / "packaging" / "PKGBUILD.local").write_text("pkgver=0.2.0\n")
             (root / "README.md").write_text(
                 "sudo pacman -U sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )

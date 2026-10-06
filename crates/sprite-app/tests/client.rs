@@ -478,3 +478,223 @@ fn help_and_version_are_answers_rather_than_errors() {
     assert_eq!(version.status, 0);
     assert!(version.out.starts_with("sprite "));
 }
+
+#[test]
+fn config_print_refuses_wrong_credentials_without_stdout() {
+    let endpoint = window(|| "unused".to_owned());
+    let mut environment = credentials(&endpoint, "0");
+    environment
+        .iter_mut()
+        .find(|(name, _)| name == "SPRITE_OBSERVATION_KEY")
+        .unwrap()
+        .1 = "b".repeat(64);
+    let outcome = run(&["config", "print"], &borrowed(&environment));
+    assert_eq!(outcome.status, 5);
+    assert!(outcome.out.is_empty(), "{}", outcome.out);
+    assert!(outcome.errors.contains("denied"), "{}", outcome.errors);
+}
+
+#[test]
+fn config_print_validates_the_window_answer_before_printing() {
+    for answer in ["not TOML", "font = [", "font = 42"] {
+        let endpoint = window(move || answer.to_owned());
+        let environment = credentials(&endpoint, "0");
+        let outcome = run(&["config", "print"], &borrowed(&environment));
+        assert_eq!(outcome.status, 5, "{answer}");
+        assert!(outcome.out.is_empty(), "{}", outcome.out);
+        assert!(!outcome.errors.is_empty());
+    }
+    let settings = sprite_app::Settings::default().to_toml();
+    let response = settings.clone();
+    let endpoint = window(move || response.clone());
+    let environment = credentials(&endpoint, "0");
+    let outcome = run(&["config", "print"], &borrowed(&environment));
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert!(outcome.out.contains(settings.trim_end()));
+}
+
+#[test]
+fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
+    use std::io::{BufRead, BufReader, Write};
+    for tail in ["", "{\"version\":"] {
+        let (mut endpoint, window) = surface_window(|request| match request {
+            sprite_app::SurfaceRequest::Open { reply, .. } => {
+                reply.send(Ok(())).expect("reply");
+                true
+            }
+            sprite_app::SurfaceRequest::Closed { .. } => false,
+            _ => true,
+        });
+        let environment = surface_credentials(&endpoint, "4");
+        let mut child = Command::new(SPRITE)
+            .args(["surface", "open", "--fill"])
+            .env_clear()
+            .envs(borrowed(&environment))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        write!(input, "{DESCRIPTION}\n{{\"type\":\"close\"}}\n{tail}").unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let output = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            tx.send(first).unwrap();
+            let mut remaining = String::new();
+            std::io::Read::read_to_string(&mut reader, &mut remaining).unwrap();
+        });
+        let opened = rx.recv_timeout(Duration::from_secs(3));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if status.is_none() {
+            child.kill().unwrap();
+        }
+        drop(input);
+        let finished = child.wait_with_output().unwrap();
+        output.join().unwrap();
+        endpoint.close();
+        window.join().unwrap();
+        assert!(opened.unwrap().contains("opened"));
+        assert!(
+            status.is_some(),
+            "socket EOF left stdin blocked for tail {tail:?}"
+        );
+        assert!(
+            finished.status.success(),
+            "{}",
+            String::from_utf8_lossy(&finished.stderr)
+        );
+        assert!(
+            finished.stderr.is_empty(),
+            "cancellation is not malformed JSON"
+        );
+    }
+}
+
+#[test]
+fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
+    use std::io::{BufRead, BufReader, Write};
+    for after_opened in [false, true] {
+        let mut live = None;
+        let (mut endpoint, window) = surface_window(move |request| match request {
+            sprite_app::SurfaceRequest::Open {
+                reply, connection, ..
+            } => {
+                live = Some(connection);
+                reply.send(Ok(())).unwrap();
+                true
+            }
+            sprite_app::SurfaceRequest::Focus { .. } => {
+                assert!(live.as_ref().unwrap().send(r#"{"type":"focus"}"#));
+                true
+            }
+            sprite_app::SurfaceRequest::Closed { .. } => false,
+            _ => true,
+        });
+        let environment = surface_credentials(&endpoint, "4");
+        let mut child = Command::new(SPRITE)
+            .args(["surface", "open", "--fill"])
+            .env_clear()
+            .envs(borrowed(&environment))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        if after_opened {
+            writeln!(input, "{DESCRIPTION}").unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let first = std::thread::spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                tx.send(line).unwrap();
+            });
+            if rx.recv_timeout(Duration::from_secs(3)).is_err() {
+                child.kill().unwrap();
+                drop(input);
+                child.wait().unwrap();
+                first.join().unwrap();
+                panic!("surface did not open");
+            }
+            first.join().unwrap();
+            write!(
+                input,
+                "{{\"type\":\"focus\",\"target\":\"terminal\"}}\n{{\"version\":"
+            )
+            .unwrap();
+        } else {
+            drop(stdout);
+            writeln!(input, "{DESCRIPTION}").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if status.is_none() {
+            child.kill().unwrap();
+        }
+        drop(input);
+        let finished = child.wait_with_output().unwrap();
+        endpoint.close();
+        window.join().unwrap();
+        assert!(
+            status.is_some(),
+            "stdout failure left stdin blocked: after_opened={after_opened}"
+        );
+        assert!(
+            finished.status.success(),
+            "{}",
+            String::from_utf8_lossy(&finished.stderr)
+        );
+        assert!(finished.stderr.is_empty());
+    }
+}
+
+#[test]
+fn surface_stdin_eof_drains_the_windows_final_event() {
+    let mut live = None;
+    let (endpoint, window) = surface_window(move |request| match request {
+        sprite_app::SurfaceRequest::Open {
+            reply, connection, ..
+        } => {
+            live = Some(connection);
+            reply.send(Ok(())).unwrap();
+            true
+        }
+        sprite_app::SurfaceRequest::Closed { .. } => {
+            assert!(live.take().unwrap().send(r#"{"type":"closed"}"#));
+            false
+        }
+        _ => true,
+    });
+    let environment = surface_credentials(&endpoint, "4");
+    let outcome = run_with_input(
+        &["surface", "open", "--fill"],
+        &borrowed(&environment),
+        DESCRIPTION,
+    );
+    window.join().unwrap();
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert_eq!(outcome.out.lines().last(), Some(r#"{"type":"closed"}"#));
+}

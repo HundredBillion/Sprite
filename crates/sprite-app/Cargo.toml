@@ -45,3 +45,6 @@ gpui = { workspace = true, features = ["wayland", "x11"] }
 # so the terminal shows a cursor over blank rows. On Linux the `wayland`/`x11`
 # features already pull `font-kit` in, which is why only macOS needed this.
 gpui = { workspace = true, features = ["font-kit"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
