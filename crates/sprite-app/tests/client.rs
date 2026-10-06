@@ -698,3 +698,138 @@ fn surface_stdin_eof_drains_the_windows_final_event() {
     assert_eq!(outcome.status, 0, "{}", outcome.errors);
     assert_eq!(outcome.out.lines().last(), Some(r#"{"type":"closed"}"#));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn surface_event_eof_releases_a_blocked_socket_write() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixListener;
+
+    let directory = scratch();
+    std::fs::create_dir_all(&directory).unwrap();
+    let socket = directory.join("write-pressure.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut child = Command::new(SPRITE)
+        .args(["surface", "open", "--fill"])
+        .env_clear()
+        .env("SPRITE_SURFACE_SOCKET", &socket)
+        .env("SPRITE_SURFACE_KEY", "a".repeat(64))
+        .env("SPRITE_PANE", "4")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let update = serde_json::json!({
+            "version": 1,
+            "root": {
+                "kind": "text",
+                "color": "terminal.foreground",
+                "text": "x".repeat(8 * 1024 * 1024),
+            },
+        });
+        let result = writeln!(input, "{DESCRIPTION}\n{update}");
+        (result, input)
+    });
+    let mut peer = None;
+    let result = (|| -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            if Instant::now() >= deadline {
+                return Err("client did not connect".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        peer = Some(BufReader::new(stream));
+        let reader = peer.as_mut().unwrap();
+        let mut open = String::new();
+        reader
+            .read_line(&mut open)
+            .map_err(|error| error.to_string())?;
+        if !open.contains("\"type\":\"open\"") {
+            return Err(format!("unexpected open: {open}"));
+        }
+        writeln!(reader.get_mut(), "{{\"type\":\"opened\",\"id\":1}}")
+            .map_err(|error| error.to_string())?;
+        let mut prefix = [0];
+        reader
+            .read_exact(&mut prefix)
+            .map_err(|error| error.to_string())?;
+        if prefix != [b'{'] {
+            return Err("update was not JSON".into());
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let syscall = std::fs::read_to_string(format!("/proc/{}/syscall", child.id()))
+                .map_err(|error| error.to_string())?;
+            let state = std::fs::read_to_string(format!("/proc/{}/wchan", child.id()))
+                .map_err(|error| error.to_string())?;
+            let arguments: Vec<_> = syscall.split_whitespace().collect();
+            let argument = |index| {
+                arguments.get(index).and_then(|value: &&str| {
+                    u64::from_str_radix(value.trim_start_matches("0x"), 16).ok()
+                })
+            };
+            if state.contains("sock")
+                && argument(1).is_some_and(|fd| (3..128).contains(&fd))
+                && argument(3).is_some_and(|bytes| bytes > 1024 * 1024)
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "no blocked socket write: syscall={syscall}, wchan={state}"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        reader
+            .get_ref()
+            .shutdown(Shutdown::Write)
+            .map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err("event EOF left the main socket write blocked".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    let (written, input) = writer.join().unwrap();
+    drop(input);
+    drop(peer);
+    drop(listener);
+    std::fs::remove_file(socket).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+    assert!(written.is_ok(), "stdin writer failed: {written:?}");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+}
