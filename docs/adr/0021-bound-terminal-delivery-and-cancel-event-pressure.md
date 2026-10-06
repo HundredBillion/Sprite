@@ -7,9 +7,21 @@ limited to 16 KiB; paste and confirmed paste retain the existing 1 MiB clipboard
 limit. The seventeen-slot worker inbox and sixteen 16 KiB output permits stay
 unchanged. Accepted commands keep their existing inbox order. Saturated UI
 submissions set the pane status; observation requests refuse and remove their
-waiter. A refused live configuration update does not advance `applied_settings`.
+waiter. Hyperlink hover and click requests acquire outstanding response state
+only after a running session accepts their submission; refusal leaves them
+retryable.
 The observation registry uses nonblocking submission even off-thread because
 its mutex is also needed by the GPUI event consumer.
+
+Live configuration acknowledgement follows each owner independently. Renderer
+font metrics, padding, fallback colors, and texture budget record their actual
+local application even when a terminal command refuses. The accepted terminal
+color defaults and cursor settings advance only on successful submission; the
+geometry cache likewise records only accepted Resize commands. Reconciliation
+compares these owner states with the requested settings, so returning from a
+partially applied B to A restores local state and retries accepted terminal
+groups that still need reverting. An unchanged reload does not reset terminal
+defaults. Submission acknowledges queue acceptance, not worker completion.
 
 Lifecycle delivery uses one mutex-owned mailbox: thirty-two normal events,
 at most one whole produced mutation batch waiting for space, and up to two
@@ -58,4 +70,5 @@ This refines ADR 0010's lifecycle ownership and ADR 0011's cancellation contract
 Real PTY regressions cover saturated UI submission, held events through shutdown,
 whole-batch ordering, resumed consumption, receiver drop, natural exit under
 event pressure, and final title/text survival with a stubborn descendant. GPUI
-and observation regressions cover visible refusal and unapplied reload state.
+and observation regressions cover visible refusal, hyperlink recovery, retryable
+geometry, and restoration after partial local or terminal settings acceptance.

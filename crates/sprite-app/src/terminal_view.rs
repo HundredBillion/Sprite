@@ -45,7 +45,10 @@ enum SessionState {
 }
 
 pub struct TerminalView {
+    /// Local renderer groups and the independently accepted terminal cursor group.
     applied_settings: crate::config::Settings,
+    /// Terminal defaults can lag local fallback colors after a refused reload.
+    accepted_colors: sprite_term::ColorDefaults,
     /// An ended pane keeps its worker handle until cleanup can join it.
     ///
     /// A pane whose configured program could not be run still has to draw the
@@ -149,25 +152,34 @@ thread_local! {
 impl TerminalView {
     fn request_hover_link(&mut self, position: sprite_term::CellPosition) {
         self.hovered_link = None;
+        if !matches!(self.session, SessionState::Running(_)) {
+            return;
+        }
         if self.hover_request.is_none() {
             let request_id = self.next_link_request;
             self.next_link_request = self.next_link_request.wrapping_add(1);
-            self.hover_request = Some((request_id, position));
-            self.send(TerminalCommand::ResolveHyperlink {
+            if self.submit(TerminalCommand::ResolveHyperlink {
                 position,
                 request_id,
-            });
+            }) {
+                self.hover_request = Some((request_id, position));
+            }
         }
     }
 
     fn request_link_click(&mut self, position: sprite_term::CellPosition) {
         let request_id = self.next_link_request;
         self.next_link_request = self.next_link_request.wrapping_add(1);
-        self.pending_link_click = Some(request_id);
-        self.send(TerminalCommand::ResolveHyperlink {
+        self.pending_link_click = None;
+        if !matches!(self.session, SessionState::Running(_)) {
+            return;
+        }
+        if self.submit(TerminalCommand::ResolveHyperlink {
             position,
             request_id,
-        });
+        }) {
+            self.pending_link_click = Some(request_id);
+        }
     }
 
     /// `environment` carries this pane's observation variables: the window's
@@ -241,6 +253,7 @@ impl TerminalView {
             ..sprite_term::GraphicsPolicy::default()
         };
         let fallback_colors = defaults.fallback_colors;
+        let accepted_colors = defaults.colors.clone();
         config.colors = defaults.colors;
         config.cursor = defaults.cursor;
         config.scrollback_bytes = scrollback.bytes.get();
@@ -344,6 +357,7 @@ impl TerminalView {
 
         Self {
             applied_settings,
+            accepted_colors,
             session: SessionState::Running(session),
             observation,
             surfaces: SurfaceHost::default(),
@@ -428,6 +442,7 @@ impl TerminalView {
             });
         Self {
             applied_settings: crate::config::Settings::default(),
+            accepted_colors: theme::session_defaults(&crate::config::Settings::default()).colors,
             session: SessionState::NeverStarted,
             // A view that never started a session has nothing to observe.
             observation: None,
@@ -689,174 +704,4 @@ impl sprite_pane::Pane for TerminalView {
 }
 
 #[cfg(test)]
-mod submission_regressions {
-    use super::*;
-
-    #[gpui::test]
-    fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::TestAppContext) {
-        let settings = crate::config::Settings::default();
-        cx.set_global(crate::config::ActiveSettings(settings.clone()));
-        cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            TerminalView::failed(
-                "resize regression".into(),
-                ".SystemUIFont".into(),
-                window,
-                cx,
-            )
-        });
-        let titles: String = (0..100)
-            .map(|index| format!("\x1b]2;TITLE{index}\x07"))
-            .collect();
-        let script = format!(
-            "stty -echo; printf '%s' '{titles}'; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf '\\nPTY:%s\\n' \"$(stty size)\"; done"
-        );
-        let sprite_term::Spawned {
-            session,
-            mut events,
-            mut snapshots,
-        } = TerminalSession::spawn(SessionConfig::command(
-            "/bin/sh",
-            vec!["-c".into(), script.into()],
-        ))
-        .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let initial = snapshots.next_blocking().unwrap();
-        let allocated = gpui::size(px(800.0), px(480.0));
-        let mut reloaded = settings.clone();
-        reloaded.font.size = crate::config::FontSize::new(21.0);
-        let wanted = view.update_in(cx, |view, window, cx| {
-            view.session = SessionState::Running(session);
-            view.size = Some(initial.pane.size);
-            view.set_allocated(allocated);
-            view.apply_settings(&reloaded, window, cx);
-            let wanted = geometry::grid_size(
-                crate::grid::content_area(allocated, view.padding),
-                view.metrics.width(),
-                view.metrics.height(),
-                window.scale_factor(),
-            )
-            .unwrap();
-            assert_ne!(wanted, initial.pane.size);
-            assert!(
-                view.status
-                    .as_ref()
-                    .is_some_and(|status| status.contains("queue is full"))
-            );
-            assert_ne!(
-                view.size,
-                Some(wanted),
-                "refused resize must remain retryable"
-            );
-            assert_eq!(
-                view.applied_settings.font.size, settings.font.size,
-                "refused font resize remains unapplied"
-            );
-            wanted
-        });
-        let event_drain = std::thread::spawn(move || while events.next_blocking().is_ok() {});
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let snapshot_drain = std::thread::spawn(move || {
-            while let Ok(bundle) = snapshots.next_blocking() {
-                if tx.send(bundle).is_err() {
-                    break;
-                }
-            }
-        });
-        let wait_for_text = |text: &str| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                let bundle = rx
-                    .recv_timeout(remaining)
-                    .expect("terminal output deadline");
-                if bundle.pane.rows.iter().any(|row| row.text.contains(text)) {
-                    break bundle;
-                }
-            }
-        };
-        wait_for_text("INPUT_READY");
-        view.update_in(cx, |view, window, _| {
-            view.set_allocated(allocated);
-            view.synchronise_size(window);
-            assert_eq!(
-                view.size,
-                Some(wanted),
-                "identical layout retries the refused size"
-            );
-            assert!(view.submit(TerminalCommand::Input(b"report\n".to_vec())));
-        });
-        let report = wait_for_text(&format!("PTY:{} {}", wanted.rows(), wanted.cols()));
-        assert_eq!(
-            report.pane.size, wanted,
-            "snapshot and kernel PTY size agree"
-        );
-        let handle = view.update_in(cx, |view, window, cx| {
-            view.apply_settings(&reloaded, window, cx);
-            assert_eq!(view.applied_settings.font.size, reloaded.font.size);
-            view.begin_shutdown().unwrap()
-        });
-        handle.wait().unwrap();
-        drop(rx);
-        snapshot_drain.join().unwrap();
-        event_drain.join().unwrap();
-    }
-
-    #[gpui::test]
-    fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAppContext) {
-        let settings = crate::config::Settings::default();
-        cx.set_global(crate::config::ActiveSettings(settings.clone()));
-        cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-        let (sender, _exits) = async_channel::unbounded();
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            TerminalView::new(
-                Some(vec!["/bin/sleep".into(), "30".into()]),
-                settings.clone(),
-                Vec::new(),
-                None,
-                PaneExit {
-                    sender,
-                    identity: (crate::tabs::TabId(0), crate::pane_tree::PaneId(0)),
-                },
-                window,
-                cx,
-            )
-        });
-        let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        snapshots.next_blocking().unwrap();
-        let guard = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            drop(events);
-        });
-        let mut reloaded = settings.clone();
-        reloaded.cursor.blink = Some(false);
-        view.update_in(cx, |view, window, cx| {
-            view.session = SessionState::Running(session);
-            view.status = None;
-            let started = std::time::Instant::now();
-            view.send(TerminalCommand::Input(b"x".to_vec()));
-            assert!(
-                started.elapsed() < std::time::Duration::from_millis(200),
-                "GPUI submission waited for the worker"
-            );
-            assert!(
-                view.status
-                    .as_ref()
-                    .is_some_and(|status| status.contains("queue is full"))
-            );
-            view.apply_settings(&reloaded, window, cx);
-            assert_eq!(
-                view.applied_settings.cursor.blink, settings.cursor.blink,
-                "refused reload remains unapplied"
-            );
-            assert!(
-                view.status
-                    .as_ref()
-                    .is_some_and(|status| status.contains("queue is full"))
-            );
-            view.begin_shutdown();
-        });
-        guard.join().unwrap();
-    }
-}
+mod submission_regressions;

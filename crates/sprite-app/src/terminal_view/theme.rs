@@ -212,7 +212,7 @@ impl TerminalView {
     ) {
         use crate::config::LiveChange;
         let changes = self.applied_settings.diff(settings);
-        let mut submitted = true;
+        let mut accepted_cursor = self.applied_settings.cursor;
         if changes.has(LiveChange::Font) {
             let (family, _) = chosen_family(window, settings.font.family.as_deref());
             self.metrics = CellMetrics::measure(
@@ -225,7 +225,9 @@ impl TerminalView {
         if changes.has(LiveChange::Font) || changes.has(LiveChange::Grid) {
             self.padding = settings.grid.padding.get();
             self.size = None;
-            submitted &= self.synchronise_size(window);
+            self.synchronise_size(window);
+        } else if self.size.is_none() {
+            self.synchronise_size(window);
         }
         if changes.has(LiveChange::Font)
             || changes.has(LiveChange::Highlights)
@@ -236,10 +238,16 @@ impl TerminalView {
         let defaults = session_defaults(settings);
         if changes.has(LiveChange::Colors) {
             self.fallback_colors = defaults.fallback_colors;
-            submitted &= self.submit(TerminalCommand::SetColors(defaults.colors));
         }
-        if changes.has(LiveChange::Cursor) {
-            submitted &= self.submit(TerminalCommand::SetCursor(defaults.cursor));
+        if self.accepted_colors != defaults.colors
+            && self.submit(TerminalCommand::SetColors(defaults.colors.clone()))
+        {
+            self.accepted_colors = defaults.colors;
+        }
+        if changes.has(LiveChange::Cursor)
+            && self.submit(TerminalCommand::SetCursor(defaults.cursor))
+        {
+            accepted_cursor = settings.cursor;
         }
         if changes.has(LiveChange::TextureBudget) {
             self.textures
@@ -248,9 +256,8 @@ impl TerminalView {
                 self.refresh_textures(&bundle);
             }
         }
-        if submitted {
-            self.applied_settings = settings.clone();
-        }
+        self.applied_settings = settings.clone();
+        self.applied_settings.cursor = accepted_cursor;
         cx.notify();
     }
 
