@@ -212,6 +212,7 @@ impl TerminalView {
     ) {
         use crate::config::LiveChange;
         let changes = self.applied_settings.diff(settings);
+        let mut submitted = true;
         if changes.has(LiveChange::Font) {
             let (family, _) = chosen_family(window, settings.font.family.as_deref());
             self.metrics = CellMetrics::measure(
@@ -224,7 +225,7 @@ impl TerminalView {
         if changes.has(LiveChange::Font) || changes.has(LiveChange::Grid) {
             self.padding = settings.grid.padding.get();
             self.size = None;
-            self.synchronise_size(window);
+            submitted &= self.synchronise_size(window);
         }
         if changes.has(LiveChange::Font)
             || changes.has(LiveChange::Highlights)
@@ -233,7 +234,6 @@ impl TerminalView {
             self.invalidate_grids();
         }
         let defaults = session_defaults(settings);
-        let mut submitted = true;
         if changes.has(LiveChange::Colors) {
             self.fallback_colors = defaults.fallback_colors;
             submitted &= self.submit(TerminalCommand::SetColors(defaults.colors));

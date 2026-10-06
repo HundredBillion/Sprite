@@ -689,6 +689,116 @@ mod submission_regressions {
     use super::*;
 
     #[gpui::test]
+    fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "resize regression".into(),
+                ".SystemUIFont".into(),
+                window,
+                cx,
+            )
+        });
+        let titles: String = (0..100)
+            .map(|index| format!("\x1b]2;TITLE{index}\x07"))
+            .collect();
+        let script = format!(
+            "stty -echo; printf '%s' '{titles}'; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf '\\nPTY:%s\\n' \"$(stty size)\"; done"
+        );
+        let sprite_term::Spawned {
+            session,
+            mut events,
+            mut snapshots,
+        } = TerminalSession::spawn(SessionConfig::command(
+            "/bin/sh",
+            vec!["-c".into(), script.into()],
+        ))
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let initial = snapshots.next_blocking().unwrap();
+        let allocated = gpui::size(px(800.0), px(480.0));
+        let mut reloaded = settings.clone();
+        reloaded.font.size = crate::config::FontSize::new(21.0);
+        let wanted = view.update_in(cx, |view, window, cx| {
+            view.session = SessionState::Running(session);
+            view.size = Some(initial.pane.size);
+            view.set_allocated(allocated);
+            view.apply_settings(&reloaded, window, cx);
+            let wanted = geometry::grid_size(
+                crate::grid::content_area(allocated, view.padding),
+                view.metrics.width(),
+                view.metrics.height(),
+                window.scale_factor(),
+            )
+            .unwrap();
+            assert_ne!(wanted, initial.pane.size);
+            assert!(
+                view.status
+                    .as_ref()
+                    .is_some_and(|status| status.contains("queue is full"))
+            );
+            assert_ne!(
+                view.size,
+                Some(wanted),
+                "refused resize must remain retryable"
+            );
+            assert_eq!(
+                view.applied_settings.font.size, settings.font.size,
+                "refused font resize remains unapplied"
+            );
+            wanted
+        });
+        let event_drain = std::thread::spawn(move || while events.next_blocking().is_ok() {});
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let snapshot_drain = std::thread::spawn(move || {
+            while let Ok(bundle) = snapshots.next_blocking() {
+                if tx.send(bundle).is_err() {
+                    break;
+                }
+            }
+        });
+        let wait_for_text = |text: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let bundle = rx
+                    .recv_timeout(remaining)
+                    .expect("terminal output deadline");
+                if bundle.pane.rows.iter().any(|row| row.text.contains(text)) {
+                    break bundle;
+                }
+            }
+        };
+        wait_for_text("INPUT_READY");
+        view.update_in(cx, |view, window, _| {
+            view.set_allocated(allocated);
+            view.synchronise_size(window);
+            assert_eq!(
+                view.size,
+                Some(wanted),
+                "identical layout retries the refused size"
+            );
+            assert!(view.submit(TerminalCommand::Input(b"report\n".to_vec())));
+        });
+        let report = wait_for_text(&format!("PTY:{} {}", wanted.rows(), wanted.cols()));
+        assert_eq!(
+            report.pane.size, wanted,
+            "snapshot and kernel PTY size agree"
+        );
+        let handle = view.update_in(cx, |view, window, cx| {
+            view.apply_settings(&reloaded, window, cx);
+            assert_eq!(view.applied_settings.font.size, reloaded.font.size);
+            view.begin_shutdown().unwrap()
+        });
+        handle.wait().unwrap();
+        drop(rx);
+        snapshot_drain.join().unwrap();
+        event_drain.join().unwrap();
+    }
+
+    #[gpui::test]
     fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
