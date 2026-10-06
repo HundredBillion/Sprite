@@ -539,6 +539,11 @@ fn review_budget_raise_rehydrates_idle_image(cx: &mut gpui::TestAppContext) {
         settings.graphics.texture_bytes = crate::config::TextureBytes::new(0);
         view.apply_settings(&settings, window, cx);
         assert!(view.textures.get(1, 1).is_none());
+        assert!(
+            view.graphics_status
+                .as_ref()
+                .is_some_and(|status| status.contains("image 1 not shown"))
+        );
         settings.graphics.texture_bytes = crate::config::TextureBytes::new(1024);
         view.apply_settings(&settings, window, cx);
         assert!(
@@ -556,6 +561,13 @@ fn review_budget_raise_rehydrates_idle_image(cx: &mut gpui::TestAppContext) {
             1,
             "raising budget must restore a current displayed image without another snapshot"
         );
+        assert!(
+            view.graphics_status.is_none(),
+            "restoring the visible image must clear its refusal warning"
+        );
+        assert!(view.status_line().is_none());
+        let unrelated: gpui::SharedString = "session notice".into();
+        view.status = Some(unrelated.clone());
         for budget in [0, 3, 4, 1024, 0, 4] {
             settings.graphics.texture_bytes = crate::config::TextureBytes::new(budget);
             view.apply_settings(&settings, window, cx);
@@ -565,7 +577,25 @@ fn review_budget_raise_rehydrates_idle_image(cx: &mut gpui::TestAppContext) {
                 usize::from(budget >= 4)
             );
             assert_eq!(view.bundle.as_ref().unwrap().generation, generation);
+            assert_eq!(view.status.as_ref(), Some(&unrelated));
+            assert_eq!(view.graphics_status.is_some(), budget < 4);
+            let displayed = view.status_line().unwrap();
+            assert!(displayed.contains(unrelated.as_ref()));
+            assert_eq!(displayed.contains("image 1 not shown"), budget < 4);
         }
+        settings.graphics.texture_bytes = crate::config::TextureBytes::new(0);
+        view.apply_settings(&settings, window, cx);
+        assert!(view.graphics_status.is_some());
+        let no_graphics = SnapshotBundle {
+            graphics: None,
+            ..(**view.bundle.as_ref().unwrap()).clone()
+        };
+        view.refresh_textures(&no_graphics);
+        view.bundle = Some(Arc::new(no_graphics));
+        assert!(view.graphics_status.is_none());
+        assert!(view.textures.is_empty());
+        assert_eq!(view.status.as_ref(), Some(&unrelated));
+        assert_eq!(view.status_line().as_ref(), Some(&unrelated));
     });
 }
 

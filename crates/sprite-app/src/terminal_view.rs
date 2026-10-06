@@ -82,6 +82,8 @@ pub struct TerminalView {
     /// tell every child the wrong size.
     allocated: Option<Size<Pixels>>,
     status: Option<SharedString>,
+    /// Texture reconciliation clears only its own refusal; terminal notices survive.
+    graphics_status: Option<SharedString>,
     /// The title the child set through OSC, if it set one.
     ///
     /// `None` means unknown, never a guess: the engine's own rule, kept here.
@@ -350,6 +352,7 @@ impl TerminalView {
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
             status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
+            graphics_status: None,
             bundle: None,
             // The renderer's own limit, separate from the terminal's above.
             textures: crate::graphics_cache::GraphicsCache::with_budget(
@@ -445,6 +448,7 @@ impl TerminalView {
             title: None,
             display_title: None,
             status: Some(message.into()),
+            graphics_status: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
             plain_link_click: input::PlainLinkClick::default(),
