@@ -33,6 +33,7 @@ pub(super) fn close(runtime: Runtime) {
         mut exit_status,
         mut pump_stopped,
         mut fatal,
+        natural_exit_at: _,
     } = runtime;
     // The pump may be parked on a PTY that a descendant keeps open forever, so
     // it is woken now rather than waited on.

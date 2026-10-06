@@ -21,6 +21,7 @@ name = "sprite-paint-bench"
 path = "src/bin/sprite-paint-bench.rs"
 
 [dependencies]
+nix = { workspace = true }
 serde = { workspace = true }
 async-channel = { workspace = true }
 image = { workspace = true }

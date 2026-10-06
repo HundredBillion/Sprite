@@ -155,6 +155,13 @@ impl SessionConfig {
         }
     }
 
+    /// An explicit terminal program with Sprite's identity and installed terminfo.
+    pub fn terminal_command(program: impl Into<PathBuf>, args: Vec<OsString>) -> Self {
+        let mut config = Self::command(program, args);
+        config.environment = shell::identity_environment();
+        config
+    }
+
     /// The user's login shell, in the current directory, carrying Sprite's
     /// terminal identity.
     pub fn login_shell() -> Result<Self, SessionError> {
@@ -391,6 +398,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn low_level_command_has_no_identity_overrides() {
+        assert!(
+            SessionConfig::command("/bin/sh", Vec::new())
+                .environment
+                .is_empty()
+        );
     }
 
     #[test]

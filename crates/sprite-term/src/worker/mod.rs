@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use libghostty_vt::Terminal;
 use libghostty_vt::key;
@@ -138,6 +139,7 @@ struct Runtime {
     exit_status: Option<Result<ExitStatus, String>>,
     pump_stopped: bool,
     fatal: Option<SessionError>,
+    natural_exit_at: Option<Instant>,
 }
 
 struct Session {
@@ -188,6 +190,7 @@ pub(crate) fn run(
         exit_status: None,
         pump_stopped: true,
         fatal: None,
+        natural_exit_at: None,
     };
     let pump = match Pump::start(runtime.started.master_fd, commands.clone()) {
         Ok(pump) => pump,
@@ -236,9 +239,17 @@ pub(crate) fn run(
         && session.capture().is_continue()
     {
         while !session.runtime.shutdown.load(Ordering::SeqCst) {
-            let Ok(message) = session.runtime.inbox.recv() else {
-                break;
+            let message = match session.runtime.natural_exit_at {
+                Some(exited) => {
+                    let deadline = exited + Duration::from_secs(2);
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    session.runtime.inbox.recv_timeout(remaining).ok()
+                }
+                None => session.runtime.inbox.recv().ok(),
             };
+            let Some(message) = message else { break };
             if session.handle(message).is_break() {
                 break;
             }
@@ -468,6 +479,9 @@ impl Session {
                         // Queued whole; the pump feeds it to the PTY as the
                         // PTY has room, so its size costs the pane nothing.
                         Ok(bytes) => {
+                            if return_to_bottom(terminal) {
+                                pending.mutated();
+                            }
                             if let Err(error) = input.write(bytes) {
                                 emit(events, TerminalEvent::Error(error))?;
                             }
@@ -479,6 +493,9 @@ impl Session {
                 }
                 TerminalCommand::PasteConfirmed(text) => match encode_paste(terminal, &text) {
                     Ok(bytes) => {
+                        if return_to_bottom(terminal) {
+                            pending.mutated();
+                        }
                         if let Err(error) = input.write(bytes) {
                             emit(events, TerminalEvent::Error(error))?;
                         }
@@ -581,6 +598,9 @@ impl Session {
                 // cleanup has finished, so its signal is never presented as an
                 // unexpected failure.
                 *exit_status = Some(status);
+                self.runtime
+                    .natural_exit_at
+                    .get_or_insert_with(Instant::now);
                 if *pump_stopped {
                     return Stop(());
                 }
@@ -607,6 +627,10 @@ impl Session {
     }
 
     fn capture(&mut self) -> Flow {
+        // The final snapshot suffices after exit; intermediate projections spend the drain budget.
+        if self.runtime.natural_exit_at.is_some() {
+            return Continue(());
+        }
         if self.pending.dirty && self.snapshots.is_empty() {
             self.pending.dirty = match self.owned.projector.capture(
                 self.pending.generation,
@@ -624,7 +648,37 @@ impl Session {
         Continue(())
     }
 
+    fn drain_accepted_output(&mut self) {
+        let Some(exited) = self.runtime.natural_exit_at else {
+            return;
+        };
+        if self.runtime.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(pump) = &self.runtime.pump {
+            pump.cancel();
+        }
+        // Cancel new reads, then parse the bounded output already accepted by the pump.
+        let deadline = exited + Duration::from_secs(6);
+        while !self.runtime.pump_stopped && !self.runtime.shutdown.load(Ordering::SeqCst) {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            let Ok(message) = self.runtime.inbox.recv_timeout(remaining) else {
+                break;
+            };
+            if matches!(
+                message,
+                Message::PtyOutput(_) | Message::PumpStopped(_) | Message::ChildExited(_)
+            ) && self.handle(message).is_break()
+            {
+                break;
+            }
+        }
+    }
+
     fn finish(mut self) {
+        self.drain_accepted_output();
         if self.pending.dirty
             && let Ok(bundle) = self.owned.projector.capture(
                 self.pending.generation,

@@ -8,6 +8,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.stopping {
+            request.refuse_with(Refusal::Ineligible);
+            return;
+        }
         match request {
             SurfaceRequest::RegisterToken {
                 name,
@@ -149,6 +153,33 @@ mod tests {
             )
         });
     }
+    #[gpui::test]
+    fn shutdown_refuses_queued_surface_open(cx: &mut gpui::TestAppContext) {
+        use crate::surface::channel::{Open, SurfaceConnection};
+        let (workspace, cx) = test_workspace(cx);
+        let pane = workspace.read_with(cx, |workspace, _| {
+            workspace.tabs.active().unwrap().focus().unwrap()
+        });
+        let cleanups = workspace.update(cx, |workspace, cx| workspace.begin_shutdown(cx));
+        cx.background_executor.block_test(async move {
+            for cleanup in cleanups {
+                cleanup.await;
+            }
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.serve_surface_request(SurfaceRequest::Open {
+                id: crate::surface::SurfaceId(1), pane,
+                open: Open {
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None }, focus: false,
+                    description: serde_json::json!({"version":1,"root":{"kind":"text","text":"queued"}}),
+                }, connection: SurfaceConnection::new(&stream).unwrap(), reply,
+            }, window, cx);
+        });
+        assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
+    }
+
     #[gpui::test]
     fn repaint_preserves_a_hosted_surfaces_keyboard_focus(cx: &mut gpui::TestAppContext) {
         use crate::surface::channel::{Open, SurfaceConnection};

@@ -141,7 +141,7 @@ fn is_executable_file(candidate: &Path) -> bool {
 
 /// Sprite's identity, applied after the inherited user environment so these
 /// values win for the child.
-fn identity_environment() -> Vec<(OsString, OsString)> {
+pub(crate) fn identity_environment() -> Vec<(OsString, OsString)> {
     let mut entries = vec![
         (OsString::from("TERM"), OsString::from(TERM)),
         (OsString::from("TERM_PROGRAM"), OsString::from(TERM_PROGRAM)),

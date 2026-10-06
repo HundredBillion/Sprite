@@ -24,6 +24,7 @@ use crate::tokens::{Role, TokenRegistry};
 #[derive(Default)]
 pub(crate) struct ElementImageCache {
     images: BTreeMap<u64, Option<Arc<RenderImage>>>,
+    retained_bytes: usize,
 }
 
 #[cfg(test)]
@@ -53,7 +54,19 @@ pub(crate) fn render(
     )
 }
 
+pub(crate) const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SVG_RASTER_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SVG_RASTER_DIMENSION: f32 = 4096.0;
+
 pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<RenderImage>> {
+    render_svg_with_budget(svg, target_width, MAX_SVG_RASTER_BYTES)
+}
+
+pub(crate) fn render_svg_with_budget(
+    svg: &str,
+    target_width: Option<f32>,
+    available_bytes: usize,
+) -> Option<Arc<RenderImage>> {
     static FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
         let mut db = resvg::usvg::fontdb::Database::new();
         db.load_system_fonts();
@@ -80,10 +93,22 @@ pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<Ren
     let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &OPTIONS).ok()?;
     let size = tree.size();
     let scale = target_width.map_or(1.0, |target| target / size.width());
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(
-        (size.width() * scale).ceil() as u32,
-        (size.height() * scale).ceil() as u32,
-    )?;
+    let width = (size.width() * scale).ceil();
+    let height = (size.height() * scale).ceil();
+    if [width, height].iter().any(|dimension| {
+        !dimension.is_finite() || *dimension <= 0.0 || *dimension > MAX_SVG_RASTER_DIMENSION
+    }) {
+        return None;
+    }
+    let width = width as u32;
+    let height = height as u32;
+    let bytes = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if bytes > available_bytes.min(MAX_SVG_RASTER_BYTES) {
+        return None;
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
     resvg::render(
         &tree,
         resvg::tiny_skia::Transform::from_scale(scale, scale),
@@ -272,10 +297,18 @@ fn element(
 
     let (mut boxed, text, on_click, children) = match node {
         Element::Image { style, svg } => {
-            let picture = images
-                .images
-                .entry(index)
-                .or_insert_with(|| render_svg(svg, None));
+            let picture = images.images.entry(index).or_insert_with(|| {
+                let available = MAX_SURFACE_IMAGE_BYTES - images.retained_bytes;
+                let picture = if available >= MAX_SVG_RASTER_BYTES {
+                    render_svg(svg, None)
+                } else {
+                    render_svg_with_budget(svg, None, available)
+                };
+                if let Some(picture) = &picture {
+                    images.retained_bytes += picture.as_bytes(0).expect("raster frame").len();
+                }
+                picture
+            });
             return match picture {
                 Some(picture) => {
                     style::apply_all(img(picture.clone()), &style.utilities).into_any_element()
@@ -355,6 +388,88 @@ mod tests {
 
     use crate::config::Colors;
     use crate::surface::description;
+
+    #[test]
+    fn svg_raster_refuses_oversized_dimensions_and_bytes() {
+        let mut accepted = Vec::new();
+        for (width, height, target) in [(4097, 1, None), (1, 300, Some(16.0)), (2049, 2048, None)] {
+            let svg = format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}'/>"
+            );
+            if render_svg(&svg, target).is_some() {
+                accepted.push((width, height, target));
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "oversized rasters accepted: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn svg_raster_requires_positive_finite_target_width() {
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='3'/>";
+        for target in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(render_svg(svg, Some(target)).is_none());
+        }
+        let image = render_svg(svg, Some(3.0)).unwrap();
+        assert_eq!(image.as_bytes(0).unwrap().len(), 3 * 5 * 4);
+    }
+
+    #[test]
+    fn element_image_cache_bounds_retained_pixels_and_resets() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let node = json!({"kind":"image","svg":"<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'/>"});
+        let document = description::parse(
+            &json!({"version":1,"root":{"kind":"box","children":vec![node.clone();5]}}),
+            &registry,
+        )
+        .unwrap()
+        .description;
+        let mut cache = ElementImageCache::default();
+        let _ = render(
+            &document,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        let retained: usize = cache
+            .images
+            .values()
+            .flatten()
+            .map(|image| image.as_bytes(0).unwrap().len())
+            .sum();
+        assert_eq!(retained, 64 * 1024 * 1024);
+        assert!(cache.images[&5].is_none());
+        let first = cache.images[&1].as_ref().unwrap().id;
+        let _ = render(
+            &document,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        assert_eq!(cache.images[&1].as_ref().unwrap().id, first);
+        assert!(cache.images[&5].is_none());
+        cache = ElementImageCache::default();
+        let fresh = description::parse(&json!({"version":1,"root":node}), &registry)
+            .unwrap()
+            .description;
+        let _ = render(
+            &fresh,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        assert!(cache.images[&0].is_some());
+    }
 
     #[test]
     fn text_only_svg_renders_visible_pixels() {

@@ -102,6 +102,10 @@ pub struct Workspace {
     /// same thing the window was asked to run.
     command: Option<Vec<std::ffi::OsString>>,
     mode: Mode,
+    pending_cleanups: Vec<PendingCleanup>,
+    stopping: bool,
+    #[cfg(test)]
+    cleanup_gates: std::collections::VecDeque<async_channel::Receiver<()>>,
     /// The file this window was told to read, if it was told.
     ///
     /// Kept so a reload re-reads *that* file rather than quietly switching to
@@ -278,6 +282,10 @@ impl Workspace {
             settings,
             focus: cx.focus_handle(),
             mode: Mode::Idle,
+            pending_cleanups: Vec::new(),
+            stopping: false,
+            #[cfg(test)]
+            cleanup_gates: Default::default(),
             window_title: None,
             wanted_title: "Sprite".into(),
             pane_titles: Default::default(),

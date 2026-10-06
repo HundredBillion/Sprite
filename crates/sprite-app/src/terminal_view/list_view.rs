@@ -19,7 +19,9 @@ use crate::surface::channel::{
 };
 use crate::surface::description::{GuideVisibility, ListBorderSide, ListConfig};
 use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
+#[cfg(test)]
 use crate::surface::render::render_svg;
+use crate::surface::render::{MAX_SURFACE_IMAGE_BYTES, render_svg_with_budget};
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -58,12 +60,25 @@ fn sync_image_cache(
     {
         return;
     }
+    let mut retained_bytes: usize = cache
+        .values()
+        .flatten()
+        .map(|image| image.as_bytes(0).expect("raster frame").len())
+        .sum();
     let mut images = (**cache).clone();
     for id in ids {
         if !images.contains_key(&id)
             && let Some(svg) = assets.get(&id)
         {
-            images.insert(id, render_svg(svg, Some(raster_width)));
+            let picture = render_svg_with_budget(
+                svg,
+                Some(raster_width),
+                MAX_SURFACE_IMAGE_BYTES - retained_bytes,
+            );
+            if let Some(picture) = &picture {
+                retained_bytes += picture.as_bytes(0).expect("raster frame").len();
+            }
+            images.insert(id, picture);
         }
     }
     if images.len() != cache.len() {
@@ -934,6 +949,40 @@ mod tests {
         let restored = restored_pixel_offset(index, intra, 1000, 24.0, 440.0);
         assert_eq!(scroll_anchor(1000, 24.0, 440.0, -restored), (100, 3.0, 19));
     }
+    #[test]
+    fn visible_list_assets_bound_retained_pixels_and_reset() {
+        let mut cache = Arc::new(BTreeMap::new());
+        let assets = (0..5)
+            .map(|i| {
+                (
+                    i.to_string(),
+                    "<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'/>"
+                        .to_owned(),
+                )
+            })
+            .collect();
+        sync_image_cache(&mut cache, &assets, (0..4).map(|i| i.to_string()), 2048.0);
+        assert_eq!(cache.values().flatten().count(), 4);
+        sync_image_cache(&mut cache, &assets, ["4".to_owned()], 2048.0);
+        let retained: usize = cache
+            .values()
+            .flatten()
+            .map(|image| image.as_bytes(0).unwrap().len())
+            .sum();
+        assert_eq!(retained, 64 * 1024 * 1024);
+        assert!(cache["4"].is_none());
+        let first = cache.clone();
+        sync_image_cache(&mut cache, &assets, ["4".to_owned()], 2048.0);
+        assert!(Arc::ptr_eq(&cache, &first));
+        drop(first);
+        cache = Arc::new(BTreeMap::new());
+        sync_image_cache(&mut cache, &assets, ["4".to_owned()], 1024.0);
+        assert_eq!(
+            cache["4"].as_ref().unwrap().as_bytes(0).unwrap().len(),
+            4 * 1024 * 1024
+        );
+    }
+
     #[test]
     fn accepted_duplicate_assets_reuse_cache_and_image_arcs() {
         let mut cache = Arc::new(BTreeMap::new());

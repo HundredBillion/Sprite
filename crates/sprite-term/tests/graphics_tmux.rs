@@ -76,7 +76,7 @@ fn images_through_tmux(passthrough: bool) -> GraphicsSnapshot {
         config.display(),
         image.display(),
     );
-    let mut config_session = SessionConfig::command(
+    let mut config_session = SessionConfig::terminal_command(
         "/bin/sh",
         vec![OsString::from("-c"), OsString::from(&script)],
     );

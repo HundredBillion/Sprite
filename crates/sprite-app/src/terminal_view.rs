@@ -82,6 +82,7 @@ pub struct TerminalView {
     /// tell every child the wrong size.
     allocated: Option<Size<Pixels>>,
     status: Option<SharedString>,
+    texture_warning: Option<SharedString>,
     /// The title the child set through OSC, if it set one.
     ///
     /// `None` means unknown, never a guess: the engine's own rule, kept here.
@@ -207,7 +208,7 @@ impl TerminalView {
         let mut config = match command {
             Some(command) => {
                 let (program, arguments) = command.split_first().expect("a program to run");
-                SessionConfig::command(program, arguments.to_vec())
+                SessionConfig::terminal_command(program, arguments.to_vec())
             }
             // A preference that cannot be honoured falls back and says so
             // rather than leaving a pane that will not open.
@@ -350,6 +351,7 @@ impl TerminalView {
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
             status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
+            texture_warning: None,
             bundle: None,
             // The renderer's own limit, separate from the terminal's above.
             textures: crate::graphics_cache::GraphicsCache::with_budget(
@@ -445,6 +447,7 @@ impl TerminalView {
             title: None,
             display_title: None,
             status: Some(message.into()),
+            texture_warning: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
             plain_link_click: input::PlainLinkClick::default(),

@@ -1,9 +1,12 @@
 //! Private local transport shared by independent protocol adapters.
 
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::net::Shutdown;
+use std::os::fd::AsFd;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -175,6 +178,7 @@ pub(crate) struct LocalSocket {
     running: Arc<AtomicBool>,
     connections: Connections,
     listener: Option<JoinHandle<()>>,
+    cancellation: UnixStream,
 }
 
 impl LocalSocket {
@@ -197,7 +201,12 @@ impl LocalSocket {
         let mut name = ObservationKey::generate()?.to_hex();
         name.truncate(policy.filename_hex);
         let socket = directory.join(format!("{name}{}", policy.suffix));
+        let (cancellation, cancelled) = UnixStream::pair()?;
         let listener = bind_private(&socket)?;
+        if let Err(error) = listener.set_nonblocking(true) {
+            let _ = fs::remove_file(&socket);
+            return Err(error);
+        }
         let running = Arc::new(AtomicBool::new(true));
         let connections: Connections = Arc::default();
         let thread = std::thread::Builder::new()
@@ -208,11 +217,36 @@ impl LocalSocket {
                 let connections = Arc::clone(&connections);
                 let handler = Arc::new(handler);
                 move || {
-                    for (id, connection) in listener.incoming().enumerate() {
-                        if !running.load(Ordering::SeqCst) {
+                    let mut next_id = 0;
+                    loop {
+                        let mut fds = [
+                            PollFd::new(cancelled.as_fd(), PollFlags::POLLIN),
+                            PollFd::new(listener.as_fd(), PollFlags::POLLIN),
+                        ];
+                        match poll(&mut fds, PollTimeout::NONE) {
+                            Err(Errno::EINTR) => continue,
+                            Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        if !running.load(Ordering::SeqCst)
+                            || !fds[0].revents().unwrap_or_else(PollFlags::empty).is_empty()
+                        {
                             break;
                         }
-                        let Ok(stream) = connection else { continue };
+                        let stream = match listener.accept() {
+                            Ok((stream, _)) => stream,
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                                ) =>
+                            {
+                                continue;
+                            }
+                            Err(_) => break,
+                        };
+                        let id = next_id;
+                        next_id += 1;
                         let deadline = Instant::now() + policy.handshake_timeout;
                         let mut live = connections.lock().unwrap();
                         if live.len() >= policy.max_connections {
@@ -271,6 +305,7 @@ impl LocalSocket {
             running,
             connections,
             listener: Some(thread),
+            cancellation,
         })
     }
 
@@ -292,7 +327,8 @@ impl LocalSocket {
             return;
         }
         self.running.store(false, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.socket);
+        // Cancellation stays reachable even after the public socket pathname disappears.
+        let _ = self.cancellation.shutdown(Shutdown::Both);
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
         }
@@ -903,5 +939,38 @@ mod tests {
         writeln!(client, "{} hello", socket.key_hex()).unwrap();
         entry.recv_timeout(Duration::from_secs(2)).unwrap();
         wait_for_count(&socket, 0);
+    }
+    #[test]
+    fn closing_after_unlink_cancels_the_listener_and_authenticated_client() {
+        let scratch = Scratch::new();
+        let (entered, entry) = mpsc::channel();
+        let mut socket = LocalSocket::open_in(
+            scratch.0.clone(),
+            Arc::new(ObservationKey::generate().unwrap()),
+            POLICY,
+            rejected,
+            move |mut connection| {
+                entered.send(()).unwrap();
+                let mut line = String::new();
+                let _ = connection.reader.read_line(&mut line);
+            },
+        )
+        .unwrap();
+        let mut client = UnixStream::connect(socket.socket_path()).unwrap();
+        writeln!(client, "{} hello", socket.key_hex()).unwrap();
+        entry.recv_timeout(Duration::from_secs(2)).unwrap();
+        fs::remove_file(socket.socket_path()).unwrap();
+        let (done, completed) = mpsc::channel();
+        std::thread::spawn(move || {
+            socket.close();
+            done.send(()).unwrap();
+        });
+        completed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("unlinked listener must close");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
     }
 }
