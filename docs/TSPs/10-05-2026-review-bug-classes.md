@@ -90,7 +90,7 @@ Share validation between submission methods. Cover Input, Paste, PasteConfirmed,
 - [ ] Implement cancellation-aware descriptor reading with OS `poll` on input plus a cancellation socket. Socket event EOF and output errors cancel input. Read descriptor bytes directly rather than mixing raw readiness with buffered `Stdin::read`. Join the events thread and distinguish canceled input from malformed JSON. Add nix as a direct target dependency from the existing workspace entry only if required.
 - [ ] Add a real endpoint wrong-key `sprite config print` regression, then validate configuration responses before printing; denied or malformed replies go to stderr and return refusal with empty stdout.
 - [ ] Extend existing release-preparation tests to include both recipes. Synchronize `PKGBUILD.local` to workspace version and include it in atomic preparation validation before any files are written.
-- [ ] Change Fish's sourced duplicate guard to `return 0`. Exercise repeat/nested sourcing if Fish is available; otherwise record the missing runtime, do not invent an execution result.
+- [ ] Change Fish's sourced duplicate guard to `return 0` and keep its marker global but unexported (`set -g -u`) so child shells can install their own hooks. Exercise repeat/nested sourcing if Fish is available; otherwise record the missing runtime, do not invent an execution result.
 - [ ] Run `cargo test -p sprite-app --test client --locked --offline`, `python3 -m unittest discover -s scripts -p 'test_*.py'`, and shell syntax checks appropriate to installed runtimes; commit Task 3.
 
 ### Task 4: Whole-change verification and independent review
