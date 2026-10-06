@@ -433,3 +433,324 @@ fn closing_an_owned_terminal_unregisters_before_retained_handles_drop(
     assert!(weak.upgrade().is_none());
     assert!(panes.panes().is_empty());
 }
+
+#[gpui::test]
+fn review_ime_ranges_use_utf16(cx: &mut gpui::TestAppContext) {
+    use gpui::{ElementInputHandler, InputHandler};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::failed("probe".into(), ".SystemUIFont".into(), window, cx)
+    });
+    let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view.clone());
+    cx.update(|window, cx| {
+        for (text, units) in [
+            ("日本", 2),
+            ("😀", 2),
+            ("e\u{301}", 2),
+            ("a😀日e\u{301}", 6),
+        ] {
+            handler.replace_and_mark_text_in_range(None, text, None, window, cx);
+            assert_eq!(
+                handler
+                    .selected_text_range(false, window, cx)
+                    .unwrap()
+                    .range,
+                units..units
+            );
+            assert_eq!(handler.marked_text_range(window, cx).unwrap(), 0..units);
+        }
+        handler.unmark_text(window, cx);
+        assert_eq!(
+            handler
+                .selected_text_range(false, window, cx)
+                .unwrap()
+                .range,
+            0..0
+        );
+        assert_eq!(handler.marked_text_range(window, cx), None);
+    });
+}
+
+#[gpui::test]
+fn review_budget_raise_rehydrates_idle_image(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sleep".into(), "30".into()]),
+            settings.clone(),
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let initial = wait_for_bundle(&view, cx, |_| true);
+    view.update_in(cx, |view, window, cx| {
+        let image = Arc::new(sprite_term::ImagePixels {
+            id: 1,
+            generation: 1,
+            width: 1,
+            height: 1,
+            transmitted: sprite_term::TransmittedFormat::Rgba,
+            pixels: vec![255; 4],
+        });
+        let bundle = Arc::new(SnapshotBundle {
+            generation: initial.generation,
+            render: initial.render.clone(),
+            pane: initial.pane.clone(),
+            graphics: Some(Arc::new(sprite_term::GraphicsFrame {
+                generation: 1,
+                images: vec![image.clone()],
+                placements: vec![sprite_term::Placement {
+                    image: 1,
+                    placement: 1,
+                    is_virtual: false,
+                    layer: sprite_term::Layer::AboveText,
+                    source: sprite_term::Rectangle {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                    pixel_width: 1,
+                    pixel_height: 1,
+                    columns: 1,
+                    rows: 1,
+                    viewport_column: 0,
+                    viewport_row: 0,
+                    visible: true,
+                    x_offset: 0,
+                    y_offset: 0,
+                }],
+            })),
+        });
+        view.refresh_textures(&bundle);
+        view.bundle = Some(bundle);
+        assert_eq!(view.image_layers(&[], px(8.0), px(16.0))[2].len(), 1);
+        let generation = view.bundle.as_ref().unwrap().generation;
+        let mut settings = settings;
+        settings.graphics.texture_bytes = crate::config::TextureBytes::new(0);
+        view.apply_settings(&settings, window, cx);
+        assert!(view.textures.get(1, 1).is_none());
+        settings.graphics.texture_bytes = crate::config::TextureBytes::new(1024);
+        view.apply_settings(&settings, window, cx);
+        assert!(
+            view.bundle
+                .as_ref()
+                .unwrap()
+                .graphics
+                .as_ref()
+                .unwrap()
+                .image(1)
+                .is_some()
+        );
+        assert_eq!(
+            view.image_layers(&[], px(8.0), px(16.0))[2].len(),
+            1,
+            "raising budget must restore a current displayed image without another snapshot"
+        );
+        for budget in [0, 3, 4, 1024, 0, 4] {
+            settings.graphics.texture_bytes = crate::config::TextureBytes::new(budget);
+            view.apply_settings(&settings, window, cx);
+            assert!(view.textures.used_bytes() <= budget);
+            assert_eq!(
+                view.image_layers(&[], px(8.0), px(16.0))[2].len(),
+                usize::from(budget >= 4)
+            );
+            assert_eq!(view.bundle.as_ref().unwrap().generation, generation);
+        }
+    });
+}
+
+#[gpui::test]
+fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let expected = "\x1b[<59;2;2M\x1b[<24;2;2M\x1b[<56;3;2M\x1b[<24;3;2m\x1b[<25;2;2M\x1b[<57;3;2M\x1b[<25;3;2m\x1b[<26;2;2M\x1b[<58;3;2M\x1b[<26;3;2m";
+    let script = format!(
+        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; timeout --foreground 0.5 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        expected.len()
+    );
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    wait_for_bundle(&view, cx, |bundle| {
+        bundle
+            .pane
+            .rows
+            .iter()
+            .any(|row| row.text.contains("READY"))
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let (start, end) = view.read_with(cx, |view, _| {
+        let origin = view.content_origin.unwrap_or(view.origin);
+        let width = view.metrics.width();
+        let height = view.metrics.height();
+        (
+            gpui::point(origin.x + width * 1.5, origin.y + height * 1.5),
+            gpui::point(origin.x + width * 2.5, origin.y + height * 1.5),
+        )
+    });
+    view.update(cx, |view, _| {
+        view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+    });
+    let modifiers = Modifiers {
+        alt: true,
+        control: true,
+        ..Default::default()
+    };
+    cx.simulate_mouse_move(start, None, modifiers);
+    for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+        cx.simulate_mouse_down(start, button, modifiers);
+        cx.simulate_mouse_move(end, Some(button), modifiers);
+        cx.simulate_mouse_up(end, button, modifiers);
+    }
+    let bundle = wait_for_bundle(&view, cx, |bundle| {
+        bundle.pane.rows.iter().any(|row| row.text.contains("DONE"))
+    });
+    let text: String = bundle.pane.rows.iter().map(|row| row.text.trim()).collect();
+    let actual = text
+        .split("READY")
+        .nth(1)
+        .unwrap()
+        .split("DONE")
+        .next()
+        .unwrap();
+    let expected: String = expected.bytes().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(actual, expected);
+    view.read_with(cx, |view, _| {
+        assert!(view.drag.is_none());
+        assert_eq!(
+            view.hovered_cell,
+            Some(sprite_term::CellPosition { row: 1, column: 1 })
+        );
+    });
+}
+
+#[gpui::test]
+fn pointer_selection_keeps_shift_override_and_click_drag_semantics(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+        Some(vec!["/bin/sh".into(), "-c".into(), "stty -icanon -echo; printf 'SELECTABLE'; IFS= read -r go; printf '\\033[?1003h\\033[?1006h'; sleep 30".into()]), settings,
+        Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+    ));
+    wait_for_bundle(&view, cx, |bundle| {
+        bundle
+            .pane
+            .rows
+            .iter()
+            .any(|row| row.text.contains("SELECTABLE"))
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let (start, end) = view.read_with(cx, |view, _| {
+        let origin = view.content_origin.unwrap_or(view.origin);
+        let width = view.metrics.width();
+        let height = view.metrics.height();
+        (
+            gpui::point(origin.x + width * 1.5, origin.y + height * 0.5),
+            gpui::point(origin.x + width * 3.5, origin.y + height * 0.5),
+        )
+    });
+    for reporting in [false, true] {
+        if reporting {
+            view.update(cx, |view, _| {
+                view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+            });
+            wait_for_bundle(&view, cx, |bundle| bundle.render.mouse_tracking);
+        }
+        let modifiers = Modifiers {
+            shift: reporting,
+            ..Default::default()
+        };
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        view.read_with(cx, |view, _| {
+            assert!(view.drag.is_some_and(|drag| !drag.moved))
+        });
+        cx.simulate_mouse_up(start, MouseButton::Left, modifiers);
+        view.read_with(cx, |view, _| assert!(view.drag.is_none()));
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), modifiers);
+        view.read_with(cx, |view, _| {
+            assert!(view.drag.is_some_and(|drag| drag.moved))
+        });
+        cx.simulate_mouse_up(end, MouseButton::Left, modifiers);
+        let bundle = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .render
+                .rows
+                .iter()
+                .any(|row| row.cells.iter().any(|cell| cell.selected))
+        });
+        assert!(bundle.render.rows[0].cells.iter().any(|cell| cell.selected));
+        view.read_with(cx, |view, _| assert!(view.drag.is_none()));
+    }
+}
+
+#[gpui::test]
+fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+        Some(vec!["/bin/sh".into(), "-c".into(), "printf '\\033[?1003h\\033[?1006h\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30".into()]), settings,
+        Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+    ));
+    wait_for_bundle(&view, cx, |bundle| {
+        bundle.pane.rows.iter().any(|row| row.text.contains("LINK"))
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let (start, inside, outside) = view.read_with(cx, |view, _| {
+        let origin = view.content_origin.unwrap_or(view.origin);
+        let width = view.metrics.width();
+        let height = view.metrics.height();
+        (
+            gpui::point(origin.x + width * 0.5, origin.y + height * 0.5),
+            gpui::point(origin.x + width * 1.5, origin.y + height * 0.5),
+            gpui::point(origin.x + width * 5.5, origin.y + height * 0.5),
+        )
+    });
+    cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
+    let executor = cx.executor();
+    executor.allow_parking();
+    executor.block_test(view.condition::<()>(cx, |view, _| view.hovered_link.is_some()));
+    let link = view.read_with(cx, |view, _| view.hovered_link);
+    cx.simulate_mouse_move(inside, None, gpui::Modifiers::default());
+    view.read_with(cx, |view, _| assert_eq!(view.hovered_link, link));
+    cx.simulate_mouse_move(outside, None, gpui::Modifiers::default());
+    view.read_with(cx, |view, _| assert!(view.hovered_link.is_none()));
+}

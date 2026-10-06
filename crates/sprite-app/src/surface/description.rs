@@ -40,7 +40,22 @@ pub enum Kind {
     VirtualList,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BodyKind {
+    Elements,
+    Grid,
+    List,
+}
+
 impl Kind {
+    fn body_kind(self) -> BodyKind {
+        match self {
+            Self::Grid => BodyKind::Grid,
+            Self::VirtualList => BodyKind::List,
+            Self::Box | Self::Text | Self::List | Self::Image | Self::Button => BodyKind::Elements,
+        }
+    }
+
     fn parse(name: &str) -> Option<Kind> {
         Some(match name {
             "box" => Kind::Box,
@@ -209,7 +224,6 @@ pub enum Element {
 }
 
 impl Element {
-    #[cfg(test)]
     pub fn kind(&self) -> Kind {
         match self {
             Self::Box { .. } => Kind::Box,
@@ -221,6 +235,10 @@ impl Element {
             Self::VirtualList { .. } => Kind::VirtualList,
         }
     }
+    pub fn body_kind(&self) -> BodyKind {
+        self.kind().body_kind()
+    }
+
     pub fn list(&self) -> Option<&ListConfig> {
         match self {
             Self::VirtualList { config } => Some(config),
@@ -282,9 +300,9 @@ fn element(
         .ok_or_else(|| Refusal::Malformed("an element needs a kind".to_owned()))?;
     let kind = Kind::parse(kind_name).ok_or_else(|| Refusal::UnknownKind(kind_name.to_owned()))?;
 
-    if matches!(kind, Kind::Grid | Kind::VirtualList) && depth > 0 {
+    if kind.body_kind() != BodyKind::Elements && depth > 0 {
         return Err(Refusal::Malformed(
-            "a grid is the root element; it cannot sit inside a box".to_owned(),
+            "a grid or virtual_list must be the root element".to_owned(),
         ));
     }
 

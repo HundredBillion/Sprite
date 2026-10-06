@@ -22,7 +22,7 @@ use crate::surface::channel::{
     event_grid_resize, event_input, event_mouse, event_paste, event_refused, event_resize,
     event_warning, neovim_modifiers,
 };
-use crate::surface::description::{self, Description, Element};
+use crate::surface::description::{self, BodyKind, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
 use crate::surface::list::ListOp;
 use crate::surface::{Refusal, SurfaceId};
@@ -51,6 +51,79 @@ pub(super) enum Body {
 }
 
 type ResizeDimensions = (u32, u32, Option<(u16, u16)>);
+
+impl Body {
+    fn new(description: Description, id: SurfaceId, cx: &mut Context<TerminalView>) -> Self {
+        let root = description.root;
+        match &root {
+            Element::Grid { size, .. } => Body::Grid {
+                grid: Box::new(GridSurface::new(size.cols, size.rows)),
+                root,
+            },
+            Element::VirtualList { config } => {
+                let config = config.as_ref().clone();
+                let host = cx.entity().downgrade();
+                Body::List {
+                    root,
+                    view: cx.new(|_| VirtualListView::new(config, id, host)),
+                }
+            }
+            Element::Box { .. }
+            | Element::List { .. }
+            | Element::Text { .. }
+            | Element::Button { .. }
+            | Element::Image { .. } => Body::Elements {
+                description: Description { root },
+                images: Default::default(),
+            },
+        }
+    }
+
+    fn kind(&self) -> BodyKind {
+        match self {
+            Self::Elements { .. } => BodyKind::Elements,
+            Self::Grid { .. } => BodyKind::Grid,
+            Self::List { .. } => BodyKind::List,
+        }
+    }
+
+    fn replace_description(
+        &mut self,
+        document: serde_json::Value,
+        cx: &mut Context<TerminalView>,
+    ) -> Result<Vec<String>, Refusal> {
+        if self.kind() == BodyKind::Grid {
+            return Err(Refusal::Malformed(
+                "a grid Surface takes rows, not an update".to_owned(),
+            ));
+        }
+        let parsed = description::parse(&document, cx.global::<TokenRegistry>())?;
+        if self.kind() != parsed.description.root.body_kind() {
+            return Err(Refusal::Malformed(
+                "an update must preserve the Surface body kind".to_owned(),
+            ));
+        }
+        match (self, parsed.description.root) {
+            (Self::List { root, view }, replacement @ Element::VirtualList { .. }) => {
+                let config = replacement.list().expect("virtual_list").clone();
+                *root = replacement;
+                view.update(cx, |view, cx| view.reconfigure(config, cx));
+            }
+            (body @ Self::Elements { .. }, root) => {
+                *body = Self::Elements {
+                    description: Description { root },
+                    images: Default::default(),
+                };
+            }
+            _ => {
+                return Err(Refusal::Malformed(
+                    "an update must preserve the Surface body kind".to_owned(),
+                ));
+            }
+        }
+        Ok(parsed.warnings)
+    }
+}
 
 /// A Surface this pane is drawing, and the connection that owns it.
 pub(super) struct HostedSurface {
@@ -486,29 +559,7 @@ impl TerminalView {
             Position::Fill | Position::Dock => None,
         };
         let warnings = parsed.warnings;
-        let root = parsed.description.root;
-        let body = match &root {
-            Element::Grid { size, .. } => Body::Grid {
-                grid: Box::new(GridSurface::new(size.cols, size.rows)),
-                root,
-            },
-            Element::VirtualList { config } => {
-                let config = config.as_ref().clone();
-                let host = cx.entity().downgrade();
-                Body::List {
-                    root,
-                    view: cx.new(|_| VirtualListView::new(config, id, host)),
-                }
-            }
-            Element::Box { .. }
-            | Element::List { .. }
-            | Element::Text { .. }
-            | Element::Button { .. }
-            | Element::Image { .. } => Body::Elements {
-                description: Description { root },
-                images: Default::default(),
-            },
-        };
+        let body = Body::new(parsed.description, id, cx);
         let hosted = HostedSurface {
             id,
             body,
@@ -677,45 +728,9 @@ impl TerminalView {
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
             return;
         };
-        if matches!(surface.body, Body::Grid { .. }) {
-            surface.connection.send(&event_refused(
-                &Refusal::Malformed("a grid Surface takes rows, not an update".to_owned()).reason(),
-            ));
-            return;
-        }
-        // Parsed only once the Surface is known to take a description, so a
-        // grid's refusal costs nothing.
-        let parsed = description::parse(&document, cx.global::<TokenRegistry>());
-        match parsed {
-            Ok(parsed) => {
-                if let Body::List { root, view } = &mut surface.body {
-                    if parsed.description.root.list().is_none() {
-                        surface.connection.send(&event_refused(
-                            &Refusal::Malformed(
-                                "a virtual_list update keeps kind virtual_list".to_owned(),
-                            )
-                            .reason(),
-                        ));
-                        return;
-                    }
-                    let config = parsed.description.root.list().expect("checked").clone();
-                    *root = parsed.description.root;
-                    view.update(cx, |view, cx| view.reconfigure(config, cx));
-                } else if parsed.description.root.list().is_some() {
-                    surface.connection.send(&event_refused(
-                        &Refusal::Malformed(
-                            "a virtual_list update needs a virtual_list Surface".to_owned(),
-                        )
-                        .reason(),
-                    ));
-                    return;
-                } else {
-                    surface.body = Body::Elements {
-                        description: parsed.description,
-                        images: Default::default(),
-                    };
-                }
-                for warning in parsed.warnings {
+        match surface.body.replace_description(document, cx) {
+            Ok(warnings) => {
+                for warning in warnings {
                     surface.connection.send(&event_warning(&warning));
                 }
                 if surface.owner().is_some() {
@@ -1973,6 +1988,111 @@ mod tests {
         }
         cx.update(|window, _| window.remove_window());
         drop(host);
+    }
+
+    #[gpui::test]
+    fn incompatible_surface_updates_preserve_body_and_content(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        let list_root = fixture["description"]["root"].clone();
+        let id = SurfaceId(901);
+        let text = serde_json::json!({"version":1,"root":{"kind":"text","text":"keep me"}});
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(text));
+        assert_eq!(answer, Ok(()));
+        for root in [
+            serde_json::json!({"kind":"grid","cols":8,"rows":2}),
+            list_root.clone(),
+            serde_json::json!({"kind":"box","children":[{"kind":"grid","cols":8,"rows":2}]}),
+            serde_json::json!({"kind":"list","children":[{"kind":"box","children":[list_root.clone()]}]}),
+        ] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Update {
+                    id,
+                    pane: crate::pane_tree::PaneId(1),
+                    description: serde_json::json!({"version":1,"root":root}),
+                },
+            );
+            let received = events(&mut peer);
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0]["type"], "refused");
+            host.read_with(cx, |host, _| {
+                let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+                else {
+                    panic!("element body must survive")
+                };
+                assert!(
+                    matches!(&description.root, Element::Text { text, .. } if text == "keep me")
+                );
+            });
+        }
+        host.update_in(cx, |host, window, cx| host.close_surface(id, window, cx));
+        for (id, root, replacements) in [
+            (
+                SurfaceId(902),
+                serde_json::json!({"kind":"grid","cols":8,"rows":2}),
+                vec![
+                    serde_json::json!({"kind":"text","text":"erase"}),
+                    list_root.clone(),
+                ],
+            ),
+            (
+                SurfaceId(903),
+                list_root.clone(),
+                vec![
+                    serde_json::json!({"kind":"text","text":"erase"}),
+                    serde_json::json!({"kind":"grid","cols":8,"rows":2}),
+                ],
+            ),
+        ] {
+            let (answer, mut peer) = open_request(
+                &host,
+                cx,
+                id,
+                open_description(serde_json::json!({"version":1,"root":root})),
+            );
+            assert_eq!(answer, Ok(()));
+            let before = host.read_with(cx, |host, _| {
+                match &host.surfaces.fill.as_ref().unwrap().body {
+                    Body::Grid { root, .. } => (root.clone(), None),
+                    Body::List { root, view } => (root.clone(), Some(view.entity_id())),
+                    Body::Elements { .. } => panic!("specialized body"),
+                }
+            });
+            for replacement in replacements {
+                dispatch(
+                    &host,
+                    cx,
+                    SurfaceRequest::Update {
+                        id,
+                        pane: crate::pane_tree::PaneId(1),
+                        description: serde_json::json!({"version":1,"root":replacement}),
+                    },
+                );
+                let received = events(&mut peer);
+                assert_eq!(received.len(), 1);
+                assert_eq!(received[0]["type"], "refused");
+                host.read_with(cx, |host, _| {
+                    match &host.surfaces.fill.as_ref().unwrap().body {
+                        Body::Grid { root, .. } => assert_eq!((root.clone(), None), before),
+                        Body::List { root, view } => {
+                            assert_eq!((root.clone(), Some(view.entity_id())), before)
+                        }
+                        Body::Elements { .. } => panic!("body kind must survive"),
+                    }
+                });
+            }
+            host.update_in(cx, |host, window, cx| host.close_surface(id, window, cx));
+        }
     }
 
     #[gpui::test]

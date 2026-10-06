@@ -244,6 +244,9 @@ impl TerminalView {
         if changes.has(LiveChange::TextureBudget) {
             self.textures
                 .set_budget(settings.graphics.texture_bytes.get());
+            if let Some(bundle) = self.bundle.clone() {
+                self.refresh_textures(&bundle);
+            }
         }
         if submitted {
             self.applied_settings = settings.clone();

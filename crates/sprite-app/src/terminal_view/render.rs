@@ -480,8 +480,12 @@ impl Render for TerminalView {
                         view.request_link_click(cell);
                         return;
                     }
-                    let shift = event.modifiers.shift;
-                    if view.route_mouse(cell, MouseAction::Press, shift) {
+                    if view.route_mouse(
+                        cell,
+                        MouseAction::Press,
+                        Some(event.button),
+                        event.modifiers,
+                    ) {
                         // The press drops whatever was selected and remembers
                         // where a drag would start from. It selects nothing
                         // itself — see `Drag::moved`.
@@ -512,6 +516,9 @@ impl Render for TerminalView {
                             view.request_hover_link(cell);
                         }
                     }
+                    if let Some(cell) = cell {
+                        view.route_mouse(cell, MouseAction::Motion, None, event.modifiers);
+                    }
                     return;
                 }
                 let Some(cell) = view.cell_under(event.position) else {
@@ -520,7 +527,12 @@ impl Render for TerminalView {
                 };
                 view.plain_link_click.moved_to(cell);
                 let Some(drag) = view.drag else {
-                    view.route_mouse(cell, MouseAction::Motion, event.modifiers.shift);
+                    view.route_mouse(
+                        cell,
+                        MouseAction::Motion,
+                        event.pressed_button,
+                        event.modifiers,
+                    );
                     return;
                 };
                 // Movement inside the cell the press landed in is not yet a
@@ -555,10 +567,67 @@ impl Render for TerminalView {
                             view.request_link_click(cell);
                         }
                     } else {
-                        view.route_mouse(cell, MouseAction::Release, event.modifiers.shift);
+                        view.route_mouse(
+                            cell,
+                            MouseAction::Release,
+                            Some(event.button),
+                            event.modifiers,
+                        );
                         if open_link {
                             view.request_link_click(cell);
                         }
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
+                    if let Some(cell) = view.cell_under(event.position) {
+                        view.route_mouse(
+                            cell,
+                            MouseAction::Press,
+                            Some(event.button),
+                            event.modifiers,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|view, event: &MouseUpEvent, _window, _cx| {
+                    if let Some(cell) = view.cell_under(event.position) {
+                        view.route_mouse(
+                            cell,
+                            MouseAction::Release,
+                            Some(event.button),
+                            event.modifiers,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
+                    if let Some(cell) = view.cell_under(event.position) {
+                        view.route_mouse(
+                            cell,
+                            MouseAction::Press,
+                            Some(event.button),
+                            event.modifiers,
+                        );
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|view, event: &MouseUpEvent, _window, _cx| {
+                    if let Some(cell) = view.cell_under(event.position) {
+                        view.route_mouse(
+                            cell,
+                            MouseAction::Release,
+                            Some(event.button),
+                            event.modifiers,
+                        );
                     }
                 }),
             )

@@ -90,7 +90,7 @@ impl GraphicsCache {
         if let Some(previous) = self.entries.remove(&pixels.id) {
             self.used = self.used.saturating_sub(previous.bytes);
         }
-        self.make_room(bytes, pixels.id);
+        self.make_room(bytes, Some(pixels.id));
 
         self.entries.insert(
             pixels.id,
@@ -159,19 +159,16 @@ impl GraphicsCache {
     /// otherwise hold the old textures until it did.
     pub fn set_budget(&mut self, budget: usize) {
         self.budget = budget;
-        // `keep` names an image that must survive; nothing is being admitted
-        // here, so no id is exempt. Zero is not special-cased because an image
-        // id of zero is a real id — it is simply as evictable as any other.
-        self.make_room(0, u32::MAX);
+        self.make_room(0, None);
     }
 
     /// Evicts least-recently-placed entries until `wanted` bytes will fit.
-    fn make_room(&mut self, wanted: usize, keep: u32) {
+    fn make_room(&mut self, wanted: usize, keep: Option<u32>) {
         while self.used + wanted > self.budget {
             let Some(victim) = self
                 .entries
                 .iter()
-                .filter(|(id, _)| **id != keep)
+                .filter(|(id, _)| Some(**id) != keep)
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(id, _)| *id)
             else {
@@ -231,6 +228,17 @@ mod tests {
             transmitted: TransmittedFormat::Rgba,
             pixels: vec![value; (size * size * 4) as usize],
         }
+    }
+
+    #[test]
+    fn maximum_image_id_is_evictable() {
+        let mut cache = GraphicsCache::with_budget(1024);
+        let mut image = image(1, 1, 1, 1);
+        image.id = u32::MAX;
+        assert!(cache.texture(&image).is_some());
+        cache.set_budget(0);
+        assert!(cache.is_empty());
+        assert_eq!(cache.used_bytes(), 0);
     }
 
     /// A red/blue swap produces a picture that looks fine at a glance, so the
