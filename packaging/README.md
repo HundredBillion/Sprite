@@ -1,7 +1,8 @@
 # Packaging Sprite
 
-Four files and one script. `install.sh` is the only thing that knows where
-anything goes, so a distribution package and a manual install cannot disagree.
+`install.sh` owns the installation layout, so distribution packages and manual
+installs place files consistently. Preparation generates the terminfo source
+from the pinned Ghostty checkout before installation.
 
 | File | What it is |
 |---|---|
@@ -9,6 +10,8 @@ anything goes, so a distribution package and a manual install cannot disagree.
 | `sprite.desktop` | The desktop entry. Passes `desktop-file-validate`. |
 | `sprite.svg` | The icon, scalable, for `hicolor/scalable/apps`. |
 | `PKGBUILD` | The Arch recipe, building from a clean checkout. |
+| `PKGBUILD.local` | Packages the existing release binary with the workspace version. Its preparation generates terminfo. |
+| `prepare.sh` | Generates `target/ghostty.terminfo` with Zig from the pinned Ghostty source. |
 | `third-party-notices.py` | Regenerates `THIRD-PARTY-NOTICES.md` from Cargo's resolution. |
 | `macos/bundle.sh`, `macos/Info.plist` | Wrap a built Sprite as `Sprite.app`. Build nothing. |
 | `macos/update.sh` | Build, generate terminfo, bundle, install to `/Applications`, link the command. |
@@ -90,7 +93,11 @@ cd packaging
 makepkg -si
 ~~~
 
-Two deviations from the usual makepkg shape, both deliberate:
+`packaging/update.sh` uses `PKGBUILD.local` after building the release binary.
+The local recipe requires Zig, ncurses and Python; its version comes from
+`Cargo.toml`, and its `prepare()` generates terminfo even in a fresh checkout.
+
+Two deviations from the distribution recipe's usual makepkg shape, both deliberate:
 
 - The Ghostty VT engine is a git submodule, initialised in `prepare()`. It is
   not a second `source` entry because the submodule commit is already pinned by
@@ -102,7 +109,8 @@ Two deviations from the usual makepkg shape, both deliberate:
 ## Installing by hand
 
 ~~~bash
-# from the workspace root, after a release build and the terminfo bootstrap
+# from the workspace root, after a release build
+packaging/prepare.sh
 sudo PREFIX=/usr packaging/install.sh
 ~~~
 

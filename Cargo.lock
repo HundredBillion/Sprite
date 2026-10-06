@@ -5146,6 +5146,7 @@ dependencies = [
  "async-channel 2.5.0",
  "gpui",
  "image",
+ "nix 0.28.0",
  "proptest",
  "resvg",
  "serde",

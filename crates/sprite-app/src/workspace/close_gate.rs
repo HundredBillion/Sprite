@@ -1,42 +1,89 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static QUIT_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn quit_app(cx: &mut gpui::App) {
+    #[cfg(test)]
+    QUIT_REQUESTS.with(|requests| requests.set(requests.get() + 1));
+    cx.quit();
+}
+
 impl Workspace {
-    /// Hands over every pane's blocking cleanup so the window can run all of
-    /// it off the GPUI thread.
-    ///
-    /// Every tab, not only the visible one: a background tab's pane is still
-    /// running whatever it runs.
-    pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<Box<dyn FnOnce() + Send>> {
-        // No new Surface may open while the window winds down.
+    /// Starts current pane cleanup and hands over any cleanup still running from removed panes.
+    pub fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Vec<gpui::Task<()>> {
+        if self.stopping {
+            return Vec::new();
+        }
+        self.stopping = true;
         self.surfaces = None;
-        // The window is going: its socket leaves the filesystem and its key
-        // stops being accepted now, not once the last pane has finished.
         if let Some(endpoint) = self.endpoint.as_mut() {
             endpoint.close();
         }
         let mut panes = self.tabs.all_panes();
         panes.sort_unstable_by_key(|(_, pane, _)| *pane);
-        panes
+        let panes: Vec<_> = panes
             .into_iter()
             .map(|(_, _, pane)| Rc::clone(pane))
-            .collect::<Vec<_>>()
+            .collect();
+        for pane in panes {
+            self.shut_down(pane, cx);
+        }
+        std::mem::take(&mut self.pending_cleanups)
             .into_iter()
-            .filter_map(|pane| pane.begin_shutdown(cx))
+            .map(|cleanup| cleanup.task)
             .collect()
     }
-    /// Shuts a pane down deliberately rather than leaving it to a drop, so
-    /// whatever it owns is released at a known moment.
+
+    /// Blocking cleanup outlives removal from the layout and stays off the GPUI thread.
     pub(super) fn shut_down(
-        &self,
+        &mut self,
         pane: Rc<dyn PaneHandle<Request = SurfaceRequest>>,
         cx: &mut Context<Self>,
     ) {
+        self.pending_cleanups
+            .retain(|cleanup| !cleanup.completed.load(std::sync::atomic::Ordering::Acquire));
         if let Some(cleanup) = pane.begin_shutdown(cx) {
-            cx.background_executor()
-                .spawn(async move { cleanup() })
-                .detach();
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mark_completed = completed.clone();
+            #[cfg(test)]
+            let gate = self.cleanup_gates.pop_front();
+            let task = cx.background_executor().spawn(async move {
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    gate.recv().await.expect("release cleanup gate");
+                }
+                cleanup();
+                mark_completed.store(true, std::sync::atomic::Ordering::Release);
+            });
+            self.pending_cleanups
+                .push(PendingCleanup { task, completed });
         }
     }
+
+    fn shutdown_and_quit(&mut self, cx: &mut Context<Self>) {
+        if self.stopping {
+            return;
+        }
+        let cleanups = self.begin_shutdown(cx);
+        if cleanups.is_empty() {
+            quit_app(cx);
+            return;
+        }
+        let finished = cx.background_executor().spawn(async move {
+            for cleanup in cleanups {
+                cleanup.await;
+            }
+        });
+        cx.spawn(async move |_workspace, cx| {
+            finished.await;
+            let _ = cx.update(quit_app);
+        })
+        .detach();
+    }
+
     pub(super) fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
         if !self.may_close(CloseScope::Pane, cx) {
             return;
@@ -84,32 +131,19 @@ impl Workspace {
     pub fn confirm_close(&mut self, cx: &mut Context<Self>) -> bool {
         self.may_close(CloseScope::Window, cx)
     }
-    /// Closes Sprite in response to its platform shortcut.
-    ///
-    /// `Window::remove_window` bypasses the native close callback, so this
-    /// performs the same confirmation and cleanup explicitly before asking the
-    /// application to exit. That keeps Cmd+Q and Super+W from becoming a way
-    /// around the close warning for running programs.
-    pub(super) fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.may_close(CloseScope::Quit, cx) {
-            return;
+    /// Keeps the native window alive until pane cleanup has finished.
+    pub fn close_window(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.confirm_close(cx) {
+            self.shutdown_and_quit(cx);
         }
-        let cleanups = self.begin_shutdown(cx);
-        window.remove_window();
-        if cleanups.is_empty() {
-            cx.quit();
-            return;
+        false
+    }
+
+    /// Applies the same confirmation and cleanup to the platform quit shortcut.
+    pub(super) fn quit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.may_close(CloseScope::Quit, cx) {
+            self.shutdown_and_quit(cx);
         }
-        let finished = cx.background_executor().spawn(async move {
-            for cleanup in cleanups {
-                cleanup();
-            }
-        });
-        cx.spawn(async move |_workspace, cx| {
-            let _ = finished.await;
-            let _ = cx.update(|cx| cx.quit());
-        })
-        .detach();
     }
     /// Whether a close may go ahead now, or must be asked about first.
     ///
@@ -119,6 +153,9 @@ impl Workspace {
     /// answers. A pane whose state cannot be determined closes too — a question
     /// nobody can ever resolve is one people learn to dismiss unread.
     pub(super) fn may_close(&mut self, scope: CloseScope, cx: &mut Context<Self>) -> bool {
+        if self.stopping {
+            return false;
+        }
         let pending = self.mode.pending_close().map(|pending| pending.scope);
         let running = if pending == Some(scope) {
             Vec::new()
@@ -179,14 +216,17 @@ impl Workspace {
         self.mode = Mode::Idle;
         self.refresh_layout(cx);
         if self.tabs.is_empty() {
-            // The last pane of the last tab closed, so the window has nothing
-            // left to show.
-            cx.quit();
+            self.shutdown_and_quit(cx);
             return;
         }
         cx.notify();
     }
 }
+pub(super) struct PendingCleanup {
+    task: gpui::Task<()>,
+    completed: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// A close waiting on a second press.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingClose {
@@ -388,6 +428,198 @@ mod tests {
         assert_eq!(CloseScope::Window.again(), "click close again");
         assert_eq!(CloseScope::Quit.again(), "press the same keys again");
     }
+    fn gated_panes(
+        workspace: &gpui::Entity<Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (
+        std::sync::Arc<std::sync::Mutex<Vec<PaneId>>>,
+        Vec<async_channel::Sender<()>>,
+    ) {
+        use gpui::AppContext;
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        let completed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (gates, receivers): (Vec<_>, Vec<_>) =
+            (0..2).map(|_| async_channel::bounded(1)).unzip();
+        cx.background_executor.allow_parking();
+        workspace.update(cx, |workspace, cx| {
+            workspace.cleanup_gates = receivers.into();
+            let started = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut make = |_, id: PaneId| {
+                Rc::new(cx.new(|cx| ShutdownPane {
+                    focus: cx.focus_handle(),
+                    id,
+                    started: started.clone(),
+                    completed: completed.clone(),
+                    shutting_down: false,
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            };
+            workspace.tabs = Tabs::new(&mut make);
+            workspace.tabs.split(Orientation::Vertical, &mut make);
+            workspace.tabs.focus_pane(PaneId(0));
+            workspace.refresh_layout(cx);
+        });
+        (completed, gates)
+    }
+
+    #[gpui::test]
+    fn last_pane_waits_for_prior_and_final_cleanup_before_quit(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let (completed, gates) = gated_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        assert!(completed.lock().unwrap().is_empty());
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        assert_eq!(
+            QUIT_REQUESTS.with(|requests| requests.get()),
+            0,
+            "quit before cleanup"
+        );
+        gates[0].try_send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(*completed.lock().unwrap(), vec![PaneId(0)]);
+        assert_eq!(
+            QUIT_REQUESTS.with(|requests| requests.get()),
+            0,
+            "final cleanup still gated"
+        );
+        gates[1].try_send(()).unwrap();
+        cx.run_until_parked();
+        let mut done = completed.lock().unwrap().clone();
+        done.sort_unstable();
+        assert_eq!(done, vec![PaneId(0), PaneId(1)]);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn native_close_keeps_window_until_prior_and_current_cleanup_finish(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (workspace, cx) = test_workspace(cx);
+        let (completed, gates) = gated_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        assert!(
+            !workspace.update(cx, |workspace, cx| workspace.close_window(cx)),
+            "native close released the last window before cleanup"
+        );
+        assert!(!workspace.update(cx, |workspace, cx| workspace.close_window(cx)));
+        assert_eq!(cx.windows().len(), 1);
+        cx.run_until_parked();
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        gates[1].try_send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(*completed.lock().unwrap(), vec![PaneId(1)]);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        gates[0].try_send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(completed.lock().unwrap().len(), 2);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn shortcut_quit_keeps_window_until_prior_and_current_cleanup_finish(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (workspace, cx) = test_workspace(cx);
+        let (completed, gates) = gated_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        workspace.update_in(cx, |workspace, window, cx| workspace.quit(window, cx));
+        assert_eq!(
+            cx.windows().len(),
+            1,
+            "shortcut removed the last window before cleanup"
+        );
+        workspace.update_in(cx, |workspace, window, cx| workspace.quit(window, cx));
+        cx.run_until_parked();
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        gates[1].try_send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(*completed.lock().unwrap(), vec![PaneId(1)]);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        gates[0].try_send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(completed.lock().unwrap().len(), 2);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn waiting_for_shutdown_refuses_new_tabs_and_splits(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let (_completed, gates) = gated_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        workspace.update(cx, |workspace, cx| workspace.close_window(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_tab(window, cx);
+            workspace.split(Orientation::Vertical, window, cx);
+        });
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.tabs.all_panes().len()),
+            1
+        );
+        for gate in gates {
+            gate.try_send(()).unwrap();
+        }
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn queued_reload_cannot_reenable_observation_during_shutdown(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let (_completed, gates) = gated_panes(&workspace, cx);
+        let path =
+            std::env::temp_dir().join(format!("sprite-stop-reload-{}.toml", std::process::id()));
+        std::fs::write(&path, "[pane_observation]\nenabled = true\n").unwrap();
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        workspace.update(cx, |workspace, cx| {
+            workspace.config_path = Some(path.clone());
+            workspace.close_window(cx);
+            workspace
+                .reload_sender
+                .try_send(ReloadRequest {
+                    what: ConfigVerb::Reload,
+                    reply,
+                    reply_connection: None,
+                })
+                .unwrap();
+        });
+        cx.run_until_parked();
+        let answer = receiver.try_recv().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(answer, "this window is closing");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.settings.pane_observation.enabled);
+            assert!(workspace.endpoint.is_none());
+        });
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        for gate in gates {
+            gate.try_send(()).unwrap();
+        }
+        cx.run_until_parked();
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn completed_removed_cleanup_is_pruned_before_shutdown(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let (completed, gates) = gated_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        gates[0].try_send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(*completed.lock().unwrap(), vec![PaneId(0)]);
+        let cleanups = workspace.update(cx, |workspace, cx| workspace.begin_shutdown(cx));
+        assert_eq!(cleanups.len(), 1, "only the remaining pane is pending");
+        assert!(
+            workspace
+                .update(cx, |workspace, cx| workspace.begin_shutdown(cx))
+                .is_empty()
+        );
+        gates[1].try_send(()).unwrap();
+        cx.background_executor.block_test(async move {
+            for cleanup in cleanups {
+                cleanup.await;
+            }
+        });
+        assert_eq!(completed.lock().unwrap().len(), 2);
+    }
+
     #[gpui::test]
     fn window_shutdown_includes_background_panes_in_identity_order_once(
         cx: &mut gpui::TestAppContext,
@@ -439,9 +671,12 @@ mod tests {
                 .update(cx, |workspace, cx| workspace.begin_shutdown(cx))
                 .is_empty()
         );
-        for cleanup in cleanups {
-            cleanup();
-        }
+        cx.background_executor.block_test(async move {
+            for cleanup in cleanups {
+                cleanup.await;
+            }
+        });
+        completed.lock().unwrap().sort_unstable();
         assert_eq!(*completed.lock().unwrap(), *started.borrow());
         assert_eq!(started.borrow().len(), 4);
     }

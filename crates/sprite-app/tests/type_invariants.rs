@@ -362,6 +362,19 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
             )
         })
         .collect();
+    let nix = dependency_for_source(
+        &dependencies,
+        &scratch,
+        "nix",
+        &externs,
+        "use nix::errno::Errno;
+         use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+         fn probe(socket: &std::os::unix::net::UnixStream) {
+             use std::os::fd::AsFd;
+             let _ = poll(&mut [PollFd::new(socket.as_fd(), PollFlags::POLLIN)], PollTimeout::NONE);
+         }",
+    );
+    externs.push(format!("nix={}", nix.display()));
     // Cargo feature variants can load independently while having incompatible Serde traits.
     let serde = dependency_for_source(
         &dependencies,

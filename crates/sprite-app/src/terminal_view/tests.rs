@@ -433,3 +433,103 @@ fn closing_an_owned_terminal_unregisters_before_retained_handles_drop(
     assert!(weak.upgrade().is_none());
     assert!(panes.panes().is_empty());
 }
+
+#[gpui::test]
+fn texture_budget_growth_restores_a_quiet_terminal_image(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '\\033_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\\033\\\\'; exec sleep 30".into(),
+            ]),
+            settings.clone(),
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let initial = wait_for_bundle(&view, cx, |bundle| {
+        bundle
+            .graphics
+            .as_ref()
+            .is_some_and(|frame| frame.images.iter().any(|image| image.id == 1))
+    });
+    let image_generation = initial
+        .graphics
+        .as_ref()
+        .unwrap()
+        .images
+        .iter()
+        .find(|image| image.id == 1)
+        .unwrap()
+        .generation;
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.textures.get(1, image_generation).is_some());
+        let mut low = settings.clone();
+        low.graphics.texture_bytes = crate::config::TextureBytes::new(0);
+        view.apply_settings(&low, window, cx);
+        assert!(view.textures.get(1, image_generation).is_none());
+        view.apply_settings(&settings, window, cx);
+        assert!(
+            view.textures.get(1, image_generation).is_some(),
+            "budget growth must replay the current pixels"
+        );
+        assert!(
+            view.status.is_none(),
+            "a recovered image must clear its budget warning"
+        );
+        view.apply_settings(&low, window, cx);
+        view.status = Some("unrelated terminal failure".into());
+        view.apply_settings(&settings, window, cx);
+        assert_eq!(view.status, Some("unrelated terminal failure".into()));
+        assert_eq!(view.bundle.as_ref().unwrap().generation, initial.generation);
+    });
+}
+
+#[gpui::test]
+fn explicit_application_command_receives_sprite_terminal_identity(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(),
+                "printf 'IDENT:%s:%s:%s\\n' \"$TERM\" \"$TERM_PROGRAM\" \"$COLORTERM\"; infocmp xterm-ghostty >/dev/null 2>&1 && printf 'TERMINFO_OK\\n'; exec sleep 30".into()]),
+            settings, Vec::new(), None,
+            PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+        )
+    });
+    let bundle = wait_for_bundle(&view, cx, |b| {
+        b.pane.rows.iter().any(|row| row.text.contains("IDENT:"))
+            && b.pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("TERMINFO_OK"))
+    });
+    let text = bundle
+        .pane
+        .rows
+        .iter()
+        .map(|row| row.text.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("IDENT:xterm-ghostty:Sprite:truecolor"),
+        "explicit child identity: {text}"
+    );
+    assert!(
+        text.contains("TERMINFO_OK"),
+        "explicit child can find bundled terminfo: {text}"
+    );
+}

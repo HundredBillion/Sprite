@@ -709,6 +709,12 @@ impl TerminalView {
                         .reason(),
                     ));
                     return;
+                } else if matches!(parsed.description.root, Element::Grid { .. }) {
+                    surface.connection.send(&event_refused(
+                        &Refusal::Malformed("a grid update needs a grid Surface".to_owned())
+                            .reason(),
+                    ));
+                    return;
                 } else {
                     surface.body = Body::Elements {
                         description: parsed.description,
@@ -1973,6 +1979,55 @@ mod tests {
         }
         cx.update(|window, _| window.remove_window());
         drop(host);
+    }
+
+    #[gpui::test]
+    fn element_update_refuses_grid_and_preserves_text(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(104);
+        let pane = crate::pane_tree::PaneId(1);
+        let text = |text| serde_json::json!({"version":1,"root":{"kind":"text","text":text}});
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(text("before")));
+        assert_eq!(answer, Ok(()));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: serde_json::json!({"version":1,"root":{"kind":"grid","cols":8,"rows":2}}),
+            },
+        );
+        assert_eq!(events(&mut peer)[0]["type"], "refused");
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "before"));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: text("after"),
+            },
+        );
+        assert!(events(&mut peer).is_empty());
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+        });
     }
 
     #[gpui::test]

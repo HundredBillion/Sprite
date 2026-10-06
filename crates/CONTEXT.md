@@ -19,6 +19,11 @@ _Avoid_: phase, prototype, temporary implementation
 **Terminal Session**:
 One independent running terminal and its child process. A Terminal Session
 belongs to exactly one Pane and is never shared between Panes.
+After its direct child exits, the owner allows a fixed two seconds output drain
+before cancelling a PTY retained by descendants, then parses already accepted
+output under a bounded final-drain budget before the final snapshot. Explicit
+shutdown keeps the
+existing bounded HUP/TERM/KILL cleanup policy.
 _Avoid_: shell (only one possible child), terminal instance
 
 **Terminal Generation**:
@@ -50,7 +55,9 @@ a Pane, and never disturbs a Terminal Session.
 _Avoid_: splitter, gutter, sash, handle, border
 
 **Sprite Window**:
-The top-level desktop window that owns tabs and Panes.
+The top-level desktop window that owns tabs and Panes. It also owns pending
+cleanup after a Pane leaves the layout; its last window stays alive until
+removed and present Pane cleanup completes.
 _Avoid_: workspace, session, terminal window
 
 **Pane Observation**:
@@ -95,6 +102,10 @@ _Avoid_: the observation socket, the socket (unqualified), IPC, the API
 The versioned document a program sends over the Surface Channel saying what a
 Surface contains: element kinds, utility tokens for style, and token names
 for colour. It is what Sprite draws; it is never code.
+An update preserves the existing element, grid or virtual-list body kind.
+Surface SVG decoding bounds final raster dimensions to 4096, each bitmap to
+16MiB and retained decoded pixels to 64MiB per cache. These bounds do not
+cover SVG parsing/filter intermediates or process-wide memory.
 _Avoid_: markup, HTML, template, DSL, layout code
 
 **Semantic Token**:

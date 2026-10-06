@@ -48,6 +48,9 @@ impl Workspace {
         reply: Option<&crate::local_socket::ReplyConnection>,
         cx: &mut Context<Self>,
     ) -> String {
+        if self.stopping {
+            return "this window is closing".to_owned();
+        }
         let Some(path) = self.config_path.clone().or_else(crate::config::path) else {
             return "there is nowhere to read a configuration file from \
                     (neither XDG_CONFIG_HOME nor HOME is set)"
