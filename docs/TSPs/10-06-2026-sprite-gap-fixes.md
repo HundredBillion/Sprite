@@ -254,6 +254,17 @@ there is no system-patch or archive-extraction-filter dependency. Linux compile,
 headless/PTY/Surface tests run locally; native Cocoa/compositor qualification and
 independent Task5 review remain separate gates.
 
+Task5 integrated compile-control refinement: a whole-workspace test run exposed
+loadable but incoherent cached GPUI/image artifacts in the settings type proof.
+The fixture now validates GPUI's actual Render trait against built
+`sprite_app::Workspace` and the pinned fallback
+callback, then selects image using the actual `RenderImage::new(Frame)` call.
+This preserves positive controls and every exact negative-diagnostic assertion;
+no cache is cleared and no contract test is skipped. Artifact probes rejected
+the mismatched pair even though both image artifacts share version/features.
+Focused red/green, all three type-invariant tests, workspace build/Clippy, and
+formatting evidence are recorded in the ignored Task5 fix1 report.
+
 ## Task 6: Preserve production scheduling guard with bounded test coordination
 
 **Blocked by:** Task5 implementation; may run during read-only Task5 review.
