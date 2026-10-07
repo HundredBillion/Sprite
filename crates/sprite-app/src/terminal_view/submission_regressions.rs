@@ -1,5 +1,16 @@
 use super::*;
 
+fn submit_probe(commands: sprite_term::CommandSender, command: TerminalCommand) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let sender = std::thread::spawn(move || {
+        let _ = tx.send(commands.send(command));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .expect("probe admission deadline")
+        .expect("probe command accepted");
+    sender.join().unwrap();
+}
+
 #[gpui::test]
 fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
@@ -200,7 +211,7 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
                 cx,
             )
         });
-        let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n' \"$line\"; done".into()]);
+        let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done".into()]);
         let defaults = theme::session_defaults(&settings);
         config.colors = defaults.colors;
         config.cursor = defaults.cursor;
@@ -242,8 +253,13 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
             view.apply_settings(&settings, window, cx);
         });
         let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let event_drain = std::thread::spawn(move || {
             while let Ok(event) = events.next_blocking() {
+                if matches!(&event, sprite_term::TerminalEvent::TitleChanged(Some(title)) if title == "RESTORED_READY")
+                {
+                    let _ = ready_tx.send(());
+                }
                 if let sprite_term::TerminalEvent::History(history) = event
                     && history_tx.send(history).is_err()
                 {
@@ -295,17 +311,32 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
             "return to A reconciles the accepted B defaults after the prior A submission refused"
         );
         assert!(restored.render.cursor.blinking);
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("complete child response");
+        let commands = view.update(cx, |view, _| match &view.session {
+            SessionState::Running(session) => session.commands(),
+            _ => panic!("probe session ended"),
+        });
+        submit_probe(
+            commands.clone(),
+            TerminalCommand::CaptureHistory(sprite_term::HistoryLines::new(0)),
+        );
+        let settled = history_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         view.update_in(cx, |view, window, cx| {
             view.apply_settings(&settings, window, cx);
-            assert!(view.submit(TerminalCommand::CaptureHistory(
-                sprite_term::HistoryLines::new(0)
-            )));
         });
+        submit_probe(
+            commands,
+            TerminalCommand::CaptureHistory(sprite_term::HistoryLines::new(0)),
+        );
         let unchanged = history_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         assert_eq!(
-            unchanged.generation, restored.generation,
+            unchanged.generation, settled.generation,
             "unchanged reload must not reset terminal defaults"
         );
         let handle = view.update(cx, |view, _| view.begin_shutdown().unwrap());
@@ -409,8 +440,12 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
             Some(wanted),
             "identical layout retries the refused size"
         );
-        assert!(view.submit(TerminalCommand::Input(b"report\n".to_vec())));
     });
+    let commands = view.update(cx, |view, _| match &view.session {
+        SessionState::Running(session) => session.commands(),
+        _ => panic!("probe session ended"),
+    });
+    submit_probe(commands, TerminalCommand::Input(b"report\n".to_vec()));
     let report = wait_for_text(&format!("PTY:{} {}", wanted.rows(), wanted.cols()));
     assert_eq!(
         report.pane.size, wanted,
