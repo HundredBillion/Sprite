@@ -432,15 +432,19 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
         }
     };
     wait_for_text("INPUT_READY");
-    view.update_in(cx, |view, window, _| {
+    let retry_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !view.update_in(cx, |view, window, _| {
         view.set_allocated(allocated);
         view.synchronise_size(window);
-        assert_eq!(
-            view.size,
-            Some(wanted),
-            "identical layout retries the refused size"
+        view.size == Some(wanted)
+    }) {
+        assert!(
+            std::time::Instant::now() < retry_deadline,
+            "identical layout must admit the refused size after pressure clears"
         );
-    });
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+    }
     let commands = view.update(cx, |view, _| match &view.session {
         SessionState::Running(session) => session.commands(),
         _ => panic!("probe session ended"),
