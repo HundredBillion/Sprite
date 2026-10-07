@@ -175,7 +175,9 @@ their public result types. Mailbox owns cancellation/final-outcome ordering.
   after pressure clears. Retry is bounded/coalesced per view, never unbounded
   threads/tasks. Record successful settings admission per worker-facing field,
   so partial color success followed by cursor refusal and a revert to original
-  settings still restores actual worker defaults.
+  settings still restores actual worker defaults. Before the first snapshot,
+  fallback colors track the latest desired UI defaults independently of worker
+  admission; refused B followed by original A must restore visible fallback A.
 - [x] Prove settings eventually match latest requested values after pressure
   clears, shutdown cancels blocked publication, final outcomes remain visible,
   natural output tail and existing throughput/input benchmark still pass.
@@ -192,6 +194,11 @@ fixture now awaits the PTY reader's acknowledgement; five focused repetitions
 and the final serialized covering run retain all ten exact packets. ADR0026
 records bounds and the selected source chain. Independent Task4 review follows
 this implementation commit; evidence is in the task workspace report.
+The initial independent Task4 review passed the main specification and quality
+checks with one minor fallback-color finding. Fix round1 adds an actual
+pre-snapshot refused-B/revert-A regression and derives UI fallback defaults on
+every desired reload. All66 terminal-view tests, app clippy, formatting and diff
+checks pass; focused independent re-review follows the repair commit.
 
 ## Task 5: Distinguish native text commits from key fallback (SPR-019)
 
@@ -212,11 +219,17 @@ and accepts ordinary native replace calls regardless of preedit.
 - [ ] Add direct-commit actual PTY/Surface red tests for multibyte and identical
   ASCII text, marked composition and ordinary-key no-double delivery, including
   enhanced key protocol. Verify explicit origin under deferred/focus changes.
-- [ ] Preserve pinned GPUI source/licenses. Add only the fallback callback and
+- [ ] Preserve pinned GPUI source/licenses. Published archive SHA256 is
+  `979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707`,
+  independently matched to the pre-patch Cargo.lock. Verify the exact source
+  plus recorded patch against that archive, including a tamper-negative check.
+  Add only the fallback callback and
   bridge. Label Linux explicit key/replay fallback and mac held-key fallback;
   Cocoa ordinary insertText uses active native key scope and exact text match,
   invalidated by marking/transformed composition. Independent insertions remain
-  native commits. Scope save/restore handles nested dispatch; no frame timers.
+  native commits. Scope save/restore handles nested dispatch; no frame timers. A nested marking
+  or transformed composition must invalidate the enclosing fallback scope too;
+  restoring its previous string must not re-arm it.
 - [ ] Preserve Wayland one-byte composition commits: capture composing state
   before CommitString resets it. Only uncomposed one-byte text synthesizes the
   existing ordinary KeyDown; active-composition commits route directly to
@@ -253,3 +266,5 @@ Independent plan review: `/tmp/sprite-gap-plan-review.md`; three corrections ado
 Task3 review refinement authorized under user autonomy preference: R3-1 excludes proven foreign SID before protected Darwin metadata, R3-2 retains process ownership after natural completion for later explicit wait. Natural singleHUP/output and explicit request-relative budgets remain invariants.
 
 SPR015 sibling refinement: actual old-Fish exported marker suppresses current Bash/Zsh hooks; updated Fish repeat-load early return also leaves it exported. Root verified isolated actual scripts; fix is authorized within the initialization root-cause class.
+
+Task4 R1 minor review refinement: before first bundle, fallback colors must follow latest desired UI defaults even when refused values are reverted and admitted-worker diff is empty. Root authorizes actual-path regression and targeted repair.
