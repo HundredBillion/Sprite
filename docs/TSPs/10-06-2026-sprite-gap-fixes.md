@@ -35,7 +35,7 @@ Python stdlib and POSIX shell; existing dependencies only.
 **Blocked by:** None
 
 **Files:** packaging/macos/update.sh; new packaging/macos/install.sh;
-crates/sprite-term/shell-integration/sprite.fish and sprite.zsh;
+crates/sprite-term/shell-integration/sprite.bash, sprite.fish and sprite.zsh;
 scripts/test_packaging_automation.py; new scripts/test_shell_integration.py;
 crates/sprite-term/tests/graphics_tmux.rs; packaging documentation/CI as needed.
 
@@ -55,7 +55,10 @@ remains optional. No Rust public interface change.
   supplied temporary binaries. Record red for nested/inherited Fish and Zsh
   prompt callback. Guard Fish by local installed functions and unexport marker;
   use an ordinary Zsh exit-code variable. Repeat-source and interactive control
-  must pass without touching user configs.
+  must pass without touching user configs. SPR-015 sibling refinement: unexport
+  Fish marker before its local-hook early return; Bash/Zsh must install their
+  local hooks despite a marker inherited from an older Fish parent. Preserve
+  idempotence and verify actual inherited, nested and repeated source paths.
 - [x] Add actual tmux regression with spaced/metacharacter fixture directory.
   Pass script arguments rather than interpolate unquoted filenames through its
   two shell layers. Normal and spaced controls must both pass.
@@ -248,3 +251,5 @@ and accepts ordinary native replace calls regardless of preedit.
 Independent plan review: `/tmp/sprite-gap-plan-review.md`; three corrections adopted before implementation: retain latest refused Resize, route one-byte Wayland composition commits natively, and track partial settings admission across a latest-value revert. All ten IDs covered. Task1 has no remaining plan blocker.
 
 Task3 review refinement authorized under user autonomy preference: R3-1 excludes proven foreign SID before protected Darwin metadata, R3-2 retains process ownership after natural completion for later explicit wait. Natural singleHUP/output and explicit request-relative budgets remain invariants.
+
+SPR015 sibling refinement: actual old-Fish exported marker suppresses current Bash/Zsh hooks; updated Fish repeat-load early return also leaves it exported. Root verified isolated actual scripts; fix is authorized within the initialization root-cause class.

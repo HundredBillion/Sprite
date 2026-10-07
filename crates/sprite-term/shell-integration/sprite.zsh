@@ -3,10 +3,13 @@
 # Loaded by Sprite into shells it launches. Sprite never edits or appends to a
 # user dotfile.
 
-if [ -n "${SPRITE_SHELL_INTEGRATION:-}" ]; then
+SPRITE_SHELL_INTEGRATION=1
+typeset +x SPRITE_SHELL_INTEGRATION
+
+# An inherited marker does not mean this shell has its own prompt hooks.
+if typeset -f __sprite_osc7 __sprite_preexec __sprite_precmd >/dev/null; then
   return 0
 fi
-SPRITE_SHELL_INTEGRATION=1
 
 __sprite_osc7() { printf '\033]7;file://%s%s\007' "${HOST:-}" "$PWD"; }
 

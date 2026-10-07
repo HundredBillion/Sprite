@@ -6,10 +6,13 @@
 # Emits OSC 133 semantic prompt marks and OSC 7 working directory, which is what
 # lets Sprite distinguish a prompt from its output without parsing text.
 
-if [ -n "${SPRITE_SHELL_INTEGRATION:-}" ]; then
-  return 0 2>/dev/null || true
-fi
 SPRITE_SHELL_INTEGRATION=1
+export -n SPRITE_SHELL_INTEGRATION
+
+# An inherited marker does not mean this shell has its own prompt hooks.
+if declare -F __sprite_osc7 __sprite_preexec __sprite_precmd >/dev/null; then
+  return 0
+fi
 
 __sprite_osc7() {
   printf '\033]7;file://%s%s\007' "${HOSTNAME:-}" "$PWD"
