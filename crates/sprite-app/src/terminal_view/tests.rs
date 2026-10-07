@@ -582,7 +582,7 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
     use gpui::{Modifiers, MouseButton};
     let expected = "\x1b[<59;2;2M\x1b[<24;2;2M\x1b[<56;3;2M\x1b[<24;3;2m\x1b[<25;2;2M\x1b[<57;3;2M\x1b[<25;3;2m\x1b[<26;2;2M\x1b[<58;3;2M\x1b[<26;3;2m";
     let script = format!(
-        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; timeout --foreground 0.5 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; printf 'CAPTURING\\r\\n'; timeout --foreground 0.5 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
         expected.len()
     );
     let settings = crate::config::Settings::default();
@@ -627,12 +627,28 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
         view.update(cx, |view, _| {
             view.send(TerminalCommand::Input(b"GO\n".to_vec()))
         });
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("CAPTURING"))
+        });
         let modifiers = Modifiers {
             alt: true,
             control: true,
             ..Default::default()
         };
         cx.simulate_mouse_move(start, None, modifiers);
+        view.read_with(cx, |v, _| {
+            assert!(
+                v.status
+                    .as_ref()
+                    .is_none_or(|s| !s.contains("queue is full")),
+                "fixture refused its first motion: {:?}",
+                v.status
+            )
+        });
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
             cx.simulate_mouse_down(start, button, modifiers);
             cx.simulate_mouse_move(end, Some(button), modifiers);
@@ -643,7 +659,7 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
         });
         let text: String = bundle.pane.rows.iter().map(|row| row.text.trim()).collect();
         let actual = text
-            .split("READY")
+            .split("CAPTURING")
             .nth(1)
             .unwrap()
             .split("DONE")
@@ -786,7 +802,13 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
         executor.block_test(view.condition::<()>(cx, |view, _| view.hovered_link.is_some()));
         let link = view.read_with(cx, |view, _| view.hovered_link);
         cx.simulate_mouse_move(inside, None, gpui::Modifiers::default());
-        view.read_with(cx, |view, _| assert_eq!(view.hovered_link, link));
+        view.read_with(cx, |view, _| {
+            let (generation, span) = view
+                .hovered_link
+                .expect("moving inside the link preserves hover");
+            assert_eq!(Some(span), link.map(|(_, span)| span));
+            assert_eq!(generation, view.bundle.as_ref().unwrap().generation);
+        });
         cx.simulate_mouse_move(outside, None, gpui::Modifiers::default());
         view.read_with(cx, |view, _| assert!(view.hovered_link.is_none()));
         cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
@@ -803,5 +825,267 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
     }
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn settings_callback_recovers_latest_values_after_real_event_pressure() {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "terminal_view::tests::settings_callback_pressure_child",
+            "--nocapture",
+        ])
+        .env("SPRITE_SETTINGS_PRESSURE_CHILD", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                status.success(),
+                "actual GPUI callback regression failed: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("actual GPUI settings callback or recovery stalled");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[gpui::test]
+fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
+    if std::env::var_os("SPRITE_SETTINGS_PRESSURE_CHILD").is_none() {
+        return;
+    }
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let gate = std::env::temp_dir().join(format!(
+        "sprite-settings-pressure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let program = format!(
+        "import os,time,signal; signal.alarm(15);\nwhile not os.path.exists({:?}): time.sleep(.005)\nos.write(1,b''.join(b'\\x1b]2;burst-'+str(i).encode()+b'\\x07' for i in range(150))); os.write(1,b'\\x00'*(320*1024)); time.sleep(30)",
+        gate.to_str().unwrap()
+    );
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/usr/bin/python".into(), "-c".into(), program.into()]),
+            settings.clone(),
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let initial = wait_for_bundle(&view, cx, |_| true);
+    std::fs::write(&gate, b"go").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(750));
+    let mut changed = settings.clone();
+    changed.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
+    changed.cursor.blink = Some(false);
+    let desired_size = view.update_in(cx, |view, window, cx| {
+        let before = std::time::Instant::now();
+        view.apply_settings(&changed, window, cx);
+        assert!(
+            before.elapsed() < std::time::Duration::from_millis(200),
+            "actual settings callback blocked"
+        );
+        assert_eq!(
+            view.applied_settings.colors, changed.colors,
+            "the reserved command slot accepted colors"
+        );
+        assert_eq!(
+            view.applied_settings.cursor, settings.cursor,
+            "cursor refusal must not advance its cache"
+        );
+        assert!(
+            view.status
+                .as_ref()
+                .is_some_and(|s| s.contains("queue is full"))
+        );
+        assert!(view.pending_settings.is_some());
+        view.apply_settings(&settings, window, cx);
+        assert_eq!(
+            view.applied_settings.colors, changed.colors,
+            "refused revert must retain admitted color state"
+        );
+        let allocated = gpui::size(px(400.0), px(200.0));
+        view.set_allocated(allocated);
+        let desired_size = super::geometry::grid_size(
+            crate::grid::content_area(allocated, view.padding),
+            view.metrics.width(),
+            view.metrics.height(),
+            window.scale_factor(),
+        )
+        .unwrap();
+        view.synchronise_size(window);
+        assert_ne!(
+            view.size,
+            Some(desired_size),
+            "refused geometry cannot advance admission cache"
+        );
+        assert_eq!(view.pending_resize, Some(desired_size));
+        desired_size
+    });
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    assert!(
+        cx.debug_bounds("terminal-status").is_some(),
+        "the refused callback paints its status without another worker snapshot"
+    );
+    assert_eq!(
+        view.read_with(cx, |v, _| v.bundle.as_ref().unwrap().generation),
+        initial.generation
+    );
+    // Normal installed receivers resume; the view's sole retry task submits the latest values.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(5));
+        cx.executor().tick();
+        if view.read_with(cx, |v, _| {
+            v.pending_settings.is_none()
+                && v.pending_resize.is_none()
+                && v.bundle.as_ref().is_some_and(|b| {
+                    b.render.default_foreground == initial.render.default_foreground
+                        && b.render.size == desired_size
+                        && b.render.cursor.blinking == initial.render.cursor.blinking
+                })
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "latest worker state: {:?}",
+            view.read_with(cx, |v, _| (
+                v.pending_settings.is_some(),
+                v.pending_resize,
+                v.size,
+                v.status.clone(),
+                v.bundle.as_ref().map(|b| (
+                    b.render.size,
+                    b.render.default_foreground,
+                    b.render.cursor.blinking
+                ))
+            ))
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    view.update(cx, |view, _| {
+        view.begin_shutdown();
+    });
+    std::fs::remove_file(gate).unwrap();
+}
+
+#[gpui::test]
+fn natural_completion_retires_idle_admission_recovery(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "sleep .05; exit 7".into(),
+            ]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.executor().tick();
+        if view.read_with(cx, |v, _| v.retry_wake.is_closed()) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ended session left admission recovery alive"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    view.read_with(cx, |v, _| {
+        assert!(matches!(v.session, SessionState::Ended(_)));
+        assert!(v.pending_settings.is_none());
+        assert!(v.pending_resize.is_none());
+    });
+    if let Some(cleanup) = view.update(cx, |v, _| v.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+}
+
+#[gpui::test]
+fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+        Some(vec!["/bin/sh".into(), "-c".into(), "sleep .3; i=0; while [ $i -lt 150 ]; do printf '\\033]2;title%s\\007' $i; i=$((i+1)); done; exit 7".into()]), settings.clone(),Vec::new(),None,
+        PaneExit {sender,identity:(crate::tabs::TabId(1),crate::pane_tree::PaneId(1))},window,cx));
+    wait_for_bundle(&view, cx, |_| true);
+    // Keep installed UI receivers paused until the natural mailbox deadline ends the worker.
+    std::thread::sleep(std::time::Duration::from_millis(2600));
+    let mut latest = settings;
+    latest.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
+    view.update_in(cx, |v, w, cx| {
+        assert!(matches!(v.session, SessionState::Running(_)));
+        v.apply_settings(&latest, w, cx);
+        assert!(
+            v.admission_closed,
+            "disconnected admission must retire recovery"
+        );
+        assert!(
+            v.status
+                .as_ref()
+                .is_some_and(|s| s.contains("worker ended"))
+        );
+        assert!(v.pending_settings.is_none());
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.executor().tick();
+        if view.read_with(cx, |v, _| v.retry_wake.is_closed()) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disconnected recovery continued retrying"
+        );
+    }
+    if let Some(cleanup) = view.update(cx, |v, _| v.begin_shutdown()) {
+        cleanup.wait().unwrap();
     }
 }

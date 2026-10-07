@@ -21,20 +21,16 @@ const SNAPSHOT_CAPACITY: usize = 1;
 
 /// The lossless lifecycle stream. Single-owner by construction.
 pub struct EventStream {
-    receiver: async_channel::Receiver<TerminalEvent>,
+    receiver: crate::event_mailbox::Receiver,
 }
 
 impl EventStream {
     pub async fn next(&mut self) -> Result<TerminalEvent, SessionError> {
-        self.receiver.recv().await.map_err(Self::ended)
+        self.receiver.next().await
     }
 
     pub fn next_blocking(&mut self) -> Result<TerminalEvent, SessionError> {
-        self.receiver.recv_blocking().map_err(Self::ended)
-    }
-
-    fn ended(_: async_channel::RecvError) -> SessionError {
-        SessionError::new("event_stream", "the terminal session ended")
+        self.receiver.next_blocking()
     }
 }
 
@@ -85,18 +81,38 @@ pub struct CommandSender {
 }
 
 impl CommandSender {
-    /// Submits a command, applying the same checks as [`TerminalSession::send`].
+    /// Submits a command, waiting for queue space on the calling thread.
     pub fn send(&self, command: TerminalCommand) -> Result<(), SessionError> {
-        validate(&command)?;
+        self.validate(&command)?;
+        self.commands
+            .send(worker::Message::Command(command))
+            .map_err(|_| SessionError::new("send", "the terminal worker ended"))
+    }
+
+    /// Submits without waiting; saturation is an explicit refusal.
+    pub fn try_send(&self, command: TerminalCommand) -> Result<(), SessionError> {
+        self.validate(&command)?;
+        match self.commands.try_send(worker::Message::Command(command)) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(SessionError::new(
+                "send",
+                "the terminal command queue is full",
+            )),
+            Err(TrySendError::Disconnected(_)) => {
+                Err(SessionError::new("send", "the terminal worker ended"))
+            }
+        }
+    }
+
+    fn validate(&self, command: &TerminalCommand) -> Result<(), SessionError> {
+        validate(command)?;
         if self.shutdown.load(Ordering::SeqCst) {
             return Err(SessionError::new(
                 "send",
                 "the terminal session is shutting down",
             ));
         }
-        self.commands
-            .send(worker::Message::Command(command))
-            .map_err(|_| SessionError::new("send", "the terminal worker ended"))
+        Ok(())
     }
 }
 
@@ -125,17 +141,24 @@ impl ShutdownHandle {
 /// Applied wherever a command enters, so a second entry point cannot become a
 /// way around the limits.
 fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
-    // Rejected before it reaches the queue, so an oversized payload never
-    // occupies a worker slot and never partially reaches the child.
-    if let TerminalCommand::Input(bytes) = command
-        && bytes.len() > MAX_INPUT_BYTES
-    {
+    let (bytes, limit) = match command {
+        TerminalCommand::Input(bytes) => (bytes.len(), MAX_INPUT_BYTES),
+        TerminalCommand::Paste(text) | TerminalCommand::PasteConfirmed(text) => {
+            (text.len(), crate::max_clipboard_bytes())
+        }
+        TerminalCommand::CommitText(text) => (text.len(), MAX_INPUT_BYTES),
+        TerminalCommand::Key(key) => (
+            key.logical_key
+                .len()
+                .saturating_add(key.text.as_ref().map_or(0, String::len)),
+            MAX_INPUT_BYTES,
+        ),
+        _ => (0, MAX_INPUT_BYTES),
+    };
+    if bytes > limit {
         return Err(SessionError::new(
             "send",
-            format!(
-                "input of {} bytes exceeds the {MAX_INPUT_BYTES} byte limit",
-                bytes.len()
-            ),
+            format!("input of {bytes} bytes exceeds the {limit} byte limit"),
         ));
     }
     Ok(())
@@ -153,6 +176,7 @@ pub struct TerminalSession {
     /// Answers "what is running in this pane" without a round-trip.
     foreground: Arc<ForegroundWatch>,
     worker: Option<JoinHandle<Option<crate::pty_unix::SessionProcesses>>>,
+    events: Arc<crate::event_mailbox::Mailbox>,
 }
 
 impl TerminalSession {
@@ -160,7 +184,8 @@ impl TerminalSession {
     /// PTY, child, and terminal are live.
     pub fn spawn(config: SessionConfig) -> Result<Spawned, SessionError> {
         let (commands, command_rx) = mpsc::sync_channel(WORKER_QUEUE_CAPACITY);
-        let (event_tx, event_rx) = async_channel::bounded(EVENT_CAPACITY);
+        let (event_tx, event_rx) = crate::event_mailbox::bounded(EVENT_CAPACITY);
+        let event_cancel = Arc::clone(&event_tx);
         let (snapshot_tx, snapshot_rx) = async_channel::bounded(SNAPSHOT_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let foreground = Arc::new(ForegroundWatch::default());
@@ -192,6 +217,7 @@ impl TerminalSession {
                 shutdown,
                 foreground,
                 worker: Some(worker),
+                events: event_cancel,
             },
             events: EventStream { receiver: event_rx },
             snapshots: SnapshotStream {
@@ -228,16 +254,12 @@ impl TerminalSession {
     }
 
     pub fn send(&mut self, command: TerminalCommand) -> Result<(), SessionError> {
-        if self.shutdown.load(Ordering::SeqCst) {
-            return Err(SessionError::new(
-                "send",
-                "the terminal session is shutting down",
-            ));
-        }
-        validate(&command)?;
-        self.commands
-            .send(worker::Message::Command(command))
-            .map_err(|_| SessionError::new("send", "the terminal worker ended"))
+        self.commands().send(command)
+    }
+
+    /// Submits without waiting for a queue slot, suitable for the UI thread.
+    pub fn try_send(&mut self, command: TerminalCommand) -> Result<(), SessionError> {
+        self.commands().try_send(command)
     }
 
     /// Idempotent and non-blocking. The first call hands over the worker; later
@@ -255,6 +277,7 @@ impl TerminalSession {
     /// `Disconnected` queue means the worker already ended.
     fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        self.events.cancel();
         match self.commands.try_send(worker::Message::Shutdown) {
             Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }

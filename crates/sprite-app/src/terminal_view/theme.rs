@@ -212,6 +212,8 @@ impl TerminalView {
     ) {
         use crate::config::LiveChange;
         let changes = self.applied_settings.diff(settings);
+        // Each worker-facing field remembers its last accepted value so partial reloads can be reverted.
+        let mut admitted = settings.clone();
         if changes.has(LiveChange::Font) {
             let (family, _) = chosen_family(window, settings.font.family.as_deref());
             self.metrics = CellMetrics::measure(
@@ -235,14 +237,14 @@ impl TerminalView {
         let defaults = session_defaults(settings);
         if changes.has(LiveChange::Colors) {
             self.fallback_colors = defaults.fallback_colors;
-            if let SessionState::Running(session) = &mut self.session {
-                let _ = session.send(TerminalCommand::SetColors(defaults.colors));
+            if !self.submit(TerminalCommand::SetColors(defaults.colors)) {
+                admitted.colors = self.applied_settings.colors.clone();
             }
         }
         if changes.has(LiveChange::Cursor)
-            && let SessionState::Running(session) = &mut self.session
+            && !self.submit(TerminalCommand::SetCursor(defaults.cursor))
         {
-            let _ = session.send(TerminalCommand::SetCursor(defaults.cursor));
+            admitted.cursor = self.applied_settings.cursor;
         }
         if changes.has(LiveChange::TextureBudget) {
             self.textures
@@ -251,7 +253,13 @@ impl TerminalView {
                 self.refresh_textures(&bundle);
             }
         }
-        self.applied_settings = settings.clone();
+        self.pending_settings =
+            if !self.admission_closed && !admitted.diff(settings).live.is_empty() {
+                Some(settings.clone())
+            } else {
+                None
+            };
+        self.applied_settings = admitted;
         cx.notify();
     }
 

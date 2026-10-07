@@ -11,6 +11,7 @@ compile_error!("Sprite Terminal Core supports Linux and macOS only");
 #[doc(hidden)]
 pub mod capture_benchmark;
 
+mod event_mailbox;
 mod foreground;
 mod graphics;
 mod png_decoder;

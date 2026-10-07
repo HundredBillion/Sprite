@@ -220,7 +220,10 @@ impl PaneSource for WindowPanes {
             rect: entry.placement.rect,
             focused: entry.placement.focused,
         };
-        if let Err(error) = entry.commands.send(TerminalCommand::CaptureHistory(lines)) {
+        if let Err(error) = entry
+            .commands
+            .try_send(TerminalCommand::CaptureHistory(lines))
+        {
             entry.waiting.pop_back();
             return Err(error.to_string());
         }

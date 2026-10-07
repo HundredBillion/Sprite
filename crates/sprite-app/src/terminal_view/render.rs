@@ -396,6 +396,7 @@ impl Render for TerminalView {
             ))
             .children(status.map(|status| {
                 div()
+                    .debug_selector(|| "terminal-status".into())
                     .absolute()
                     .bottom(px(0.0))
                     .left(px(0.0))

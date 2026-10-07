@@ -155,16 +155,16 @@ ADR0026 and core glossary.
 remains available to non-UI consumers. EventStream next/next_blocking retain
 their public result types. Mailbox owns cancellation/final-outcome ordering.
 
-- [ ] Promote the external round9 producer/control into bounded actual GPUI
+- [x] Promote the external round9 producer/control into bounded actual GPUI
   regression for multi-command settings reload and real installed receivers;
   record baseline callback stall. Add public-session paused-event-consumer
   shutdown and natural-exit outcome tests with retained event ordering.
-- [ ] Read exact ad119fd delivery changes/ADR0021 and reconcile its mailbox,
+- [x] Read exact ad119fd delivery changes/ADR0021 and reconcile its mailbox,
   cancellation and UI admission design rather than importing its whole branch.
   Retain merged two-second read/six-second accepted-tail drain from ADR0024.
   Publication must retain the rest of an accepted bounded parser batch when
   cancelling; final error/exit outcomes must not await consumer room.
-- [ ] Route actual UI input/resize/settings and observation enqueue through
+- [x] Route actual UI input/resize/settings and observation enqueue through
   nonblocking admission. Expose refusal and retain pending/unapplied live
   settings and Resize for recoverable latest-value retry; do not mark failed
   updates applied. geometry.rs currently advances self.size before send: only
@@ -173,11 +173,22 @@ their public result types. Mailbox owns cancellation/final-outcome ordering.
   threads/tasks. Record successful settings admission per worker-facing field,
   so partial color success followed by cursor refusal and a revert to original
   settings still restores actual worker defaults.
-- [ ] Prove settings eventually match latest requested values after pressure
+- [x] Prove settings eventually match latest requested values after pressure
   clears, shutdown cancels blocked publication, final outcomes remain visible,
   natural output tail and existing throughput/input benchmark still pass.
-- [ ] Record ADR0026 alternatives/bounds/compatibility and exact source chain;
+- [x] Record ADR0026 alternatives/bounds/compatibility and exact source chain;
   run term/app covering suites and clippy, report red/green and commit/review.
+
+Implementation verification: terminal suite 226 passed (2 ignored), app suite
+596 passed, clippy with warnings denied, formatting and diff checks passed.
+Actual GPUI pressure runs through an owned 12-second subprocess bound, preserves
+installed receivers, proves partial admission and latest worker-state recovery,
+and verifies painted refusal before a new snapshot. Public shutdown and waiter
+clock counterchecks fail before their respective fixes. The pointer forwarding
+fixture now awaits the PTY reader's acknowledgement; five focused repetitions
+and the final serialized covering run retain all ten exact packets. ADR0026
+records bounds and the selected source chain. Independent Task4 review follows
+this implementation commit; evidence is in the task workspace report.
 
 ## Task 5: Distinguish native text commits from key fallback (SPR-019)
 
