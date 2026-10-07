@@ -339,7 +339,7 @@ review remains outstanding.
   Python automation/shell tests, shell syntax, vendored patch integrity and
   safe staged installation as appropriate. Inspect actual command outputs.
 - [x] Finalize findings, ADRs/context and PR evidence for the reviewed fixes.
-- [ ] Push branch and open PR against current origin/master without merging it.
+- [x] Push branch and open PR against current origin/master without merging it.
 
 Independent plan review: `/tmp/sprite-gap-plan-review.md`; three corrections adopted before implementation: retain latest refused Resize, route one-byte Wayland composition commits natively, and track partial settings admission across a latest-value revert. All ten IDs covered. Task1 has no remaining plan blocker.
 
@@ -359,3 +359,7 @@ and focused repair review8174aee..6eb05a1 resolve both final Important findings;
 Task6 independently passes specification/quality. Native platform qualification
 and portable/installer limits remain explicit in the audit. Publication is the
 remaining authorized action; no merge is requested.
+
+Published PR: https://github.com/HundredBillion/Sprite/pull/54 . Branch
+`fix/sprite-gap-audit-2026-10-06` is pushed against master. No merge performed;
+native hosted CI status is reported separately from local verification.

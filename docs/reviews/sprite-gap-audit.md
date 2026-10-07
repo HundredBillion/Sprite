@@ -233,7 +233,7 @@ reviews: `docs/TSPs/10-06-2026-sprite-gap-fixes.md`. No merge is authorized.
 
 Unconfirmed GAP-C01–05 remain separate. All confirmed findings and introduced
 regressions are resolved and reviewed. Fresh integrated verification is recorded
-below; PR publication is the remaining requested action.
+below. The branch is published as PR #54 without merging.
 
 ### Task 1 verification: SPR-014/015/016/022
 
@@ -580,3 +580,11 @@ and check-to-killpg retain documented races; unknown owned permissions remain
 bounded/incomplete. Installer recovery handles ordinary errors, without a
 power-loss or concurrent-installer atomicity promise. Unconfirmed GAP-C01–05
 remain explicitly separate and are not presented as fixed bugs.
+
+### Publication
+
+[PR #54](https://github.com/HundredBillion/Sprite/pull/54) is open against master
+from `fix/sprite-gap-audit-2026-10-06`. All confirmed findings and introduced
+regressions are fixed, verified and independently reviewed. The final publication
+record changes documentation only; no merge, release or deployment is performed.
+Hosted CI results are reported separately; local native-platform limits remain.
