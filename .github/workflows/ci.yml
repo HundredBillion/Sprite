@@ -27,8 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - name: Test release version helpers
-        run: python3 -m unittest scripts.test_release_automation -v
+      - name: Install shell integration test dependencies
+        run: sudo apt-get update && sudo apt-get install -y fish zsh
+      - name: Test release, packaging and optional shell integration
+        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration -v
 
   arch:
     name: arch linux
@@ -42,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm --needed \
-            base-devel git curl ncurses \
+            base-devel git curl ncurses python \
             less \
             "zig=${ZIG_VERSION}" \
             wayland libxkbcommon libx11 libxcb libxkbcommon-x11 \
@@ -71,6 +73,7 @@ jobs:
       - name: Fetch dependencies (the only network-enabled build stage)
         run: |
           set -euo pipefail
+          python3 scripts/check_gpui_patch.py --fetch
           cargo fetch --locked
           export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
           export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
@@ -125,6 +128,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --all -- --check
+          rustfmt --edition 2024 --check vendor/gpui/src/platform/key_text_scope.rs
+          python3 -m unittest scripts.test_gpui_patch -v
           cargo clippy --workspace --all-targets --locked --offline -- -D warnings
           # `--no-fail-fast`: without it cargo stops at the first failing test
           # binary, so a run reports one failure and silently skips the rest of
@@ -148,8 +153,9 @@ jobs:
           ! grep -rnE "^[[:space:]]*use[[:space:]]+(libghostty_vt|portable_pty)|(libghostty_vt|portable_pty)::" \
             --include='*.rs' crates/sprite-app
           ! grep -nE "^(libghostty-vt|portable-pty)[[:space:]]*=" crates/sprite-app/Cargo.toml
+          # Blocking coordination lives only in the cfg(test) helper; production stays event driven.
           ! grep -rnE "thread::sleep|Timer::after|request_animation_frame" \
-            --include='*.rs' crates/sprite-app
+            --include='*.rs' --exclude='test_blocking_wait.rs' crates/sprite-app
 
   macos:
     name: macos
@@ -184,6 +190,7 @@ jobs:
       - name: Fetch dependencies (the only network-enabled build stage)
         run: |
           set -euo pipefail
+          python3 scripts/check_gpui_patch.py --fetch
           cargo fetch --locked
           export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
           export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
@@ -208,6 +215,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --all -- --check
+          rustfmt --edition 2024 --check vendor/gpui/src/platform/key_text_scope.rs
+          python3 -m unittest scripts.test_gpui_patch -v
           cargo clippy --workspace --all-targets --locked --offline -- -D warnings
           # `--no-fail-fast`: without it cargo stops at the first failing test
           # binary, so a run reports one failure and silently skips the rest of

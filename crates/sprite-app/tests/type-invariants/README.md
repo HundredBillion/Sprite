@@ -13,6 +13,13 @@ Missing markers abort the test. Unused imports for the omitted parser and
 resolver are removed explicitly. Each dependency candidate must compile with
 the active Rust compiler before selection; paired cases reuse the same externs.
 
+The settings fixture also requires coherent dependency identities: GPUI's
+`Render` trait must accept the built application's `Workspace`, its pinned
+fallback callback must exist, and `RenderImage::new` must accept the selected
+image crate's `Frame`. Independent crate loading, identical versions/features,
+and file timestamps cannot prove that shared types come from the same artifact.
+The existing Serde/TOML probe similarly validates a real cross-crate consumer.
+
 Each negative snippet has the same imports as a compiling positive control.
 The runner requires the indicated Rust diagnostic and its subject, so a missing
 module or dependency cannot count as proof. These are internal examples because

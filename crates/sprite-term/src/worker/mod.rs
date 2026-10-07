@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::key;
@@ -27,6 +27,7 @@ use crate::{
 };
 
 mod closing;
+pub(crate) use closing::finish_shutdown;
 mod start;
 use crate::hyperlink::resolve_hyperlink;
 use crate::input::keys::{encode_focus, encode_key};
@@ -79,6 +80,7 @@ struct Started {
     /// Recorded at spawn so descendants can still be reached after the child
     /// itself is gone and its own process id means nothing.
     process_group: Option<i32>,
+    processes: Option<pty_unix::SessionProcesses>,
     waiter: JoinHandle<()>,
 }
 
@@ -134,12 +136,11 @@ struct Runtime {
     started: Started,
     pump: Option<Pump>,
     inbox: Receiver<Message>,
-    events: async_channel::Sender<TerminalEvent>,
+    events: Arc<crate::event_mailbox::Mailbox>,
     shutdown: Arc<AtomicBool>,
     exit_status: Option<Result<ExitStatus, String>>,
     pump_stopped: bool,
     fatal: Option<SessionError>,
-    natural_exit_at: Option<Instant>,
 }
 
 struct Session {
@@ -157,10 +158,11 @@ struct Session {
     has_selection: bool,
 }
 
-fn emit(events: &async_channel::Sender<TerminalEvent>, event: TerminalEvent) -> Flow {
-    match events.send_blocking(event) {
-        Ok(()) => Continue(()),
-        Err(_) => Stop(()),
+fn emit(events: &Arc<crate::event_mailbox::Mailbox>, event: TerminalEvent) -> Flow {
+    if events.publish(vec![event]) {
+        Continue(())
+    } else {
+        Stop(())
     }
 }
 
@@ -168,16 +170,17 @@ pub(crate) fn run(
     config: SessionConfig,
     commands: SyncSender<Message>,
     inbox: Receiver<Message>,
-    events: async_channel::Sender<TerminalEvent>,
+    events: Arc<crate::event_mailbox::Mailbox>,
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
     foreground: Arc<crate::ForegroundWatch>,
-) {
-    let started = match start::start(&config, &commands) {
+) -> Option<pty_unix::SessionProcesses> {
+    let _completion = events.completion_guard();
+    let started = match start::start(&config, &commands, Arc::clone(&events)) {
         Ok(started) => started,
         Err(error) => {
-            let _ = emit(&events, TerminalEvent::Error(error));
-            return;
+            events.seal(vec![TerminalEvent::Error(error)]);
+            return None;
         }
     };
     foreground.attach(started.master_fd, started.process_group);
@@ -190,14 +193,12 @@ pub(crate) fn run(
         exit_status: None,
         pump_stopped: true,
         fatal: None,
-        natural_exit_at: None,
     };
     let pump = match Pump::start(runtime.started.master_fd, commands.clone()) {
         Ok(pump) => pump,
         Err(error) => {
             runtime.fatal = Some(error);
-            closing::close(runtime);
-            return;
+            return closing::close(runtime);
         }
     };
     let input = pump.input();
@@ -207,8 +208,7 @@ pub(crate) fn run(
         Ok(initialized) => initialized,
         Err(error) => {
             runtime.fatal = Some(error);
-            closing::close(runtime);
-            return;
+            return closing::close(runtime);
         }
     };
     let start::Initialized {
@@ -239,14 +239,9 @@ pub(crate) fn run(
         && session.capture().is_continue()
     {
         while !session.runtime.shutdown.load(Ordering::SeqCst) {
-            let message = match session.runtime.natural_exit_at {
-                Some(exited) => {
-                    let deadline = exited + Duration::from_secs(2);
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        break;
-                    };
-                    session.runtime.inbox.recv_timeout(remaining).ok()
-                }
+            let message = match session.runtime.events.drain_remaining() {
+                Some(remaining) if remaining.is_zero() => break,
+                Some(remaining) => session.runtime.inbox.recv_timeout(remaining).ok(),
                 None => session.runtime.inbox.recv().ok(),
             };
             let Some(message) = message else { break };
@@ -255,7 +250,7 @@ pub(crate) fn run(
             }
         }
     }
-    session.finish();
+    session.finish()
 }
 
 impl Session {
@@ -295,25 +290,19 @@ impl Session {
                 pending.mutated();
                 drop(chunk);
 
-                // The reply callback cannot speak for itself, so a reply the
-                // pump refused to queue is reported from here rather than
-                // silently dropped.
+                let mut batch = Vec::new();
                 if let Some(error) = write_error.borrow_mut().take() {
-                    emit(events, TerminalEvent::Error(error))?;
+                    batch.push(TerminalEvent::Error(error));
                 }
-
-                // Lifecycle notices raised during parsing are delivered here,
-                // outside the callback that cannot block.
-                let raised: Vec<TerminalEvent> = notices.borrow_mut().take();
-                for notice in raised {
-                    emit(events, notice)?;
-                }
-
-                // Accepted clipboard writes are delivered here rather than from
-                // inside the parser callback, which must not block on a channel.
-                let accepted: Vec<String> = clipboard_pending.borrow_mut().drain(..).collect();
-                for text in accepted {
-                    emit(events, TerminalEvent::ClipboardWrite(text))?;
+                batch.extend(notices.borrow_mut().take());
+                batch.extend(
+                    clipboard_pending
+                        .borrow_mut()
+                        .drain(..)
+                        .map(TerminalEvent::ClipboardWrite),
+                );
+                if !events.publish(batch) {
+                    return Stop(());
                 }
             }
             // Not a no-op: a wake. The snapshot slot holds one bundle
@@ -598,9 +587,6 @@ impl Session {
                 // cleanup has finished, so its signal is never presented as an
                 // unexpected failure.
                 *exit_status = Some(status);
-                self.runtime
-                    .natural_exit_at
-                    .get_or_insert_with(Instant::now);
                 if *pump_stopped {
                     return Stop(());
                 }
@@ -628,7 +614,7 @@ impl Session {
 
     fn capture(&mut self) -> Flow {
         // The final snapshot suffices after exit; intermediate projections spend the drain budget.
-        if self.runtime.natural_exit_at.is_some() {
+        if self.runtime.events.drain_remaining().is_some() {
             return Continue(());
         }
         if self.pending.dirty && self.snapshots.is_empty() {
@@ -649,9 +635,10 @@ impl Session {
     }
 
     fn drain_accepted_output(&mut self) {
-        let Some(exited) = self.runtime.natural_exit_at else {
+        if self.runtime.events.drain_remaining().is_none() || !self.runtime.events.producer_ready()
+        {
             return;
-        };
+        }
         if self.runtime.shutdown.load(Ordering::SeqCst) {
             return;
         }
@@ -659,7 +646,7 @@ impl Session {
             pump.cancel();
         }
         // Cancel new reads, then parse the bounded output already accepted by the pump.
-        let deadline = exited + Duration::from_secs(6);
+        let deadline = Instant::now() + self.runtime.events.finish_remaining().unwrap_or_default();
         while !self.runtime.pump_stopped && !self.runtime.shutdown.load(Ordering::SeqCst) {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 break;
@@ -677,7 +664,7 @@ impl Session {
         }
     }
 
-    fn finish(mut self) {
+    fn finish(mut self) -> Option<pty_unix::SessionProcesses> {
         self.drain_accepted_output();
         if self.pending.dirty
             && let Ok(bundle) = self.owned.projector.capture(
@@ -690,7 +677,7 @@ impl Session {
             let _ = self.snapshots.force_send(Arc::new(bundle));
         }
         drop(self.owned);
-        closing::close(self.runtime);
+        closing::close(self.runtime)
     }
 }
 
@@ -789,7 +776,7 @@ mod closing_regressions {
         if std::env::var_os(CHILD).is_some() {
             let (commands, inbox) = std::sync::mpsc::sync_channel(1);
             commands.send(Message::CaptureRequested).unwrap();
-            let (events, receiver) = async_channel::bounded(1);
+            let (events, receiver) = crate::event_mailbox::bounded(1);
             drop(receiver);
             let (snapshots, _receiver) = async_channel::bounded(1);
             run(

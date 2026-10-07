@@ -26,6 +26,28 @@ shutdown keeps the
 existing bounded HUP/TERM/KILL cleanup policy.
 _Avoid_: shell (only one possible child), terminal instance
 
+**Command Admission**:
+The point at which a Terminal Session accepts an application request. A refused
+request has not changed terminal state; a Pane can retain the latest desired
+settings or size until it can admit them.
+_Avoid_: applied setting (admission precedes the terminal's change)
+
+**Accepted Event Batch**:
+The ordered notices produced by one completed terminal change. Ending a session
+preserves this batch before its final outcome, even when its reader is paused.
+_Avoid_: pending output (unparsed terminal output is a different obligation)
+
+**Ordinary Session Job**:
+A running program that remains in its Terminal Session's process session,
+including background and foreground jobs. A program that deliberately starts a
+new process session is detached and outside that Terminal Session's cleanup
+ownership. Natural child exit does not release ownership of retained Ordinary
+Session Jobs; explicit Terminal Session cleanup still owes those jobs its
+bounded shutdown policy.
+Unreadable metadata of a proven foreign session does not block this cleanup;
+unknown membership keeps cleanup pending within its existing deadline.
+_Avoid_: descendant (ancestry alone does not establish current ownership)
+
 **Terminal Generation**:
 The identity shared by coherent views of one completed terminal-state change.
 _Avoid_: frame number, render version

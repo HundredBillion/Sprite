@@ -353,7 +353,7 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
         .parent()
         .unwrap()
         .to_owned();
-    let mut externs: Vec<_> = ["gpui", "sprite_term", "toml", "image"]
+    let mut externs: Vec<_> = ["sprite_app", "sprite_term", "toml"]
         .iter()
         .map(|name| {
             format!(
@@ -362,6 +362,31 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
             )
         })
         .collect();
+    // A loadable cache artifact can still use different transitive crate types.
+    // Match GPUI to the built application before choosing its image companion.
+    let gpui = dependency_for_source(
+        &dependencies,
+        &scratch,
+        "gpui",
+        &externs,
+        "fn require_render<T: gpui::Render>() {}
+         fn probe() { require_render::<sprite_app::Workspace>(); }
+         fn fallback(handler: &mut impl gpui::InputHandler, window: &mut gpui::Window, cx: &mut gpui::App) {
+             handler.replace_text_in_range_from_key(None, \"a\", window, cx);
+         }",
+    );
+    externs.push(format!("gpui={}", gpui.display()));
+    let image = dependency_for_source(
+        &dependencies,
+        &scratch,
+        "image",
+        &externs,
+        "fn probe() {
+             let buffer = image::RgbaImage::new(1, 1);
+             let _ = gpui::RenderImage::new(vec![image::Frame::new(buffer)]);
+         }",
+    );
+    externs.push(format!("image={}", image.display()));
     let nix = dependency_for_source(
         &dependencies,
         &scratch,

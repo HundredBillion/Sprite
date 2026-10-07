@@ -174,3 +174,171 @@ fn resized_workspace_allocates_each_retained_terminal_its_placement(cx: &mut gpu
         }
     });
 }
+
+#[gpui::test]
+fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
+    cx: &mut gpui::TestAppContext,
+) {
+    for tabs in [1, 2] {
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            let (workspace, cx) = test_workspace(cx);
+            workspace.update_in(cx, |workspace, window, cx| {
+                if tabs == 2 {
+                    workspace.open_tab(window, cx);
+                }
+                workspace.split(orientation, window, cx);
+            });
+            cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+            draw_workspace(cx);
+            let before = cx.debug_bounds("workspace-panes").unwrap();
+            let published = publications(&workspace, cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.mode = Mode::ConfirmingClose(PendingClose {
+                    scope: CloseScope::Window,
+                    label: "busy — click close again to close this window, Esc to keep it".into(),
+                });
+                cx.notify();
+            });
+            draw_workspace(cx);
+            assert_eq!(
+                cx.debug_bounds("workspace-panes").unwrap(),
+                before,
+                "confirmation must not move or shrink drawn panes"
+            );
+            assert_eq!(publications(&workspace, cx), published);
+            for size in [
+                gpui::size(px(1000.0), px(700.0)),
+                gpui::size(px(840.0), px(560.0)),
+            ] {
+                cx.simulate_resize(size);
+                draw_workspace(cx);
+                let bounds = cx.debug_bounds("workspace-panes").unwrap();
+                let strip = if tabs == 2 { TAB_STRIP_HEIGHT } else { 0.0 };
+                assert_eq!(bounds.origin.y, px(strip));
+                assert_eq!(bounds.bottom(), size.height);
+                let placements = workspace.read_with(cx, |workspace, _| {
+                    workspace
+                        .placements
+                        .iter()
+                        .map(|(pane, x, y, width, height, _)| (*pane, *x, *y, *width, *height))
+                        .collect::<Vec<_>>()
+                });
+                for (pane, x, y, width, height) in placements {
+                    let selector = match pane.0 {
+                        0 => "workspace-pane-0",
+                        1 => "workspace-pane-1",
+                        2 => "workspace-pane-2",
+                        _ => panic!("unexpected test pane"),
+                    };
+                    assert_eq!(
+                        cx.debug_bounds(selector).unwrap(),
+                        gpui::Bounds {
+                            origin: gpui::point(px(x), px(y + strip)),
+                            size: gpui::size(px(width), px(height)),
+                        }
+                    );
+                }
+                workspace.read_with(cx, |workspace, _| {
+                    for (_, x, y, width, height, _) in &workspace.placements {
+                        assert!(*x + *width <= f32::from(size.width));
+                        assert!(*y + *height <= f32::from(size.height) - strip);
+                    }
+                });
+            }
+            let placed = workspace.read_with(cx, |workspace, _| workspace.dividers[0].0);
+            let start = match orientation {
+                Orientation::Horizontal => gpui::point(
+                    px(placed.boundary - 0.5),
+                    px(placed.across + placed.span * 0.5),
+                ),
+                Orientation::Vertical => gpui::point(
+                    px(placed.across + placed.span * 0.5),
+                    px(placed.boundary - 0.5),
+                ),
+            };
+            cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+            workspace.read_with(cx, |workspace, _| {
+                assert!(workspace.mode.divider_drag().is_some())
+            });
+            draw_workspace(cx);
+            cx.simulate_mouse_move(
+                start,
+                Some(gpui::MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            workspace.read_with(cx, |workspace, _| {
+                assert!((workspace.dividers[0].0.boundary - placed.boundary).abs() < 0.01)
+            });
+            let end = match orientation {
+                Orientation::Horizontal => start + gpui::point(px(40.0), px(0.0)),
+                Orientation::Vertical => start + gpui::point(px(0.0), px(40.0)),
+            };
+            cx.simulate_mouse_move(
+                end,
+                Some(gpui::MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+            draw_workspace(cx);
+            workspace.read_with(cx, |workspace, _| {
+                assert!((workspace.dividers[0].0.boundary - placed.boundary - 40.0).abs() < 0.01);
+                assert!(matches!(workspace.mode, Mode::Idle));
+            });
+            assert_eq!(publications(&workspace, cx), published + 1);
+            let dismissed = cx.debug_bounds("workspace-panes").unwrap();
+            workspace.update(cx, |workspace, cx| {
+                workspace.mode = Mode::ConfirmingClose(PendingClose {
+                    scope: CloseScope::Window,
+                    label: "busy ".repeat(100).into(),
+                });
+                cx.notify();
+            });
+            draw_workspace(cx);
+            assert_eq!(cx.debug_bounds("workspace-panes").unwrap(), dismissed);
+            let confirmation = cx.debug_bounds("workspace-confirmation").unwrap();
+            assert_eq!(confirmation.origin, gpui::point(px(0.0), px(0.0)));
+            assert!(confirmation.bottom() <= px(560.0));
+            let focused = workspace.read_with(cx, |workspace, _| {
+                (
+                    workspace.tabs.active_tab(),
+                    workspace.tabs.active().unwrap().focus(),
+                )
+            });
+            for x in [10.0, 600.0] {
+                for button in [
+                    gpui::MouseButton::Left,
+                    gpui::MouseButton::Middle,
+                    gpui::MouseButton::Right,
+                ] {
+                    cx.simulate_mouse_down(
+                        gpui::point(px(x), px(10.0)),
+                        button,
+                        gpui::Modifiers::default(),
+                    );
+                    cx.simulate_mouse_up(
+                        gpui::point(px(x), px(10.0)),
+                        button,
+                        gpui::Modifiers::default(),
+                    );
+                    workspace.read_with(cx, |workspace, _| {
+                        assert_eq!(
+                            (
+                                workspace.tabs.active_tab(),
+                                workspace.tabs.active().unwrap().focus()
+                            ),
+                            focused
+                        );
+                        assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
+                    });
+                }
+            }
+            workspace.update(cx, |workspace, cx| {
+                workspace.mode = Mode::Idle;
+                cx.notify();
+            });
+            draw_workspace(cx);
+            assert_eq!(cx.debug_bounds("workspace-panes").unwrap(), dismissed);
+            assert_eq!(publications(&workspace, cx), published + 1);
+        }
+    }
+}

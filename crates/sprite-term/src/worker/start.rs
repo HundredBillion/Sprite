@@ -373,6 +373,7 @@ fn configure_child_environment(
 pub(super) fn start(
     config: &SessionConfig,
     commands: &SyncSender<Message>,
+    events: Arc<crate::event_mailbox::Mailbox>,
 ) -> Result<Started, SessionError> {
     let size = config.size;
     let pair = native_pty_system()
@@ -407,10 +408,10 @@ pub(super) fn start(
             "the child reported no process id",
         ));
     };
-    // Recorded now, while the child is certainly alive: once it exits, its
-    // process id no longer resolves to a group, and descendants that outlive it
-    // would become unreachable.
+    // Foreground observation retains the shell group; cleanup separately owns
+    // the session before the waiter can reap an already exited leader.
     let process_group = pty_unix::process_group_of(child_pid);
+    let processes = pty_unix::SessionProcesses::capture(child_pid);
     let Some(master_fd) = pair.master.as_raw_fd() else {
         return Err(SessionError::new(
             "open_pty",
@@ -422,12 +423,13 @@ pub(super) fn start(
     // child's exit.
     drop(pair.slave);
 
-    let waiter = spawn_child_waiter(child, commands.clone())?;
+    let waiter = spawn_child_waiter(child, commands.clone(), events)?;
 
     Ok(Started {
         master: pair.master,
         master_fd,
         process_group,
+        processes,
         waiter,
     })
 }
@@ -437,12 +439,14 @@ pub(super) fn start(
 fn spawn_child_waiter(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     commands: SyncSender<Message>,
+    events: Arc<crate::event_mailbox::Mailbox>,
 ) -> Result<JoinHandle<()>, SessionError> {
     thread::Builder::new()
         .name("sprite-term-child-waiter".to_owned())
         .stack_size(HELPER_STACK_BYTES)
         .spawn(move || {
             let status = child.wait().map_err(|error| error.to_string());
+            events.begin_natural_drain();
             let _ = commands.send(Message::ChildExited(status));
         })
         .map_err(|error| SessionError::new("spawn_child_waiter", error))

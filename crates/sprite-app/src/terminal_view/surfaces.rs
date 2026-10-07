@@ -1244,8 +1244,9 @@ impl TerminalView {
                 // key and every letter of a conversion would arrive as plain
                 // key events and nothing would ever be marked. Nothing types
                 // it twice, because the terminal's own key handlers type only
-                // while the terminal holds the keyboard, and a commit that is
-                // not part of a composition is ignored.
+                // while the terminal holds the keyboard.
+                // The from_key path suppresses duplicate ordinary-key fallback.
+                // Independent native commits are accepted even without preedit.
                 //
                 // One limit remains, the same one the terminal lives with: the
                 // key that *begins* a composition still arrives here first,
@@ -1780,6 +1781,121 @@ mod tests {
         wire.lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    #[gpui::test]
+    fn native_commits_and_key_fallback_follow_surface_focus(cx: &mut gpui::TestAppContext) {
+        native_surface_trace(
+            cx,
+            serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+        );
+    }
+
+    #[gpui::test]
+    fn element_surface_native_commits_and_fallback_follow_focus(cx: &mut gpui::TestAppContext) {
+        native_surface_trace(
+            cx,
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"probe"}}),
+        );
+    }
+
+    fn native_surface_trace(cx: &mut gpui::TestAppContext, description: serde_json::Value) {
+        use gpui::{ElementInputHandler, InputHandler, Keystroke};
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, mut peer) =
+            open_request(&host, cx, SurfaceId(991), open_description(description));
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(SurfaceId(991)), window, cx)
+                .unwrap();
+        });
+        draw_test_window(cx);
+        events(&mut peer);
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(
+                Keystroke {
+                    key: "a".into(),
+                    key_char: Some("a".into()),
+                    modifiers: Default::default(),
+                },
+                cx,
+            );
+        });
+        let mut handler = ElementInputHandler::new(gpui::Bounds::default(), host.clone());
+        cx.update(|window, cx| {
+            handler.replace_text_in_range(None, "a", window, cx);
+            handler.replace_text_in_range(None, "日本", window, cx);
+            handler.replace_and_mark_text_in_range(None, "😀", None, window, cx);
+            handler.replace_text_in_range(None, "😀", window, cx);
+            handler.replace_text_in_range(None, "", window, cx);
+        });
+        let inputs: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|e| e["type"] == "input")
+            .collect();
+        assert_eq!(
+            inputs.len(),
+            4,
+            "one key, direct identical ASCII, Japanese, marked emoji: {inputs:?}"
+        );
+        assert_eq!(inputs[0]["key"], "a");
+        assert_eq!(inputs[1]["text"], "a");
+        assert!(inputs[1].get("key").is_none());
+        assert_eq!(inputs[2]["text"], "日本");
+        assert_eq!(inputs[3]["text"], "😀");
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: Keystroke {
+                key: "b".into(),
+                key_char: Some("b".into()),
+                modifiers: Default::default(),
+            },
+            is_held: false,
+        });
+        let deferred_host = host.clone();
+        cx.update(|window, cx| {
+            window.defer(cx, move |window, cx| {
+                deferred_host.update(cx, |host, cx| {
+                    host.focus_target(FocusTarget::Terminal, window, cx)
+                        .unwrap();
+                });
+            });
+        });
+        let delayed: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|e| e["type"] == "input")
+            .collect();
+        assert_eq!(delayed.len(), 1);
+        assert_eq!(delayed[0]["key"], "b");
+        cx.update(|window, cx| {
+            handler.replace_text_in_range_from_key(None, "b", window, cx);
+        });
+        assert!(
+            events(&mut peer).is_empty(),
+            "deferred effects and focus changes cannot turn key fallback into a native commit"
+        );
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(SurfaceId(991)), window, cx)
+                .unwrap();
+            host.surfaces.fill.as_mut().unwrap().placement = HostedPlacement::Fill {
+                registered_owner: Some((u32::MAX, i32::MAX)),
+            };
+        });
+        events(&mut peer);
+        cx.update(|window, cx| {
+            handler.replace_text_in_range(None, "refused", window, cx);
+        });
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+        assert!(
+            events(&mut peer).iter().all(|e| e["type"] != "input"),
+            "refused native commit must not send input"
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
     }
 
     #[gpui::test]

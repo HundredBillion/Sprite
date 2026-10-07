@@ -131,10 +131,20 @@ impl TerminalView {
         self.origin.x += shift;
 
         if self.size == Some(size) {
+            self.pending_resize = None;
             return;
         }
-        self.size = Some(size);
-        self.send(TerminalCommand::Resize(size));
+        self.admit_resize(size);
+    }
+
+    pub(super) fn admit_resize(&mut self, size: ValidTerminalSize) {
+        self.pending_resize = Some(size);
+        if self.submit(TerminalCommand::Resize(size)) {
+            self.size = Some(size);
+            self.pending_resize = None;
+        } else if self.admission_closed {
+            self.pending_resize = None;
+        }
     }
 
     /// The docks' widths at this pane size: what each asked for, but never more

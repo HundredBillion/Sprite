@@ -36,8 +36,7 @@ echo "==> bundling"
 packaging/macos/bundle.sh
 
 echo "==> installing to $app"
-rm -rf "$app"
-ditto target/Sprite.app "$app"
+packaging/macos/install.sh target/Sprite.app "$app"
 
 echo "==> linking $link (sudo)"
 if [ -e "$link" ] && [ ! -L "$link" ]; then

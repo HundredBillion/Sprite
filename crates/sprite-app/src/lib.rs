@@ -21,6 +21,8 @@ mod surface;
 mod tabs;
 mod terminal_events;
 mod terminal_view;
+#[cfg(test)]
+mod test_blocking_wait;
 mod tokens;
 mod workspace;
 

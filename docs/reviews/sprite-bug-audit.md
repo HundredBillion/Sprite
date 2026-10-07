@@ -1,5 +1,10 @@
 # Sprite bug audit — 2026-10-06
 
+Follow-up: five additional gap-focused review rounds of merged commit `091efef`
+are recorded in [sprite-gap-audit.md](sprite-gap-audit.md). That review-only pass
+continues finding IDs at SPR-014 and distinguishes new defects from the fixes
+accepted below.
+
 ## Scope and baseline
 
 Publication update: after audit acceptance, the user authorized committing these fixes, pushing the audit branch, and opening a pull request. The no-publication statements below describe the original audit scope and its acceptance state. Merging remains outside the current request.

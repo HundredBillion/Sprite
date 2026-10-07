@@ -14,6 +14,7 @@ from the pinned Ghostty checkout before installation.
 | `prepare.sh` | Generates `target/ghostty.terminfo` with Zig from the pinned Ghostty source. |
 | `third-party-notices.py` | Regenerates `THIRD-PARTY-NOTICES.md` from Cargo's resolution. |
 | `macos/bundle.sh`, `macos/Info.plist` | Wrap a built Sprite as `Sprite.app`. Build nothing. |
+| `macos/install.sh` | Stage and replace a bundle while retaining the old app on ordinary failures. |
 | `macos/update.sh` | Build, generate terminfo, bundle, install to `/Applications`, link the command. |
 
 ## What ends up where
@@ -61,6 +62,14 @@ from a copy kept in this repository, so it cannot drift from the engine that
 produces the sequences it describes.
 
 ## macOS
+
+The updater delegates replacement to `macos/install.sh source.app destination.app`.
+It copies with `ditto` into a private sibling staging directory before moving the
+old bundle. A failed replacement rename restores the old bundle; if restoration
+also fails, the installer retains the old bundle and prints its recovery path.
+The existing CLI link keeps pointing into the one installed bundle. This handles
+ordinary command failures; it does not promise recovery from power loss or
+concurrent installers.
 
 The same binary and the same terminfo, in a bundle:
 
