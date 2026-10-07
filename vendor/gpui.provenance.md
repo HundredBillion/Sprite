@@ -66,3 +66,10 @@ adapters execute exact match-arm source, not a live compositor or IBus daemon.
 Cocoa and live Linux IME smoke testing remain native qualification gates.
 Existing macOS hosted CI compiles and runs tests on a real macOS runner when
 executed; it has not been executed in this local Linux session.
+
+Whitespace checking keeps first-party code checks intact. Two exact artifact
+paths disable Git whitespace diagnostics: the unchanged published Metal shader
+contains space-before-tab indentation, and the recorded unified patch contains
+blank context lines with the required leading space. The initial staged
+`git diff --cached --check` reported those preserved bytes. They were retained,
+with narrow `.gitattributes` exceptions, rather than altering upstream content.
