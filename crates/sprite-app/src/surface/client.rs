@@ -7,11 +7,18 @@
 //! exit code, and nothing on standard output that is not the window's own
 //! answer.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::{AsFd, AsRawFd};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde_json::{Value, json};
 
 use crate::cli::{SurfaceOpenArgs, TokenRegisterArgs};
@@ -101,9 +108,49 @@ fn refused(verdict: &Value, errors: &mut dyn Write) -> Exit {
     Exit::Refused
 }
 
+struct CancellableInput<Fd> {
+    input: Fd,
+    cancellation: UnixStream,
+    canceled: Arc<AtomicBool>,
+}
+
+impl<Fd: AsFd> Read for CancellableInput<Fd> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let mut descriptors = [
+                PollFd::new(self.cancellation.as_fd(), PollFlags::POLLIN),
+                PollFd::new(self.input.as_fd(), PollFlags::POLLIN),
+            ];
+            match poll(&mut descriptors, PollTimeout::NONE) {
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
+            }
+            if self.canceled.load(Ordering::Acquire)
+                || descriptors[0]
+                    .revents()
+                    .is_some_and(|flags| !flags.is_empty())
+            {
+                self.canceled.store(true, Ordering::Release);
+                return Err(io::Error::other("surface channel closed"));
+            }
+            if descriptors[1]
+                .revents()
+                .is_some_and(|flags| !flags.is_empty())
+            {
+                return nix::unistd::read(self.input.as_fd().as_raw_fd(), buffer)
+                    .map_err(io::Error::from);
+            }
+        }
+    }
+}
+
 pub fn run_surface_open(
     args: &SurfaceOpenArgs,
-    input: impl Read + Send + 'static,
+    input: impl AsFd,
     mut out: impl Write + Send + 'static,
     errors: &mut dyn Write,
 ) -> Exit {
@@ -113,7 +160,21 @@ pub fn run_surface_open(
     };
     // Documents, not lines: a description file is usually pretty-printed, and
     // the streaming deserializer takes either.
-    let mut documents = serde_json::Deserializer::from_reader(input).into_iter::<Value>();
+    let (cancellation, cancel_events) = match UnixStream::pair() {
+        Ok(pair) => pair,
+        Err(error) => {
+            let _ = writeln!(errors, "sprite: could not monitor standard input: {error}");
+            return Exit::Unreachable;
+        }
+    };
+    let canceled = Arc::new(AtomicBool::new(false));
+    let input = CancellableInput {
+        input,
+        cancellation,
+        canceled: Arc::clone(&canceled),
+    };
+    let mut documents =
+        serde_json::Deserializer::from_reader(BufReader::new(input)).into_iter::<Value>();
     let description = match documents.next() {
         Some(Ok(description)) => description,
         Some(Err(error)) => {
@@ -164,22 +225,31 @@ pub fn run_surface_open(
     if verdict.get("type").and_then(Value::as_str) != Some("opened") {
         return refused(&verdict, errors);
     }
-    let _ = writeln!(out, "{verdict}");
-    let _ = out.flush();
+    if writeln!(out, "{verdict}")
+        .and_then(|_| out.flush())
+        .is_err()
+    {
+        let _ = stream.shutdown(Shutdown::Both);
+        return Exit::Ok;
+    }
 
-    // Events flow window → stdout on their own thread; documents flow stdin →
-    // window on this one. Two blocking reads need two threads; there is no
-    // third.
+    let event_canceled = Arc::clone(&canceled);
     let events = std::thread::spawn(move || {
-        for line in reader.lines() {
+        for line in reader.by_ref().lines() {
             let Ok(line) = line else { break };
             if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
                 break;
             }
         }
+        let _ = reader.get_ref().shutdown(Shutdown::Both);
+        event_canceled.store(true, Ordering::Release);
+        drop(cancel_events);
     });
     let mut bad_input = false;
     for document in documents {
+        if canceled.load(Ordering::Acquire) {
+            break;
+        }
         let message = match document {
             Ok(value) if value.get("type").is_some() => value,
             Ok(value) => json!({ "type": "update", "description": value }),
@@ -190,6 +260,7 @@ pub fn run_surface_open(
             }
         };
         if !send_line(&stream, &versioned(message).to_string()) {
+            let _ = stream.shutdown(Shutdown::Both);
             break;
         }
     }

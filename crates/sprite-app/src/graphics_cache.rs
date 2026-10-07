@@ -233,6 +233,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn maximum_image_id_is_evictable() {
+        let mut cache = GraphicsCache::with_budget(1024);
+        let mut image = image(1, 1, 1, 1);
+        image.id = u32::MAX;
+        assert!(cache.texture(&image).is_some());
+        cache.set_budget(0);
+        assert!(cache.is_empty());
+        assert_eq!(cache.used_bytes(), 0);
+    }
+
     /// A red/blue swap produces a picture that looks fine at a glance, so the
     /// channel order is asserted against a pixel whose channels all differ.
     #[test]

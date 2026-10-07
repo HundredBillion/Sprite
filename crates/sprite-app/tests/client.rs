@@ -5,6 +5,9 @@
 //! what reaches standard error, what the exit status is, and that it always
 //! returns. None of that is observable from inside the crate.
 
+#[path = "../src/test_blocking_wait.rs"]
+mod test_blocking_wait;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -477,4 +480,359 @@ fn help_and_version_are_answers_rather_than_errors() {
     let version = run(&["--version"], &[]);
     assert_eq!(version.status, 0);
     assert!(version.out.starts_with("sprite "));
+}
+
+#[test]
+fn config_print_refuses_wrong_credentials_without_stdout() {
+    let endpoint = window(|| "unused".to_owned());
+    let mut environment = credentials(&endpoint, "0");
+    environment
+        .iter_mut()
+        .find(|(name, _)| name == "SPRITE_OBSERVATION_KEY")
+        .unwrap()
+        .1 = "b".repeat(64);
+    let outcome = run(&["config", "print"], &borrowed(&environment));
+    assert_eq!(outcome.status, 5);
+    assert!(outcome.out.is_empty(), "{}", outcome.out);
+    assert!(outcome.errors.contains("denied"), "{}", outcome.errors);
+}
+
+#[test]
+fn config_print_validates_the_window_answer_before_printing() {
+    for answer in ["not TOML", "font = [", "font = 42"] {
+        let endpoint = window(move || answer.to_owned());
+        let environment = credentials(&endpoint, "0");
+        let outcome = run(&["config", "print"], &borrowed(&environment));
+        assert_eq!(outcome.status, 5, "{answer}");
+        assert!(outcome.out.is_empty(), "{}", outcome.out);
+        assert!(!outcome.errors.is_empty());
+    }
+    let settings = sprite_app::Settings::default().to_toml();
+    let response = settings.clone();
+    let endpoint = window(move || response.clone());
+    let environment = credentials(&endpoint, "0");
+    let outcome = run(&["config", "print"], &borrowed(&environment));
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert!(outcome.out.contains(settings.trim_end()));
+}
+
+#[test]
+fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
+    use std::io::{BufRead, BufReader, Write};
+    for tail in ["", "{\"version\":"] {
+        let (mut endpoint, window) = surface_window(|request| match request {
+            sprite_app::SurfaceRequest::Open { reply, .. } => {
+                reply.send(Ok(())).expect("reply");
+                true
+            }
+            sprite_app::SurfaceRequest::Closed { .. } => false,
+            _ => true,
+        });
+        let environment = surface_credentials(&endpoint, "4");
+        let mut child = Command::new(SPRITE)
+            .args(["surface", "open", "--fill"])
+            .env_clear()
+            .envs(borrowed(&environment))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        write!(input, "{DESCRIPTION}\n{{\"type\":\"close\"}}\n{tail}").unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let output = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            tx.send(first).unwrap();
+            let mut remaining = String::new();
+            std::io::Read::read_to_string(&mut reader, &mut remaining).unwrap();
+        });
+        let opened = rx.recv_timeout(Duration::from_secs(3));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            test_blocking_wait::pause(Duration::from_millis(10));
+        };
+        if status.is_none() {
+            child.kill().unwrap();
+        }
+        drop(input);
+        let finished = child.wait_with_output().unwrap();
+        output.join().unwrap();
+        endpoint.close();
+        window.join().unwrap();
+        assert!(opened.unwrap().contains("opened"));
+        assert!(
+            status.is_some(),
+            "socket EOF left stdin blocked for tail {tail:?}"
+        );
+        assert!(
+            finished.status.success(),
+            "{}",
+            String::from_utf8_lossy(&finished.stderr)
+        );
+        assert!(
+            finished.stderr.is_empty(),
+            "cancellation is not malformed JSON"
+        );
+    }
+}
+
+#[test]
+fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
+    use std::io::{BufRead, BufReader, Write};
+    for after_opened in [false, true] {
+        let mut live = None;
+        let (mut endpoint, window) = surface_window(move |request| match request {
+            sprite_app::SurfaceRequest::Open {
+                reply, connection, ..
+            } => {
+                live = Some(connection);
+                reply.send(Ok(())).unwrap();
+                true
+            }
+            sprite_app::SurfaceRequest::Focus { .. } => {
+                assert!(live.as_ref().unwrap().send(r#"{"type":"focus"}"#));
+                true
+            }
+            sprite_app::SurfaceRequest::Closed { .. } => false,
+            _ => true,
+        });
+        let environment = surface_credentials(&endpoint, "4");
+        let mut child = Command::new(SPRITE)
+            .args(["surface", "open", "--fill"])
+            .env_clear()
+            .envs(borrowed(&environment))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        if after_opened {
+            writeln!(input, "{DESCRIPTION}").unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let first = std::thread::spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                tx.send(line).unwrap();
+            });
+            if rx.recv_timeout(Duration::from_secs(3)).is_err() {
+                child.kill().unwrap();
+                drop(input);
+                child.wait().unwrap();
+                first.join().unwrap();
+                panic!("surface did not open");
+            }
+            first.join().unwrap();
+            write!(
+                input,
+                "{{\"type\":\"focus\",\"target\":\"terminal\"}}\n{{\"version\":"
+            )
+            .unwrap();
+        } else {
+            drop(stdout);
+            writeln!(input, "{DESCRIPTION}").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            test_blocking_wait::pause(Duration::from_millis(10));
+        };
+        if status.is_none() {
+            child.kill().unwrap();
+        }
+        drop(input);
+        let finished = child.wait_with_output().unwrap();
+        endpoint.close();
+        window.join().unwrap();
+        assert!(
+            status.is_some(),
+            "stdout failure left stdin blocked: after_opened={after_opened}"
+        );
+        assert!(
+            finished.status.success(),
+            "{}",
+            String::from_utf8_lossy(&finished.stderr)
+        );
+        assert!(finished.stderr.is_empty());
+    }
+}
+
+#[test]
+fn surface_stdin_eof_drains_the_windows_final_event() {
+    let mut live = None;
+    let (endpoint, window) = surface_window(move |request| match request {
+        sprite_app::SurfaceRequest::Open {
+            reply, connection, ..
+        } => {
+            live = Some(connection);
+            reply.send(Ok(())).unwrap();
+            true
+        }
+        sprite_app::SurfaceRequest::Closed { .. } => {
+            assert!(live.take().unwrap().send(r#"{"type":"closed"}"#));
+            false
+        }
+        _ => true,
+    });
+    let environment = surface_credentials(&endpoint, "4");
+    let outcome = run_with_input(
+        &["surface", "open", "--fill"],
+        &borrowed(&environment),
+        DESCRIPTION,
+    );
+    window.join().unwrap();
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert_eq!(outcome.out.lines().last(), Some(r#"{"type":"closed"}"#));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn surface_event_eof_releases_a_blocked_socket_write() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixListener;
+
+    let directory = scratch();
+    std::fs::create_dir_all(&directory).unwrap();
+    let socket = directory.join("write-pressure.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut child = Command::new(SPRITE)
+        .args(["surface", "open", "--fill"])
+        .env_clear()
+        .env("SPRITE_SURFACE_SOCKET", &socket)
+        .env("SPRITE_SURFACE_KEY", "a".repeat(64))
+        .env("SPRITE_PANE", "4")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let update = serde_json::json!({
+            "version": 1,
+            "root": {
+                "kind": "text",
+                "color": "terminal.foreground",
+                "text": "x".repeat(8 * 1024 * 1024),
+            },
+        });
+        let result = writeln!(input, "{DESCRIPTION}\n{update}");
+        (result, input)
+    });
+    let mut peer = None;
+    let result = (|| -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            if Instant::now() >= deadline {
+                return Err("client did not connect".into());
+            }
+            test_blocking_wait::pause(Duration::from_millis(10));
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        peer = Some(BufReader::new(stream));
+        let reader = peer.as_mut().unwrap();
+        let mut open = String::new();
+        reader
+            .read_line(&mut open)
+            .map_err(|error| error.to_string())?;
+        if !open.contains("\"type\":\"open\"") {
+            return Err(format!("unexpected open: {open}"));
+        }
+        writeln!(reader.get_mut(), "{{\"type\":\"opened\",\"id\":1}}")
+            .map_err(|error| error.to_string())?;
+        let mut prefix = [0];
+        reader
+            .read_exact(&mut prefix)
+            .map_err(|error| error.to_string())?;
+        if prefix != *b"{" {
+            return Err("update was not JSON".into());
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let syscall = std::fs::read_to_string(format!("/proc/{}/syscall", child.id()))
+                .map_err(|error| error.to_string())?;
+            let state = std::fs::read_to_string(format!("/proc/{}/wchan", child.id()))
+                .map_err(|error| error.to_string())?;
+            let arguments: Vec<_> = syscall.split_whitespace().collect();
+            let argument = |index| {
+                arguments.get(index).and_then(|value: &&str| {
+                    u64::from_str_radix(value.trim_start_matches("0x"), 16).ok()
+                })
+            };
+            if state.contains("sock")
+                && argument(1).is_some_and(|fd| (3..128).contains(&fd))
+                && argument(3).is_some_and(|bytes| bytes > 1024 * 1024)
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "no blocked socket write: syscall={syscall}, wchan={state}"
+                ));
+            }
+            test_blocking_wait::pause(Duration::from_millis(10));
+        }
+        reader
+            .get_ref()
+            .shutdown(Shutdown::Write)
+            .map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err("event EOF left the main socket write blocked".into());
+            }
+            test_blocking_wait::pause(Duration::from_millis(10));
+        }
+    })();
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    let (written, input) = writer.join().unwrap();
+    drop(input);
+    drop(peer);
+    drop(listener);
+    std::fs::remove_file(socket).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+    assert!(result.is_ok(), "{}", result.unwrap_err());
+    assert!(written.is_ok(), "stdin writer failed: {written:?}");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
 }

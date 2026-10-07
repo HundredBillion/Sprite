@@ -154,6 +154,9 @@ thread_local! {
 impl TerminalView {
     fn request_hover_link(&mut self, position: sprite_term::CellPosition) {
         self.hovered_link = None;
+        if !matches!(self.session, SessionState::Running(_)) {
+            return;
+        }
         if self.hover_request.is_none() {
             let request_id = self.next_link_request;
             self.next_link_request = self.next_link_request.wrapping_add(1);
@@ -170,6 +173,10 @@ impl TerminalView {
     fn request_link_click(&mut self, position: sprite_term::CellPosition) {
         let request_id = self.next_link_request;
         self.next_link_request = self.next_link_request.wrapping_add(1);
+        self.pending_link_click = None;
+        if !matches!(self.session, SessionState::Running(_)) {
+            return;
+        }
         self.pending_link_click = Some(request_id);
         if !self.submit(TerminalCommand::ResolveHyperlink {
             position,
@@ -764,3 +771,6 @@ impl sprite_pane::Pane for TerminalView {
         })
     }
 }
+
+#[cfg(test)]
+mod submission_regressions;

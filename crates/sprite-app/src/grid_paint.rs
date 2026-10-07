@@ -324,6 +324,8 @@ struct Drawn {
     cursor: Option<CursorSnapshot>,
     /// The colour that cursor is drawn in.
     cursor_paint: Rgba,
+    underline: Option<gpui::UnderlineStyle>,
+    strikethrough: Option<StrikethroughStyle>,
 }
 
 impl GridPaint {
@@ -378,9 +380,19 @@ impl GridPaint {
             }),
         };
 
+        let foreground = if inverted { background } else { foreground };
+        let (underline, strikethrough) = decorations(
+            &cell.style,
+            foreground,
+            self.default_fg,
+            self.palette.as_deref(),
+            self.cell_height,
+        );
         Drawn {
             background: fill,
-            foreground: if inverted { background } else { foreground },
+            foreground,
+            underline,
+            strikethrough,
             cursor: here,
             cursor_paint,
         }
@@ -593,6 +605,7 @@ impl Element for GridPaint {
                     bottom,
                 };
                 self.paint_glyph(cell, &drawn, bounds, scale, window, cx);
+                self.paint_decorations(cell, &drawn, bounds, window);
                 self.paint_cursor(&drawn, bounds, scale, window);
             }
         }
@@ -636,20 +649,13 @@ impl GridPaint {
         }
 
         let text = SharedString::from(cell.text.as_str().to_owned());
-        let (underline, strikethrough) = decorations(
-            &cell.style,
-            drawn.foreground,
-            self.default_fg,
-            self.palette.as_deref(),
-            self.cell_height,
-        );
         let run = TextRun {
             len: text.len(),
             font: terminal_font(&self.font_family, cell.style.bold, cell.style.italic),
             color: drawn.foreground.into(),
             background_color: None,
-            underline,
-            strikethrough,
+            underline: None,
+            strikethrough: None,
         };
         let font_size = if cell.hovered_link {
             self.font_size + px(1.0)
@@ -693,6 +699,47 @@ impl GridPaint {
         };
         window.with_content_mask(Some(mask), |window| {
             let _ = line.paint(origin, self.cell_height, window, cx);
+        });
+    }
+
+    fn paint_decorations(
+        &self,
+        cell: &PositionedCell,
+        drawn: &Drawn,
+        bounds: CellBounds,
+        window: &mut Window,
+    ) {
+        if drawn.underline.is_none() && drawn.strikethrough.is_none() {
+            return;
+        }
+        // Decorations span the cell even when its glyph has no ink or uses geometry.
+        let font = terminal_font(&self.font_family, cell.style.bold, cell.style.italic);
+        let font_size = self.font_size + if cell.hovered_link { px(1.0) } else { px(0.0) };
+        let text = window.text_system();
+        let font_id = text.resolve_font(&font);
+        let baseline = text.baseline_offset(font_id, font_size, self.cell_height);
+        let descent = text.descent(font_id, font_size);
+        let ascent = text.ascent(font_id, font_size);
+        let left = bounds.left.pixels();
+        let top = bounds.top.pixels();
+        let width = bounds.right.pixels() - left;
+        let mask = ContentMask {
+            bounds: Bounds::from_corners(
+                point(left, top),
+                point(bounds.right.pixels(), top + self.cell_height),
+            ),
+        };
+        window.with_content_mask(Some(mask), |window| {
+            if let Some(style) = drawn.underline.as_ref() {
+                window.paint_underline(point(left, top + baseline + descent * 0.618), width, style);
+            }
+            if let Some(style) = drawn.strikethrough.as_ref() {
+                window.paint_strikethrough(
+                    point(left, top + (ascent * 0.5 + baseline) * 0.5),
+                    width,
+                    style,
+                );
+            }
         });
     }
 
@@ -1260,6 +1307,70 @@ mod tests {
             underline,
             strikethrough,
             ..plain_style(SnapshotColor::Default, SnapshotColor::Default, false)
+        }
+    }
+
+    #[test]
+    fn drawing_prepares_decorations_for_whitespace_without_glyph_ink() {
+        let paint = GridPaint::new(GridPaintSpec {
+            rows: Arc::from([]),
+            pass: RowPass::Whole,
+            cursor: None,
+            cursor_color: None,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x112233),
+            palette: None,
+            cell_width: px(8.4),
+            cell_height: px(16.8),
+            font_family: ".SystemUIFont".into(),
+            font_size: px(14.0),
+        });
+        for text in ["", " ", "\t", "\u{3000}", "\u{10eeee}"] {
+            let mut cell = PositionedCell {
+                column: 0,
+                columns: 1,
+                text: text.into(),
+                style: decorated(UnderlineStyle::Single, true),
+                selected: false,
+                hovered_link: false,
+            };
+            assert!(blank_glyph(&cell.text));
+            let drawn = paint.draw(&cell, None);
+            assert!(
+                drawn.underline.is_some(),
+                "{text:?} must retain its underline"
+            );
+            assert!(drawn.strikethrough.is_some());
+            let block = CursorSnapshot {
+                row: 0,
+                column: 0,
+                visible: true,
+                blinking: false,
+                style: CursorStyle::Block,
+            };
+            let on_cursor = paint.draw(&cell, Some(block));
+            assert_eq!(
+                on_cursor.underline.unwrap().color,
+                Some(rgb(0x112233).into())
+            );
+            assert_eq!(
+                on_cursor.strikethrough.unwrap().color,
+                Some(rgb(0x112233).into())
+            );
+            cell.selected = true;
+            assert_eq!(
+                paint.draw(&cell, None).underline.unwrap().color,
+                Some(rgb(0x112233).into())
+            );
+            cell.style.underline_color = SnapshotColor::Rgb(unpack(0xff0000));
+            assert_eq!(
+                paint.draw(&cell, None).underline.unwrap().color,
+                Some(rgb(0xff0000).into())
+            );
+            cell.style = decorated(UnderlineStyle::None, false);
+            let drawn = paint.draw(&cell, None);
+            assert!(drawn.underline.is_none());
+            assert!(drawn.strikethrough.is_none());
         }
     }
 
