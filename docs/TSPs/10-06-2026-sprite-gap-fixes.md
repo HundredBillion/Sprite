@@ -266,7 +266,7 @@ and accepts ordinary native replace calls regardless of preedit.
   and verification against pinned upstream/recorded patch. Preserve other GPUI
   clients through default forwarding. Source-inspect Darwin and run available
   compiler/native CI rather than pretending Cocoa ran on Linux.
-- [ ] Remove Sprite's preedit-only commit gate; retain key encoding and current
+- [x] Remove Sprite's preedit-only commit gate; retain key encoding and current
   Surface target/refusal rules. Test native commits, key fallback, active marks,
   focus changes and protocols. Record ADR0027 limits/cost and commit/review.
 
@@ -309,7 +309,7 @@ covered. A custom Rust parser or broader production exclusion is unnecessary.
   new guard passes on the repository but rejects a temporary production match.
 - [x] Run covering terminal-view/theme regressions, normal build/check, fmt,
   strict app clippy and diff check; record report and scoped commit.
-- [ ] Independent final branch review covers helper/guard and affected callers.
+- [x] Independent final branch review covers helper/guard and affected callers.
 
 Task6 implementation: `test_blocking_wait.rs` is gated with cfg(test) at the
 module declaration and within the file. Six callers retain their exact wait
@@ -330,16 +330,16 @@ review remains outstanding.
   Task3 021; Task4 023; Task5 019. No confirmed ID omitted.
 - [x] Independent plan review including GUI compatibility seam, session scope,
   rollback recovery, settings retries and original bug invariants.
-- [ ] Complete independent task spec/quality reviews and resolve substantive
+- [x] Complete independent task spec/quality reviews and resolve substantive
   findings; maintain plan-local progress ledger and audit verification statuses.
-- [ ] Final whole-branch review from baseline including new files, affected
+- [x] Final whole-branch review from baseline including new files, affected
   unchanged callers, native input source and all earlier audit regressions.
-- [ ] Run `cargo fmt --all -- --check`, locked/offline full workspace build,
+- [x] Run `cargo fmt --all -- --check`, locked/offline full workspace build,
   clippy all-targets with -D warnings, TERM=dumb tests including doctests,
   Python automation/shell tests, shell syntax, vendored patch integrity and
   safe staged installation as appropriate. Inspect actual command outputs.
-- [ ] Update findings, ADRs/context and PR evidence; commit remaining docs,
-  push branch and open PR against current origin/master without merging it.
+- [x] Finalize findings, ADRs/context and PR evidence for the reviewed fixes.
+- [ ] Push branch and open PR against current origin/master without merging it.
 
 Independent plan review: `/tmp/sprite-gap-plan-review.md`; three corrections adopted before implementation: retain latest refused Resize, route one-byte Wayland composition commits natively, and track partial settings admission across a latest-value revert. All ten IDs covered. Task1 has no remaining plan blocker.
 
@@ -348,3 +348,14 @@ Task3 review refinement authorized under user autonomy preference: R3-1 excludes
 SPR015 sibling refinement: actual old-Fish exported marker suppresses current Bash/Zsh hooks; updated Fish repeat-load early return also leaves it exported. Root verified isolated actual scripts; fix is authorized within the initialization root-cause class.
 
 Task4 R1 minor review refinement: before first bundle, fallback colors must follow latest desired UI defaults even when refused values are reverted and admitted-worker diff is empty. Root authorizes actual-path regression and targeted repair.
+
+
+Final evidence at6eb05a1:833 workspace tests pass,0fail,2existing ignored,
+including doctests/full-output benchmark;32Python pass without skips; all three
+contract tests pass after normal build; strict workspace clippy, locked/offline
+build, firstparty/helper formatting, shell syntax, exact source integrity, all
+CI forbidden-state checks and dependency views pass. Full review091efef..8174aee
+and focused repair review8174aee..6eb05a1 resolve both final Important findings;
+Task6 independently passes specification/quality. Native platform qualification
+and portable/installer limits remain explicit in the audit. Publication is the
+remaining authorized action; no merge is requested.

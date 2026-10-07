@@ -58,7 +58,7 @@ fix commits and durable regression paths against the resulting branch.
 | SPR-018 | P2 | 6 | Close confirmation appears above vertically split panes; `workspace/mod.rs:364–374,472–493`, `workspace/divider.rs:250–279` | Parent reran actual GPUI render probe: pane origin changes 0→34px and height 1080→1046, divider cache still origin 0/boundary 540. Existing allocations remain based on pre-banner room. | Cached pane geometry accounts only for tab chrome; dynamic banner changes actual container room and pointer coordinates. | Resolved in 074cc1a; actual-handler/PTY/layout red-green verified; independent spec/quality review passed |
 | SPR-019 | P2 | 6 | Wayland multibyte commit without preedit; `terminal_view/input.rs:259–260` | Pinned CommitString("日本")→InsertText→replace_text_in_range path has no KeyDown fallback. Actual handler GPUI command recorder emits zero commands; marked-text control emits CommitText("日本"). Parent reran. | Preedit presence incorrectly stands in for whether text was already delivered by keydown. | Resolved in d271b54/6f529e5; PTY/socket and portable source-policy regressions verified; independent initial/focused reviews passed |
 | SPR-020 | P2 | 6 | Terminal mouse reporting for middle/right buttons or Alt/Control; `terminal_view/render.rs:473–475,555–557`, `terminal_view/input.rs:158–164` | Parent inspected entire terminal mouse listener/route census: only left down/up listeners; route always sends Left and hard-codes Alt/Control false. Motion similarly discards supplied pressed button. | Native mouse payload omitted at application-to-core boundary despite supported core fields. | Resolved in 074cc1a; actual-handler/PTY/layout red-green verified; independent spec/quality review passed |
-| SPR-021 | P1 | 10 | Explicit shutdown with ordinary Bash job-control background group; `sprite-term/src/worker/closing.rs:79,188–200` | Parent reran actual public-session `/tmp/sprite-round10-process.py`: shell disappears, wait completes in 50ms, background sleep remains live/reparented in a separate group within the same terminal session. Probe kills only its tracked children afterward. | Cleanup enumerates recorded shell and foreground groups, excluding other ordinary job-control groups; completion predicate checks only enumerated groups. | Resolved in 5e50493/69cc473; immediate/late cleanup and permission regressions verified; independent review passed |
+| SPR-021 | P1 | 10 | Explicit shutdown with ordinary Bash job-control background group; `sprite-term/src/worker/closing.rs:79,188–200` | Parent reran actual public-session `/tmp/sprite-round10-process.py`: shell disappears, wait completes in 50ms, background sleep remains live/reparented in a separate group within the same terminal session. Probe kills only its tracked children afterward. | Cleanup enumerates recorded shell and foreground groups, excluding other ordinary job-control groups; completion predicate checks only enumerated groups. | Resolved in 5e50493/69cc473/6eb05a1; immediate/late and Linux/Darwin permission regressions verified; full/focused reviews passed |
 | SPR-022 | P3 | 10 | Rust tmux graphics fixture with TMPDIR containing spaces; `sprite-term/tests/graphics_tmux.rs:78–83` | Parent reran `/tmp/sprite-round10-tmux.py`: exact baseline test binary passes with ordinary TMPDIR, fails with spaced TMPDIR (exit 101, snapshot stream ended). | Generated shell command interpolates fixture config/image paths without shell quoting. | Resolved in 81e6672; regression verified; independent spec/quality review passed |
 | SPR-023 | P1 | 9 | Child event burst and multi-command settings reload while UI consumption is delayed; `sprite-term/src/worker/mod.rs:161`, `session.rs:233`, `terminal_view/theme.rs:239,245` | Parent independently reran serialized actual-session GPUI probe: callback prints before, stalls past 6s; identical case with dispatcher draining notices prints after and passes in 2.69s. Actual ordinary event/snapshot tasks are installed. | Worker blocks publishing to 32-event queue; pump fills 16 of 17 inbox slots; multiple blocking UI command sends exhaust the reserved slot and prevent the same UI thread draining events. | Resolved in a2d8fab/605463d; main pressure/recovery and pre-snapshot fallback regressions verified; independent reviews passed |
 
@@ -225,14 +225,15 @@ reviews: `docs/TSPs/10-06-2026-sprite-gap-fixes.md`. No merge is authorized.
 
 | Task | Finding IDs | Current status | Verification |
 | --- | --- | --- | --- |
-| 1 | SPR-014/015/016/022 | Resolved; independent spec/quality review passed | 25 Python and 3 real tmux tests pass; actual Fish/Zsh PTY controls, syntax/fmt and targeted clippy pass; installer red/green includes failed copy/replacement/rollback |
+| 1 | SPR-014/015/016/022 | Resolved; initial/focused spec/quality reviews passed | 29 automation/shell Python and 3 real tmux tests; inherited/nested/reload siblings and actual shell PTY controls; installer copy/replacement/rollback red-green |
 | 2 | SPR-017/018/020 | Resolved; independent review passed | 562 app tests, 11 terminal and 4 layout tests pass; fmt/clippy pass; three actual-path baseline failures verified |
-| 3 | SPR-021 | Resolved; independent fix review passed | 66 library, 21 integration tests pass; ordinary job red-green, detached/independent negatives and fast-leader capture pass |
+| 3 | SPR-021 | Resolved; initial and both repair reviews passed | Four public ordinary-job scenarios including actual Linux foreign EACCES red-green; immediate/fast/late shutdown and detached/independent controls; 35 covering checks and full-volume benchmark |
 | 4 | SPR-023 | Resolved; independent initial/fix reviews passed | 226 term and 596 app tests, benchmark, fmt/clippy pass; actual pressure/recovery and paused-consumer regressions verified |
-| 5 | SPR-019 | Pending | Original direct-commit failure and native call path retained |
+| 5 | SPR-019 | Resolved; initial/focused and final harness reviews passed | Actual PTY/Surface/default-client red-green, portable native traces and exact source integrity; all three type proofs pass after a normal build |
 
-Unconfirmed GAP-C01–05 remain separate. Final verification and PR publication are
-pending; baseline success alone is not evidence for the fixes.
+Unconfirmed GAP-C01–05 remain separate. All confirmed findings and introduced
+regressions are resolved and reviewed. Fresh integrated verification is recorded
+below; PR publication is the remaining requested action.
 
 ### Task 1 verification: SPR-014/015/016/022
 
@@ -414,7 +415,7 @@ pointer regressions. Production scheduling remains event driven. This is an
 introduced integration failure, not a new audit finding. Before publication,
 keep production sources covered by the prohibition and isolate intentional
 blocking test coordination through a narrowly scoped test-only helper; verify a
-production-match negative control. Repair and independent review remain pending.
+production-match negative control. The repair and independent review are recorded below.
 
 ### Task 5 verification: SPR-019
 
@@ -470,11 +471,112 @@ durable outcomes are recorded in this audit and the TSP.
 
 Fresh packaging/release/shell/patch Python verification: 32 tests pass, zero
 skips, including temporary Fish4.9.3 and Zsh5.9.2. Bash/Fish/Zsh and macOS
-installation/update/bundle shell syntax checks pass. Final full workspace
-verification and independent branch review remain pending.
+installation/update/bundle shell syntax checks pass. Final full workspace verification and independent branch review are recorded
+below.
 
 Task5 independent review passed the specification and execution checks, with
 one minor stale-comment finding repaired in33ce995. Focused spec/quality
 re-review passed and found no remaining Task5 issue. All ten confirmed audit
-findings now have reviewed fixes; final branch review and fresh integrated
-verification are the remaining publication gates.
+findings had reviewed fixes at this checkpoint; the subsequent full review,
+its additional platform/test repairs and fresh gates are recorded below.
+
+### Final review: SPR-021 Linux foreign-permission sibling
+
+The full-branch reviewer demonstrated an avoidable permission failure analogous
+to Darwin's repaired variant. Linux `scan(_session)` reads every numeric
+`/proc/PID/stat` before filtering ownership, and any EACCES aborts the entire
+scan. Linux procfs `hidepid=1` lists foreign process directories while denying
+access to their contents; the kernel documents this configuration at
+https://docs.kernel.org/filesystems/proc.html . Unknown possibly owned metadata
+must remain conservative, but a proven foreign SID must not prevent escalation
+of accessible owned jobs.
+
+Reviewer and root independently ran the actual public-session job regression
+with a narrowly scoped LD_PRELOAD fault denying only `/proc/1/stat`. Both failed:
+shutdown waited about6.08s and an ordinary HUP/TERM-ignoring job survived.
+The fixture cleaned only its tracked children. No host procfs mount, user
+session, desktop or source was modified by the probe. Root evidence:
+`/tmp/sprite-gap-final-linux-foreign-red.log`. This is deduplicated into SPR-021;
+the repair, durable regression and focused final re-review are recorded below.
+
+Fresh whole-workspace verification completed with831passes,1failure,2existing
+ignored across44result blocks. The failure is an existing raw-rustc contract
+harness selecting individually loadable but incompatible cached GPUI/image
+artifacts after GPUI became local; its positive Frame consumer fails E0271.
+All other application/PTY/benchmark paths passed. A narrow consumer-compatibility
+selection repair is in progress; contract assertions will remain unchanged.
+This run is diagnostic evidence, not the final passing verification.
+
+R-FINAL-2 repair `38048a5` anchors GPUI's Render trait and additive callback to
+built Sprite, then selects image by compiling the actual RenderImage(Frame)
+consumer. This rejects the mismatched artifacts even when version, features,
+compiler and profile names match. It mirrors the existing Serde/toml consumer
+probe and preserves all positive controls and exact negative diagnostics.
+Focused red exit101 becomes green; all three type-proof tests pass, including
+a repeat after normal build/doctests. Workspace strict clippy/build, formatting
+and diff checks pass. No cache, production Cargo dependency, pinned source or
+contract assertion is removed. Focused final review and fresh full verification
+will cover this repair with the Linux sibling repair.
+
+
+## Final implementation result
+
+All ten confirmed findings SPR-014–SPR-023 are resolved. Full independent review
+covered baseline091efef through8174aee; focused final review of8174aee through
+6eb05a1 resolves both Important findings. Separate Task6 spec/quality review and
+all Task1–5 initial/repair reviews passed their stated scopes. No actionable
+review finding remains open. This combines full coverage with scoped repairs;
+it does not relabel the original failing review as an initial clean verdict.
+
+SPR-021 final repair6eb05a1 shares SID-first protected-metadata filtering between
+Linux and Darwin. Its durable self-reexec public-session test proves EACCES is
+active for a still-live foreign parent, then exercises actual shutdown with two
+ordinary ignoring groups and detached/independent controls. Reverting only Linux
+wiring fails at6.10s with an ordinary survivor; restoring it passes3.13s.
+Independent reviewer reruns pass3.11s for the durable test and3.07s for the
+original /proc/1/stat fault. The subprocess has a12s bound and captures output
+in files. Ordinary failures execute birth-aware fixture cleanup; forced timeout
+cannot run child Drop, so test jobs retain their explicit30s lifetime. No guessed
+or global kills are used. Unknown or possibly owned permission errors remain
+incomplete rather than silently discarded.
+
+R-FINAL-2's consumer-based artifact selection in38048a5 passes the full suite and
+three contract tests after the final normal build. Task6's production scheduling
+guard continues rejecting a real blocking production control. All original
+SPR-001–SPR-013 fixes and Pane cleanup ownership remain preserved.
+
+### Fresh final verification
+
+Production/test code revision:6eb05a1; final documentation updates follow without
+changing executable behavior. All commands exited0:
+
+| Artifact | Command / actual result |
+| --- | --- |
+| Workspace tests and doctests | `TERM=dumb cargo test --workspace --locked --offline --no-fail-fast`:833 passed,0 failed,2 existing ignored;44 result blocks; full-output benchmark passed33.48s. Log `/tmp/sprite-gap-final-tests.log` |
+| Strict first-party lint | `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`:passed. Log `/tmp/sprite-gap-final-clippy.log` |
+| Workspace build | `cargo build --workspace --locked --offline`:passed. Log `/tmp/sprite-gap-final-build.log` |
+| Post-build compile contracts | `TERM=dumb cargo test -p sprite-app --test type_invariants --locked --offline`:3 passed. Log `/tmp/sprite-gap-final-postbuild-contracts.log` |
+| Formatting | `cargo fmt --all -- --check` and new GPUI scope-helper rustfmt check:passed; published upstream source bytes preserved |
+| Release, packaging, optional shells and patched-source policies | `python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration scripts.test_gpui_patch -v`:32 passed,zero skips, with recorded temporary Fish/Zsh/Misc FPATH. Log `/tmp/sprite-gap-final-python.log` |
+| Shell syntax | Bash integration/install/update/bundle, Fish integration, Zsh integration:passed |
+| Exact source and production boundaries | `python3 scripts/check_gpui_patch.py`, exact CI Forbidden states script, and baseline-to-branch diff whitespace check:passed; tamper and production-match negative controls separately verified |
+| Dependency views | Locked/offline Cargo duplicate and feature trees completed; no resolved dependency versions/features changed |
+| Release workload | Five-sample full10MiB `sprite-term-bench`:passed; JSON `/tmp/sprite-gap-linux-fix-bench.json` |
+
+The two ignored tests are unchanged: external Croft capability smoke and maximum
+request cost measurement. Retained upstream GPUI compiler warnings and the
+proc-macro-error2 future-compatibility notice do not fail the first-party lint
+gate; third-party source is not edited to silence unrelated warnings.
+
+### Remaining qualifications
+
+Live Cocoa/X11/Wayland IME/compositor/hardware behavior and a real macOS
+installation were not exercised on this Linux host. Hosted macOS compilation
+and headless checks are configured; their status will be reported from the PR
+rather than inferred. Source-policy traces and safe injected installation
+failures do not replace those native qualification gates. The GPUI source patch
+adds maintenance work when its exact pin changes. Portable process enumeration
+and check-to-killpg retain documented races; unknown owned permissions remain
+bounded/incomplete. Installer recovery handles ordinary errors, without a
+power-loss or concurrent-installer atomicity promise. Unconfirmed GAP-C01–05
+remain explicitly separate and are not presented as fixed bugs.
