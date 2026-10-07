@@ -1,0 +1,3 @@
+# Preserve published shader indentation and unified-diff context bytes.
+vendor/gpui/src/platform/mac/shaders.metal -whitespace
+patches/gpui-0.2.2-native-text.patch -whitespace

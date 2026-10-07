@@ -376,8 +376,9 @@ mod tests {
         });
         workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
         draw_workspace(cx);
-        let reopened = focused_handle(&workspace, cx);
-        cx.update(|window, _| assert!(reopened.is_focused(window)));
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.tabs.active().is_none());
+        });
     }
     #[gpui::test]
     fn modes_cancel_and_close_confirmation_remains_scope_specific(cx: &mut gpui::TestAppContext) {

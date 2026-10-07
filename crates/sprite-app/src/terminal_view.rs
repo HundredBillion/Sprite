@@ -45,10 +45,11 @@ enum SessionState {
 }
 
 pub struct TerminalView {
-    /// Local renderer groups and the independently accepted terminal cursor group.
     applied_settings: crate::config::Settings,
-    /// Terminal defaults can lag local fallback colors after a refused reload.
-    accepted_colors: sprite_term::ColorDefaults,
+    pending_settings: Option<crate::config::Settings>,
+    pending_resize: Option<sprite_term::ValidTerminalSize>,
+    admission_closed: bool,
+    admission_notice: bool,
     /// An ended pane keeps its worker handle until cleanup can join it.
     ///
     /// A pane whose configured program could not be run still has to draw the
@@ -85,8 +86,7 @@ pub struct TerminalView {
     /// tell every child the wrong size.
     allocated: Option<Size<Pixels>>,
     status: Option<SharedString>,
-    /// Texture reconciliation clears only its own refusal; terminal notices survive.
-    graphics_status: Option<SharedString>,
+    texture_warning: Option<SharedString>,
     /// The title the child set through OSC, if it set one.
     ///
     /// `None` means unknown, never a guess: the engine's own rule, kept here.
@@ -132,6 +132,8 @@ pub struct TerminalView {
     _events: Task<()>,
     _snapshots: Task<()>,
     _blink: Task<()>,
+    _retry: Task<()>,
+    retry_wake: async_channel::Sender<()>,
     /// Keeps the settings subscription alive for as long as the view is.
     _settings: gpui::Subscription,
 }
@@ -158,11 +160,12 @@ impl TerminalView {
         if self.hover_request.is_none() {
             let request_id = self.next_link_request;
             self.next_link_request = self.next_link_request.wrapping_add(1);
-            if self.submit(TerminalCommand::ResolveHyperlink {
+            self.hover_request = Some((request_id, position));
+            if !self.submit(TerminalCommand::ResolveHyperlink {
                 position,
                 request_id,
             }) {
-                self.hover_request = Some((request_id, position));
+                self.hover_request = None;
             }
         }
     }
@@ -174,11 +177,12 @@ impl TerminalView {
         if !matches!(self.session, SessionState::Running(_)) {
             return;
         }
-        if self.submit(TerminalCommand::ResolveHyperlink {
+        self.pending_link_click = Some(request_id);
+        if !self.submit(TerminalCommand::ResolveHyperlink {
             position,
             request_id,
         }) {
-            self.pending_link_click = Some(request_id);
+            self.pending_link_click = None;
         }
     }
 
@@ -221,7 +225,7 @@ impl TerminalView {
         let mut config = match command {
             Some(command) => {
                 let (program, arguments) = command.split_first().expect("a program to run");
-                SessionConfig::command(program, arguments.to_vec())
+                SessionConfig::terminal_command(program, arguments.to_vec())
             }
             // A preference that cannot be honoured falls back and says so
             // rather than leaving a pane that will not open.
@@ -253,7 +257,6 @@ impl TerminalView {
             ..sprite_term::GraphicsPolicy::default()
         };
         let fallback_colors = defaults.fallback_colors;
-        let accepted_colors = defaults.colors.clone();
         config.colors = defaults.colors;
         config.cursor = defaults.cursor;
         config.scrollback_bytes = scrollback.bytes.get();
@@ -289,6 +292,7 @@ impl TerminalView {
                             }
                             SessionState::NeverStarted => SessionState::NeverStarted,
                         };
+                        let _ = view.retry_wake.force_send(());
                         view.refresh_display_title(cx);
                     });
                 }
@@ -355,9 +359,13 @@ impl TerminalView {
                 view.apply_settings(&settings, window, cx);
             });
 
+        let (retry_task, retry_wake) = Self::spawn_retry(window, cx);
         Self {
             applied_settings,
-            accepted_colors,
+            pending_settings: None,
+            pending_resize: None,
+            admission_closed: false,
+            admission_notice: false,
             session: SessionState::Running(session),
             observation,
             surfaces: SurfaceHost::default(),
@@ -366,7 +374,7 @@ impl TerminalView {
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
             status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
-            graphics_status: None,
+            texture_warning: None,
             bundle: None,
             // The renderer's own limit, separate from the terminal's above.
             textures: crate::graphics_cache::GraphicsCache::with_budget(
@@ -396,6 +404,8 @@ impl TerminalView {
             _events: event_task,
             _snapshots: snapshot_task,
             _blink: Self::spawn_blink(cx),
+            _retry: retry_task,
+            retry_wake,
             _settings: settings_subscription,
         }
     }
@@ -442,7 +452,10 @@ impl TerminalView {
             });
         Self {
             applied_settings: crate::config::Settings::default(),
-            accepted_colors: theme::session_defaults(&crate::config::Settings::default()).colors,
+            pending_settings: None,
+            pending_resize: None,
+            admission_closed: false,
+            admission_notice: false,
             session: SessionState::NeverStarted,
             // A view that never started a session has nothing to observe.
             observation: None,
@@ -463,7 +476,7 @@ impl TerminalView {
             title: None,
             display_title: None,
             status: Some(message.into()),
-            graphics_status: None,
+            texture_warning: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
             plain_link_click: input::PlainLinkClick::default(),
@@ -485,6 +498,8 @@ impl TerminalView {
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
             _blink: Self::spawn_blink(cx),
+            _retry: Task::ready(()),
+            retry_wake: async_channel::bounded(1).0,
             _settings: settings_subscription,
         }
     }
@@ -550,6 +565,10 @@ impl TerminalView {
 
     /// Hands over the worker so the window can wait for it off the GPUI thread.
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
+        self.admission_closed = true;
+        self.pending_settings = None;
+        self.pending_resize = None;
+        let _ = self.retry_wake.force_send(());
         // Retained view handles must not keep a closed pane reachable by commands.
         if let Some(link) = self.observation.take() {
             link.panes.forget(link.pane);
@@ -572,11 +591,61 @@ impl TerminalView {
         let SessionState::Running(session) = &mut self.session else {
             return true;
         };
-        if let Err(error) = session.try_send(command) {
-            self.status = Some(error.to_string().into());
-            return false;
+        match session.try_send(command) {
+            Ok(()) => true,
+            Err(error) => {
+                self.admission_closed = matches!(
+                    error.message.as_str(),
+                    "the terminal worker ended" | "the terminal session is shutting down"
+                );
+                self.status = Some(error.to_string().into());
+                self.admission_notice = true;
+                let _ = self.retry_wake.force_send(());
+                false
+            }
         }
-        true
+    }
+
+    // One coalesced wake starts bounded latest-value recovery and paints refusal without another snapshot.
+    fn spawn_retry(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Task<()>, async_channel::Sender<()>) {
+        let (wake, receiver) = async_channel::bounded(1);
+        let task = cx.spawn_in(window, async move |view, cx| {
+            while receiver.recv().await.is_ok() {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                    let pending = view.update_in(cx, |view, window, cx| {
+                        if std::mem::take(&mut view.admission_notice) {
+                            cx.notify();
+                        }
+                        if view.admission_closed
+                            || !matches!(view.session, SessionState::Running(_))
+                        {
+                            view.pending_settings = None;
+                            view.pending_resize = None;
+                            return None;
+                        }
+                        if let Some(settings) = view.pending_settings.take() {
+                            view.apply_settings(&settings, window, cx);
+                        }
+                        if let Some(size) = view.pending_resize {
+                            view.admit_resize(size);
+                        }
+                        Some(view.pending_settings.is_some() || view.pending_resize.is_some())
+                    });
+                    match pending {
+                        Ok(Some(true)) => {}
+                        Ok(Some(false)) => break,
+                        _ => return,
+                    }
+                }
+            }
+        });
+        (task, wake)
     }
 
     /// What this pane is running, asked of the kernel rather than of the

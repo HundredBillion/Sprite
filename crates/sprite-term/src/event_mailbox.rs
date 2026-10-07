@@ -137,7 +137,7 @@ impl Mailbox {
 
     pub(crate) fn finish_remaining(&self) -> Option<Duration> {
         self.state.lock().unwrap().drain_deadline.map(|deadline| {
-            (deadline + crate::worker::CLEANUP_BUDGET - NATURAL_DRAIN)
+            (deadline + Duration::from_secs(6) - NATURAL_DRAIN)
                 .saturating_duration_since(Instant::now())
         })
     }

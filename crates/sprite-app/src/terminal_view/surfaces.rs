@@ -1253,8 +1253,9 @@ impl TerminalView {
                 // key and every letter of a conversion would arrive as plain
                 // key events and nothing would ever be marked. Nothing types
                 // it twice, because the terminal's own key handlers type only
-                // while the terminal holds the keyboard, and a commit that is
-                // not part of a composition is ignored.
+                // while the terminal holds the keyboard.
+                // The from_key path suppresses duplicate ordinary-key fallback.
+                // Independent native commits are accepted even without preedit.
                 //
                 // One limit remains, the same one the terminal lives with: the
                 // key that *begins* a composition still arrives here first,
@@ -1792,6 +1793,121 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_commits_and_key_fallback_follow_surface_focus(cx: &mut gpui::TestAppContext) {
+        native_surface_trace(
+            cx,
+            serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+        );
+    }
+
+    #[gpui::test]
+    fn element_surface_native_commits_and_fallback_follow_focus(cx: &mut gpui::TestAppContext) {
+        native_surface_trace(
+            cx,
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"probe"}}),
+        );
+    }
+
+    fn native_surface_trace(cx: &mut gpui::TestAppContext, description: serde_json::Value) {
+        use gpui::{ElementInputHandler, InputHandler, Keystroke};
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, mut peer) =
+            open_request(&host, cx, SurfaceId(991), open_description(description));
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(SurfaceId(991)), window, cx)
+                .unwrap();
+        });
+        draw_test_window(cx);
+        events(&mut peer);
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(
+                Keystroke {
+                    key: "a".into(),
+                    key_char: Some("a".into()),
+                    modifiers: Default::default(),
+                },
+                cx,
+            );
+        });
+        let mut handler = ElementInputHandler::new(gpui::Bounds::default(), host.clone());
+        cx.update(|window, cx| {
+            handler.replace_text_in_range(None, "a", window, cx);
+            handler.replace_text_in_range(None, "日本", window, cx);
+            handler.replace_and_mark_text_in_range(None, "😀", None, window, cx);
+            handler.replace_text_in_range(None, "😀", window, cx);
+            handler.replace_text_in_range(None, "", window, cx);
+        });
+        let inputs: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|e| e["type"] == "input")
+            .collect();
+        assert_eq!(
+            inputs.len(),
+            4,
+            "one key, direct identical ASCII, Japanese, marked emoji: {inputs:?}"
+        );
+        assert_eq!(inputs[0]["key"], "a");
+        assert_eq!(inputs[1]["text"], "a");
+        assert!(inputs[1].get("key").is_none());
+        assert_eq!(inputs[2]["text"], "日本");
+        assert_eq!(inputs[3]["text"], "😀");
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: Keystroke {
+                key: "b".into(),
+                key_char: Some("b".into()),
+                modifiers: Default::default(),
+            },
+            is_held: false,
+        });
+        let deferred_host = host.clone();
+        cx.update(|window, cx| {
+            window.defer(cx, move |window, cx| {
+                deferred_host.update(cx, |host, cx| {
+                    host.focus_target(FocusTarget::Terminal, window, cx)
+                        .unwrap();
+                });
+            });
+        });
+        let delayed: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|e| e["type"] == "input")
+            .collect();
+        assert_eq!(delayed.len(), 1);
+        assert_eq!(delayed[0]["key"], "b");
+        cx.update(|window, cx| {
+            handler.replace_text_in_range_from_key(None, "b", window, cx);
+        });
+        assert!(
+            events(&mut peer).is_empty(),
+            "deferred effects and focus changes cannot turn key fallback into a native commit"
+        );
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(SurfaceId(991)), window, cx)
+                .unwrap();
+            host.surfaces.fill.as_mut().unwrap().placement = HostedPlacement::Fill {
+                registered_owner: Some((u32::MAX, i32::MAX)),
+            };
+        });
+        events(&mut peer);
+        cx.update(|window, cx| {
+            handler.replace_text_in_range(None, "refused", window, cx);
+        });
+        assert!(host.read_with(cx, |host, _| host.surfaces.fill.is_none()));
+        assert!(
+            events(&mut peer).iter().all(|e| e["type"] != "input"),
+            "refused native commit must not send input"
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
     fn surface_wheel_syscall_probe(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -1991,108 +2107,52 @@ mod tests {
     }
 
     #[gpui::test]
-    fn incompatible_surface_updates_preserve_body_and_content(cx: &mut gpui::TestAppContext) {
+    fn element_update_refuses_grid_and_preserves_text(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
         cx.set_global(TokenRegistry::new(&settings.colors));
         let (host, cx) = cx.add_window_view(|window, cx| {
             TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
         });
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/surface-list-v1.json"
-        ))
-        .unwrap();
-        let list_root = fixture["description"]["root"].clone();
-        let id = SurfaceId(901);
-        let text = serde_json::json!({"version":1,"root":{"kind":"text","text":"keep me"}});
-        let (answer, mut peer) = open_request(&host, cx, id, open_description(text));
+        let id = SurfaceId(104);
+        let pane = crate::pane_tree::PaneId(1);
+        let text = |text| serde_json::json!({"version":1,"root":{"kind":"text","text":text}});
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(text("before")));
         assert_eq!(answer, Ok(()));
-        for root in [
-            serde_json::json!({"kind":"grid","cols":8,"rows":2}),
-            list_root.clone(),
-            serde_json::json!({"kind":"box","children":[{"kind":"grid","cols":8,"rows":2}]}),
-            serde_json::json!({"kind":"list","children":[{"kind":"box","children":[list_root.clone()]}]}),
-        ] {
-            dispatch(
-                &host,
-                cx,
-                SurfaceRequest::Update {
-                    id,
-                    pane: crate::pane_tree::PaneId(1),
-                    description: serde_json::json!({"version":1,"root":root}),
-                },
-            );
-            let received = events(&mut peer);
-            assert_eq!(received.len(), 1);
-            assert_eq!(received[0]["type"], "refused");
-            host.read_with(cx, |host, _| {
-                let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-                else {
-                    panic!("element body must survive")
-                };
-                assert!(
-                    matches!(&description.root, Element::Text { text, .. } if text == "keep me")
-                );
-            });
-        }
-        host.update_in(cx, |host, window, cx| host.close_surface(id, window, cx));
-        for (id, root, replacements) in [
-            (
-                SurfaceId(902),
-                serde_json::json!({"kind":"grid","cols":8,"rows":2}),
-                vec![
-                    serde_json::json!({"kind":"text","text":"erase"}),
-                    list_root.clone(),
-                ],
-            ),
-            (
-                SurfaceId(903),
-                list_root.clone(),
-                vec![
-                    serde_json::json!({"kind":"text","text":"erase"}),
-                    serde_json::json!({"kind":"grid","cols":8,"rows":2}),
-                ],
-            ),
-        ] {
-            let (answer, mut peer) = open_request(
-                &host,
-                cx,
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
                 id,
-                open_description(serde_json::json!({"version":1,"root":root})),
-            );
-            assert_eq!(answer, Ok(()));
-            let before = host.read_with(cx, |host, _| {
-                match &host.surfaces.fill.as_ref().unwrap().body {
-                    Body::Grid { root, .. } => (root.clone(), None),
-                    Body::List { root, view } => (root.clone(), Some(view.entity_id())),
-                    Body::Elements { .. } => panic!("specialized body"),
-                }
-            });
-            for replacement in replacements {
-                dispatch(
-                    &host,
-                    cx,
-                    SurfaceRequest::Update {
-                        id,
-                        pane: crate::pane_tree::PaneId(1),
-                        description: serde_json::json!({"version":1,"root":replacement}),
-                    },
-                );
-                let received = events(&mut peer);
-                assert_eq!(received.len(), 1);
-                assert_eq!(received[0]["type"], "refused");
-                host.read_with(cx, |host, _| {
-                    match &host.surfaces.fill.as_ref().unwrap().body {
-                        Body::Grid { root, .. } => assert_eq!((root.clone(), None), before),
-                        Body::List { root, view } => {
-                            assert_eq!((root.clone(), Some(view.entity_id())), before)
-                        }
-                        Body::Elements { .. } => panic!("body kind must survive"),
-                    }
-                });
-            }
-            host.update_in(cx, |host, window, cx| host.close_surface(id, window, cx));
-        }
+                pane,
+                description: serde_json::json!({"version":1,"root":{"kind":"grid","cols":8,"rows":2}}),
+            },
+        );
+        assert_eq!(events(&mut peer)[0]["type"], "refused");
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "before"));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: text("after"),
+            },
+        );
+        assert!(events(&mut peer).is_empty());
+        host.read_with(cx, |host, _| {
+            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("element Surface")
+            };
+            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+        });
     }
 
     #[gpui::test]

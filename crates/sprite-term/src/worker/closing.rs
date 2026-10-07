@@ -11,19 +11,20 @@ const KILL_AFTER: Duration = Duration::from_secs(3);
 
 /// Cleanup stops waiting here even if a group somehow survives KILL, so a
 /// worker can never hang forever.
-const GIVE_UP_AFTER: Duration = CLEANUP_BUDGET;
+const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
 
 /// Short enough that escalation deadlines are re-checked promptly even under
 /// continuous output.
 const CLOSING_SLICE: Duration = Duration::from_millis(50);
 
-pub(super) fn close(runtime: Runtime) {
+pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
     let Runtime {
         started:
             Started {
                 master,
                 master_fd: _,
-                process_group,
+                process_group: _,
+                mut processes,
                 waiter,
             },
         mut pump,
@@ -40,11 +41,12 @@ pub(super) fn close(runtime: Runtime) {
         pump.cancel();
     }
 
-    let groups = process_groups(master.as_ref(), process_group);
     let closing_started = Instant::now();
 
     // A hangup is the polite request every well-behaved program honours.
-    signal_groups(&groups, &GroupSignal::Hangup);
+    if let Some(processes) = &mut processes {
+        processes.signal(&GroupSignal::Hangup);
+    }
     let mut escalation = 1_u8;
 
     // Set the first time the flag is observed, so every escalation deadline is
@@ -63,11 +65,15 @@ pub(super) fn close(runtime: Runtime) {
         // escalation past its deadline.
         if let Some(since) = requested_at {
             let waited = since.elapsed();
-            if waited >= KILL_AFTER && escalation < 3 {
-                signal_groups(&groups, &GroupSignal::Kill);
+            if waited >= KILL_AFTER {
+                if let Some(processes) = &mut processes {
+                    processes.signal(&GroupSignal::Kill);
+                }
                 escalation = 3;
             } else if waited >= TERM_AFTER && escalation < 2 {
-                signal_groups(&groups, &GroupSignal::Terminate);
+                if let Some(processes) = &mut processes {
+                    processes.signal(&GroupSignal::Terminate);
+                }
                 escalation = 2;
             }
         }
@@ -75,7 +81,10 @@ pub(super) fn close(runtime: Runtime) {
         let settled = exit_status.is_some() && pump_stopped;
         // A requested shutdown is not finished while anything the pane started
         // is still running; a natural exit only owes the single hangup above.
-        let descendants_gone = !requested || groups.iter().all(|group| !group_is_alive(*group));
+        let descendants_gone = !requested
+            || processes
+                .as_mut()
+                .is_some_and(|processes| !processes.is_alive());
         // A pane that was never asked to shut down still may not hang forever,
         // so an unrequested close keeps its own deadline from Closing.
         let exhausted = match requested_at {
@@ -156,34 +165,30 @@ pub(super) fn close(runtime: Runtime) {
     events.seal(outcomes);
 
     drop(master);
-}
-
-/// The process groups descendant cleanup must reach.
-///
-/// The group recorded at spawn covers the shell and anything it started; the
-/// current foreground group covers an interactive program that moved itself
-/// into its own group since.
-fn process_groups(master: &(dyn MasterPty + Send), recorded: Option<i32>) -> Vec<i32> {
-    let mut groups = Vec::with_capacity(2);
-    if let Some(group) = recorded {
-        groups.push(group);
-    }
-    if let Some(foreground) = master.process_group_leader()
-        && !groups.contains(&foreground)
-    {
-        groups.push(foreground);
-    }
-    groups
-}
-
-fn signal_groups(groups: &[i32], signal: &GroupSignal) {
-    for group in groups {
-        pty_unix::signal_group(*group, signal);
+    // Natural completion leaves ordinary jobs for a later explicit owner;
+    // an attempted explicit cleanup must never spend its budget twice.
+    if requested_at.is_none() {
+        processes
+    } else {
+        None
     }
 }
 
-fn group_is_alive(group: i32) -> bool {
-    pty_unix::group_is_alive(group)
+pub(crate) fn finish_shutdown(mut processes: pty_unix::SessionProcesses, requested_at: Instant) {
+    let mut terminated = false;
+    while processes.is_alive() {
+        let waited = requested_at.elapsed();
+        if waited >= KILL_AFTER {
+            processes.signal(&GroupSignal::Kill);
+        } else if waited >= TERM_AFTER && !terminated {
+            processes.signal(&GroupSignal::Terminate);
+            terminated = true;
+        }
+        if waited >= GIVE_UP_AFTER {
+            break;
+        }
+        std::thread::sleep(CLOSING_SLICE.min(GIVE_UP_AFTER.saturating_sub(waited)));
+    }
 }
 
 /// Reports one cause, never two: a signalled child has no exit code.

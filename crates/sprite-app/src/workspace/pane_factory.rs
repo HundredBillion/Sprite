@@ -7,6 +7,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.stopping {
+            return;
+        }
         // A split starts a fresh session; panes never share one.
         self.tabs.split(
             orientation,
@@ -27,6 +30,9 @@ impl Workspace {
         cx.notify();
     }
     pub(super) fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stopping {
+            return;
+        }
         self.tabs.open(make_pane(
             self.command.clone(),
             self.settings.clone(),

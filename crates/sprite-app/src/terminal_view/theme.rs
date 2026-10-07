@@ -212,7 +212,8 @@ impl TerminalView {
     ) {
         use crate::config::LiveChange;
         let changes = self.applied_settings.diff(settings);
-        let mut accepted_cursor = self.applied_settings.cursor;
+        // Each worker-facing field remembers its last accepted value so partial reloads can be reverted.
+        let mut admitted = settings.clone();
         if changes.has(LiveChange::Font) {
             let (family, _) = chosen_family(window, settings.font.family.as_deref());
             self.metrics = CellMetrics::measure(
@@ -226,8 +227,6 @@ impl TerminalView {
             self.padding = settings.grid.padding.get();
             self.size = None;
             self.synchronise_size(window);
-        } else if self.size.is_none() {
-            self.synchronise_size(window);
         }
         if changes.has(LiveChange::Font)
             || changes.has(LiveChange::Highlights)
@@ -236,18 +235,16 @@ impl TerminalView {
             self.invalidate_grids();
         }
         let defaults = session_defaults(settings);
-        if changes.has(LiveChange::Colors) {
-            self.fallback_colors = defaults.fallback_colors;
-        }
-        if self.accepted_colors != defaults.colors
-            && self.submit(TerminalCommand::SetColors(defaults.colors.clone()))
+        self.fallback_colors = defaults.fallback_colors;
+        if changes.has(LiveChange::Colors)
+            && !self.submit(TerminalCommand::SetColors(defaults.colors))
         {
-            self.accepted_colors = defaults.colors;
+            admitted.colors = self.applied_settings.colors.clone();
         }
         if changes.has(LiveChange::Cursor)
-            && self.submit(TerminalCommand::SetCursor(defaults.cursor))
+            && !self.submit(TerminalCommand::SetCursor(defaults.cursor))
         {
-            accepted_cursor = settings.cursor;
+            admitted.cursor = self.applied_settings.cursor;
         }
         if changes.has(LiveChange::TextureBudget) {
             self.textures
@@ -256,8 +253,13 @@ impl TerminalView {
                 self.refresh_textures(&bundle);
             }
         }
-        self.applied_settings = settings.clone();
-        self.applied_settings.cursor = accepted_cursor;
+        self.pending_settings =
+            if !self.admission_closed && !admitted.diff(settings).live.is_empty() {
+                Some(settings.clone())
+            } else {
+                None
+            };
+        self.applied_settings = admitted;
         cx.notify();
     }
 
@@ -416,5 +418,93 @@ mod settings_effect_tests {
             assert_eq!(view.size, size);
             assert!(view.applied_settings.diff(&settings).live.is_empty());
         });
+    }
+}
+
+#[cfg(test)]
+mod fallback_admission_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn refused_reload_then_revert_restores_defaults_before_first_snapshot(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut original = crate::config::Settings::default();
+        original.colors.foreground = Some(Rgb {
+            r: 11,
+            g: 22,
+            b: 33,
+        });
+        cx.set_global(crate::config::ActiveSettings(original.clone()));
+        cx.set_global(crate::tokens::TokenRegistry::new(&original.colors));
+        let (sender, _exits) = async_channel::unbounded();
+        let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), "i=0; while [ $i -lt 150 ]; do printf '\\033]2;title%s\\007' $i; i=$((i+1)); done; sleep 30".into()]),
+            original.clone(), Vec::new(), None,
+            PaneExit {sender,identity:(crate::tabs::TabId(1),crate::pane_tree::PaneId(1))}, window, cx,
+        ));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let reverted = view.update_in(cx, |view, window, cx| {
+                assert!(view.bundle.is_none());
+                let SessionState::Running(session) = &mut view.session else {
+                    panic!("running session");
+                };
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                let mut full_since = None;
+                // Installed receivers stay paused while the real worker reaches sustained event pressure.
+                loop {
+                    if session
+                        .try_send(TerminalCommand::Capture)
+                        .is_err_and(|error| error.message.contains("queue is full"))
+                    {
+                        let since = full_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= std::time::Duration::from_millis(100) {
+                            break;
+                        }
+                    } else {
+                        full_since = None;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "worker did not reach event pressure"
+                    );
+                    crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
+                }
+                let mut refused = original.clone();
+                refused.colors.foreground = Some(Rgb {
+                    r: 44,
+                    g: 55,
+                    b: 66,
+                });
+                view.apply_settings(&refused, window, cx);
+                assert!(
+                    view.status
+                        .as_ref()
+                        .is_some_and(|status| status.contains("queue is full"))
+                );
+                assert_eq!(view.applied_settings.colors, original.colors);
+                assert!(view.pending_settings.is_some());
+                assert_eq!(
+                    view.default_colors(),
+                    session_defaults(&refused).fallback_colors
+                );
+                view.apply_settings(&original, window, cx);
+                assert!(view.bundle.is_none());
+                assert!(view.pending_settings.is_none());
+                assert_eq!(view.applied_settings.colors, original.colors);
+                view.default_colors()
+            });
+            assert_eq!(
+                reverted,
+                session_defaults(&original).fallback_colors,
+                "fallback must follow the latest desired UI colors even when worker admission has no diff"
+            );
+        }));
+        if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+            cleanup.wait().unwrap();
+        }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 }

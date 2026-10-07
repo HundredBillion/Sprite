@@ -9,10 +9,6 @@ REPO = Path(__file__).resolve().parents[1]
 PREPARE = REPO / "scripts" / "prepare_release.py"
 CHECK = REPO / "scripts" / "check_release_version.py"
 RELEASE_WORKFLOW = REPO / ".github" / "workflows" / "release-pr.yml"
-WORKSPACE_LOCK = "".join(
-    f'[[package]]\nname = "{name}"\nversion = "0.2.0"\n'
-    for name in ("sprite-app", "sprite-pane", "sprite-term")
-)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -48,7 +44,6 @@ class PrepareReleaseTests(unittest.TestCase):
             )
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
-            (root / "packaging" / "PKGBUILD.local").write_text("pkgver=0.2.0\n")
             (root / "README.md").write_text(
                 "sudo pacman -U sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )
@@ -61,10 +56,6 @@ class PrepareReleaseTests(unittest.TestCase):
             )
 
             self.assertIn('version = "0.2.1"', (root / "Cargo.toml").read_text())
-            self.assertEqual(
-                "pkgver=0.2.1\n",
-                (root / "packaging" / "PKGBUILD.local").read_text(),
-            )
             self.assertEqual(
                 3,
                 (root / "Cargo.lock").read_text().count('version = "0.2.1"'),
@@ -86,7 +77,6 @@ class PrepareReleaseTests(unittest.TestCase):
             )
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
-            (root / "packaging" / "PKGBUILD.local").write_text("pkgver=0.2.0\n")
             (root / "README.md").write_text(
                 "sudo pacman -U sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )
@@ -110,10 +100,8 @@ class PrepareReleaseTests(unittest.TestCase):
             original_cargo = '[workspace.package]\nversion = "0.2.0"\n'
             original_pkgbuild = "pkgver=0.2.0\n"
             (root / "Cargo.toml").write_text(original_cargo)
-            (root / "Cargo.lock").write_text(WORKSPACE_LOCK)
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text(original_pkgbuild)
-            (root / "packaging" / "PKGBUILD.local").write_text(original_pkgbuild)
             (root / "README.md").write_text("no package command here\n")
 
             result = subprocess.run(
@@ -139,10 +127,8 @@ class PrepareReleaseTests(unittest.TestCase):
                 "sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )
             (root / "Cargo.toml").write_text(original_cargo)
-            (root / "Cargo.lock").write_text(WORKSPACE_LOCK)
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text(original_pkgbuild)
-            (root / "packaging" / "PKGBUILD.local").write_text(original_pkgbuild)
             (root / "README.md").write_text(original_readme)
 
             result = subprocess.run(
@@ -154,31 +140,6 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertEqual(original_cargo, (root / "Cargo.toml").read_text())
             self.assertEqual(original_readme, (root / "README.md").read_text())
-
-    def test_invalid_local_recipe_prevents_every_write(self):
-        for local in [None, "pkgver=0.2.0\npkgver=0.2.0\n"]:
-            with self.subTest(local=local), tempfile.TemporaryDirectory() as temp_dir:
-                root = Path(temp_dir)
-                (root / "packaging").mkdir()
-                files = {
-                    "Cargo.toml": '[workspace.package]\nversion = "0.2.0"\n',
-                    "Cargo.lock": WORKSPACE_LOCK,
-                    "packaging/PKGBUILD": "pkgver=0.2.0\n",
-                    "README.md": "sprite-0.2.0-1-x86_64.pkg.tar.zst\n",
-                }
-                if local is not None:
-                    files["packaging/PKGBUILD.local"] = local
-                for name, content in files.items():
-                    (root / name).write_text(content)
-                result = subprocess.run(
-                    [sys.executable, str(PREPARE), "0.2.1", "--root", str(root)],
-                    capture_output=True,
-                    text=True,
-                )
-                self.assertNotEqual(0, result.returncode)
-                self.assertIn("PKGBUILD.local", result.stderr)
-                for name, content in files.items():
-                    self.assertEqual(content, (root / name).read_text())
 
     def test_updates_workspace_packages_in_cargo_lock(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -202,7 +163,6 @@ class PrepareReleaseTests(unittest.TestCase):
             )
             (root / "packaging").mkdir()
             (root / "packaging" / "PKGBUILD").write_text("pkgver=0.2.0\n")
-            (root / "packaging" / "PKGBUILD.local").write_text("pkgver=0.2.0\n")
             (root / "README.md").write_text(
                 "sudo pacman -U sprite-0.2.0-1-x86_64.pkg.tar.zst\n"
             )
@@ -250,6 +210,77 @@ class ReleaseTagCheckTests(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode)
             self.assertIn("does not match Cargo workspace version", result.stderr)
+
+class ReleaseWriteRecoveryTests(unittest.TestCase):
+    def fixture(self, root):
+        import shutil
+        (root / 'packaging').mkdir()
+        for name in ('Cargo.toml', 'Cargo.lock', 'README.md', 'packaging/PKGBUILD'):
+            shutil.copy(REPO / name, root / name)
+        return {name: (root / name).read_bytes() for name in ('Cargo.toml', 'Cargo.lock', 'README.md', 'packaging/PKGBUILD')}
+
+    def test_filesystem_failure_never_leaves_mixed_release_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = self.fixture(root)
+            lock = root / 'Cargo.lock'
+            lock.chmod(0o444)
+            result = subprocess.run([sys.executable, str(PREPARE), '0.2.3', '--root', str(root)], capture_output=True, text=True)
+            if result.returncode:
+                for name, content in original.items():
+                    self.assertEqual((root / name).read_bytes(), content, name)
+            else:
+                import tomllib
+                self.assertEqual(tomllib.loads((root / 'Cargo.toml').read_text())['workspace']['package']['version'], '0.2.3')
+                packages = tomllib.loads((root / "Cargo.lock").read_text())["package"]
+                versions = {package["name"]: package["version"] for package in packages if package["name"] in ("sprite-app", "sprite-pane", "sprite-term")}
+                self.assertEqual(versions, {name: "0.2.3" for name in ("sprite-app", "sprite-pane", "sprite-term")})
+            self.assertEqual(lock.stat().st_mode & 0o777, 0o444)
+
+    def test_late_replacement_failure_restores_bytes_modes_and_cleans_staging(self):
+        from unittest.mock import patch
+        import os
+        from scripts.prepare_release import prepare_release
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = self.fixture(root)
+            modes = {name: (root / name).stat().st_mode for name in original}
+            replace = os.replace
+            calls = 0
+            def fail_third(source, destination):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise PermissionError('injected replacement failure')
+                return replace(source, destination)
+            with patch('os.replace', side_effect=fail_third):
+                with self.assertRaises(PermissionError):
+                    prepare_release(root, '0.2.3')
+            for name, content in original.items():
+                self.assertEqual((root / name).read_bytes(), content, name)
+                self.assertEqual((root / name).stat().st_mode, modes[name], name)
+            self.assertEqual(sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()), sorted(original))
+
+    def test_staging_failure_preserves_originals_and_removes_partial_staging(self):
+        from unittest.mock import patch
+        from scripts.prepare_release import prepare_release
+        temporary_file = tempfile.NamedTemporaryFile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = self.fixture(root)
+            calls = 0
+            def fail_third(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise PermissionError('injected staging failure')
+                return temporary_file(*args, **kwargs)
+            with patch('tempfile.NamedTemporaryFile', side_effect=fail_third):
+                with self.assertRaises(PermissionError):
+                    prepare_release(root, '0.2.3')
+            for name, content in original.items():
+                self.assertEqual((root / name).read_bytes(), content, name)
+            self.assertEqual(sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()), sorted(original))
 
 
 if __name__ == "__main__":

@@ -118,33 +118,7 @@ fn open_window(args: WindowArgs) {
             .update(cx, |_view, window, cx| {
                 let view = cx.entity();
                 window.on_window_should_close(cx, move |_window, cx| {
-                    // A close that would interrupt work asks first, exactly as
-                    // Ctrl+Shift+W and Ctrl+Shift+Q do. Returning false keeps
-                    // the window open; the banner explains how to answer.
-                    if !view.update(cx, |view, cx| view.confirm_close(cx)) {
-                        return false;
-                    }
-                    // The first close takes each pane's blocking cleanup and
-                    // runs it off the GPUI thread, so the native window can
-                    // shut immediately while children and helper threads
-                    // finish joining. Every pane, not just one: a window may
-                    // hold several and each owns its own.
-                    let cleanups = view.update(cx, |view, cx| view.begin_shutdown(cx));
-                    if !cleanups.is_empty() {
-                        let finished = cx.background_executor().spawn(async move {
-                            for cleanup in cleanups {
-                                cleanup();
-                            }
-                        });
-                        cx.spawn(async move |cx| {
-                            let _ = finished.await;
-                            // Quitting any earlier could tear the executor down
-                            // before those joins complete.
-                            let _ = cx.update(|cx| cx.quit());
-                        })
-                        .detach();
-                    }
-                    true
+                    view.update(cx, |view, cx| view.close_window(cx))
                 });
             })
             .expect("install the close handler");

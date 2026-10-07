@@ -278,3 +278,45 @@ fn a_bracketed_paste_with_newlines_needs_no_confirmation() {
         "bracketing makes it safe, so it went through unchallenged"
     );
 }
+
+fn paste_from_history(command: TerminalCommand, accepted: bool) {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; seq 1 200; read line; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("complete history", |b| pane_text(b).contains("200"));
+    session
+        .send(TerminalCommand::Scroll(sprite_term::Scroll::Top))
+        .unwrap();
+    let before = snapshots.wait_for("history viewport", |b| !b.render.viewport.at_bottom());
+    session.send(command).unwrap();
+    session.send(TerminalCommand::Capture).unwrap();
+    if accepted {
+        snapshots.wait_for("paste returns to live output", |b| {
+            b.render.viewport.at_bottom()
+        });
+    } else {
+        assert!(matches!(events.next(), TerminalEvent::UnsafePaste(_)));
+        let after = snapshots.wait_for("post-paste capture", |b| b.generation >= before.generation);
+        assert_eq!(after.render.viewport.offset, before.render.viewport.offset);
+    }
+}
+
+#[test]
+fn accepted_paste_returns_to_live_output() {
+    paste_from_history(TerminalCommand::Paste("z".into()), true);
+}
+
+#[test]
+fn confirmed_paste_returns_to_live_output() {
+    paste_from_history(TerminalCommand::PasteConfirmed("z".into()), true);
+}
+
+#[test]
+fn withheld_paste_keeps_the_history_viewport() {
+    paste_from_history(TerminalCommand::Paste("z\n".into()), false);
+}

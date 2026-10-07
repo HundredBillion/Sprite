@@ -101,9 +101,9 @@ impl TerminalView {
         self.allocated = Some(allocated);
     }
 
-    /// Recomputes the grid for the current layout and sends a resize only when it changed.
-    /// Returns whether submission succeeded or no resize was needed.
-    pub(super) fn synchronise_size(&mut self, window: &Window) -> bool {
+    /// Recomputes the grid for the current layout and sends a resize only when
+    /// it actually changed.
+    pub(super) fn synchronise_size(&mut self, window: &Window) {
         let allocated = self.allocated.unwrap_or_else(|| window.viewport_size());
         // Docks take their strips first; the grid gets what is left, and the
         // PTY learns the narrower size exactly as it would on a window resize.
@@ -115,7 +115,7 @@ impl TerminalView {
             self.metrics.height(),
             window.scale_factor(),
         ) else {
-            return true;
+            return;
         };
 
         // Recomputed before the grid is compared, because a pane can be resized
@@ -131,13 +131,19 @@ impl TerminalView {
         self.origin.x += shift;
 
         if self.size == Some(size) {
-            return true;
+            self.pending_resize = None;
+            return;
         }
+        self.admit_resize(size);
+    }
+
+    pub(super) fn admit_resize(&mut self, size: ValidTerminalSize) {
+        self.pending_resize = Some(size);
         if self.submit(TerminalCommand::Resize(size)) {
             self.size = Some(size);
-            true
-        } else {
-            false
+            self.pending_resize = None;
+        } else if self.admission_closed {
+            self.pending_resize = None;
         }
     }
 

@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn saturated_observation_refuses_without_holding_the_ui_registry() {
         let mut spawned = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        crate::test_blocking_wait::pause(Duration::from_millis(300));
         spawned.snapshots.next_blocking().unwrap();
         let panes = WindowPanes::new();
         panes.register(PaneId(0), TabId(0), spawned.session.commands());

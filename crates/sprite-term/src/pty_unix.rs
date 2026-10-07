@@ -21,6 +21,9 @@
 
 #![deny(unsafe_code)]
 
+mod processes;
+pub(crate) use processes::SessionProcesses;
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -612,7 +615,6 @@ pub(crate) fn signal_group(group: i32, signal: &GroupSignal) {
     let _ = killpg(Pid::from_raw(group), Signal::from(signal));
 }
 
-/// Whether any process remains in the group, probed with the null signal.
 pub(crate) fn group_is_alive(group: i32) -> bool {
     killpg(Pid::from_raw(group), None).is_ok()
 }

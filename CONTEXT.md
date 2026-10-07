@@ -98,6 +98,18 @@ SVGTree's existing file-tree presentation inside a Neovim buffer, with image
 icons where terminal graphics are supported and text otherwise.
 _Avoid_: native tree, plain tree (which obscures graphics support)
 
+**Native text commit**:
+Text the platform input method commits independently of already delivered key
+fallback, with or without prior marked text. Sprite sends it once to the
+current valid keyboard target. Identical ASCII remains native outside a native
+key dispatch scope.
+
+**Key fallback**:
+Printable text supplied by GPUI after dispatching an ordinary key. Sprite's
+key listener already encodes or refuses that input; the explicit
+`replace_text_in_range_from_key` bridge suppresses a second delivery. Other
+GPUI clients keep ordinary replacement through default forwarding.
+
 ## Superseded
 
 Terms retired on 2026-09-07 by `docs/PRDs/09-07-2026-native-surfaces.md`,

@@ -1,0 +1,11 @@
+# Bound natural-exit draining and own pending pane cleanup
+
+After the direct child exits, the terminal owner preserves the ordinary EOF drain path but permits at most two seconds of further draining before canceling a PTY held by descendants. Immediate cancellation can lose final output; waiting indefinitely for descendants makes direct-child lifecycle meaningless. A fixed deadline cannot be renewed by busy descendant output. This does not promise to preserve arbitrarily late descendant output, and explicit shutdown retains its HUP/TERM/KILL policy.
+
+Before the final projection, cancellation stops new reads and the owner parses already accepted PTY chunks under a six-second overall drain budget. Intermediate projections are skipped during natural exit. This preserves the earlier `ad119fd` design rationale: short cutoffs and throwing away accepted chunks lose ordinary output. The clock in this narrower fix starts when ChildExited reaches the owner; it does not adopt the separate branch's event-pressure mailbox or promise to solve blocked event delivery.
+
+The Sprite Window owns cleanup tasks even after their Panes leave the layout. Last-pane/tab closure, platform shortcut quit and native window closure must await both removed and present Pane cleanup before application quit. Detaching tasks loses that lifetime relationship; waiting only for current Panes misses removed ones. Blocking cleanup remains on the background executor, so rendering/input need not join children.
+
+Native close refuses immediate window removal while cleanup is pending; shortcut and final-pane closure use the same coordinator. On Linux, pinned GPUI stops its event loop after the last window disappears, so awaiting tasks after removing that window is insufficient. Shutdown is idempotent, and active tasks are never pruned; completion flags identify finished tasks. No new process supervisor or worker thread is introduced.
+
+Current pane cleanup runs concurrently on independent background tasks, matching the Phase1 shutdown requirement to avoid multiplying per-pane deadlines. Begin-shutdown initiation remains sorted and exactly once; completion order is not guaranteed. ADR0024 uses a fresh number because separate branch `fix/review-bug-classes` already contains ADR0021 for terminal delivery.

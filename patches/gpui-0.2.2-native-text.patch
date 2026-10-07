@@ -1,0 +1,335 @@
+--- a/src/input.rs
++++ b/src/input.rs
+@@ -44,6 +44,17 @@
+         cx: &mut Context<Self>,
+     );
+ 
++    /// See [`InputHandler::replace_text_in_range_from_key`] for details.
++    fn replace_text_in_range_from_key(
++        &mut self,
++        range: Option<Range<usize>>,
++        text: &str,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        self.replace_text_in_range(range, text, window, cx);
++    }
++
+     /// See [`InputHandler::replace_and_mark_text_in_range`] for details
+     fn replace_and_mark_text_in_range(
+         &mut self,
+@@ -132,6 +143,18 @@
+         });
+     }
+ 
++    fn replace_text_in_range_from_key(
++        &mut self,
++        replacement_range: Option<Range<usize>>,
++        text: &str,
++        window: &mut Window,
++        cx: &mut App,
++    ) {
++        self.view.update(cx, |view, cx| {
++            view.replace_text_in_range_from_key(replacement_range, text, window, cx)
++        });
++    }
++
+     fn replace_and_mark_text_in_range(
+         &mut self,
+         range_utf16: Option<Range<usize>>,
+--- /dev/null
++++ b/src/platform/key_text_scope.rs
+@@ -0,0 +1,109 @@
++/// Native dispatch scopes distinguish unchanged printable fallback from an IME
++/// commit. Invalidating every enclosing scope prevents nested composition from
++/// rearming the outer key when nested dispatch returns.
++#[derive(Default)]
++pub(super) struct KeyTextScope {
++    scopes: Vec<(Option<String>, bool)>,
++}
++
++impl KeyTextScope {
++    pub(super) fn enter(&mut self) {
++        self.scopes.push((None, false));
++    }
++
++    pub(super) fn arm(&mut self, text: Option<String>) {
++        if let Some((scope, invalidated)) = self.scopes.last_mut()
++            && !*invalidated
++        {
++            *scope = text;
++        }
++    }
++
++    pub(super) fn exit(&mut self) {
++        self.scopes.pop();
++    }
++
++    pub(super) fn invalidate(&mut self) {
++        for scope in &mut self.scopes {
++            *scope = (None, true);
++        }
++    }
++
++    pub(super) fn is_fallback(&mut self, text: &str, replaces_range: bool) -> bool {
++        let matches = !replaces_range
++            && self.scopes.last().and_then(|(text, _)| text.as_deref()) == Some(text);
++        if !matches {
++            self.invalidate();
++        }
++        matches
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn identical_independent_commits_are_native_after_return() {
++        let mut scope = KeyTextScope::default();
++        scope.enter();
++        scope.arm(Some("a".into()));
++        assert!(scope.is_fallback("a", false));
++        scope.exit();
++        assert!(!scope.is_fallback("a", false));
++    }
++
++    #[test]
++    fn native_first_and_transformed_insertions_are_native() {
++        let mut scope = KeyTextScope::default();
++        scope.enter();
++        assert!(!scope.is_fallback("a", false));
++        scope.arm(Some("a".into()));
++        assert!(!scope.is_fallback("愛", false));
++        assert!(!scope.is_fallback("a", false));
++        scope.exit();
++    }
++
++    #[test]
++    fn nested_marks_and_transformations_invalidate_enclosing_scope() {
++        for marked in [true, false] {
++            let mut scope = KeyTextScope::default();
++            scope.enter();
++            scope.arm(Some("a".into()));
++            scope.enter();
++            scope.arm(Some("b".into()));
++            if marked {
++                scope.invalidate();
++            } else {
++                assert!(!scope.is_fallback("日本", false));
++            }
++            scope.exit();
++            assert!(!scope.is_fallback("a", false));
++            scope.exit();
++        }
++    }
++
++    #[test]
++    fn callback_marking_cannot_be_rearmed_after_app_delivery() {
++        let mut scope = KeyTextScope::default();
++        scope.enter();
++        scope.invalidate();
++        scope.arm(Some("a".into()));
++        assert!(!scope.is_fallback("a", false));
++        scope.exit();
++    }
++
++    #[test]
++    fn nested_ordinary_dispatch_restores_outer_scope() {
++        let mut scope = KeyTextScope::default();
++        scope.enter();
++        scope.arm(Some("a".into()));
++        scope.enter();
++        scope.arm(Some("b".into()));
++        assert!(scope.is_fallback("b", false));
++        scope.exit();
++        assert!(scope.is_fallback("a", false));
++        assert!(!scope.is_fallback("a", true));
++        scope.exit();
++    }
++}
+--- a/src/platform/linux/wayland/client.rs
++++ b/src/platform/linux/wayland/client.rs
+@@ -1430,6 +1430,7 @@
+                 this.disable_ime();
+             }
+             zwp_text_input_v3::Event::CommitString { text } => {
++                let was_composing = state.composing;
+                 state.composing = false;
+                 let Some(window) = state.keyboard_focused_window.clone() else {
+                     return;
+@@ -1439,7 +1440,7 @@
+                     drop(state);
+                     // IBus Intercepts keys like `a`, `b`, but those keys are needed for vim mode.
+                     // We should only send ASCII characters to Zed, otherwise a user could remap a letter like `か` or `相`.
+-                    if commit_text.len() == 1 {
++                    if commit_text.len() == 1 && !was_composing {
+                         window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
+                             keystroke: Keystroke {
+                                 modifiers: Modifiers::default(),
+--- a/src/platform/linux/wayland/window.rs
++++ b/src/platform/linux/wayland/window.rs
+@@ -729,7 +729,7 @@
+             let mut state = self.state.borrow_mut();
+             if let Some(mut input_handler) = state.input_handler.take() {
+                 drop(state);
+-                input_handler.replace_text_in_range(None, key_char);
++                input_handler.replace_text_in_range_from_key(None, key_char);
+                 self.state.borrow_mut().input_handler = Some(input_handler);
+             }
+         }
+--- a/src/platform/linux/x11/window.rs
++++ b/src/platform/linux/x11/window.rs
+@@ -1006,7 +1006,7 @@
+                 if let Some(mut input_handler) = state.input_handler.take() {
+                     if let Some(key_char) = &event.keystroke.key_char {
+                         drop(state);
+-                        input_handler.replace_text_in_range(None, key_char);
++                        input_handler.replace_text_in_range_from_key(None, key_char);
+                         state = self.state.borrow_mut();
+                     }
+                     state.input_handler = Some(input_handler);
+--- a/src/platform/mac/window.rs
++++ b/src/platform/mac/window.rs
+@@ -403,6 +403,7 @@
+     appearance_changed_callback: Option<Box<dyn FnMut()>>,
+     input_handler: Option<PlatformInputHandler>,
+     last_key_equivalent: Option<KeyDownEvent>,
++    key_text_scope: super::super::key_text_scope::KeyTextScope,
+     synthetic_drag_counter: usize,
+     traffic_light_position: Option<Point<Pixels>>,
+     transparent_titlebar: bool,
+@@ -706,6 +707,7 @@
+                 appearance_changed_callback: None,
+                 input_handler: None,
+                 last_key_equivalent: None,
++                key_text_scope: Default::default(),
+                 synthetic_drag_counter: 0,
+                 traffic_light_position: titlebar
+                     .as_ref()
+@@ -1659,6 +1661,14 @@
+ //   - type `a i left down up enter enter` should create an unmarked text "愛"
+ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
+     let window_state = unsafe { get_window_state(this) };
++    window_state.as_ref().lock().key_text_scope.enter();
++    let result = handle_key_event_in_scope(this, native_event, key_equivalent);
++    window_state.as_ref().lock().key_text_scope.exit();
++    result
++}
++
++fn handle_key_event_in_scope(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
++    let window_state = unsafe { get_window_state(this) };
+     let mut lock = window_state.as_ref().lock();
+ 
+     let window_height = lock.content_size().height;
+@@ -1738,12 +1748,18 @@
+                 return YES;
+             }
+ 
++            window_state
++                .as_ref()
++                .lock()
++                .key_text_scope
++                .arm(key_down_event.keystroke.key_char.clone());
++
+             if key_down_event.is_held
+                 && let Some(key_char) = key_down_event.keystroke.key_char.as_ref()
+             {
+                 let handled = with_input_handler(this, |input_handler| {
+                     if !input_handler.apple_press_and_hold_enabled() {
+-                        input_handler.replace_text_in_range(None, key_char);
++                        input_handler.replace_text_in_range_from_key(None, key_char);
+                         return YES;
+                     }
+                     NO
+@@ -2243,8 +2259,17 @@
+ 
+         let text = text.to_str();
+         let replacement_range = replacement_range.to_range();
++        let from_key = get_window_state(this)
++            .as_ref()
++            .lock()
++            .key_text_scope
++            .is_fallback(text, replacement_range.is_some());
+         with_input_handler(this, |input_handler| {
+-            input_handler.replace_text_in_range(replacement_range, text)
++            if from_key {
++                input_handler.replace_text_in_range_from_key(replacement_range, text)
++            } else {
++                input_handler.replace_text_in_range(replacement_range, text)
++            }
+         });
+     }
+ }
+@@ -2267,6 +2292,11 @@
+         let selected_range = selected_range.to_range();
+         let replacement_range = replacement_range.to_range();
+         let text = text.to_str();
++        get_window_state(this)
++            .as_ref()
++            .lock()
++            .key_text_scope
++            .invalidate();
+         with_input_handler(this, |input_handler| {
+             input_handler.replace_and_mark_text_in_range(replacement_range, text, selected_range)
+         });
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -1,4 +1,6 @@
+ mod app_menu;
++#[cfg(target_os = "macos")]
++mod key_text_scope;
+ mod keyboard;
+ mod keystroke;
+ 
+@@ -912,6 +914,19 @@
+             .ok();
+     }
+ 
++    fn replace_text_in_range_from_key(
++        &mut self,
++        replacement_range: Option<Range<usize>>,
++        text: &str,
++    ) {
++        self.cx
++            .update(|window, cx| {
++                self.handler
++                    .replace_text_in_range_from_key(replacement_range, text, window, cx);
++            })
++            .ok();
++    }
++
+     pub fn replace_and_mark_text_in_range(
+         &mut self,
+         range_utf16: Option<Range<usize>>,
+@@ -951,7 +966,8 @@
+     }
+ 
+     pub(crate) fn dispatch_input(&mut self, input: &str, window: &mut Window, cx: &mut App) {
+-        self.handler.replace_text_in_range(None, input, window, cx);
++        self.handler
++            .replace_text_in_range_from_key(None, input, window, cx);
+     }
+ 
+     pub fn selected_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
+@@ -1033,6 +1049,19 @@
+         window: &mut Window,
+         cx: &mut App,
+     );
++
++    /// Insert the printable text fallback for an already dispatched key.
++    /// The default preserves existing text-editor clients. Clients that encode
++    /// keys themselves can override this without dropping independent commits.
++    fn replace_text_in_range_from_key(
++        &mut self,
++        replacement_range: Option<Range<usize>>,
++        text: &str,
++        window: &mut Window,
++        cx: &mut App,
++    ) {
++        self.replace_text_in_range(replacement_range, text, window, cx);
++    }
+ 
+     /// Replace the text in the given document range with the given text,
+     /// and mark the given text as part of an IME 'composing' state

@@ -72,3 +72,11 @@ whole-batch ordering, resumed consumption, receiver drop, natural exit under
 event pressure, and final title/text survival with a stubborn descendant. GPUI
 and observation regressions cover visible refusal, hyperlink recovery, retryable
 geometry, and restoration after partial local or terminal settings acceptance.
+
+## Reconciliation with merged audits (2026-10-06)
+
+PR52 has been reconciled with master `a303969`, including merged PR53 and PR54. ADR0024–0027 describe the current drain, ordinary-job ownership, UI retry and native-text contracts; the original ADR0021 and task evidence are historical where those decisions differ. Local package versions now derive from the workspace manifest; release updates retain staging/rollback and update only the fixed-version distribution recipe. The original fixed local-recipe validation assertions have been superseded. Current integrated tests and master regressions cover these retained decisions.
+
+The remaining PR52 changes retain Surface CLI cancellation, configuration response validation, Surface description replacement checks, drawing decorations and link readiness. Its submission regression tests run against master’s admission/retry implementation. Pane cleanup ownership and the native-text provenance patch are retained.
+
+Merge verification: `TERM=dumb cargo test --workspace --locked --offline` passed **847 tests, 0 failed, 2 optional ignored**. Independent full resulting-PR review against master found no actionable runtime regression. Native desktop and Cocoa scheduling remain unexecuted.

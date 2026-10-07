@@ -247,6 +247,15 @@ than the no-op backend. Sprite's development dependency also enables
 
 **License and source.** Apache-2.0. <https://github.com/zed-industries/zed>.
 
+**Local input patch.** The exact published 0.2.2 archive is retained in
+`vendor/gpui`, with its Apache license and a narrow recorded native-commit/key-
+fallback patch. `scripts/check_gpui_patch.py` verifies the complete source
+against the SHA256-pinned archive plus `patches/gpui-0.2.2-native-text.patch`;
+CI runs this and its tamper-negative/source trace tests. Cargo.lock changes only
+GPUI's registry source/checksum removal for the local path. Existing versions
+and features remain unchanged. See ADR0027 and `vendor/gpui.provenance.md` for
+caller coverage, default-client compatibility, and native execution limits.
+
 **Pin policy.** Exact `=0.2.2`. GPUI is pre-1.0 and publishes breaking changes
 between patch releases; updates require a deliberate review of window, input,
 and accessibility behavior on both platforms.

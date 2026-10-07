@@ -685,11 +685,21 @@ fn serve_surface(
     }
 
     loop {
-        let mut line = String::new();
-        match (&mut reader).take(MAX_MESSAGE_BYTES).read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
+        let mut bytes = Vec::new();
+        let count = match (&mut reader)
+            .take(MAX_MESSAGE_BYTES + 1)
+            .read_until(b'\n', &mut bytes)
+        {
+            Ok(count) => count,
+            Err(_) => break,
+        };
+        // A partial physical line is never a request, even if its prefix is valid JSON.
+        if count == 0 || count as u64 > MAX_MESSAGE_BYTES || bytes.last() != Some(&b'\n') {
+            break;
         }
+        let Ok(line) = std::str::from_utf8(&bytes) else {
+            break;
+        };
         let request = match stream_line(line.trim()) {
             Ok(Message::Update(description)) => SurfaceRequest::Update {
                 id,
@@ -1865,5 +1875,54 @@ mod tests {
             line(&mut reader)["reason"],
             "malformed: a focus target is \"terminal\" or a Surface id"
         );
+    }
+    fn invalid_stream_frame_is_never_dispatched(oversized: bool) {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (seen, received) = mpsc::channel();
+        let window = window(rx, move |request| match request {
+            SurfaceRequest::Open { reply, .. } => {
+                reply.send(Ok(())).unwrap();
+                true
+            }
+            SurfaceRequest::Closed { .. } => {
+                seen.send("closed").unwrap();
+                false
+            }
+            SurfaceRequest::Focus { .. } => {
+                seen.send("focus").unwrap();
+                true
+            }
+            SurfaceRequest::Close { .. } => {
+                seen.send("close").unwrap();
+                false
+            }
+            other => panic!("unexpected frame dispatch: {other:?}"),
+        });
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).unwrap();
+        assert_eq!(line(&mut reader)["type"], "opened");
+        let mut frame = br#"{"type":"focus","target":"terminal"}"#.to_vec();
+        if oversized {
+            frame.resize(MAX_MESSAGE_BYTES as usize, b' ');
+            frame.extend_from_slice(b"{\"type\":\"close\"}\n");
+        }
+        let _ = stream.write_all(&frame);
+        stream.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "closed"
+        );
+        window.join().unwrap();
+    }
+
+    #[test]
+    fn an_oversized_stream_line_cannot_dispatch_its_prefix_or_suffix() {
+        invalid_stream_frame_is_never_dispatched(true);
+    }
+
+    #[test]
+    fn an_eof_terminated_stream_json_cannot_dispatch() {
+        invalid_stream_frame_is_never_dispatched(false);
     }
 }

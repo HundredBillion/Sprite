@@ -341,32 +341,119 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
 }
 
 #[test]
-fn natural_exit_drains_final_output_when_a_descendant_keeps_the_pty_open() {
-    let sprite_term::Spawned { mut session, events, mut snapshots } = TerminalSession::spawn(
-        SessionConfig::command("/bin/sh", args(&["-c", "(trap '' HUP TERM; exec sleep 30) & printf 'DESC:%s\\n' \"$!\"; sleep 0.1; head -c 262144 /dev/zero; printf '\\033]2;FINAL_TITLE\\007FINAL_OUTPUT\\n'; exit 7"])),
-    ).unwrap();
+fn natural_exit_finishes_when_a_descendant_retains_the_pty() {
+    retained_descendant_exits(false);
+}
+
+#[test]
+fn natural_exit_deadline_is_not_renewed_by_continuous_output() {
+    retained_descendant_exits(true);
+}
+
+fn retained_descendant_exits(writes: bool) {
+    let pid_file = std::env::temp_dir().join(format!(
+        "sprite-exit-descendant-{}-{}.pid",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    struct Descendant(std::path::PathBuf);
+    impl Drop for Descendant {
+        fn drop(&mut self) {
+            if let Ok(pid) = std::fs::read_to_string(&self.0) {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", pid.trim()])
+                    .status();
+            }
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _descendant = Descendant(pid_file.clone());
+    let script = r#"import os, signal, sys, time
+r, w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    os.write(w, b'ready')
+    os.close(w)
+    if sys.argv[2] == 'write':
+        while True:
+            os.write(1, b'descendant output\r\n' * 32)
+    time.sleep(30)
+    os._exit(0)
+os.close(w)
+os.read(r, 5)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(pid))
+os._exit(7)
+"#;
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "python3",
+        vec![
+            "-c".into(),
+            script.into(),
+            pid_file.into_os_string(),
+            if writes {
+                "write".into()
+            } else {
+                "sleep".into()
+            },
+        ],
+    ))
+    .expect("spawn parent and retained-descriptor descendant");
     let events = EventPump::new(events);
     events.expect_ready();
-    let mut final_title = false;
-    let exit = loop {
-        match events.next() {
-            TerminalEvent::TitleChanged(Some(title)) => final_title |= title == "FINAL_TITLE",
-            TerminalEvent::Exited(exit) => break exit,
-            other => panic!("unexpected event {other:?}"),
+    match events.next() {
+        TerminalEvent::Exited(exit) => {
+            assert_eq!(exit.code, Some(7));
+            assert!(!exit.requested);
         }
-    };
-    assert_eq!(exit.code, Some(7));
-    assert!(!exit.requested);
-    assert!(final_title);
-    let bundle = snapshots.next_blocking().unwrap();
-    let text = support::pane_text(&bundle);
-    assert!(
-        text.contains("FINAL_OUTPUT"),
-        "final output survives: {text}"
-    );
-    let descendant = marker_fields(&text, "DESC:")[0].clone();
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", &descendant])
-        .status();
-    session.begin_shutdown().unwrap().unwrap().wait().unwrap();
+        other => panic!("expected natural Exited, got {other:?}"),
+    }
+}
+
+#[test]
+fn natural_exit_publishes_the_output_tail_in_the_final_snapshot() {
+    let script = r"import os
+output = b'line\r\n' * 1500 + b'FINAL_EXIT_TAIL'
+while output:
+    output = output[os.write(1, output):]
+os._exit(7)
+";
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "python3",
+        vec!["-c".into(), script.into()],
+    ))
+    .expect("spawn a child with a large output tail");
+    let (final_tx, final_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut final_snapshot = None;
+        while let Ok(bundle) = snapshots.next_blocking() {
+            final_snapshot = Some(bundle);
+        }
+        let _ = final_tx.send(final_snapshot);
+    });
+    let events = EventPump::new(events);
+    events.expect_ready();
+    match events.next() {
+        TerminalEvent::Exited(exit) => assert_eq!(exit.code, Some(7)),
+        other => panic!("expected natural Exited, got {other:?}"),
+    }
+    let final_snapshot = final_rx
+        .recv_timeout(support::WATCHDOG)
+        .expect("snapshot stream closes after exit")
+        .expect("exit published a snapshot");
+    let text = support::pane_text(&final_snapshot);
+    assert!(text.contains("FINAL_EXIT_TAIL"), "final snapshot: {text:?}");
 }

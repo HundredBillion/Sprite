@@ -207,21 +207,17 @@ impl TerminalView {
         layers
     }
 
-    pub(super) fn status_line(&self) -> Option<SharedString> {
-        match (&self.status, &self.graphics_status) {
-            (Some(status), Some(graphics)) => Some(format!("{status} · {graphics}").into()),
-            (Some(status), None) | (None, Some(status)) => Some(status.clone()),
-            (None, None) => None,
-        }
-    }
-
     /// Builds textures for the images this generation shows, and lets go of the
     /// rest.
     ///
     /// Driven by the snapshot rather than by drawing, so a still image is
     /// converted once when it arrives instead of once per frame.
     pub(super) fn refresh_textures(&mut self, bundle: &SnapshotBundle) {
-        self.graphics_status = None;
+        if let Some(warning) = self.texture_warning.take()
+            && self.status.as_ref() == Some(&warning)
+        {
+            self.status = None;
+        }
         let Some(frame) = bundle.graphics.as_ref() else {
             // Nothing shown: hold nothing. A pane that displayed images an hour
             // ago should not still be paying for them.
@@ -246,13 +242,13 @@ impl TerminalView {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            self.graphics_status = Some(
-                format!(
-                    "image {names} not shown: larger than this pane's texture budget \
-                     (graphics.texture_bytes)"
-                )
-                .into(),
-            );
+            let warning: SharedString = format!(
+                "image {names} not shown: larger than this pane's texture budget \
+                 (graphics.texture_bytes)"
+            )
+            .into();
+            self.texture_warning = Some(warning.clone());
+            self.status = Some(warning);
         }
         let shown: Vec<u32> = frame.images.iter().map(|image| image.id).collect();
         self.textures.retain(&shown);
@@ -282,7 +278,7 @@ impl Render for TerminalView {
             .as_ref()
             .map(|bundle| bundle.render.cursor)
             .filter(|cursor| metrics.blink_on || !cursor.blinking);
-        let status = self.status_line();
+        let status = self.status.clone();
         let preedit = self.preedit.clone();
         // The terminal draws its own composition only when the terminal holds
         // the keyboard: a focused Surface either draws its own (a grid) or
@@ -400,6 +396,7 @@ impl Render for TerminalView {
             ))
             .children(status.map(|status| {
                 div()
+                    .debug_selector(|| "terminal-status".into())
                     .absolute()
                     .bottom(px(0.0))
                     .left(px(0.0))

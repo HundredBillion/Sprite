@@ -8,7 +8,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
         TerminalView::failed("link recovery".into(), ".SystemUIFont".into(), window, cx)
     });
     let sprite_term::Spawned { session, mut events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; printf '\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30".into()])).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
     let position = sprite_term::CellPosition { row: 0, column: 0 };
     view.update(cx, |view, _| {
@@ -122,7 +122,7 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
         TerminalView::failed("reload revert".into(), ".SystemUIFont".into(), window, cx)
     });
     let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
     let image = sprite_term::ImagePixels {
         id: 88,
@@ -209,7 +209,7 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
             mut events,
             mut snapshots,
         } = TerminalSession::spawn(config).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
         let mut reloaded = settings.clone();
         let changed_color = Rgb {
             r: 0x12,
@@ -244,10 +244,10 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
         let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
         let event_drain = std::thread::spawn(move || {
             while let Ok(event) = events.next_blocking() {
-                if let sprite_term::TerminalEvent::History(history) = event {
-                    if history_tx.send(history).is_err() {
-                        break;
-                    }
+                if let sprite_term::TerminalEvent::History(history) = event
+                    && history_tx.send(history).is_err()
+                {
+                    break;
                 }
             }
         });
@@ -345,7 +345,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
         vec!["-c".into(), script.into()],
     ))
     .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     let initial = snapshots.next_blocking().unwrap();
     let allocated = gpui::size(px(800.0), px(480.0));
     let mut reloaded = settings.clone();
@@ -448,10 +448,10 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
         )
     });
     let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
     let guard = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        crate::test_blocking_wait::pause(std::time::Duration::from_secs(1));
         drop(events);
     });
     let mut reloaded = settings.clone();

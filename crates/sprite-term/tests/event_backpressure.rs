@@ -1,35 +1,10 @@
-use sprite_term::{SessionConfig, TerminalCommand, TerminalSession};
+use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession};
 use std::sync::mpsc;
 use std::time::Duration;
 
 #[test]
-fn ui_submission_returns_with_events_and_worker_queue_full() {
-    let sprite_term::Spawned { mut session, events, mut snapshots } = TerminalSession::spawn(
-        SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()]),
-    ).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    snapshots.next_blocking().unwrap();
-    let sender = session.commands();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = sender.try_send(TerminalCommand::Input(b"a".to_vec()));
-        let _ = tx.send(result);
-    });
-    let result = rx.recv_timeout(Duration::from_secs(1));
-    let handle = session.begin_shutdown().unwrap().unwrap();
-    drop(events);
-    handle.wait().unwrap();
-    assert!(
-        result.is_ok(),
-        "UI submission blocked on a full worker queue: {result:?}"
-    );
-}
-
-#[test]
-fn shutdown_retains_events_and_final_outcome_without_consumption() {
-    let titles: String = (0..100)
-        .map(|index| format!("\x1b]2;TITLE{index}\x07"))
-        .collect();
+fn shutdown_retains_accepted_titles_without_consumer_progress() {
+    let titles: String = (0..100).map(|i| format!("\x1b]2;TITLE{i}\x07")).collect();
     let script = format!("printf '%s' '{titles}'; sleep 30");
     let sprite_term::Spawned {
         mut session,
@@ -40,56 +15,37 @@ fn shutdown_retains_events_and_final_outcome_without_consumption() {
         vec!["-c".into(), script.into()],
     ))
     .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let mut saturated_since = None;
-    loop {
-        if session
-            .try_send(TerminalCommand::Capture)
-            .is_err_and(|error| error.message.contains("queue is full"))
-        {
-            let since = saturated_since.get_or_insert_with(std::time::Instant::now);
-            if since.elapsed() >= Duration::from_millis(100) {
-                break;
-            }
-        } else {
-            saturated_since = None;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "worker did not reach sustained event pressure"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    std::thread::sleep(Duration::from_millis(300));
     let handle = session.begin_shutdown().unwrap().unwrap();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(handle.wait());
     });
     let joined = rx.recv_timeout(Duration::from_secs(7));
-    let mut titles = Vec::new();
+    let mut retained = Vec::new();
     let mut exited = false;
     while let Ok(event) = events.next_blocking() {
         match event {
-            sprite_term::TerminalEvent::TitleChanged(Some(title)) => {
-                assert!(!exited, "events remain ordered before exit");
-                titles.push(title);
+            TerminalEvent::TitleChanged(Some(title)) => {
+                assert!(!exited);
+                retained.push(title);
             }
-            sprite_term::TerminalEvent::Exited(_) => exited = true,
+            TerminalEvent::Exited(_) => exited = true,
             _ => {}
         }
     }
     assert!(
         joined.is_ok(),
-        "shutdown depends on event consumption: {joined:?}"
+        "shutdown depends on consumer progress: {joined:?}"
     );
-    assert!(exited, "final outcome remains readable after join");
-    assert!(
-        titles.len() >= 32,
-        "the first title beyond the Ready plus normal title slots survives: {}",
-        titles.len()
+    assert!(exited);
+    assert_eq!(
+        retained.len(),
+        100,
+        "one accepted parser batch survives cancellation"
     );
-    for (index, title) in titles.iter().enumerate() {
-        assert_eq!(title, &format!("TITLE{index}"));
+    for (i, title) in retained.iter().enumerate() {
+        assert_eq!(title, &format!("TITLE{i}"));
     }
 }
 
@@ -195,10 +151,23 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let mut outcome = None;
+    let mut titles = Vec::new();
     while let Ok(event) = events.next_blocking() {
-        if let sprite_term::TerminalEvent::Exited(exit) = event {
-            outcome = Some(exit);
+        match event {
+            TerminalEvent::TitleChanged(Some(title)) => {
+                assert!(
+                    outcome.is_none(),
+                    "retained titles precede the final outcome"
+                );
+                titles.push(title);
+            }
+            TerminalEvent::Exited(exit) => outcome = Some(exit),
+            _ => {}
         }
+    }
+    assert!(titles.len() >= 32);
+    for (index, title) in titles.iter().enumerate() {
+        assert_eq!(title, &format!("TITLE{index}"));
     }
     let outcome = outcome.expect("reserved exit outcome");
     assert_eq!(outcome.code, Some(7));

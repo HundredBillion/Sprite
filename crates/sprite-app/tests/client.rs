@@ -5,6 +5,9 @@
 //! what reaches standard error, what the exit status is, and that it always
 //! returns. None of that is observable from inside the crate.
 
+#[path = "../src/test_blocking_wait.rs"]
+mod test_blocking_wait;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -556,7 +559,7 @@ fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
             if Instant::now() >= deadline {
                 break None;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            test_blocking_wait::pause(Duration::from_millis(10));
         };
         if status.is_none() {
             child.kill().unwrap();
@@ -649,7 +652,7 @@ fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
             if Instant::now() >= deadline {
                 break None;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            test_blocking_wait::pause(Duration::from_millis(10));
         };
         if status.is_none() {
             child.kill().unwrap();
@@ -747,7 +750,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
             if Instant::now() >= deadline {
                 return Err("client did not connect".into());
             }
-            std::thread::sleep(Duration::from_millis(10));
+            test_blocking_wait::pause(Duration::from_millis(10));
         };
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -767,7 +770,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
         reader
             .read_exact(&mut prefix)
             .map_err(|error| error.to_string())?;
-        if prefix != [b'{'] {
+        if prefix != *b"{" {
             return Err("update was not JSON".into());
         }
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -793,7 +796,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
                     "no blocked socket write: syscall={syscall}, wchan={state}"
                 ));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            test_blocking_wait::pause(Duration::from_millis(10));
         }
         reader
             .get_ref()
@@ -811,7 +814,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
             if Instant::now() >= deadline {
                 return Err("event EOF left the main socket write blocked".into());
             }
-            std::thread::sleep(Duration::from_millis(10));
+            test_blocking_wait::pause(Duration::from_millis(10));
         }
     })();
     if child.try_wait().unwrap().is_none() {
