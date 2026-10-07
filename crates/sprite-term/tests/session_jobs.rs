@@ -39,15 +39,20 @@ impl Drop for Fixture {
 }
 #[test]
 fn shutdown_owns_ordinary_job_groups_and_excludes_detached_sessions() {
-    job_groups(false);
+    job_groups(false, false);
 }
 
 #[test]
 fn shutdown_reaches_jobs_after_fast_leader_exit() {
-    job_groups(true);
+    job_groups(true, false);
 }
 
-fn job_groups(fast: bool) {
+#[test]
+fn shutdown_after_natural_exited_still_owns_ordinary_jobs() {
+    job_groups(true, true);
+}
+
+fn job_groups(fast: bool, late: bool) {
     let path = std::env::temp_dir().join(format!(
         "sprite-jobs-{}-{}",
         std::process::id(),
@@ -115,6 +120,12 @@ sleep 30
     let (birth, _, live) = identity(pid).unwrap();
     assert!(live);
     fixture.children.push((pid, birth));
+    if late {
+        match events.next() {
+            sprite_term::TerminalEvent::Exited(exit) => assert!(!exit.requested),
+            other => panic!("expected natural Exited, got {other:?}"),
+        }
+    }
     let before = Instant::now();
     session.begin_shutdown().unwrap().unwrap().wait().unwrap();
     for &(pid, birth) in &fixture.children[..2] {

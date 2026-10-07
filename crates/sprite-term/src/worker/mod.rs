@@ -27,6 +27,7 @@ use crate::{
 };
 
 mod closing;
+pub(crate) use closing::finish_shutdown;
 mod start;
 use crate::hyperlink::resolve_hyperlink;
 use crate::input::keys::{encode_focus, encode_key};
@@ -173,12 +174,12 @@ pub(crate) fn run(
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
     foreground: Arc<crate::ForegroundWatch>,
-) {
+) -> Option<pty_unix::SessionProcesses> {
     let started = match start::start(&config, &commands) {
         Ok(started) => started,
         Err(error) => {
             let _ = emit(&events, TerminalEvent::Error(error));
-            return;
+            return None;
         }
     };
     foreground.attach(started.master_fd, started.process_group);
@@ -197,8 +198,7 @@ pub(crate) fn run(
         Ok(pump) => pump,
         Err(error) => {
             runtime.fatal = Some(error);
-            closing::close(runtime);
-            return;
+            return closing::close(runtime);
         }
     };
     let input = pump.input();
@@ -208,8 +208,7 @@ pub(crate) fn run(
         Ok(initialized) => initialized,
         Err(error) => {
             runtime.fatal = Some(error);
-            closing::close(runtime);
-            return;
+            return closing::close(runtime);
         }
     };
     let start::Initialized {
@@ -256,7 +255,7 @@ pub(crate) fn run(
             }
         }
     }
-    session.finish();
+    session.finish()
 }
 
 impl Session {
@@ -678,7 +677,7 @@ impl Session {
         }
     }
 
-    fn finish(mut self) {
+    fn finish(mut self) -> Option<pty_unix::SessionProcesses> {
         self.drain_accepted_output();
         if self.pending.dirty
             && let Ok(bundle) = self.owned.projector.capture(
@@ -691,7 +690,7 @@ impl Session {
             let _ = self.snapshots.force_send(Arc::new(bundle));
         }
         drop(self.owned);
-        closing::close(self.runtime);
+        closing::close(self.runtime)
     }
 }
 

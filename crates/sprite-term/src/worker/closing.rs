@@ -17,7 +17,7 @@ const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
 /// continuous output.
 const CLOSING_SLICE: Duration = Duration::from_millis(50);
 
-pub(super) fn close(runtime: Runtime) {
+pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
     let Runtime {
         started:
             Started {
@@ -187,6 +187,30 @@ pub(super) fn close(runtime: Runtime) {
     }
 
     drop(master);
+    // Natural completion leaves ordinary jobs for a later explicit owner;
+    // an attempted explicit cleanup must never spend its budget twice.
+    if requested_at.is_none() {
+        processes
+    } else {
+        None
+    }
+}
+
+pub(crate) fn finish_shutdown(mut processes: pty_unix::SessionProcesses, requested_at: Instant) {
+    let mut terminated = false;
+    while processes.is_alive() {
+        let waited = requested_at.elapsed();
+        if waited >= KILL_AFTER {
+            processes.signal(&GroupSignal::Kill);
+        } else if waited >= TERM_AFTER && !terminated {
+            processes.signal(&GroupSignal::Terminate);
+            terminated = true;
+        }
+        if waited >= GIVE_UP_AFTER {
+            break;
+        }
+        std::thread::sleep(CLOSING_SLICE.min(GIVE_UP_AFTER.saturating_sub(waited)));
+    }
 }
 
 /// Reports one cause, never two: a signalled child has no exit code.

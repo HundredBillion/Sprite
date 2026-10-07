@@ -24,15 +24,29 @@ signal guessed groups nor declare completion, and remain bounded by the existing
 shutdown deadline. KILL rescans repeat until completion or deadline to reach
 newly created groups. Natural exit still sends one HUP; explicit shutdown keeps
 TERM at two seconds, KILL at three seconds and its six-second budget. Existing
-natural output drain and off-UI-thread cleanup stay intact.
+natural output drain and off-UI-thread cleanup stay intact. After natural
+completion, the worker returns retained process ownership to the existing
+shutdown handle through its join result. Blocking ShutdownHandle::wait performs
+any remaining explicit escalation on its caller’s background executor. The
+worker returns no remaining scope once its closing loop observed an explicit
+request, so that policy never spends a second six-second budget. This decision
+uses the observed request time, not the final flag: an auto-close request during
+natural Exited publication must still receive the retained scope. The handoff
+clock starts at begin_shutdown and includes joining the naturally ending worker;
+there is no new thread, supervisor or Pane lifecycle owner.
 
 Linux reads numeric /proc entries and parses stat after the last closing
 parenthesis. Darwin uses the existing nix/libc bindings: proc_listallpids returns
 PID counts and accepts buffer bytes, with bounded growth for full buffers;
 BSD info, getsid and BSD info again establish stable birth and group identity.
-Darwin sys/proc.h defines SZOMB as 5. An inaccessible process record makes the
-scan incomplete even if the process might be foreign, favoring safe bounded
-failure over uncertain signaling. This environment validates Linux behavior;
+Darwin sys/proc.h defines SZOMB as 5. Darwin probes SID with getsid before
+requesting protected full BSD metadata,
+skipping proven foreign sessions even when their BSD metadata would be denied.
+Apple’s current getsid implementation performs no same-user privilege check;
+unknown SID or unavailable possibly owned metadata still makes discovery
+incomplete. Owned records retain the BSDinfo/getsid/BSDinfo identity sandwich;
+permission errors are never discarded without proving foreign ownership.
+This environment validates Linux behavior;
 Darwin adapter source was checked against pinned bindings and Apple sources but
 has not been compiled or run on macOS.
 
@@ -47,4 +61,6 @@ Sources: portable-pty 0.9.0 src/unix.rs pre_exec setsid; libc 0.2.186 Apple
 proc_bsdinfo/proc_listallpids/proc_pidinfo bindings;
 [Apple libproc implementation](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c),
 [BSD process info](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h),
-[process status constants](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc.h).
+[process status constants](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc.h),
+[getsid implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c),
+[BSD-info privilege checks](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c).

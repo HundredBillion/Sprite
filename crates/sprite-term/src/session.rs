@@ -101,16 +101,22 @@ impl CommandSender {
 }
 
 pub struct ShutdownHandle {
-    worker: JoinHandle<()>,
+    worker: JoinHandle<Option<crate::pty_unix::SessionProcesses>>,
+    requested_at: std::time::Instant,
 }
 
 impl ShutdownHandle {
-    /// Blocks until the worker and its helper threads finish. Must not run on
-    /// the GPUI thread.
+    /// Blocks for worker completion and bounded ordinary-job cleanup. Must not
+    /// run on the GPUI thread.
     pub fn wait(self) -> Result<(), SessionError> {
-        self.worker
+        let remaining = self
+            .worker
             .join()
-            .map_err(|_| SessionError::new("join_worker", "the terminal worker panicked"))
+            .map_err(|_| SessionError::new("join_worker", "the terminal worker panicked"))?;
+        if let Some(processes) = remaining {
+            worker::finish_shutdown(processes, self.requested_at);
+        }
+        Ok(())
     }
 }
 
@@ -146,7 +152,7 @@ pub struct TerminalSession {
     shutdown: Arc<AtomicBool>,
     /// Answers "what is running in this pane" without a round-trip.
     foreground: Arc<ForegroundWatch>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<Option<crate::pty_unix::SessionProcesses>>>,
 }
 
 impl TerminalSession {
@@ -238,7 +244,10 @@ impl TerminalSession {
     /// calls return `None`.
     pub fn begin_shutdown(&mut self) -> Result<Option<ShutdownHandle>, SessionError> {
         self.request_shutdown();
-        Ok(self.worker.take().map(|worker| ShutdownHandle { worker }))
+        Ok(self.worker.take().map(|worker| ShutdownHandle {
+            worker,
+            requested_at: std::time::Instant::now(),
+        }))
     }
 
     /// Sets the flag and knocks on the queue. A `Full` queue is safe: the

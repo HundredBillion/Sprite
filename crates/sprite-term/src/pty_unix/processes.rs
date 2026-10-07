@@ -50,7 +50,7 @@ impl SessionProcesses {
         if self.retired {
             return Ok(vec![]);
         }
-        self.select(scan())
+        self.select(scan(self.session))
     }
 
     fn select(&mut self, snapshot: Result<Vec<Process>, ()>) -> Result<Vec<Process>, ()> {
@@ -131,7 +131,7 @@ fn read_process(pid: i32) -> Result<Option<Process>, ()> {
 }
 
 #[cfg(target_os = "linux")]
-fn scan() -> Result<Vec<Process>, ()> {
+fn scan(_session: i32) -> Result<Vec<Process>, ()> {
     let mut processes = Vec::new();
     for entry in std::fs::read_dir("/proc").map_err(|_| ())? {
         let entry = entry.map_err(|_| ())?;
@@ -147,6 +147,19 @@ fn scan() -> Result<Vec<Process>, ()> {
         }
     }
     Ok(processes)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn scoped_record(
+    pid: i32,
+    session: i32,
+    mut sid: impl FnMut(i32) -> Result<Option<i32>, ()>,
+    mut metadata: impl FnMut(i32) -> Result<Option<Process>, ()>,
+) -> Result<Option<Process>, ()> {
+    match sid(pid)? {
+        Some(found) if found == session => metadata(pid),
+        _ => Ok(None),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -203,8 +216,17 @@ fn read_process(pid: i32) -> Result<Option<Process>, ()> {
 }
 
 #[cfg(target_os = "macos")]
+fn process_session(pid: i32) -> Result<Option<i32>, ()> {
+    match getsid(Some(nix::unistd::Pid::from_raw(pid))) {
+        Ok(session) => Ok(Some(session.as_raw())),
+        Err(nix::errno::Errno::ESRCH) => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn scan() -> Result<Vec<Process>, ()> {
+fn scan(session: i32) -> Result<Vec<Process>, ()> {
     use nix::libc;
     // SAFETY: a null output asks libproc for a PID count without writing.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
@@ -226,7 +248,7 @@ fn scan() -> Result<Vec<Process>, ()> {
         }
         let mut processes = Vec::new();
         for pid in pids.into_iter().take(count as usize).filter(|pid| *pid > 0) {
-            if let Some(process) = read_process(pid)? {
+            if let Some(process) = scoped_record(pid, session, process_session, read_process)? {
                 processes.push(process);
             }
         }
@@ -238,6 +260,32 @@ fn scan() -> Result<Vec<Process>, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn adapter_skips_proven_foreign_denied_metadata_without_losing_owned_jobs() {
+        let owned = Process {
+            pid: 43,
+            group: 43,
+            session: 42,
+            birth: 2,
+            live: true,
+        };
+        let mut records = Vec::new();
+        for pid in [1, 43] {
+            let record = scoped_record(
+                pid,
+                42,
+                |pid| Ok(Some(if pid == 1 { 1 } else { 42 })),
+                |pid| {
+                    if pid == 1 { Err(()) } else { Ok(Some(owned)) }
+                },
+            )
+            .expect("foreign protected metadata must not block owned jobs");
+            records.extend(record);
+        }
+        assert_eq!(records, vec![owned]);
+        assert!(scoped_record(43, 42, |_| Err(()), |_| Ok(Some(owned))).is_err());
+        assert!(scoped_record(43, 42, |_| Ok(Some(42)), |_| Err(())).is_err());
+    }
     #[test]
     fn capture_rejects_nonpositive_and_callers_session() {
         assert!(SessionProcesses::capture(0).is_none());

@@ -107,6 +107,9 @@ new tests/session_jobs.rs; ADR0025 and core glossary.
 **Interfaces:** private `SessionProcesses` records SID/leader identity at spawn;
 fresh group discovery, signal and live-completion methods hide platform details.
 Keep existing process_group needed by ForegroundWatch; public session API unchanged.
+Private worker-result ownership handoff retains session scope after natural
+completion; existing blocking ShutdownHandle::wait performs remaining explicit
+cleanup off the UI thread without additional workers.
 
 - [x] Read `/tmp/sprite-gap-cleanup-design.md` and pinned portable-pty setsid
   contract. Add public-session red test with two HUP/TERM-ignoring ordinary Bash
@@ -119,16 +122,24 @@ Keep existing process_group needed by ForegroundWatch; public session API unchan
   parses numeric /proc stat after final ')'; Darwin uses existing nix::libc
   proc_listallpids/proc_pidinfo plus getsid. Distinguish failed/incomplete scans
   from empty scopes. Reject own/nonpositive/unexpected session IDs.
+  On Darwin establish SID before protected full BSD metadata: proven foreign
+  sessions are excluded without requesting same-user-only metadata; unknown
+  possibly owned records remain incomplete. Cover foreign permission denial.
 - [x] Revalidate live PID birth/SID/group immediately before signaling. Rescan
   at escalation/completion, including newly created groups after KILL stage;
   do not resurrect an empty retired scope or trust only killpg(0) zombies.
   Preserve bounded natural single-HUP policy and explicit HUP/TERM/KILL.
 - [x] Add safe pure selection/identity-change tests alongside actual sessions;
   confirm unrelated/detached jobs survive while ordinary jobs are gone when
-  shutdown reports completion. Run lifecycle/output/backpressure suites.
+  shutdown reports completion. Add actual public-session shutdown after natural
+  Exited (auto-close-equivalent) and retain ownership across worker completion;
+  do not spend a second explicit budget after the worker already attempted it.
+  Run lifecycle/output/backpressure suites.
 - [x] Record ADR0025 invariant, tradeoffs and residual portable signaling race;
   report red/green/platform evidence and commit; independent task review follows
-  this implementation report.
+  this implementation report. Review findings R3-1/R3-2 are repaired with
+  SID-first Darwin adapter coverage and post-natural-Exited public red/green;
+  focused re-review follows the first repair commit.
 
 ## Task 4: Cancelable delivery and nonblocking UI admission (SPR-023)
 
@@ -224,3 +235,5 @@ and accepts ordinary native replace calls regardless of preedit.
   push branch and open PR against current origin/master without merging it.
 
 Independent plan review: `/tmp/sprite-gap-plan-review.md`; three corrections adopted before implementation: retain latest refused Resize, route one-byte Wayland composition commits natively, and track partial settings admission across a latest-value revert. All ten IDs covered. Task1 has no remaining plan blocker.
+
+Task3 review refinement authorized under user autonomy preference: R3-1 excludes proven foreign SID before protected Darwin metadata, R3-2 retains process ownership after natural completion for later explicit wait. Natural singleHUP/output and explicit request-relative budgets remain invariants.
