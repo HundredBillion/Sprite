@@ -213,13 +213,13 @@ callback at GPUI's InputHandler/EntityInputHandler seam. Default forwards to
 existing replacement behavior; Sprite ignores already-delivered key fallback
 and accepts ordinary native replace calls regardless of preedit.
 
-- [ ] Read `/tmp/sprite-gap-ui-design.md`, pinned platform consumers and
+- [x] Read `/tmp/sprite-gap-ui-design.md`, pinned platform consumers and
   f2e66a0/35b0f7a. Reject timer/deferred receipts and blanket stop-propagation;
   these respectively lose identical commits and block native composition onset.
-- [ ] Add direct-commit actual PTY/Surface red tests for multibyte and identical
+- [x] Add direct-commit actual PTY/Surface red tests for multibyte and identical
   ASCII text, marked composition and ordinary-key no-double delivery, including
   enhanced key protocol. Verify explicit origin under deferred/focus changes.
-- [ ] Preserve pinned GPUI source/licenses. Published archive SHA256 is
+- [x] Preserve pinned GPUI source/licenses. Published archive SHA256 is
   `979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707`,
   independently matched to the pre-patch Cargo.lock. Verify the exact source
   plus recorded patch against that archive, including a tamper-negative check.
@@ -230,19 +230,29 @@ and accepts ordinary native replace calls regardless of preedit.
   native commits. Scope save/restore handles nested dispatch; no frame timers. A nested marking
   or transformed composition must invalidate the enclosing fallback scope too;
   restoring its previous string must not re-arm it.
-- [ ] Preserve Wayland one-byte composition commits: capture composing state
+- [x] Preserve Wayland one-byte composition commits: capture composing state
   before CommitString resets it. Only uncomposed one-byte text synthesizes the
   existing ordinary KeyDown; active-composition commits route directly to
   InsertText. Terminal and Surface preedit listeners otherwise suppress that
   synthetic key. Include default-client compatibility and CommitString→Done
   regression traces rather than only direct application replacement tests.
-- [ ] Audit every fallback/native caller, add bridge/native-classification tests
+- [x] Audit every fallback/native caller, add bridge/native-classification tests
   and verification against pinned upstream/recorded patch. Preserve other GPUI
   clients through default forwarding. Source-inspect Darwin and run available
   compiler/native CI rather than pretending Cocoa ran on Linux.
 - [ ] Remove Sprite's preedit-only commit gate; retain key encoding and current
   Surface target/refusal rules. Test native commits, key fallback, active marks,
   focus changes and protocols. Record ADR0027 limits/cost and commit/review.
+
+Task5 formatting/CI refinement: published GPUI is an excluded local path
+package, so workspace formatting does not rewrite upstream source. A read-only
+`cargo fmt --all -- --check` confirmed only Sprite changes before formatting;
+the new native scope helper has a separate rustfmt check. CI fetches and verifies
+the exact published archive before offline gates and runs portable patch/source
+trace tests there. These checks use Python 3.9+ standard-library source reads;
+there is no system-patch or archive-extraction-filter dependency. Linux compile,
+headless/PTY/Surface tests run locally; native Cocoa/compositor qualification and
+independent Task5 review remain separate gates.
 
 ## Plan review and final verification
 

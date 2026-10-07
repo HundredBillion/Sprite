@@ -1089,3 +1089,312 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
         cleanup.wait().unwrap();
     }
 }
+
+#[gpui::test]
+fn native_commit_without_preedit_reaches_actual_pty(cx: &mut gpui::TestAppContext) {
+    use gpui::{ElementInputHandler, InputHandler};
+    let expected = "日本😀aaa";
+    let script = format!(
+        "stty raw -echo; printf 'READY\\r\\n'; timeout --foreground 1 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        expected.len()
+    );
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("READY"))
+        });
+        let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view.clone());
+        cx.update(|window, cx| {
+            for text in ["日本", "😀", "a", "a", "a"] {
+                handler.replace_text_in_range(None, text, window, cx);
+            }
+        });
+        let bundle = wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("DONE"))
+        });
+        let text = bundle
+            .pane
+            .rows
+            .iter()
+            .map(|r| r.text.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let hex = expected
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert!(text.contains(&hex), "native commits at PTY: {text}");
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[gpui::test]
+fn ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::{ElementInputHandler, InputHandler, Keystroke};
+    let expected = "\x1b[97ua";
+    let script = format!(
+        "stty raw -echo; printf '\\033[>8uREADY\\r\\n'; timeout --foreground 1 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        expected.len() + 1
+    );
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("READY"))
+        });
+        view.update_in(cx, |view, window, _| window.focus(&view.focus));
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+            window.dispatch_keystroke(
+                Keystroke {
+                    key: "a".into(),
+                    key_char: Some("a".into()),
+                    modifiers: Default::default(),
+                },
+                cx,
+            );
+        });
+        let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view.clone());
+        cx.update(|window, cx| {
+            handler.replace_text_in_range(None, "a", window, cx);
+        });
+        let bundle = wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("DONE"))
+        });
+        let text: String = bundle.pane.rows.iter().map(|r| r.text.trim()).collect();
+        let actual = text
+            .split("READY")
+            .nth(1)
+            .unwrap()
+            .split("DONE")
+            .next()
+            .unwrap();
+        let hex = expected
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual, hex,
+            "one encoded key and one independent identical commit"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+#[gpui::test]
+fn ordinary_repeated_shift_unicode_keys_and_delayed_native_ascii_are_not_doubled(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::{ElementInputHandler, InputHandler, Keystroke};
+    let expected = "aaAé a";
+    let script = format!(
+        "stty raw -echo; printf 'READY\\r\\n'; timeout --foreground 1 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        expected.len() + 1
+    );
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("READY"))
+        });
+        view.update_in(cx, |view, window, _| window.focus(&view.focus));
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+            for (key, text, shift) in [
+                ("a", "a", false),
+                ("a", "a", false),
+                ("a", "A", true),
+                ("é", "é", false),
+                ("space", " ", false),
+            ] {
+                window.dispatch_keystroke(
+                    Keystroke {
+                        key: key.into(),
+                        key_char: Some(text.into()),
+                        modifiers: gpui::Modifiers {
+                            shift,
+                            ..Default::default()
+                        },
+                    },
+                    cx,
+                );
+            }
+        });
+        let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view.clone());
+        cx.update(|window, cx| {
+            handler.replace_text_in_range(None, "a", window, cx);
+        });
+        let bundle = wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("DONE"))
+        });
+        let text: String = bundle.pane.rows.iter().map(|r| r.text.trim()).collect();
+        let actual = text
+            .split("READY")
+            .nth(1)
+            .unwrap()
+            .split("DONE")
+            .next()
+            .unwrap();
+        let hex = expected
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual, hex,
+            "ordinary keys appear once each; identical later native commit remains independent"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[derive(Default)]
+struct DefaultTextClient(Vec<String>);
+
+impl gpui::EntityInputHandler for DefaultTextClient {
+    fn text_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: &mut Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<gpui::UTF16Selection> {
+        None
+    }
+    fn marked_text_range(
+        &self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        None
+    }
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.0.push(text.into());
+    }
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        _: &str,
+        _: Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        None
+    }
+    fn character_index_for_point(
+        &mut self,
+        _: gpui::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
+#[gpui::test]
+fn gpui_default_client_forwards_key_fallback_through_element_bridge(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext, ElementInputHandler, InputHandler};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings));
+    let (_view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::failed("probe".into(), ".SystemUIFont".into(), window, cx)
+    });
+    let client = cx.new(|_| DefaultTextClient::default());
+    let mut handler = ElementInputHandler::new(gpui::Bounds::default(), client.clone());
+    cx.update(|window, cx| {
+        handler.replace_text_in_range_from_key(None, "a", window, cx);
+        handler.replace_text_in_range(None, "a", window, cx);
+    });
+    client.read_with(cx, |client, _| assert_eq!(client.0, ["a", "a"]));
+}

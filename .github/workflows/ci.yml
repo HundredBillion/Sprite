@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm --needed \
-            base-devel git curl ncurses \
+            base-devel git curl ncurses python \
             less \
             "zig=${ZIG_VERSION}" \
             wayland libxkbcommon libx11 libxcb libxkbcommon-x11 \
@@ -73,6 +73,7 @@ jobs:
       - name: Fetch dependencies (the only network-enabled build stage)
         run: |
           set -euo pipefail
+          python3 scripts/check_gpui_patch.py --fetch
           cargo fetch --locked
           export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
           export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
@@ -127,6 +128,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --all -- --check
+          rustfmt --edition 2024 --check vendor/gpui/src/platform/key_text_scope.rs
+          python3 -m unittest scripts.test_gpui_patch -v
           cargo clippy --workspace --all-targets --locked --offline -- -D warnings
           # `--no-fail-fast`: without it cargo stops at the first failing test
           # binary, so a run reports one failure and silently skips the rest of
@@ -186,6 +189,7 @@ jobs:
       - name: Fetch dependencies (the only network-enabled build stage)
         run: |
           set -euo pipefail
+          python3 scripts/check_gpui_patch.py --fetch
           cargo fetch --locked
           export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
           export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
@@ -210,6 +214,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --all -- --check
+          rustfmt --edition 2024 --check vendor/gpui/src/platform/key_text_scope.rs
+          python3 -m unittest scripts.test_gpui_patch -v
           cargo clippy --workspace --all-targets --locked --offline -- -D warnings
           # `--no-fail-fast`: without it cargo stops at the first failing test
           # binary, so a run reports one failure and silently skips the rest of

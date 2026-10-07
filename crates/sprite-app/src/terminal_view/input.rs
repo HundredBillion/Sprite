@@ -252,14 +252,8 @@ impl EntityInputHandler for TerminalView {
         cx.notify();
     }
 
-    /// A commit. This is the only path by which *composed* text becomes input.
-    ///
-    /// GPUI also routes ordinary keystrokes through here, not only input-method
-    /// commits, and the key path has already encoded those against live
-    /// terminal state. Committing them again would type every character twice.
-    /// A commit is therefore only honoured when it concludes a composition,
-    /// which is the case `preedit` identifies. It goes to whoever holds the
-    /// keyboard: a Surface, as a text event, or the terminal.
+    /// A native commit goes to the current valid keyboard target, whether or
+    /// not the input method previously supplied marked text.
     fn replace_text_in_range(
         &mut self,
         _range: Option<Range<usize>>,
@@ -267,8 +261,8 @@ impl EntityInputHandler for TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let was_composing = self.preedit.take().is_some();
-        if was_composing && !text.is_empty() {
+        self.preedit = None;
+        if !text.is_empty() {
             if let Some(id) = self.focused_surface(window).map(|surface| surface.id())
                 && !self.accept_surface_input(id, window, cx)
             {
@@ -288,6 +282,17 @@ impl EntityInputHandler for TerminalView {
             }
         }
         cx.notify();
+    }
+
+    fn replace_text_in_range_from_key(
+        &mut self,
+        _range: Option<Range<usize>>,
+        _text: &str,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // Key listeners already encode ordinary text against the child's live
+        // protocol, or reject it. A fallback must never reach a new focus target.
     }
 
     /// A composition in progress. Held for display only.

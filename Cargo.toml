@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/sprite-app", "crates/sprite-pane", "crates/sprite-term"]
+exclude = ["vendor/gpui"]
 resolver = "3"
 
 [workspace.package]
@@ -34,3 +35,6 @@ nix = { version = "=0.28.0", default-features = false, features = ["fs", "poll",
 portable-pty = { version = "=0.9.0", default-features = false }
 sprite-pane = { path = "crates/sprite-pane" }
 sprite-term = { path = "crates/sprite-term" }
+
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
