@@ -79,6 +79,7 @@ struct Started {
     /// Recorded at spawn so descendants can still be reached after the child
     /// itself is gone and its own process id means nothing.
     process_group: Option<i32>,
+    processes: Option<pty_unix::SessionProcesses>,
     waiter: JoinHandle<()>,
 }
 

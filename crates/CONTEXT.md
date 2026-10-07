@@ -26,6 +26,13 @@ shutdown keeps the
 existing bounded HUP/TERM/KILL cleanup policy.
 _Avoid_: shell (only one possible child), terminal instance
 
+**Ordinary Session Job**:
+A running program that remains in its Terminal Session's process session,
+including background and foreground jobs. A program that deliberately starts a
+new process session is detached and outside that Terminal Session's cleanup
+ownership.
+_Avoid_: descendant (ancestry alone does not establish current ownership)
+
 **Terminal Generation**:
 The identity shared by coherent views of one completed terminal-state change.
 _Avoid_: frame number, render version

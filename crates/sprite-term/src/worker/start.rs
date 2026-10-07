@@ -407,10 +407,10 @@ pub(super) fn start(
             "the child reported no process id",
         ));
     };
-    // Recorded now, while the child is certainly alive: once it exits, its
-    // process id no longer resolves to a group, and descendants that outlive it
-    // would become unreachable.
+    // Foreground observation retains the shell group; cleanup separately owns
+    // the session before the waiter can reap an already exited leader.
     let process_group = pty_unix::process_group_of(child_pid);
+    let processes = pty_unix::SessionProcesses::capture(child_pid);
     let Some(master_fd) = pair.master.as_raw_fd() else {
         return Err(SessionError::new(
             "open_pty",
@@ -428,6 +428,7 @@ pub(super) fn start(
         master: pair.master,
         master_fd,
         process_group,
+        processes,
         waiter,
     })
 }

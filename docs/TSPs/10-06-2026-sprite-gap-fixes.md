@@ -108,23 +108,27 @@ new tests/session_jobs.rs; ADR0025 and core glossary.
 fresh group discovery, signal and live-completion methods hide platform details.
 Keep existing process_group needed by ForegroundWatch; public session API unchanged.
 
-- [ ] Read `/tmp/sprite-gap-cleanup-design.md` and pinned portable-pty setsid
+- [x] Read `/tmp/sprite-gap-cleanup-design.md` and pinned portable-pty setsid
   contract. Add public-session red test with two HUP/TERM-ignoring ordinary Bash
   job groups plus negative independent/detached sessions, bounded waits and
   identity-aware fixture cleanup.
-- [ ] Capture session ownership before child waiter handoff. Linux adapter
+- [x] Capture session ownership before child waiter handoff. Account for a leader
+  exiting before metadata capture without silently treating live ordinary jobs
+  as an empty scope; exercise the fast-leader case or record a demonstrated
+  platform limitation. Linux adapter
   parses numeric /proc stat after final ')'; Darwin uses existing nix::libc
   proc_listallpids/proc_pidinfo plus getsid. Distinguish failed/incomplete scans
   from empty scopes. Reject own/nonpositive/unexpected session IDs.
-- [ ] Revalidate live PID birth/SID/group immediately before signaling. Rescan
+- [x] Revalidate live PID birth/SID/group immediately before signaling. Rescan
   at escalation/completion, including newly created groups after KILL stage;
   do not resurrect an empty retired scope or trust only killpg(0) zombies.
   Preserve bounded natural single-HUP policy and explicit HUP/TERM/KILL.
-- [ ] Add safe pure selection/identity-change tests alongside actual sessions;
+- [x] Add safe pure selection/identity-change tests alongside actual sessions;
   confirm unrelated/detached jobs survive while ordinary jobs are gone when
   shutdown reports completion. Run lifecycle/output/backpressure suites.
-- [ ] Record ADR0025 invariant, tradeoffs and residual portable signaling race;
-  report red/green/platform evidence, commit and get task review.
+- [x] Record ADR0025 invariant, tradeoffs and residual portable signaling race;
+  report red/green/platform evidence and commit; independent task review follows
+  this implementation report.
 
 ## Task 4: Cancelable delivery and nonblocking UI admission (SPR-023)
 
