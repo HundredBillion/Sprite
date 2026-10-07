@@ -417,6 +417,7 @@ impl Render for Workspace {
             .map(|(pane, x, y, pane_width, pane_height, handle)| {
                 let is_focused = Some(pane) == focused;
                 div()
+                    .debug_selector(|| format!("workspace-pane-{}", pane.0))
                     .absolute()
                     .left(px(x))
                     .top(px(y))
@@ -445,6 +446,7 @@ impl Render for Workspace {
         let tab_children = self.tab_elements(cx);
 
         let panes = div()
+            .debug_selector(|| "workspace-panes".into())
             .relative()
             .w_full()
             .h(px(height))
@@ -469,16 +471,6 @@ impl Render for Workspace {
             // one event reaching two consumers, which the terminal's input
             // rules forbid.
             .capture_key_down(cx.listener(Self::key_down))
-            .children(self.mode.pending_close().map(|pending| {
-                div()
-                    .flex()
-                    .w_full()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .bg(rgb(CONFIRM_BG))
-                    .text_color(rgb(CONFIRM_FG))
-                    .child(pending.label.clone())
-            }))
             .when(strip > 0.0, |element| {
                 element.child(
                     div()
@@ -494,6 +486,25 @@ impl Render for Workspace {
             .when_some(self.mode.divider_drag(), |element, drag| {
                 element.child(Self::divider_overlay(drag, cx))
             })
+            .children(self.mode.pending_close().map(|pending| {
+                div()
+                    .debug_selector(|| "workspace-confirmation".into())
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .occlude()
+                    .max_h_full()
+                    .overflow_hidden()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .bg(rgb(CONFIRM_BG))
+                    .text_color(rgb(CONFIRM_FG))
+                    .child(pending.label.clone())
+            }))
             .into_any_element()
     }
 }

@@ -82,18 +82,18 @@ let button = match button {
 };
 ```
 
-- [ ] Add actual EntityInputHandler range tests for ASCII, BMP non-ASCII and
+- [x] Add actual EntityInputHandler range tests for ASCII, BMP non-ASCII and
   supplementary characters; watch baseline fail, then reconcile UTF-16 repair
   from 090389e without unrelated changes.
-- [ ] Add actual native listener/PTY regressions for middle/right press, drag,
+- [x] Add actual native listener/PTY regressions for middle/right press, drag,
   release, buttonless motion and Alt/Control. Preserve Shift selection and
   hyperlink hover/click behavior. Reconcile corresponding 090389e repair.
-- [ ] Reproduce banner coordinate mismatch with actual GPUI layout. Render
+- [x] Reproduce banner coordinate mismatch with actual GPUI layout. Render
   confirmation as an absolute overlay painted above panes so it consumes no
   flex space. Verify show/dismiss, single/multiple tabs, both split orientations,
   resize, bottom fit and pointer drag coordinates. Overlay must intercept label
   clicks instead of passing them to covered content.
-- [ ] Run covering GPUI/input/layout/cleanup tests and clippy; update exact
+- [x] Run covering GPUI/input/layout/cleanup tests and clippy; update exact
   red/green report and commit. Leave SPR-019 preedit/delivery behavior to Task 5.
 
 ## Task 3: Own all ordinary terminal-session job groups (SPR-021)

@@ -147,7 +147,8 @@ impl TerminalView {
         &mut self,
         cell: CellPosition,
         action: MouseAction,
-        shift: bool,
+        button: Option<gpui::MouseButton>,
+        modifiers: gpui::Modifiers,
     ) -> bool {
         let reporting = self
             .bundle
@@ -156,16 +157,21 @@ impl TerminalView {
 
         self.send(TerminalCommand::Mouse(MouseEvent {
             position: cell,
-            button: Some(sprite_term::MouseButton::Left),
+            button: button.and_then(|button| match button {
+                gpui::MouseButton::Left => Some(sprite_term::MouseButton::Left),
+                gpui::MouseButton::Middle => Some(sprite_term::MouseButton::Middle),
+                gpui::MouseButton::Right => Some(sprite_term::MouseButton::Right),
+                gpui::MouseButton::Navigate(_) => None,
+            }),
             action,
-            shift,
-            alt: false,
-            control: false,
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            control: modifiers.control,
         }));
 
         // Exactly the condition Terminal Core uses to withhold the event, so
         // the two sides cannot disagree about who owns it.
-        !reporting || shift
+        !reporting || modifiers.shift
     }
 
     pub(super) fn perform(&mut self, shortcut: Shortcut, cx: &mut Context<Self>) {
@@ -219,7 +225,10 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let end = self.preedit.as_ref().map_or(0, |text| text.len());
+        let end = self
+            .preedit
+            .as_ref()
+            .map_or(0, |text| text.encode_utf16().count());
         Some(UTF16Selection {
             range: end..end,
             reversed: false,
@@ -231,7 +240,9 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        self.preedit.as_ref().map(|text| 0..text.len())
+        self.preedit
+            .as_ref()
+            .map(|text| 0..text.encode_utf16().count())
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {

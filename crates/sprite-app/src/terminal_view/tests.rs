@@ -533,3 +533,275 @@ fn explicit_application_command_receives_sprite_terminal_identity(cx: &mut gpui:
         "explicit child can find bundled terminfo: {text}"
     );
 }
+
+#[gpui::test]
+fn native_ime_ranges_use_utf16(cx: &mut gpui::TestAppContext) {
+    use gpui::{ElementInputHandler, InputHandler};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::failed("probe".into(), ".SystemUIFont".into(), window, cx)
+    });
+    let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view.clone());
+    cx.update(|window, cx| {
+        for (text, units) in [
+            ("abc", 3),
+            ("é", 1),
+            ("日本", 2),
+            ("a😀é", 4),
+            ("😀", 2),
+            ("e\u{301}", 2),
+            ("a😀日e\u{301}", 6),
+        ] {
+            handler.replace_and_mark_text_in_range(None, text, None, window, cx);
+            assert_eq!(
+                handler
+                    .selected_text_range(false, window, cx)
+                    .unwrap()
+                    .range,
+                units..units
+            );
+            assert_eq!(handler.marked_text_range(window, cx).unwrap(), 0..units);
+        }
+        handler.replace_and_mark_text_in_range(None, "", None, window, cx);
+        assert_eq!(handler.marked_text_range(window, cx), None);
+        handler.unmark_text(window, cx);
+        assert_eq!(
+            handler
+                .selected_text_range(false, window, cx)
+                .unwrap()
+                .range,
+            0..0
+        );
+        assert_eq!(handler.marked_text_range(window, cx), None);
+    });
+}
+
+#[gpui::test]
+fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let expected = "\x1b[<59;2;2M\x1b[<24;2;2M\x1b[<56;3;2M\x1b[<24;3;2m\x1b[<25;2;2M\x1b[<57;3;2M\x1b[<25;3;2m\x1b[<26;2;2M\x1b[<58;3;2M\x1b[<26;3;2m";
+    let script = format!(
+        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; timeout --foreground 0.5 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        expected.len()
+    );
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("READY"))
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let (start, end) = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let width = view.metrics.width();
+            let height = view.metrics.height();
+            (
+                gpui::point(origin.x + width * 1.5, origin.y + height * 1.5),
+                gpui::point(origin.x + width * 2.5, origin.y + height * 1.5),
+            )
+        });
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+        });
+        let modifiers = Modifiers {
+            alt: true,
+            control: true,
+            ..Default::default()
+        };
+        cx.simulate_mouse_move(start, None, modifiers);
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            cx.simulate_mouse_down(start, button, modifiers);
+            cx.simulate_mouse_move(end, Some(button), modifiers);
+            cx.simulate_mouse_up(end, button, modifiers);
+        }
+        let bundle = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows.iter().any(|row| row.text.contains("DONE"))
+        });
+        let text: String = bundle.pane.rows.iter().map(|row| row.text.trim()).collect();
+        let actual = text
+            .split("READY")
+            .nth(1)
+            .unwrap()
+            .split("DONE")
+            .next()
+            .unwrap();
+        let expected: String = expected.bytes().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(actual, expected);
+        view.read_with(cx, |view, _| {
+            assert!(view.drag.is_none());
+            assert_eq!(
+                view.hovered_cell,
+                Some(sprite_term::CellPosition { row: 1, column: 1 })
+            );
+        });
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[gpui::test]
+fn pointer_selection_keeps_shift_override_and_click_drag_semantics(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+        Some(vec!["/bin/sh".into(), "-c".into(), r#"stty -icanon -echo; printf 'SELECTABLE'; IFS= read -r go; stty raw; printf '\033[?1003h\033[?1006h'; bytes=$(timeout --foreground 0.5 dd bs=1 count=1 status=none | od -An -tx1 -v | tr -d ' \n'); printf '\r\nMOUSE:%s:END\r\n' "$bytes"; sleep 30"#.into()]), settings,
+        Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+    ));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("SELECTABLE"))
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let (start, end) = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let width = view.metrics.width();
+            let height = view.metrics.height();
+            (
+                gpui::point(origin.x + width * 1.5, origin.y + height * 0.5),
+                gpui::point(origin.x + width * 3.5, origin.y + height * 0.5),
+            )
+        });
+        for reporting in [false, true] {
+            if reporting {
+                view.update(cx, |view, _| {
+                    view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+                });
+                wait_for_bundle(&view, cx, |bundle| bundle.render.mouse_tracking);
+            }
+            let modifiers = Modifiers {
+                shift: reporting,
+                ..Default::default()
+            };
+            cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+            view.read_with(cx, |view, _| {
+                assert!(view.drag.is_some_and(|drag| !drag.moved))
+            });
+            cx.simulate_mouse_up(start, MouseButton::Left, modifiers);
+            view.read_with(cx, |view, _| assert!(view.drag.is_none()));
+            cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+            cx.simulate_mouse_move(end, Some(MouseButton::Left), modifiers);
+            view.read_with(cx, |view, _| {
+                assert!(view.drag.is_some_and(|drag| drag.moved))
+            });
+            cx.simulate_mouse_up(end, MouseButton::Left, modifiers);
+            let bundle = wait_for_bundle(&view, cx, |bundle| {
+                bundle
+                    .render
+                    .rows
+                    .iter()
+                    .any(|row| row.cells.iter().any(|cell| cell.selected))
+            });
+            assert!(bundle.render.rows[0].cells.iter().any(|cell| cell.selected));
+            view.read_with(cx, |view, _| assert!(view.drag.is_none()));
+        }
+        let bundle = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows.iter().any(|row| row.text.contains(":END"))
+        });
+        assert!(
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("MOUSE::END")),
+            "Shift selection must not report bytes to the child"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[gpui::test]
+fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+        Some(vec!["/bin/sh".into(), "-c".into(), "printf '\\033[?1003h\\033[?1006h\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30".into()]), settings,
+        Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+    ));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows.iter().any(|row| row.text.contains("LINK"))
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let (start, inside, outside) = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let width = view.metrics.width();
+            let height = view.metrics.height();
+            (
+                gpui::point(origin.x + width * 0.5, origin.y + height * 0.5),
+                gpui::point(origin.x + width * 1.5, origin.y + height * 0.5),
+                gpui::point(origin.x + width * 5.5, origin.y + height * 0.5),
+            )
+        });
+        cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
+        let executor = cx.executor();
+        executor.allow_parking();
+        executor.block_test(view.condition::<()>(cx, |view, _| view.hovered_link.is_some()));
+        let link = view.read_with(cx, |view, _| view.hovered_link);
+        cx.simulate_mouse_move(inside, None, gpui::Modifiers::default());
+        view.read_with(cx, |view, _| assert_eq!(view.hovered_link, link));
+        cx.simulate_mouse_move(outside, None, gpui::Modifiers::default());
+        view.read_with(cx, |view, _| assert!(view.hovered_link.is_none()));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        assert!(
+            cx.opened_url().is_none(),
+            "plain link opens only on release"
+        );
+        cx.simulate_mouse_up(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        executor.block_test(view.condition::<()>(cx, |view, _| view.pending_link_click.is_none()));
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
