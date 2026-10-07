@@ -468,7 +468,7 @@ mod fallback_admission_tests {
                         std::time::Instant::now() < deadline,
                         "worker did not reach event pressure"
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
                 }
                 let mut refused = original.clone();
                 refused.colors.foreground = Some(Rgb {

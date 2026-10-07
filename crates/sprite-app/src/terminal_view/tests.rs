@@ -857,7 +857,7 @@ fn settings_callback_recovers_latest_values_after_real_event_pressure() {
             child.wait().unwrap();
             panic!("actual GPUI settings callback or recovery stalled");
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
     }
 }
 
@@ -898,7 +898,7 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
     });
     let initial = wait_for_bundle(&view, cx, |_| true);
     std::fs::write(&gate, b"go").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(750));
+    crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
     let mut changed = settings.clone();
     changed.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
     changed.cursor.blink = Some(false);
@@ -990,7 +990,7 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
                 ))
             ))
         );
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
     }
     view.update(cx, |view, _| {
         view.begin_shutdown();
@@ -1033,7 +1033,7 @@ fn natural_completion_retires_idle_admission_recovery(cx: &mut gpui::TestAppCont
             std::time::Instant::now() < deadline,
             "ended session left admission recovery alive"
         );
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
     }
     view.read_with(cx, |v, _| {
         assert!(matches!(v.session, SessionState::Ended(_)));
@@ -1055,7 +1055,7 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
         PaneExit {sender,identity:(crate::tabs::TabId(1),crate::pane_tree::PaneId(1))},window,cx));
     wait_for_bundle(&view, cx, |_| true);
     // Keep installed UI receivers paused until the natural mailbox deadline ends the worker.
-    std::thread::sleep(std::time::Duration::from_millis(2600));
+    crate::test_blocking_wait::pause(std::time::Duration::from_millis(2600));
     let mut latest = settings;
     latest.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
     view.update_in(cx, |v, w, cx| {

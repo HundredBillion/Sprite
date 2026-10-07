@@ -254,6 +254,39 @@ there is no system-patch or archive-extraction-filter dependency. Linux compile,
 headless/PTY/Surface tests run locally; native Cocoa/compositor qualification and
 independent Task5 review remain separate gates.
 
+## Task 6: Preserve production scheduling guard with bounded test coordination
+
+**Blocked by:** Task5 implementation; may run during read-only Task5 review.
+
+**Files:** one dedicated cfg(test) blocking-wait helper, calls in new terminal
+pressure/pointer regressions, and the exact CI no-blocking guard.
+
+The existing hosted no-blocking grep currently exits1 on six deliberate test-only
+waits introduced by Tasks2/4. Production behavior remains event driven. Keep the
+failure-path tests and durations, isolate their coordination in a module that
+normal compilation excludes, and exclude only that helper's unique filename from
+the no-blocking check. Production files and other forbidden-state checks remain
+covered. A custom Rust parser or broader production exclusion is unnecessary.
+
+- [x] Observe exact old guard failure, implement narrow isolation and verify the
+  new guard passes on the repository but rejects a temporary production match.
+- [x] Run covering terminal-view/theme regressions, normal build/check, fmt,
+  strict app clippy and diff check; record report and scoped commit.
+- [ ] Independent final branch review covers helper/guard and affected callers.
+
+Task6 implementation: `test_blocking_wait.rs` is gated with cfg(test) at the
+module declaration and within the file. Six callers retain their exact wait
+arguments; the CI grep excludes only this unique filename, leaving every other
+source and the other forbidden-state checks covered. Exact old guard exits1
+with six test-only matches; exact new guard exits0; a temporary real blocking
+function in production lib.rs is rejected with exit1, then restoration exits0.
+Covering terminal-view/theme tests72/72, normal app build, strict app all-targets
+clippy, firstparty/native-helper fmt and diff check pass. Task5 R1 stale Surface
+comment now names from_key fallback suppression and independent native commits;
+source-confirmed sibling comment search found no further stale claim. Evidence
+and dependency-warning limits are recorded in task-6-report.md. Final independent
+review remains outstanding.
+
 ## Plan review and final verification
 
 - [x] Self-review PRD coverage: Task1 014/015/016/022; Task2 017/018/020;

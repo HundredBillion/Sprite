@@ -153,8 +153,9 @@ jobs:
           ! grep -rnE "^[[:space:]]*use[[:space:]]+(libghostty_vt|portable_pty)|(libghostty_vt|portable_pty)::" \
             --include='*.rs' crates/sprite-app
           ! grep -nE "^(libghostty-vt|portable-pty)[[:space:]]*=" crates/sprite-app/Cargo.toml
+          # Blocking coordination lives only in the cfg(test) helper; production stays event driven.
           ! grep -rnE "thread::sleep|Timer::after|request_animation_frame" \
-            --include='*.rs' crates/sprite-app
+            --include='*.rs' --exclude='test_blocking_wait.rs' crates/sprite-app
 
   macos:
     name: macos

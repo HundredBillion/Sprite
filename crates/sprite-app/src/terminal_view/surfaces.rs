@@ -1244,8 +1244,9 @@ impl TerminalView {
                 // key and every letter of a conversion would arrive as plain
                 // key events and nothing would ever be marked. Nothing types
                 // it twice, because the terminal's own key handlers type only
-                // while the terminal holds the keyboard, and a commit that is
-                // not part of a composition is ignored.
+                // while the terminal holds the keyboard.
+                // The from_key path suppresses duplicate ordinary-key fallback.
+                // Independent native commits are accepted even without preedit.
                 //
                 // One limit remains, the same one the terminal lives with: the
                 // key that *begins* a composition still arrives here first,
