@@ -35,9 +35,14 @@ natural Exited publication must still receive the retained scope. The handoff
 clock starts at begin_shutdown and includes joining the naturally ending worker;
 there is no new thread, supervisor or Pane lifecycle owner.
 
-Linux reads numeric /proc entries and parses stat after the last closing
-parenthesis. Darwin uses the existing nix/libc bindings: proc_listallpids returns
-PID counts and accepts buffer bytes, with bounded growth for full buffers;
+Linux reads numeric /proc entries, excludes proven foreign SIDs with getsid
+before reading protected stat metadata, and parses stat after the last closing
+parenthesis. This prevents hidepid=1 foreign-process metadata denial from
+blocking ordinary-job cleanup. Stat still supplies actual SID, group and birth
+for ownership selection and the immediate pre-signal identity check. A failed
+getsid, including a security-policy denial, leaves discovery incomplete; only
+ESRCH proves disappearance. Darwin uses the existing nix/libc bindings:
+proc_listallpids returns PID counts and accepts buffer bytes, with bounded growth for full buffers;
 BSD info, getsid and BSD info again establish stable birth and group identity.
 Darwin sys/proc.h defines SZOMB as 5. Darwin probes SID with getsid before
 requesting protected full BSD metadata,
@@ -59,6 +64,8 @@ change deployment and architecture beyond this repair.
 
 Sources: portable-pty 0.9.0 src/unix.rs pre_exec setsid; libc 0.2.186 Apple
 proc_bsdinfo/proc_listallpids/proc_pidinfo bindings;
+[Linux procfs mount options](https://docs.kernel.org/filesystems/proc.html#mount-options),
+[Linux getsid security hook](https://github.com/torvalds/linux/blob/master/kernel/sys.c),
 [Apple libproc implementation](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c),
 [BSD process info](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h),
 [process status constants](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc.h),

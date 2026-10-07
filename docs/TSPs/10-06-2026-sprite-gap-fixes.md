@@ -144,6 +144,32 @@ cleanup off the UI thread without additional workers.
   SID-first Darwin adapter coverage and post-natural-Exited public red/green;
   focused re-review follows the first repair commit.
 
+Task3 final-review refinement: Linux procfs hidepid=1 exposes numeric foreign
+PIDs whose stat reads are denied. Actual public-session fault injection of only
+/proc/1/stat EACCES reproduces ordinary-job survival at 6.08s; the uninjected
+control passes 3.09s. Exclude proven foreign SIDs before protected metadata on
+Linux as on Darwin, sharing the existing scope boundary. Unknown/possibly-owned
+errors stay incomplete; all identity, retirement, budgets and handoff contracts
+remain unchanged. Add a durable actual scan/public shutdown permission regression
+and demonstrate red-green. No host procfs mount or Pane cleanup redesign.
+
+- [x] Task3 fix round2: Linux foreign-permission repair and durable regression,
+  covering ordinary immediate/fast/late jobs, output/lifecycle/mailbox checks,
+  strict clippy/fmt and source-family search; focused final review afterward.
+
+Round2 evidence: Linux now calls the existing SID-first scope boundary. The
+durable isolated LD_PRELOAD public-shutdown regression denies only its live
+foreign parent’s stat metadata and checks that fault is active. Reverting only
+Linux scan wiring reproduces ordinary-job survival at 6.10s; restoring it passes
+at 3.13s. The subprocess has a 12s deadline with captured diagnostics. Normal
+failures unwind birth-aware fixture cleanup; forced subprocess termination
+leaves fixture jobs subject to their 30s lifetime rather than guessing ownership.
+All 35 covering process/session/lifecycle/output/backpressure tests pass, including
+the existing unknown/owned-error and retirement checks. The original /proc/1/stat
+fault also passes 3.05s. Strict term clippy, fmt and diff checks pass. Release
+benchmark uses five samples at full 10MiB: output p95 277.942ms, spawn 1.391ms,
+idle input 0.077ms, loaded input 5.714ms. Final whole-branch review remains pending.
+
 ## Task 4: Cancelable delivery and nonblocking UI admission (SPR-023)
 
 **Blocked by:** Task 3

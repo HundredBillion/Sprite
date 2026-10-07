@@ -44,6 +44,8 @@ new process session is detached and outside that Terminal Session's cleanup
 ownership. Natural child exit does not release ownership of retained Ordinary
 Session Jobs; explicit Terminal Session cleanup still owes those jobs its
 bounded shutdown policy.
+Unreadable metadata of a proven foreign session does not block this cleanup;
+unknown membership keeps cleanup pending within its existing deadline.
 _Avoid_: descendant (ancestry alone does not establish current ownership)
 
 **Terminal Generation**:

@@ -131,7 +131,7 @@ fn read_process(pid: i32) -> Result<Option<Process>, ()> {
 }
 
 #[cfg(target_os = "linux")]
-fn scan(_session: i32) -> Result<Vec<Process>, ()> {
+fn scan(session: i32) -> Result<Vec<Process>, ()> {
     let mut processes = Vec::new();
     for entry in std::fs::read_dir("/proc").map_err(|_| ())? {
         let entry = entry.map_err(|_| ())?;
@@ -142,14 +142,14 @@ fn scan(_session: i32) -> Result<Vec<Process>, ()> {
         else {
             continue;
         };
-        if let Some(process) = read_process(pid)? {
+        if let Some(process) = scoped_record(pid, session, process_session, read_process)? {
             processes.push(process);
         }
     }
     Ok(processes)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn scoped_record(
     pid: i32,
     session: i32,
@@ -215,7 +215,7 @@ fn read_process(pid: i32) -> Result<Option<Process>, ()> {
     }))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn process_session(pid: i32) -> Result<Option<i32>, ()> {
     match getsid(Some(nix::unistd::Pid::from_raw(pid))) {
         Ok(session) => Ok(Some(session.as_raw())),
