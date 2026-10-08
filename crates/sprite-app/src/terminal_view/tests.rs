@@ -582,7 +582,7 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
     use gpui::{Modifiers, MouseButton};
     let expected = "\x1b[<59;2;2M\x1b[<24;2;2M\x1b[<56;3;2M\x1b[<24;3;2m\x1b[<25;2;2M\x1b[<57;3;2M\x1b[<25;3;2m\x1b[<26;2;2M\x1b[<58;3;2M\x1b[<26;3;2m";
     let script = format!(
-        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; printf 'CAPTURING\\r\\n'; timeout --foreground 0.5 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; stty min 0 time 5; printf 'CAPTURING\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
         expected.len()
     );
     let settings = crate::config::Settings::default();
@@ -690,7 +690,7 @@ fn pointer_selection_keeps_shift_override_and_click_drag_semantics(cx: &mut gpui
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-        Some(vec!["/bin/sh".into(), "-c".into(), r#"stty -icanon -echo; printf 'SELECTABLE'; IFS= read -r go; stty raw; printf '\033[?1003h\033[?1006h'; bytes=$(timeout --foreground 0.5 dd bs=1 count=1 status=none | od -An -tx1 -v | tr -d ' \n'); printf '\r\nMOUSE:%s:END\r\n' "$bytes"; sleep 30"#.into()]), settings,
+        Some(vec!["/bin/sh".into(), "-c".into(), r#"stty -icanon -echo; printf 'SELECTABLE'; IFS= read -r go; stty raw min 0 time 5; printf '\033[?1003h\033[?1006h'; bytes=$(dd bs=1 count=1 status=none | od -An -tx1 -v | tr -d ' \n'); printf '\r\nMOUSE:%s:END\r\n' "$bytes"; sleep 30"#.into()]), settings,
         Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
     ));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -877,14 +877,16 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             .unwrap()
             .as_nanos()
     ));
+    // The title burst must fit one macOS PTY read (1 KiB) yet overflow the event mailbox;
+    // a split burst leaves the worker holding a second chunk and the command queue short of full.
     let program = format!(
-        "import os,time,signal; signal.alarm(15);\nwhile not os.path.exists({:?}): time.sleep(.005)\nos.write(1,b''.join(b'\\x1b]2;burst-'+str(i).encode()+b'\\x07' for i in range(150))); os.write(1,b'\\x00'*(320*1024)); time.sleep(30)",
+        "import os,time,signal; signal.alarm(15);\nwhile not os.path.exists({:?}): time.sleep(.005)\nos.write(1,b''.join(b'\\x1b]2;burst-'+str(i).encode()+b'\\x07' for i in range(70))); os.write(1,b'\\x00'*(320*1024)); time.sleep(30)",
         gate.to_str().unwrap()
     );
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/usr/bin/python".into(), "-c".into(), program.into()]),
+            Some(vec!["/usr/bin/python3".into(), "-c".into(), program.into()]),
             settings.clone(),
             Vec::new(),
             None,
@@ -1050,9 +1052,24 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-        Some(vec!["/bin/sh".into(), "-c".into(), "sleep .3; i=0; while [ $i -lt 150 ]; do printf '\\033]2;title%s\\007' $i; i=$((i+1)); done; exit 7".into()]), settings.clone(),Vec::new(),None,
-        PaneExit {sender,identity:(crate::tabs::TabId(1),crate::pane_tree::PaneId(1))},window,cx));
+    // One write: separate small writes exhaust the output permits while the UI is paused,
+    // and macOS PTYs then block the child before it can exit.
+    let titles: String = (0..150).map(|i| format!("\x1b]2;title{i}\x07")).collect();
+    let script = format!("sleep .3; printf '%s' '{titles}'; exit 7");
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings.clone(),
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
     wait_for_bundle(&view, cx, |_| true);
     // Keep installed UI receivers paused until the natural mailbox deadline ends the worker.
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(2600));
@@ -1095,7 +1112,7 @@ fn native_commit_without_preedit_reaches_actual_pty(cx: &mut gpui::TestAppContex
     use gpui::{ElementInputHandler, InputHandler};
     let expected = "日本😀aaa";
     let script = format!(
-        "stty raw -echo; printf 'READY\\r\\n'; timeout --foreground 1 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        "stty raw -echo min 0 time 10; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
         expected.len()
     );
     let settings = crate::config::Settings::default();
@@ -1157,7 +1174,7 @@ fn ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit
     use gpui::{ElementInputHandler, InputHandler, Keystroke};
     let expected = "\x1b[97ua";
     let script = format!(
-        "stty raw -echo; printf '\\033[>8uREADY\\r\\n'; timeout --foreground 1 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        "stty raw -echo min 0 time 5; printf '\\033[>8uREADY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
         expected.len() + 1
     );
     let settings = crate::config::Settings::default();
@@ -1234,7 +1251,7 @@ fn ordinary_repeated_shift_unicode_keys_and_delayed_native_ascii_are_not_doubled
     use gpui::{ElementInputHandler, InputHandler, Keystroke};
     let expected = "aaAé a";
     let script = format!(
-        "stty raw -echo; printf 'READY\\r\\n'; timeout --foreground 1 dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        "stty raw -echo min 0 time 5; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
         expected.len() + 1
     );
     let settings = crate::config::Settings::default();
