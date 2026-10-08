@@ -879,14 +879,17 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
     ));
     // The title burst must fit one macOS PTY read (1 KiB) yet overflow the event mailbox;
     // a split burst leaves the worker holding a second chunk and the command queue short of full.
+    let titles: String = (0..70).map(|i| format!("\x1b]2;burst-{i}\x07")).collect();
+    // ARMED proves the child waits at the gate, so a slow start cannot push the burst
+    // past the pause below.
     let program = format!(
-        "import os,time,signal; signal.alarm(15);\nwhile not os.path.exists({:?}): time.sleep(.005)\nos.write(1,b''.join(b'\\x1b]2;burst-'+str(i).encode()+b'\\x07' for i in range(70))); os.write(1,b'\\x00'*(320*1024)); time.sleep(30)",
+        "printf ARMED; while [ ! -e '{}' ]; do sleep 0.005; done; printf '%s' '{titles}'; head -c 327680 /dev/zero; sleep 30",
         gate.to_str().unwrap()
     );
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/usr/bin/python3".into(), "-c".into(), program.into()]),
+            Some(vec!["/bin/sh".into(), "-c".into(), program.into()]),
             settings.clone(),
             Vec::new(),
             None,
@@ -898,7 +901,13 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             cx,
         )
     });
-    let initial = wait_for_bundle(&view, cx, |_| true);
+    let initial = wait_for_bundle(&view, cx, |bundle| {
+        bundle
+            .pane
+            .rows
+            .iter()
+            .any(|row| row.text.contains("ARMED"))
+    });
     std::fs::write(&gate, b"go").unwrap();
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
     let mut changed = settings.clone();
