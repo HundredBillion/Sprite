@@ -245,6 +245,12 @@ impl LocalSocket {
                             }
                             Err(_) => break,
                         };
+                        // BSD-derived systems hand the listener's O_NONBLOCK to accepted
+                        // sockets; the handshake and handlers rely on blocking reads
+                        // bounded by socket timeouts.
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let id = next_id;
                         next_id += 1;
                         let deadline = Instant::now() + policy.handshake_timeout;
@@ -959,6 +965,10 @@ mod tests {
         let mut client = UnixStream::connect(socket.socket_path()).unwrap();
         writeln!(client, "{} hello", socket.key_hex()).unwrap();
         entry.recv_timeout(Duration::from_secs(2)).unwrap();
+        // macOS refuses socket options once both directions are shut down.
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         fs::remove_file(socket.socket_path()).unwrap();
         let (done, completed) = mpsc::channel();
         std::thread::spawn(move || {
@@ -968,9 +978,6 @@ mod tests {
         completed
             .recv_timeout(Duration::from_secs(2))
             .expect("unlinked listener must close");
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
         assert_eq!(client.read(&mut [0]).unwrap(), 0);
     }
 }
