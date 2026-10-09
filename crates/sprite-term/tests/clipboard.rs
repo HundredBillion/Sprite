@@ -186,5 +186,48 @@ fn the_selection_clipboard_obeys_the_same_policy() {
     );
 }
 
+/// Focus is a state the pane moves in and out of, not a grant made once: a
+/// pane that had focus and lost it may not write the clipboard.
+#[test]
+fn losing_focus_withdraws_the_clipboard() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
+        "stty -echo; read _; printf '\\033]52;c;b25l\\007'; printf 'ONE\\n'; \
+         read _; printf '\\033]52;c;dHdv\\007'; printf 'TWO\\n'; sleep 30",
+    );
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+
+    session
+        .send(TerminalCommand::Focus(true))
+        .expect("focus the pane");
+    session
+        .send(TerminalCommand::Input(b"\n".to_vec()))
+        .expect("release the first write");
+    snapshots.wait_for("the first marker", |bundle| {
+        pane_text(bundle).contains("ONE")
+    });
+    assert_eq!(events.try_next_clipboard().as_deref(), Some("one"));
+
+    session
+        .send(TerminalCommand::Focus(false))
+        .expect("unfocus the pane");
+    session
+        .send(TerminalCommand::Input(b"\n".to_vec()))
+        .expect("release the second write");
+    snapshots.wait_for("the second marker", |bundle| {
+        pane_text(bundle).contains("TWO")
+    });
+    assert_eq!(
+        events.try_next_clipboard(),
+        None,
+        "a pane that lost focus is denied"
+    );
+}
+
 // Keeps the unused-import warning honest when only some tests run.
 const _: fn(&TerminalEvent) = |_| {};

@@ -582,6 +582,43 @@ mod tests {
             assert!(workspace.tabs.active().is_none());
         });
     }
+
+    /// The workspace's focus routing and the window's activation together
+    /// decide which terminal has Pane Focus.
+    #[gpui::test]
+    fn pane_focus_follows_the_focused_pane_and_the_active_window(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        draw_workspace(cx);
+        cx.simulate_keystrokes("ctrl-shift-d");
+        // The first frame moves the keyboard; the second reports the move.
+        draw_workspace(cx);
+        draw_workspace(cx);
+        let first = terminal_view(&workspace, PaneId(0), cx);
+        let second = terminal_view(&workspace, PaneId(1), cx);
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            (
+                first.read_with(cx, |view, _| view.pane_focused()),
+                second.read_with(cx, |view, _| view.pane_focused()),
+            )
+        };
+        assert_eq!(focused(cx), (false, true), "the split took the keyboard");
+        workspace.update(cx, |workspace, cx| workspace.focus_pane(PaneId(0), cx));
+        draw_workspace(cx);
+        draw_workspace(cx);
+        assert_eq!(focused(cx), (true, false));
+        cx.deactivate_window();
+        assert_eq!(
+            focused(cx),
+            (false, false),
+            "a background window has no Pane Focus"
+        );
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(focused(cx), (true, false), "and coming back restores it");
+    }
+
     #[gpui::test]
     fn modes_cancel_and_close_confirmation_remains_scope_specific(cx: &mut gpui::TestAppContext) {
         use super::Mode;

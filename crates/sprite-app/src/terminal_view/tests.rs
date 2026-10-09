@@ -63,6 +63,72 @@ fn hold_unsafe_paste(
     });
 }
 
+/// Two running panes side by side in one window, so the keyboard can move
+/// between them as the workspace moves it.
+struct TwoPanes {
+    left: gpui::Entity<TerminalView>,
+    right: gpui::Entity<TerminalView>,
+}
+
+impl gpui::Render for TwoPanes {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        use gpui::prelude::*;
+        gpui::div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .child(
+                gpui::div()
+                    .w(px(400.0))
+                    .h(px(300.0))
+                    .child(self.left.clone()),
+            )
+            .child(
+                gpui::div()
+                    .w(px(400.0))
+                    .h(px(300.0))
+                    .child(self.right.clone()),
+            )
+    }
+}
+
+fn two_panes<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    settings: &crate::config::Settings,
+    script: &str,
+) -> (
+    gpui::Entity<TerminalView>,
+    gpui::Entity<TerminalView>,
+    &'a mut gpui::VisualTestContext,
+) {
+    use gpui::AppContext as _;
+    let (sender, _exits) = async_channel::unbounded();
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let mut pane = |id: u64| {
+            cx.new(|cx| {
+                TerminalView::new(
+                    Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+                    settings.clone(),
+                    Vec::new(),
+                    None,
+                    PaneExit {
+                        sender: sender.clone(),
+                        identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(id)),
+                    },
+                    window,
+                    cx,
+                )
+            })
+        };
+        TwoPanes {
+            left: pane(1),
+            right: pane(2),
+        }
+    });
+    let (left, right) = root.read_with(cx, |root, _| (root.left.clone(), root.right.clone()));
+    (left, right, cx)
+}
+
 #[gpui::test]
 fn idle_view_accepts_colour_and_cursor_reloads(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
@@ -1057,6 +1123,156 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
     std::fs::remove_file(gate).unwrap();
 }
 
+#[test]
+fn focus_refused_under_a_full_queue_is_delivered_once_admission_recovers() {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "terminal_view::tests::focus_admission_pressure_child",
+            "--nocapture",
+        ])
+        .env("SPRITE_FOCUS_PRESSURE_CHILD", "1")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                status.success(),
+                "focus admission regression failed: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("focus admission recovery stalled");
+        }
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Runs only inside `focus_refused_under_a_full_queue_is_delivered_once_admission_recovers`.
+///
+/// The child turns focus reporting on, then waits at a gate. Once released it
+/// floods the event mailbox with titles while the UI thread is paused, so the
+/// worker stalls and the command queue fills. Pane Focus is gained while the
+/// queue is full; the refused `Focus(true)` must still reach the child — as
+/// CSI I — once the UI resumes and admission recovers.
+#[gpui::test]
+fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
+    if std::env::var_os("SPRITE_FOCUS_PRESSURE_CHILD").is_none() {
+        return;
+    }
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let gate = std::env::temp_dir().join(format!(
+        "sprite-focus-pressure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let titles: String = (0..70).map(|i| format!("\x1b]2;burst-{i}\x07")).collect();
+    let program = format!(
+        "stty raw -echo; printf '\\033[?1004hARMED'; while [ ! -e '{}' ]; do sleep 0.005; done; \
+         printf '%s' '{titles}'; head -c 327680 /dev/zero; \
+         dd bs=1 count=3 status=none | od -An -tx1 | tr -d ' \\n'; printf 'END'; sleep 30",
+        gate.to_str().unwrap()
+    );
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), program.into()]),
+            settings.clone(),
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    wait_for_bundle(&view, cx, |bundle| {
+        bundle
+            .pane
+            .rows
+            .iter()
+            .any(|row| row.text.contains("ARMED"))
+    });
+    // The window is active and drawn, with nothing focused yet: no Focus is
+    // sent, and the view's handle is in the rendered tree for later.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    redraw(cx);
+    assert!(!view.read_with(cx, |view, _| view.pane_focused()));
+
+    std::fs::write(&gate, b"go").unwrap();
+    crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
+    view.update_in(cx, |view, window, cx| {
+        // Whatever room the stalled worker left is taken, so the next command
+        // is refused.
+        let mut refused = false;
+        for _ in 0..64 {
+            if !view.submit(TerminalCommand::ClearSelection) {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "the fixture never filled the command queue");
+        window.focus(&view.focus);
+        view.refresh_pane_focus(window, cx);
+        assert!(view.pane_focused());
+        assert_eq!(
+            view.pending_focus,
+            Some(true),
+            "a refused Focus is kept for recovery"
+        );
+        assert!(
+            view.status
+                .as_ref()
+                .is_some_and(|status| status.contains("queue is full"))
+        );
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(5));
+        cx.executor().tick();
+        if view.read_with(cx, |view, _| {
+            view.pending_focus.is_none()
+                && view.bundle.as_ref().is_some_and(|bundle| {
+                    bundle
+                        .pane
+                        .rows
+                        .iter()
+                        .any(|row| row.text.contains("1b5b49END"))
+                })
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the refused Focus never reached the child: {:?}",
+            view.read_with(cx, |view, _| (view.pending_focus, view.status.clone()))
+        );
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
+    }
+    view.update(cx, |view, _| {
+        view.begin_shutdown();
+    });
+    std::fs::remove_file(gate).unwrap();
+}
+
 #[gpui::test]
 fn natural_completion_retires_idle_admission_recovery(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
@@ -1824,4 +2040,169 @@ fn deliberate_input_drops_a_held_paste_and_passive_input_does_not(cx: &mut gpui:
     let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view.clone());
     cx.update(|window, cx| handler.replace_text_in_range(None, "é", window, cx));
     assert!(!held(&view, cx), "an input method commit drops it");
+}
+
+/// Pane Focus is the keyboard *and* the active window. Each change reaches the
+/// child once, as a focus report, and nothing is reported when nothing
+/// changed. The child turns reporting on only after the pane's opening
+/// `Focus(false)` has been handled, then prints each three-byte report on a
+/// line of its own; a sentinel behind the reports proves nothing else came.
+#[gpui::test]
+fn pane_focus_follows_the_keyboard_and_the_window_and_reaches_the_child(
+    cx: &mut gpui::TestAppContext,
+) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let script = "stty raw -echo; dd bs=1 count=1 status=none >/dev/null; \
+                  printf '\\033[?1004hREADY\\r\\n'; \
+                  while :; do dd bs=1 count=3 status=none | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'; done";
+    let (left, right, cx) = two_panes(cx, &settings, script);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for view in [&left, &right] {
+            view.update(cx, |view, _| {
+                view.send(TerminalCommand::Input(b"g".to_vec()))
+            });
+            wait_for_bundle(view, cx, |b| {
+                b.pane.rows.iter().any(|r| r.text.contains("READY"))
+            });
+        }
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            (
+                left.read_with(cx, |view, _| view.pane_focused()),
+                right.read_with(cx, |view, _| view.pane_focused()),
+            )
+        };
+
+        // The keyboard alone is not Pane Focus while the window is behind others.
+        left.update_in(cx, |view, window, _| window.focus(&view.focus));
+        redraw(cx);
+        assert_eq!(focused(cx), (false, false));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(focused(cx), (true, false));
+        redraw(cx);
+
+        // Moving the keyboard moves Pane Focus, and the pane left behind drops
+        // the paste it was holding.
+        hold_unsafe_paste(&left, cx, "a\nb");
+        right.update_in(cx, |view, window, _| window.focus(&view.focus));
+        redraw(cx);
+        assert_eq!(focused(cx), (false, true));
+        assert!(
+            !left.read_with(cx, |view, _| view.unsafe_paste.is_armed()),
+            "leaving the pane drops its held paste"
+        );
+
+        // Frames with nothing changed report nothing.
+        redraw(cx);
+        redraw(cx);
+
+        cx.deactivate_window();
+        assert_eq!(
+            focused(cx),
+            (false, false),
+            "a background window has no Pane Focus"
+        );
+        redraw(cx);
+        left.update_in(cx, |view, window, _| window.focus(&view.focus));
+        redraw(cx);
+        assert_eq!(focused(cx), (false, false));
+
+        let reports = |view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |view, _| {
+                view.send(TerminalCommand::Input(b"ZZZ".to_vec()))
+            });
+            let bundle = wait_for_bundle(view, cx, |b| {
+                b.pane.rows.iter().any(|r| r.text.contains("5a5a5a"))
+            });
+            bundle
+                .pane
+                .rows
+                .iter()
+                .map(|r| r.text.trim().to_owned())
+                .skip_while(|line| !line.contains("READY"))
+                .skip(1)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(reports(&left, cx), ["1b5b49", "1b5b4f", "5a5a5a"]);
+        assert_eq!(reports(&right, cx), ["1b5b49", "1b5b4f", "5a5a5a"]);
+    }));
+    for view in [&left, &right] {
+        if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+            cleanup.wait().unwrap();
+        }
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// OSC 52 is honoured only from the pane with Pane Focus: refused while the
+/// pane is unfocused, accepted once it holds the keyboard in the active window.
+#[gpui::test]
+fn only_a_pane_with_pane_focus_may_write_the_clipboard(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let script = "stty -echo; read _; printf '\\033]52;c;b25l\\007'; printf 'ONE\\n'; \
+                  read _; printf '\\033]52;c;dHdv\\007'; printf 'TWO\\n'; sleep 30";
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("before".to_owned()));
+    let clipboard =
+        |cx: &mut gpui::VisualTestContext| cx.read_from_clipboard().and_then(|item| item.text());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |_| true);
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"\n".to_vec()))
+        });
+        wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("ONE"))
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("before"),
+            "an unfocused pane is refused"
+        );
+
+        view.update_in(cx, |view, window, _| window.focus(&view.focus));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        redraw(cx);
+        assert!(view.read_with(cx, |view, _| view.pane_focused()));
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"\n".to_vec()))
+        });
+        wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("TWO"))
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("two"),
+            "the focused pane is honoured"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

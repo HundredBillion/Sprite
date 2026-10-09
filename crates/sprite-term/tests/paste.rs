@@ -178,6 +178,35 @@ fn focus_is_reported_only_when_the_child_asks() {
     );
 }
 
+/// Losing focus is reported as well, as CSI O, once the child has asked.
+#[test]
+fn focus_loss_is_reported_after_focus_gain() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("printf '\\033[?1004h';", 6));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    session
+        .send(TerminalCommand::Focus(true))
+        .expect("report focus in");
+    session
+        .send(TerminalCommand::Focus(false))
+        .expect("report focus out");
+
+    let bundle = snapshots.wait_for("both reports", |b| {
+        pane_text(b).contains("1b 5b 49 1b 5b 4f")
+    });
+    assert!(
+        pane_text(&bundle).contains("1b 5b 49 1b 5b 4f"),
+        "CSI I then CSI O"
+    );
+}
+
 /// An unbracketed paste containing a newline would execute on arrival, because
 /// the line discipline turns Sprite's carriage return back into one. Such a
 /// paste is withheld and reported, not performed.
