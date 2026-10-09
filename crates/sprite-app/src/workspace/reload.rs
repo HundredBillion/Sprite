@@ -659,4 +659,131 @@ mod tests {
         let late = requests.try_recv().expect("the request is still queued");
         assert!(!late.claim(), "the window must drop it unapplied");
     }
+
+    /// Observation turned on by a reload must find the panes that were opened
+    /// while it was off, not only the ones opened afterwards.
+    #[gpui::test]
+    fn panes_opened_while_observation_was_off_are_observable_once_reload_turns_it_on(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A child owns runtime-directory variables without racing parallel
+        // tests. Its private directory also works without a logged-in desktop.
+        if std::env::var_os("SPRITE_OBSERVATION_EXISTING_PANES_TEST_CHILD").is_none() {
+            let directory = std::env::temp_dir().join(format!("sp-e-{:x}", std::process::id()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "workspace::reload::tests::panes_opened_while_observation_was_off_are_observable_once_reload_turns_it_on", "--nocapture"])
+                .env("SPRITE_OBSERVATION_EXISTING_PANES_TEST_CHILD", "1")
+                .env("XDG_RUNTIME_DIR", &directory)
+                .env("TMPDIR", &directory)
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(directory).unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "the subprocess must run and pass its exact test\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        let (workspace, cx) = test_workspace(cx);
+        let path =
+            std::env::temp_dir().join(format!("sprite-existing-panes-{}.toml", std::process::id()));
+        // Real sessions, so the panes can answer. The test workspace's own
+        // first pane runs a program that does not exist, so it cannot answer
+        // and is left out of what is expected.
+        let opened = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.config_path = Some(path.clone());
+            workspace.command = Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'existing-pane\\n'; exec sleep 30".into(),
+            ]);
+            workspace.split(Orientation::Vertical, window, cx);
+            workspace.open_tab(window, cx);
+            let mut opened: Vec<u64> = workspace
+                .tabs
+                .all_panes()
+                .into_iter()
+                .map(|(_, pane, _)| pane.0)
+                .filter(|pane| *pane != 0)
+                .collect();
+            opened.sort_unstable();
+            opened
+        });
+        assert_eq!(opened.len(), 2, "a split and a new tab: {opened:?}");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.endpoint.is_none(), "observation starts off");
+        });
+
+        std::fs::write(&path, "[pane_observation]\nenabled = true\n").unwrap();
+        let report = workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        assert!(report.contains("applied now: pane_observation"), "{report}");
+        let (socket, key) = workspace.read_with(cx, |workspace, _| {
+            let endpoint = workspace
+                .endpoint
+                .as_ref()
+                .expect("the reload turned observation on");
+            (endpoint.socket_path().to_owned(), endpoint.key_hex())
+        });
+
+        let (answer, receive) = async_channel::bounded(1);
+        let client = std::thread::spawn(move || {
+            let result = (|| -> std::io::Result<String> {
+                let mut stream = UnixStream::connect(socket)?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                writeln!(stream, "{key} sprite-observation/1 panes snapshot --window")?;
+                let mut answer = String::new();
+                stream.read_to_string(&mut answer)?;
+                Ok(answer)
+            })();
+            answer.send_blocking(result).unwrap();
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        let response = executor
+            .block_test(async { receive.recv().await.unwrap() })
+            .unwrap();
+        client.join().unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&response).unwrap_or_else(|error| panic!("{error}: {response}"));
+        let mut answered: Vec<u64> = value["panes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a pane list: {response}"))
+            .iter()
+            .map(|pane| pane["pane"].as_u64().expect("a pane id"))
+            .collect();
+        answered.sort_unstable();
+        assert_eq!(
+            answered, opened,
+            "every pane opened while observation was off is listed and answers: {response}"
+        );
+        // The first pane never got a session, so it is listed as closed
+        // rather than silently missing; no other pane may fail.
+        let failed: Vec<u64> = value["errors"]
+            .as_array()
+            .unwrap_or_else(|| panic!("an error list: {response}"))
+            .iter()
+            .map(|error| error["pane"].as_u64().expect("a pane id"))
+            .collect();
+        assert_eq!(failed, [0], "{response}");
+
+        let cleanups = workspace.update(cx, |workspace, cx| workspace.begin_shutdown(cx));
+        executor.block_test(async move {
+            for cleanup in cleanups {
+                cleanup.await;
+            }
+        });
+        std::fs::remove_file(path).unwrap();
+    }
 }

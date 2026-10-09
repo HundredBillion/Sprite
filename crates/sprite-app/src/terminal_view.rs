@@ -74,7 +74,9 @@ pub struct TerminalView {
     fallback_colors: (Rgb, Rgb),
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<sprite_term::ValidTerminalSize>,
-    /// How this pane is reached by observation, if the window has an endpoint.
+    /// How this pane is reached by observation. `None` for a pane whose
+    /// session never started, for one built outside a window, and once the
+    /// pane has begun shutting down.
     observation: Option<crate::observation::panes::PaneLink>,
     /// What programs have asked this pane to draw beside or over its grid.
     surfaces: SurfaceHost<HostedSurface>,

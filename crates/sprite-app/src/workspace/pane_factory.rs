@@ -71,13 +71,13 @@ pub(super) fn make_pane<'a>(
 ) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle<Request = SurfaceRequest>> + 'a {
     move |tab, pane| {
         let environment = session_environment(services.endpoint, services.surfaces, tab, pane);
-        let link = pane_link(services.panes, services.endpoint, tab, pane);
+        let link = pane_link(services.panes, tab, pane);
         Rc::new(cx.new(|cx| {
             TerminalView::new(
                 command,
                 settings,
                 environment,
-                link,
+                Some(link),
                 PaneExit {
                     sender: services.exit,
                     identity: (tab, pane),
@@ -89,21 +89,19 @@ pub(super) fn make_pane<'a>(
     }
 }
 
-/// How a pane will be reached by observation, when the window has an endpoint.
+/// How a pane is reached by observation.
 ///
-/// A window with no endpoint links no panes: with nothing able to ask, a
-/// registry of panes would be a list nobody can use.
-pub(super) fn pane_link(
-    panes: &Arc<WindowPanes>,
-    endpoint: Option<&Endpoint>,
-    tab: TabId,
-    pane: PaneId,
-) -> Option<PaneLink> {
-    endpoint.map(|_| PaneLink {
+/// Every pane is linked, whether or not the window has an endpoint right now:
+/// a reload can turn observation on while panes are running, and it then has
+/// to find every one of them, not only those opened afterwards. The registry
+/// is reachable only through an endpoint, so a window without one exposes
+/// nothing by keeping it filled.
+pub(super) fn pane_link(panes: &Arc<WindowPanes>, tab: TabId, pane: PaneId) -> PaneLink {
+    PaneLink {
         pane,
         tab,
         panes: Arc::clone(panes),
-    })
+    }
 }
 
 /// What one pane's session is told about observation.
