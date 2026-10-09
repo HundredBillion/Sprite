@@ -17,6 +17,58 @@ const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
 /// continuous output.
 const CLOSING_SLICE: Duration = Duration::from_millis(50);
 
+/// The next signal escalation owes. It advances only once a signal was
+/// actually attempted against every member a complete scan found: a scan that
+/// could not finish signalled nobody, and counting it would spend the hangup
+/// or TERM on no one and leave only KILL for a program that would have
+/// honoured a politer request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Escalation {
+    /// The single hangup has not reached the session yet.
+    Hangup,
+    /// The hangup was attempted; TERM is owed two seconds after a request.
+    Terminate,
+    /// TERM was attempted; only KILL remains, three seconds after a request.
+    Kill,
+}
+
+impl Escalation {
+    /// The signal due now, given how long ago shutdown was requested, if it was.
+    ///
+    /// KILL is due on every pass once its deadline passes, so a group created
+    /// after the previous scan is still reached before the budget ends.
+    fn due(self, requested: Option<Duration>) -> Option<GroupSignal> {
+        match (self, requested) {
+            (_, Some(waited)) if waited >= KILL_AFTER => Some(GroupSignal::Kill),
+            (Self::Hangup, _) => Some(GroupSignal::Hangup),
+            (Self::Terminate, Some(waited)) if waited >= TERM_AFTER => Some(GroupSignal::Terminate),
+            _ => None,
+        }
+    }
+
+    /// Where escalation stands after `signal`: past it only if it was attempted.
+    fn after(self, signal: GroupSignal, attempted: bool) -> Self {
+        match (attempted, signal) {
+            (false, _) => self,
+            (true, GroupSignal::Hangup) => Self::Terminate,
+            (true, GroupSignal::Terminate | GroupSignal::Kill) => Self::Kill,
+        }
+    }
+}
+
+/// Sends whatever is due and reports where escalation then stands.
+fn escalate(
+    processes: &mut pty_unix::SessionProcesses,
+    escalation: Escalation,
+    requested: Option<Duration>,
+) -> Escalation {
+    let Some(signal) = escalation.due(requested) else {
+        return escalation;
+    };
+    let attempted = processes.signal(&signal);
+    escalation.after(signal, attempted)
+}
+
 pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
     let Runtime {
         started:
@@ -44,11 +96,9 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
 
     let closing_started = Instant::now();
 
-    // A hangup is the polite request every well-behaved program honours.
-    if let Some(processes) = &mut processes {
-        processes.signal(&GroupSignal::Hangup);
-    }
-    let mut escalation = 1_u8;
+    // The first pass below sends the hangup every well-behaved program
+    // honours; escalation moves past a step only once it reached the members.
+    let mut escalation = Escalation::Hangup;
 
     // Set the first time the flag is observed, so every escalation deadline is
     // relative to the request rather than to the child's exit.
@@ -64,19 +114,12 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
 
         // Checked before every receive, so continuous output cannot postpone
         // escalation past its deadline.
-        if let Some(since) = requested_at {
-            let waited = since.elapsed();
-            if waited >= KILL_AFTER {
-                if let Some(processes) = &mut processes {
-                    processes.signal(&GroupSignal::Kill);
-                }
-                escalation = 3;
-            } else if waited >= TERM_AFTER && escalation < 2 {
-                if let Some(processes) = &mut processes {
-                    processes.signal(&GroupSignal::Terminate);
-                }
-                escalation = 2;
-            }
+        if let Some(processes) = &mut processes {
+            escalation = escalate(
+                processes,
+                escalation,
+                requested_at.map(|since| since.elapsed()),
+            );
         }
 
         let settled = exit_status.is_some() && pump_stopped;
@@ -180,15 +223,12 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
 }
 
 pub(crate) fn finish_shutdown(mut processes: pty_unix::SessionProcesses, requested_at: Instant) {
-    let mut terminated = false;
+    // The natural close already sent the session its hangup; what remains is
+    // TERM and KILL, each counted only once a scan has reached the members.
+    let mut escalation = Escalation::Terminate;
     while processes.is_alive() {
         let waited = requested_at.elapsed();
-        if waited >= KILL_AFTER {
-            processes.signal(&GroupSignal::Kill);
-        } else if waited >= TERM_AFTER && !terminated {
-            processes.signal(&GroupSignal::Terminate);
-            terminated = true;
-        }
+        escalation = escalate(&mut processes, escalation, Some(waited));
         if waited >= GIVE_UP_AFTER {
             break;
         }
@@ -209,5 +249,60 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
             signal: None,
             requested,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escalation_advances_only_past_a_signal_that_was_attempted() {
+        let mut escalation = Escalation::Hangup;
+        assert_eq!(escalation.due(None), Some(GroupSignal::Hangup));
+        escalation = escalation.after(GroupSignal::Hangup, false);
+        assert_eq!(
+            escalation.due(None),
+            Some(GroupSignal::Hangup),
+            "a hangup no scan delivered is still owed"
+        );
+        escalation = escalation.after(GroupSignal::Hangup, true);
+        assert_eq!(
+            escalation.due(None),
+            None,
+            "a natural close owes nothing more"
+        );
+        assert_eq!(
+            escalation.due(Some(TERM_AFTER - Duration::from_millis(1))),
+            None
+        );
+        assert_eq!(
+            escalation.due(Some(TERM_AFTER)),
+            Some(GroupSignal::Terminate)
+        );
+        escalation = escalation.after(GroupSignal::Terminate, false);
+        assert_eq!(
+            escalation.due(Some(TERM_AFTER + CLOSING_SLICE)),
+            Some(GroupSignal::Terminate),
+            "a TERM nobody received is tried again"
+        );
+        escalation = escalation.after(GroupSignal::Terminate, true);
+        assert_eq!(escalation.due(Some(TERM_AFTER + CLOSING_SLICE)), None);
+        assert_eq!(escalation.due(Some(KILL_AFTER)), Some(GroupSignal::Kill));
+        assert_eq!(
+            escalation
+                .after(GroupSignal::Kill, true)
+                .due(Some(KILL_AFTER)),
+            Some(GroupSignal::Kill),
+            "KILL repeats until the scope is empty"
+        );
+    }
+
+    #[test]
+    fn kill_is_due_at_its_deadline_even_when_earlier_steps_never_landed() {
+        assert_eq!(
+            Escalation::Hangup.due(Some(KILL_AFTER)),
+            Some(GroupSignal::Kill)
+        );
     }
 }

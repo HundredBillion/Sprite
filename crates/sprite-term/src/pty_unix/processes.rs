@@ -74,24 +74,47 @@ impl SessionProcesses {
         Ok(members)
     }
 
-    pub(crate) fn signal(&mut self, signal: &GroupSignal) {
-        let Ok(members) = self.members() else {
-            return;
+    /// Signals every owned group a fresh scan finds, after rereading each
+    /// member's identity.
+    ///
+    /// Returns whether the attempt was complete. `false` means the scan, or a
+    /// member's reread, could not finish, so someone who should have received
+    /// this signal may not have; escalation must not count it as delivered.
+    pub(crate) fn signal(&mut self, signal: &GroupSignal) -> bool {
+        let members = self.members();
+        self.signal_members(members, read_process, |group| signal_group(group, signal))
+    }
+
+    /// The decision half of `signal`, free of the platform's process table.
+    fn signal_members(
+        &self,
+        members: Result<Vec<Process>, ()>,
+        mut reread: impl FnMut(i32) -> Result<Option<Process>, ()>,
+        mut send: impl FnMut(i32),
+    ) -> bool {
+        let Ok(members) = members else {
+            return false;
         };
         let mut signalled = HashSet::new();
+        let mut unreadable = HashSet::new();
         for member in members {
             if signalled.contains(&member.group) {
                 continue;
             }
-            if read_process(member.pid)
-                .ok()
-                .flatten()
-                .is_some_and(|now| same_member(member, now) && self.owned(&now))
-            {
-                signal_group(member.group, signal);
-                signalled.insert(member.group);
+            match reread(member.pid) {
+                Ok(Some(now)) if same_member(member, now) && self.owned(&now) => {
+                    send(member.group);
+                    signalled.insert(member.group);
+                }
+                // Gone, or a different process now: nothing of this session is
+                // left there to signal.
+                Ok(_) => {}
+                Err(()) => {
+                    unreadable.insert(member.group);
+                }
             }
         }
+        unreadable.iter().all(|group| signalled.contains(group))
     }
 
     pub(crate) fn is_alive(&mut self) -> bool {
@@ -162,14 +185,63 @@ fn scoped_record(
     }
 }
 
+/// The fields of one BSD-info reading that identify a process.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Reading {
+    pid: i32,
+    group: i32,
+    birth: u64,
+    live: bool,
+}
+
+/// One process's record from a reading, its session, and a second reading.
+///
+/// Each step answers `Ok(None)` once the kernel says the process no longer
+/// exists, and that ends the record as "gone": a member that exits mid-scan
+/// has nothing left to signal, and treating it as a failure would abort the
+/// whole scan and signal nobody. Any other failure, or an identity that
+/// changed between the readings, leaves the scan incomplete — only
+/// disappearance is proof.
+#[cfg(any(target_os = "macos", test))]
+fn sandwiched_record(
+    pid: i32,
+    before: Result<Option<Reading>, ()>,
+    session: impl FnOnce() -> Result<Option<i32>, ()>,
+    after: impl FnOnce() -> Result<Option<Reading>, ()>,
+) -> Result<Option<Process>, ()> {
+    let Some(before) = before? else {
+        return Ok(None);
+    };
+    let Some(session) = session()? else {
+        return Ok(None);
+    };
+    let Some(after) = after()? else {
+        return Ok(None);
+    };
+    if (before.pid, before.group, before.birth) != (after.pid, after.group, after.birth) {
+        return Err(());
+    }
+    Ok(Some(Process {
+        pid,
+        group: after.group,
+        session,
+        birth: after.birth,
+        live: after.live,
+    }))
+}
+
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn read_process(pid: i32) -> Result<Option<Process>, ()> {
-    use nix::{libc, unistd::Pid};
-    fn bsd(pid: i32) -> Result<libc::proc_bsdinfo, ()> {
+    use nix::libc;
+    fn bsd(pid: i32) -> Result<Option<Reading>, ()> {
         // SAFETY: BSD info is a plain C output record and its exact byte size is supplied.
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of_val(&info) as i32;
+        // A short reading that sets no errno must not inherit an earlier
+        // ESRCH and pass for a vanished process.
+        nix::errno::Errno::clear();
         // SAFETY: libproc writes only within this BSD info output buffer.
         let count = unsafe {
             libc::proc_pidinfo(
@@ -180,39 +252,22 @@ fn read_process(pid: i32) -> Result<Option<Process>, ()> {
                 size,
             )
         };
-        if count != size {
-            return Err(());
+        if count == size {
+            return Ok(Some(Reading {
+                pid: info.pbi_pid as i32,
+                group: info.pbi_pgid as i32,
+                birth: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+                // Darwin sys/proc.h defines SZOMB as 5; libc exports no named binding.
+                live: info.pbi_status != 5,
+            }));
         }
-        Ok(info)
+        if nix::errno::Errno::last() == nix::errno::Errno::ESRCH {
+            Ok(None)
+        } else {
+            Err(())
+        }
     }
-    let before = match bsd(pid) {
-        Ok(info) => info,
-        Err(()) if nix::errno::Errno::last() == nix::errno::Errno::ESRCH => return Ok(None),
-        Err(()) => return Err(()),
-    };
-    let session = getsid(Some(Pid::from_raw(pid))).map_err(|_| ())?.as_raw();
-    let after = bsd(pid)?;
-    if (
-        before.pbi_pid,
-        before.pbi_pgid,
-        before.pbi_start_tvsec,
-        before.pbi_start_tvusec,
-    ) != (
-        after.pbi_pid,
-        after.pbi_pgid,
-        after.pbi_start_tvsec,
-        after.pbi_start_tvusec,
-    ) {
-        return Err(());
-    }
-    Ok(Some(Process {
-        pid,
-        group: after.pbi_pgid as i32,
-        session,
-        birth: after.pbi_start_tvsec * 1_000_000 + after.pbi_start_tvusec,
-        // Darwin sys/proc.h defines SZOMB as 5; libc exports no named binding.
-        live: after.pbi_status != 5,
-    }))
+    sandwiched_record(pid, bsd(pid), || process_session(pid), || bsd(pid))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -363,6 +418,143 @@ mod tests {
         assert_eq!(scope.select(Ok(vec![member])).unwrap(), vec![member]);
         assert!(scope.select(Ok(vec![])).unwrap().is_empty());
         assert!(scope.select(Ok(vec![member])).unwrap().is_empty());
+    }
+    #[test]
+    fn a_process_that_vanishes_mid_read_is_gone_not_an_incomplete_scan() {
+        let reading = Reading {
+            pid: 43,
+            group: 43,
+            birth: 2,
+            live: true,
+        };
+        let complete = Process {
+            pid: 43,
+            group: 43,
+            session: 42,
+            birth: 2,
+            live: true,
+        };
+        assert_eq!(
+            sandwiched_record(43, Ok(None), || panic!("not asked"), || panic!("not read")),
+            Ok(None)
+        );
+        assert_eq!(
+            sandwiched_record(43, Ok(Some(reading)), || Ok(None), || panic!("not read")),
+            Ok(None),
+            "gone before its session was read"
+        );
+        assert_eq!(
+            sandwiched_record(43, Ok(Some(reading)), || Ok(Some(42)), || Ok(None)),
+            Ok(None),
+            "gone before the second reading"
+        );
+        assert_eq!(
+            sandwiched_record(43, Ok(Some(reading)), || Ok(Some(42)), || Ok(Some(reading))),
+            Ok(Some(complete))
+        );
+        // Only disappearance is proof; anything else leaves the scan incomplete.
+        assert_eq!(
+            sandwiched_record(
+                43,
+                Ok(Some(reading)),
+                || Ok(Some(42)),
+                || {
+                    Ok(Some(Reading {
+                        birth: 3,
+                        ..reading
+                    }))
+                }
+            ),
+            Err(())
+        );
+        assert_eq!(
+            sandwiched_record(43, Ok(Some(reading)), || Err(()), || Ok(Some(reading))),
+            Err(())
+        );
+        assert_eq!(
+            sandwiched_record(43, Err(()), || Ok(Some(42)), || Ok(Some(reading))),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn a_signal_attempt_skips_vanished_members_and_reports_unreached_ones() {
+        let scope = SessionProcesses {
+            session: 42,
+            leader_birth: Some(1),
+            own_group: 7,
+            retired: false,
+        };
+        let gone = Process {
+            pid: 43,
+            group: 43,
+            session: 42,
+            birth: 2,
+            live: true,
+        };
+        let present = Process {
+            pid: 44,
+            group: 44,
+            session: 42,
+            birth: 3,
+            live: true,
+        };
+        let sibling = Process {
+            pid: 45,
+            group: 44,
+            session: 42,
+            birth: 4,
+            live: true,
+        };
+
+        let mut sent = Vec::new();
+        assert!(
+            scope.signal_members(
+                Ok(vec![gone, present]),
+                |pid| Ok((pid == present.pid).then_some(present)),
+                |group| sent.push(group),
+            ),
+            "a member that vanished has nothing left to signal"
+        );
+        assert_eq!(sent, vec![44]);
+
+        let mut sent = Vec::new();
+        assert!(!scope.signal_members(Err(()), |_| unreachable!(), |group| sent.push(group)));
+        assert!(sent.is_empty(), "an incomplete scan signals nobody");
+
+        let mut sent = Vec::new();
+        assert!(
+            !scope.signal_members(
+                Ok(vec![gone, present]),
+                |pid| if pid == gone.pid {
+                    Err(())
+                } else {
+                    Ok(Some(present))
+                },
+                |group| sent.push(group),
+            ),
+            "a member whose identity could not be read was not reached"
+        );
+        assert_eq!(
+            sent,
+            vec![44],
+            "the members that could be reached still are"
+        );
+
+        let mut sent = Vec::new();
+        assert!(
+            scope.signal_members(
+                Ok(vec![sibling, present]),
+                |pid| if pid == sibling.pid {
+                    Err(())
+                } else {
+                    Ok(Some(present))
+                },
+                |group| sent.push(group),
+            ),
+            "an unreadable member whose group was signalled through another was reached"
+        );
+        assert_eq!(sent, vec![44]);
     }
     #[test]
     fn changed_leader_identity_retires_scope_and_unknown_identity_stays_pending() {

@@ -563,6 +563,7 @@ fn read_available(master: BorrowedFd<'_>, buffer: &mut [u8]) -> ReadResult {
 }
 
 /// The bounded shutdown policy's escalation steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GroupSignal {
     Hangup,
     Terminate,
