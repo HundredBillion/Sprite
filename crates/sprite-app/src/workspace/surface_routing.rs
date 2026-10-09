@@ -162,6 +162,7 @@ mod tests {
     fn shutdown_refuses_queued_surface_open(cx: &mut gpui::TestAppContext) {
         use crate::surface::channel::{Open, SurfaceConnection};
         let (workspace, cx) = test_workspace(cx);
+        cx.background_executor.allow_parking();
         let pane = workspace.read_with(cx, |workspace, _| {
             workspace.tabs.active().unwrap().focus().unwrap()
         });

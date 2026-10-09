@@ -117,6 +117,10 @@ pub struct Workspace {
     stopping: bool,
     #[cfg(test)]
     cleanup_gates: std::collections::VecDeque<async_channel::Receiver<()>>,
+    /// Each pane cleanup thread, in the order it started, so a test can wait
+    /// for one to finish before it runs the executor.
+    #[cfg(test)]
+    cleanup_threads: Vec<Option<std::thread::JoinHandle<()>>>,
     /// The file this window was told to read, if it was told.
     ///
     /// Kept so a reload re-reads *that* file rather than quietly switching to
@@ -317,6 +321,8 @@ impl Workspace {
             stopping: false,
             #[cfg(test)]
             cleanup_gates: Default::default(),
+            #[cfg(test)]
+            cleanup_threads: Vec::new(),
             window_title: None,
             wanted_title: "Sprite".into(),
             pane_titles: Default::default(),
