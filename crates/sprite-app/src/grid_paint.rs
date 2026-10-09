@@ -663,7 +663,7 @@ impl GridPaint {
             return;
         }
 
-        let text = SharedString::from(cell.text.as_str().to_owned());
+        let text = cell.text.clone();
         let run = TextRun {
             len: text.len(),
             font: terminal_font(&self.font_family, cell.style.bold, cell.style.italic),

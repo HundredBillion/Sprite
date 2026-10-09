@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Pixels, Point, Size, px, size};
+use gpui::{Pixels, Point, SharedString, Size, px, size};
 use sprite_term::{
     CellStyle, CellWidth, HyperlinkSpan, RenderRow, RenderSnapshot, SnapshotColor, UnderlineStyle,
 };
@@ -58,7 +58,9 @@ pub(crate) struct PositionedCell {
     pub column: u16,
     /// How many columns it occupies: 1 for narrow, 2 for wide.
     pub columns: u16,
-    pub text: sprite_term::CellText,
+    /// The cell's text, already in the form the text system shapes, made
+    /// once when the row is laid out rather than on every frame that paints it.
+    pub text: SharedString,
     pub style: CellStyle,
     pub selected: bool,
     pub hovered_link: bool,
@@ -72,6 +74,25 @@ impl PositionedCell {
     pub fn span(&self) -> std::ops::Range<u32> {
         let start = u32::from(self.column);
         start..start + u32::from(self.columns.max(1))
+    }
+}
+
+/// Every printable ASCII character, in order, so a one-byte cell can borrow
+/// its text from here instead of allocating a copy.
+const PRINTABLE_ASCII: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+
+/// A cell's text in the form the text system takes.
+///
+/// Printable ASCII is by far the commonest cell and borrows a static string;
+/// anything else is copied once, here, when its row is laid out.
+pub(crate) fn shared_text(text: &str) -> SharedString {
+    match text.as_bytes() {
+        [] => SharedString::new_static(""),
+        [byte @ b' '..=b'~'] => {
+            let index = usize::from(byte - b' ');
+            SharedString::new_static(&PRINTABLE_ASCII[index..=index])
+        }
+        _ => SharedString::from(text.to_owned()),
     }
 }
 
@@ -93,7 +114,7 @@ pub(crate) fn lay_out_row(row: &RenderRow) -> Vec<PositionedCell> {
                 placed.push(PositionedCell {
                     column,
                     columns,
-                    text: cell.text.clone(),
+                    text: shared_text(&cell.text),
                     style: cell.style,
                     selected: cell.selected,
                     hovered_link: false,
@@ -358,6 +379,39 @@ mod tests {
     #[test]
     fn an_empty_row_lays_out_to_nothing() {
         assert!(lay_out_row(&row(Vec::new())).is_empty());
+    }
+
+    /// The text the painter shapes is made once, when the row is laid out.
+    /// A printable ASCII cell borrows a static string, so laying out a row of
+    /// them costs the row's own vector and nothing per cell.
+    #[test]
+    fn layout_hands_the_painter_shared_text_without_copying_ascii() {
+        let ascii = row((0..200)
+            .map(|column| cell(if column % 2 == 0 { "a" } else { " " }, CellWidth::Narrow))
+            .collect());
+        let (laid, allocations, _) = crate::surface_performance::measure(|| lay_out_row(&ascii));
+        let text: &gpui::SharedString = &laid[0].text;
+        assert_eq!(text, "a");
+        assert_eq!(laid[1].text, " ");
+        assert_eq!(allocations, 1, "one vector for the row, nothing per cell");
+
+        let other = lay_out_row(&row(vec![
+            cell("界", CellWidth::Wide),
+            cell("", CellWidth::SpacerTail),
+            cell("e\u{301}", CellWidth::Narrow),
+        ]));
+        assert_eq!(other[0].text, "界");
+        assert_eq!(other[1].text, "e\u{301}");
+    }
+
+    #[test]
+    fn the_printable_ascii_table_holds_each_character_at_its_offset() {
+        assert_eq!(PRINTABLE_ASCII.len(), 95);
+        for (index, byte) in PRINTABLE_ASCII.bytes().enumerate() {
+            assert_eq!(usize::from(byte), 0x20 + index);
+        }
+        assert_eq!(shared_text("~"), "~");
+        assert_eq!(shared_text(""), "");
     }
 }
 

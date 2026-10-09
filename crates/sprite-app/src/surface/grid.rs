@@ -401,7 +401,7 @@ pub struct Cell {
 #[derive(Clone, Debug, PartialEq)]
 struct TextEntry {
     text: Arc<str>,
-    paint: sprite_term::CellText,
+    paint: gpui::SharedString,
     references: usize,
 }
 
@@ -422,7 +422,7 @@ impl TextPool {
         let id = self.free.pop().unwrap_or(self.entries.len() as u32);
         let text: Arc<str> = text.into();
         let entry = TextEntry {
-            paint: text.as_ref().into(),
+            paint: gpui::SharedString::new(Arc::clone(&text)),
             text: text.clone(),
             references: 1,
         };
@@ -449,7 +449,7 @@ impl TextPool {
         }
     }
 
-    fn text(&self, id: u32) -> &sprite_term::CellText {
+    fn text(&self, id: u32) -> &gpui::SharedString {
         &self.entries[id as usize].as_ref().unwrap().paint
     }
 }

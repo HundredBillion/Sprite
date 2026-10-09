@@ -112,7 +112,10 @@ fn surface_allocation_probe() {
         render::render_grid(&mut grid, &Highlights::default(), &metrics)
     });
     println!("grid one-row update/render allocations={a} bytes={b}");
-    assert!(a <= 8 && b <= 12_000);
+    // Each laid-out cell carries its paint-ready text, which is 8 bytes wider
+    // than the terminal's compact cell text, so the relaid row's buffer is
+    // 196 x 8 bytes larger even though it costs one allocation fewer.
+    assert!(a <= 8 && b <= 13_000);
     let rows = (0..100_000)
         .map(|i| json!({"id":format!("r{i}"),"text":"shared row text","indent":0,"guides":[]}))
         .collect::<Vec<_>>();
