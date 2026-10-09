@@ -459,6 +459,35 @@ impl GridPaint {
         }
     }
 
+    /// Walks every glyph live painting would hand to the text system, through
+    /// the same shape cache, and returns how many there were and how many the
+    /// cache had to shape. Nothing is actually shaped: GPUI shapes only
+    /// through a window, so a default line stands in for each shape.
+    pub(crate) fn benchmark_shaping(&self, scale: f32) -> (usize, usize) {
+        if self.pass == RowPass::Background {
+            return (0, 0);
+        }
+        let mut shapes = self.shapes.borrow_mut();
+        shapes.begin_frame(self.shape_context(scale), self.rows.len());
+        let (mut glyphs, mut shaped) = (0, 0);
+        for (row, cells) in self.rows.iter().enumerate() {
+            for (column, (cell, drawn)) in
+                cells.iter().zip(self.resolve_row(row, cells)).enumerate()
+            {
+                if !reaches_text_system(&cell.text) {
+                    continue;
+                }
+                glyphs += 1;
+                let line = shapes.shaped(row, cells, column, drawn.foreground, || {
+                    shaped += 1;
+                    ShapedLine::default()
+                });
+                std::hint::black_box(line);
+            }
+        }
+        (glyphs, shaped)
+    }
+
     pub(crate) fn new(spec: GridPaintSpec) -> Self {
         // A pane without Pane Focus shows where its cursor is without
         // competing with the one being typed into: a block becomes its
