@@ -193,10 +193,10 @@ fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
             let before = cx.debug_bounds("workspace-panes").unwrap();
             let published = publications(&workspace, cx);
             workspace.update(cx, |workspace, cx| {
-                workspace.mode = Mode::ConfirmingClose(PendingClose {
-                    scope: CloseScope::Window,
-                    label: "busy — click close again to close this window, Esc to keep it".into(),
-                });
+                workspace.mode = Mode::ConfirmingClose(PendingClose::new(
+                    CloseScope::Window,
+                    "busy — click close again to close this window, Esc to keep it".into(),
+                ));
                 cx.notify();
             });
             draw_workspace(cx);
@@ -287,10 +287,10 @@ fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
             assert_eq!(publications(&workspace, cx), published + 1);
             let dismissed = cx.debug_bounds("workspace-panes").unwrap();
             workspace.update(cx, |workspace, cx| {
-                workspace.mode = Mode::ConfirmingClose(PendingClose {
-                    scope: CloseScope::Window,
-                    label: "busy ".repeat(100).into(),
-                });
+                workspace.mode = Mode::ConfirmingClose(PendingClose::new(
+                    CloseScope::Window,
+                    "busy ".repeat(100).into(),
+                ));
                 cx.notify();
             });
             draw_workspace(cx);

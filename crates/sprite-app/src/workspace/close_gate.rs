@@ -1,4 +1,5 @@
 use super::*;
+use crate::confirmation::Confirmation;
 
 #[cfg(test)]
 thread_local! {
@@ -149,20 +150,26 @@ impl Workspace {
     ///
     /// PRD story 11, and the last thing between a mistyped binding and an hour
     /// of somebody's work. A pane sitting at a shell prompt closes without
-    /// ceremony; one running a program asks, and the same keystroke again
+    /// ceremony; one running a program asks, and the same gesture again
     /// answers. A pane whose state cannot be determined closes too — a question
     /// nobody can ever resolve is one people learn to dismiss unread.
     pub(super) fn may_close(&mut self, scope: CloseScope, cx: &mut Context<Self>) -> bool {
         if self.stopping {
             return false;
         }
-        let pending = self.mode.pending_close().map(|pending| pending.scope);
-        let running = if pending == Some(scope) {
+        // Every caller is a fresh gesture: `key_down` drops a held key's
+        // repeats for every action that does not repeat, and a click is never
+        // held.
+        let confirmed = match &mut self.mode {
+            Mode::ConfirmingClose(pending) => pending.confirmation.answer(&scope, false),
+            _ => false,
+        };
+        let running = if confirmed {
             Vec::new()
         } else {
             self.running_programs(scope, cx)
         };
-        match CloseGate::decide(pending, scope, &running) {
+        match CloseGate::decide(confirmed, scope, &running) {
             CloseGate::Allow => {
                 self.mode = Mode::Idle;
                 true
@@ -230,8 +237,20 @@ pub(super) struct PendingCleanup {
 /// A close waiting on a second press.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingClose {
-    pub(super) scope: CloseScope,
+    /// Armed with the scope that asked, so only the same close answers it.
+    pub(super) confirmation: Confirmation<CloseScope>,
     pub(super) label: SharedString,
+}
+
+impl PendingClose {
+    pub(super) fn new(scope: CloseScope, label: SharedString) -> Self {
+        let mut confirmation = Confirmation::default();
+        confirmation.arm(scope);
+        Self {
+            confirmation,
+            label,
+        }
+    }
 }
 
 /// How much a close would take with it.
@@ -291,19 +310,20 @@ enum CloseGate {
 }
 
 impl CloseGate {
-    fn decide(pending: Option<CloseScope>, scope: CloseScope, running: &[Option<String>]) -> Self {
-        if pending == Some(scope) || running.is_empty() {
+    /// `confirmed` is whether this gesture answered a question already asked.
+    fn decide(confirmed: bool, scope: CloseScope, running: &[Option<String>]) -> Self {
+        if confirmed || running.is_empty() {
             return Self::Allow;
         }
-        Self::Ask(PendingClose {
+        Self::Ask(PendingClose::new(
             scope,
-            label: display_text(format!(
+            display_text(format!(
                 "{} — {} to close this {}, Esc to keep it",
                 describe_running(running),
                 scope.again(),
                 scope.noun()
             )),
-        })
+        ))
     }
 }
 
@@ -315,28 +335,31 @@ mod tests {
     #[test]
     fn consent_is_only_for_the_repeated_scope_and_idle_panes_need_none() {
         let busy = [Some("editor".to_owned()), None];
-        for scope in [
+        let scopes = [
             CloseScope::Pane,
             CloseScope::Tab,
             CloseScope::Window,
             CloseScope::Quit,
-        ] {
-            assert_eq!(CloseGate::decide(None, scope, &[]), CloseGate::Allow);
-            assert!(matches!(
-                CloseGate::decide(None, scope, &busy),
-                CloseGate::Ask(_)
-            ));
-            for pending in [
-                CloseScope::Pane,
-                CloseScope::Tab,
-                CloseScope::Window,
-                CloseScope::Quit,
-            ] {
+        ];
+        for scope in scopes {
+            assert_eq!(CloseGate::decide(false, scope, &[]), CloseGate::Allow);
+            assert_eq!(CloseGate::decide(true, scope, &busy), CloseGate::Allow);
+            let CloseGate::Ask(pending) = CloseGate::decide(false, scope, &busy) else {
+                panic!("a busy {scope:?} close must ask");
+            };
+            for answer in scopes {
+                let mut confirmation = pending.confirmation.clone();
                 assert_eq!(
-                    CloseGate::decide(Some(pending), scope, &busy) == CloseGate::Allow,
-                    pending == scope
+                    confirmation.answer(&answer, false),
+                    answer == scope,
+                    "{scope:?} answered by {answer:?}"
                 );
             }
+            let mut held = pending.confirmation.clone();
+            assert!(
+                !held.answer(&scope, true),
+                "an auto-repeat is not an answer"
+            );
         }
     }
     struct ShutdownPane {
@@ -428,6 +451,55 @@ mod tests {
         assert_eq!(CloseScope::Window.again(), "click close again");
         assert_eq!(CloseScope::Quit.again(), "press the same keys again");
     }
+    /// The quit shortcut asks like any close, and holding it down cannot
+    /// answer its own question.
+    #[gpui::test]
+    fn a_held_quit_shortcut_cannot_answer_its_own_question(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        let (workspace, cx) = test_workspace(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs = Tabs::new(|_, _| {
+                Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            });
+            workspace.refresh_layout(cx);
+        });
+        draw_workspace(cx);
+        let quit = if cfg!(target_os = "macos") {
+            press("q", platform())
+        } else {
+            press("w", platform())
+        };
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: quit.clone(),
+            is_held: false,
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)))
+        });
+        for _ in 0..3 {
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: quit.clone(),
+                is_held: true,
+            });
+        }
+        assert_eq!(
+            QUIT_REQUESTS.with(|requests| requests.get()),
+            0,
+            "a held repeat answered the quit question"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)))
+        });
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: quit,
+            is_held: false,
+        });
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
     fn gated_panes(
         workspace: &gpui::Entity<Workspace>,
         cx: &mut gpui::VisualTestContext,

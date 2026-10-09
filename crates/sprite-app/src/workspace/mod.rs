@@ -134,6 +134,8 @@ pub struct Workspace {
     dividers: Vec<(DividerPlacement, SharedString)>,
     published: Vec<(PaneId, Placement)>,
     _bounds: gpui::Subscription,
+    /// Withdraws a close question when the window stops being the active one.
+    _activation: gpui::Subscription,
 }
 
 struct PaneTitle {
@@ -279,6 +281,14 @@ impl Workspace {
                 cx.notify();
             }
         });
+        // Switching to another window or application is leaving the pane, and
+        // a close question asked before that is not answered by a press made
+        // after coming back.
+        let activation = cx.observe_window_activation(window, |workspace, window, cx| {
+            if !window.is_window_active() {
+                workspace.dismiss_pending_close(cx);
+            }
+        });
         let mut workspace = Self {
             tabs,
             endpoint,
@@ -301,6 +311,7 @@ impl Workspace {
             dividers: Vec::new(),
             published: Vec::new(),
             _bounds: bounds,
+            _activation: activation,
             config_path,
             _reload: reload_task,
             reload_sender,
@@ -477,6 +488,14 @@ impl Render for Workspace {
             // one event reaching two consumers, which the terminal's input
             // rules forbid.
             .capture_key_down(cx.listener(Self::key_down))
+            // A button press is a deliberate act, like an unrelated key, so it
+            // withdraws a close question wherever it lands. Capture phase, so a
+            // pane or divider that handles the press itself cannot hide it.
+            .capture_any_mouse_down(cx.listener(
+                |workspace, _: &gpui::MouseDownEvent, _window, cx| {
+                    workspace.dismiss_pending_close(cx);
+                },
+            ))
             .when(strip > 0.0, |element| {
                 element.child(
                     div()

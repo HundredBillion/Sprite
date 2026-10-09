@@ -8,6 +8,7 @@ mod block_elements;
 mod box_drawing;
 mod cli;
 mod config;
+mod confirmation;
 mod graphics_cache;
 mod grid;
 mod grid_paint;
