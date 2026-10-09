@@ -1018,6 +1018,33 @@ mod tests {
         serde_json::from_str(text.trim()).unwrap_or_else(|_| panic!("not JSON: {text:?}"))
     }
 
+    /// Reads a peer's end of a pair to the end of its stream, 1 KiB at a
+    /// time. On macOS a reader already blocked in `recv` can miss the wakeup
+    /// from a `shutdown(Write)` on a socket that has a send timeout, though
+    /// the next read sees the end at once. In production the descriptor
+    /// closes right after and wakes it again; a test that still holds its
+    /// own copy of the window's end has no such second wakeup. So a short
+    /// read timeout makes the reader look again, and only a stream that
+    /// really never ends fails.
+    fn read_to_eof(peer: &mut UnixStream) -> Vec<u8> {
+        use std::io::Read;
+        peer.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("timeout");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            match peer.read(&mut chunk) {
+                Ok(0) => return received,
+                Ok(count) => received.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "the stream never ended");
+                }
+                Err(error) => panic!("read failed: {error}"),
+            }
+        }
+    }
+
     fn open_message(pane: u64) -> Value {
         json!({
             "type": "open", "version": VERSION, "pane": pane, "position": "dock",
@@ -1133,13 +1160,11 @@ mod tests {
 
     #[test]
     fn chunked_batches_keep_the_gesture_lock_across_every_flush() {
-        use std::io::Read;
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         assert!(connection.establish(&event_opened(SurfaceId(1))));
         let reader = std::thread::spawn(move || {
-            let mut wire = String::new();
-            peer.read_to_string(&mut wire).unwrap();
+            let wire = String::from_utf8(read_to_eof(&mut peer)).unwrap();
             wire.lines()
                 .map(|line| serde_json::from_str::<Value>(line).unwrap())
                 .collect::<Vec<_>>()
@@ -1194,8 +1219,7 @@ mod tests {
             }
         });
         drop(connection);
-        let mut received = String::new();
-        std::io::Read::read_to_string(&mut peer, &mut received).unwrap();
+        let received = String::from_utf8(read_to_eof(&mut peer)).unwrap();
         let messages = received
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -1230,25 +1254,13 @@ mod tests {
 
     #[test]
     fn a_large_batch_delivers_every_byte_while_the_peer_drains_in_small_chunks() {
-        use std::io::Read;
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let opened = event_opened(SurfaceId(1));
         assert!(connection.establish(&opened));
         let line = json!({"payload":"x".repeat(2*1024*1024)}).to_string();
         let expected = format!("{opened}\n{line}\n{line}\n");
-        let reader = std::thread::spawn(move || {
-            let mut received = Vec::new();
-            let mut chunk = [0; 1024];
-            loop {
-                let count = peer.read(&mut chunk).unwrap();
-                if count == 0 {
-                    break;
-                }
-                received.extend_from_slice(&chunk[..count]);
-            }
-            received
-        });
+        let reader = std::thread::spawn(move || read_to_eof(&mut peer));
         assert!(connection.send_batch([line.as_str(), line.as_str()]));
         drop(connection);
         assert_eq!(reader.join().unwrap(), expected.as_bytes());
@@ -1678,7 +1690,6 @@ mod tests {
     /// and then its stream ends.
     #[test]
     fn a_graceful_close_sends_everything_queued_then_ends_the_stream() {
-        use std::io::Read;
         let (here, mut there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let opened = event_opened(SurfaceId(1));
@@ -1689,13 +1700,8 @@ mod tests {
         assert!(connection.send_batch(lines.iter().map(String::as_str)));
         assert!(connection.send(&event_closed()));
         drop(connection);
-        there
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("timeout");
-        let mut received = String::new();
-        there
-            .read_to_string(&mut received)
-            .expect("the writer ends its side after the last line");
+        // The writer ends its side after the last line.
+        let received = String::from_utf8(read_to_eof(&mut there)).unwrap();
         let expected = std::iter::once(opened)
             .chain(lines)
             .chain([event_closed()])
@@ -1734,16 +1740,11 @@ mod tests {
     /// program that reads gets every byte of it.
     #[test]
     fn a_single_event_larger_than_the_bound_is_delivered_whole() {
-        use std::io::Read;
         let (here, mut there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let opened = event_opened(SurfaceId(1));
         assert!(connection.establish(&opened));
-        let reader = std::thread::spawn(move || {
-            let mut received = Vec::new();
-            there.read_to_end(&mut received).unwrap();
-            received
-        });
+        let reader = std::thread::spawn(move || read_to_eof(&mut there));
         let paste = event_paste(&"x".repeat(MAX_PENDING_BYTES + 1024 * 1024));
         // Only `opened` can be pending, far under the bound, so the line is
         // admitted however large it is.
