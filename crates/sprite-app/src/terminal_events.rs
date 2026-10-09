@@ -55,6 +55,10 @@ fn describe_exit(exit: &sprite_term::ChildExit) -> String {
     }
 }
 
+/// How the status line begins while a paste is held for confirmation, so the
+/// view can clear that line, and only that line, when the hold is dropped.
+pub(crate) const PASTE_HELD_NOTICE: &str = "[paste held:";
+
 /// One event in, the effects it implies out.
 ///
 /// Pure on purpose. Every arm of the view's old event loop only *wrote* view
@@ -99,7 +103,7 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
             effects.push(Effect::HoldPaste(text));
             effects.push(Effect::Status(
                 format!(
-                    "[paste held: {lines} lines would run as commands — \
+                    "{PASTE_HELD_NOTICE} {lines} lines would run as commands — \
                      repeat the paste shortcut to paste anyway]"
                 )
                 .into(),

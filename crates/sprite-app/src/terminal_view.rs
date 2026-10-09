@@ -119,8 +119,9 @@ pub struct TerminalView {
     /// hit testing uses what paint reported rather than a position computed
     /// twice and liable to disagree.
     content_origin: Option<gpui::Point<Pixels>>,
-    /// A paste withheld as unsafe, awaiting a second explicit request.
-    pending_unsafe_paste: Option<String>,
+    /// A paste withheld as unsafe, awaiting a second explicit request for the
+    /// same text.
+    unsafe_paste: crate::confirmation::Confirmation<String>,
     /// Whether the cursor is in the visible half of its blink.
     ///
     /// Always true for a cursor that does not blink, so the phase costs a
@@ -409,7 +410,7 @@ impl TerminalView {
             origin: point(px(grid.padding.get()), px(grid.padding.get())),
             padding: grid.padding.get(),
             content_origin: None,
-            pending_unsafe_paste: None,
+            unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
             _events: event_task,
@@ -503,7 +504,7 @@ impl TerminalView {
             ),
             padding: crate::config::Grid::DEFAULT_PADDING,
             content_origin: None,
-            pending_unsafe_paste: None,
+            unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
             _events: Task::ready(()),
@@ -525,7 +526,7 @@ impl TerminalView {
                 self.title = title.map(SharedString::from);
                 self.refresh_display_title(cx);
             }
-            Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
+            Effect::HoldPaste(text) => self.unsafe_paste.arm(text),
             Effect::HyperlinkResolved {
                 position,
                 request_id,

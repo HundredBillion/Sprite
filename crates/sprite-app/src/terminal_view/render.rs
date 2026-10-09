@@ -4,7 +4,8 @@
 //! textures to the grid's corner.
 
 use super::input::{
-    Drag, LinkClickBehavior, application_shortcut, dropped_paths_text, link_click_behavior,
+    Drag, LinkClickBehavior, Shortcut, application_shortcut, dropped_paths_text,
+    link_click_behavior,
 };
 use super::surfaces::{Body, SurfaceLayers};
 use super::*;
@@ -428,6 +429,20 @@ impl Render for TerminalView {
             .text_size(metrics.cells.font_size())
             .line_height(metrics.cells.height())
             .track_focus(&self.focus)
+            // Deliberate input withdraws a held paste: any key but the paste
+            // that would answer it, and any button press. Capture phase, so a
+            // hosted Surface that handles the event itself cannot hide it from
+            // the pane. Pointer motion, wheel turns and modifier changes are
+            // not decisions and leave the question standing; GPUI reports a
+            // modifier on its own as a modifiers change, never as a key down.
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
+                if application_shortcut(&event.keystroke) != Some(Shortcut::Paste) {
+                    view.drop_unsafe_paste(cx);
+                }
+            }))
+            .capture_any_mouse_down(cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                view.drop_unsafe_paste(cx);
+            }))
             .on_drop(cx.listener(|view, paths: &ExternalPaths, _window, _cx| {
                 let text = dropped_paths_text(paths.paths());
                 if !text.is_empty() {
@@ -448,7 +463,7 @@ impl Render for TerminalView {
                 // what they do not claim reaches the terminal, so a binding can
                 // never also be typed into the child.
                 if let Some(shortcut) = application_shortcut(&event.keystroke) {
-                    view.perform(shortcut, cx);
+                    view.perform(shortcut, event.is_held, cx);
                     return;
                 }
 

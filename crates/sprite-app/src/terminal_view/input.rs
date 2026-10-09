@@ -174,26 +174,68 @@ impl TerminalView {
         !reporting || modifiers.shift
     }
 
-    pub(super) fn perform(&mut self, shortcut: Shortcut, cx: &mut Context<Self>) {
+    pub(super) fn perform(&mut self, shortcut: Shortcut, is_held: bool, cx: &mut Context<Self>) {
         match shortcut {
             Shortcut::Copy => self.send(TerminalCommand::CopySelection),
             Shortcut::Paste => {
-                // A second paste request confirms one that was held back.
-                if let Some(held) = self.pending_unsafe_paste.take() {
-                    self.status = None;
-                    self.send(TerminalCommand::PasteConfirmed(held));
-                    return;
-                }
-                // Read only on an explicit request, never speculatively.
+                // Read only on an explicit request, never speculatively. A
+                // clipboard that cannot be read counts as empty.
                 let text = cx
                     .read_from_clipboard()
                     .and_then(|item| item.text())
                     .unwrap_or_default();
+                if self.unsafe_paste.is_armed() {
+                    // A second request for the same text confirms the paste
+                    // held back. The decision was made about that text, so it
+                    // is compared with what the clipboard holds now rather
+                    // than assumed.
+                    if self.unsafe_paste.answer(&text, is_held) {
+                        self.clear_paste_notice();
+                        self.send(TerminalCommand::PasteConfirmed(text));
+                        cx.notify();
+                        return;
+                    }
+                    // The paste key auto-repeating from the request that was
+                    // refused: neither an answer nor a new paste.
+                    if is_held {
+                        return;
+                    }
+                    // The clipboard changed or could not be read, so what is
+                    // being pasted now is not what was asked about. The old
+                    // text is dropped and the new text, if any, is checked
+                    // from scratch.
+                    self.drop_unsafe_paste(cx);
+                }
                 if !text.is_empty() {
                     self.send(TerminalCommand::Paste(text));
                 }
             }
             Shortcut::DeleteLine => self.send(TerminalCommand::Input(vec![0x15])),
+        }
+    }
+
+    /// Withdraws a paste held back as unsafe, with the line that asked about
+    /// it. Called for deliberate input only (keys, button presses, input
+    /// method commits, leaving the pane), never from `send`, which also
+    /// carries hover lookups and resizes.
+    pub(super) fn drop_unsafe_paste(&mut self, cx: &mut Context<Self>) {
+        if !self.unsafe_paste.is_armed() {
+            return;
+        }
+        self.unsafe_paste.disarm();
+        self.clear_paste_notice();
+        cx.notify();
+    }
+
+    /// Clears the status line only while it is still the held-paste question;
+    /// a message that has replaced it since is left alone.
+    fn clear_paste_notice(&mut self) {
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|status| status.starts_with(crate::terminal_events::PASTE_HELD_NOTICE))
+        {
+            self.status = None;
         }
     }
 }
@@ -263,6 +305,9 @@ impl EntityInputHandler for TerminalView {
     ) {
         self.preedit = None;
         if !text.is_empty() {
+            // A committed composition is typing, and typing withdraws a held
+            // paste just as a key press does.
+            self.drop_unsafe_paste(cx);
             if let Some(id) = self.focused_surface(window).map(|surface| surface.id())
                 && !self.accept_surface_input(id, window, cx)
             {
