@@ -260,7 +260,15 @@ pub(crate) fn pack(color: Rgb) -> u32 {
     (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
 }
 
-/// A cell's drawn colours, honouring inverse and invisible.
+/// How strongly faint (SGR 2) text is inked: Ghostty's default
+/// `faint-opacity`.
+const FAINT_OPACITY: f32 = 0.5;
+
+/// A cell's foreground and background, honouring reverse video.
+///
+/// Hidden and faint text are drawing decisions rather than colours: both
+/// depend on whether the cell is selected or under the cursor, so `draw`
+/// applies them once it knows.
 pub(crate) fn cell_colors(
     style: &CellStyle,
     default_fg: Rgb,
@@ -271,9 +279,6 @@ pub(crate) fn cell_colors(
     let mut background = resolve(style.background, default_bg, palette);
     if style.inverse {
         std::mem::swap(&mut foreground, &mut background);
-    }
-    if style.invisible {
-        foreground = background;
     }
     (foreground, background)
 }
@@ -546,6 +551,12 @@ impl GridPaint {
             .cursor_color
             .map_or(foreground, |color| rgb(pack(color)));
 
+        // The colour the cell's ground is, whether or not this pass paints it.
+        let ground = match (is_block, inverted) {
+            (true, _) => cursor_paint,
+            (false, true) => foreground,
+            (false, false) => background,
+        };
         let fill = match self.pass {
             // The text half of a split draws no ground at all: the background
             // half already did, and an image may be sitting between them.
@@ -555,14 +566,27 @@ impl GridPaint {
             // with a background of its own still covers the image, which is
             // what an explicit background means.
             RowPass::Background if !painted => None,
-            _ => Some(match (is_block, inverted) {
-                (true, _) => cursor_paint,
-                (false, true) => foreground,
-                (false, false) => background,
-            }),
+            _ => Some(ground),
         };
 
-        let foreground = if inverted { background } else { foreground };
+        let foreground = if cell.style.invisible {
+            // Hidden text keeps the ground it is shown on, a selection
+            // included, so selecting hidden text still shows the selection,
+            // and inks its glyph in that same colour so none of it shows.
+            ground
+        } else {
+            let ink = if inverted { background } else { foreground };
+            if cell.style.faint {
+                // Faint dims the ink only. The ground stays opaque even where
+                // it is the foreground colour, as it is under a selection.
+                Rgba {
+                    a: ink.a * FAINT_OPACITY,
+                    ..ink
+                }
+            } else {
+                ink
+            }
+        };
         let (underline, strikethrough) = decorations(
             &cell.style,
             foreground,
@@ -1393,6 +1417,36 @@ mod tests {
         }
     }
 
+    /// A painter over no rows, with the defaults the colour tests use.
+    fn painter(pass: RowPass) -> GridPaint {
+        GridPaint::new(GridPaintSpec {
+            rows: Arc::from([]),
+            pass,
+            cursor: None,
+            cursor_color: None,
+            default_fg: unpack(0xaabbcc),
+            default_bg: unpack(0x112233),
+            palette: None,
+            cell_width: px(8.4),
+            cell_height: px(16.8),
+            font_family: ".SystemUIFont".into(),
+            font_size: px(14.0),
+            focused: true,
+            shapes: Default::default(),
+        })
+    }
+
+    fn positioned(style: CellStyle) -> PositionedCell {
+        PositionedCell {
+            column: 0,
+            columns: 1,
+            text: "x".into(),
+            style,
+            selected: false,
+            hovered_link: false,
+        }
+    }
+
     /// Colour resolution is arithmetic, not painting: it needs no Window.
     #[test]
     fn a_cell_with_no_opinion_takes_the_defaults() {
@@ -1431,42 +1485,23 @@ mod tests {
         assert_eq!(background, rgb(pack(default_fg)));
     }
 
-    /// An invisible cell must vanish into its background, not just match
-    /// itself: the foreground has to take on the background's colour, so a
-    /// bug that collapsed the pair the other way round (background eating
-    /// the foreground) would still leave text visible in the wrong shade.
+    /// An invisible cell must vanish into its ground, not just match itself:
+    /// the glyph has to take on the ground's colour, so a bug that collapsed
+    /// the pair the other way round would still leave text visible.
     #[test]
     fn invisible_collapses_the_foreground_onto_the_background() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        let fg_color = Rgb {
-            r: 0x10,
-            g: 0x20,
-            b: 0x30,
-        };
-        let bg_color = Rgb {
-            r: 0x40,
-            g: 0x50,
-            b: 0x60,
-        };
+        let fg_color = unpack(0x102030);
+        let bg_color = unpack(0x405060);
         let mut style = plain_style(
             SnapshotColor::Rgb(fg_color),
             SnapshotColor::Rgb(bg_color),
             false,
         );
         style.invisible = true;
-        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
-        assert_eq!(foreground, background);
+        let drawn = painter(RowPass::Whole).draw(&positioned(style), None);
+        assert_eq!(Some(drawn.foreground), drawn.background);
         assert_eq!(
-            foreground,
+            drawn.foreground,
             rgb(pack(bg_color)),
             "invisible should collapse toward the background, not the foreground"
         );
@@ -1542,47 +1577,24 @@ mod tests {
         assert_eq!(background, rgb(pack(bg_color)));
     }
 
-    /// Inverse and invisible both rewrite the same pair, and the order they
-    /// run in changes the answer: inverse swaps first, so an invisible cell
-    /// that is also reversed collapses onto its *original* foreground, not
-    /// its background. A version that ran invisible before inverse, or that
-    /// treated the two as independent, would land on the wrong colour here
-    /// even though each rule looks right in isolation.
+    /// Inverse swaps first and hiding acts on the result, so a reversed hidden
+    /// cell settles on its original foreground, which is the ground it shows.
     #[test]
     fn inverse_and_invisible_together_collapse_onto_the_original_foreground() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        let fg_color = Rgb {
-            r: 0x10,
-            g: 0x20,
-            b: 0x30,
-        };
-        let bg_color = Rgb {
-            r: 0x40,
-            g: 0x50,
-            b: 0x60,
-        };
+        let fg_color = unpack(0x102030);
+        let bg_color = unpack(0x405060);
         let mut style = plain_style(
             SnapshotColor::Rgb(fg_color),
             SnapshotColor::Rgb(bg_color),
             true,
         );
         style.invisible = true;
-        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
-        assert_eq!(foreground, background);
+        let drawn = painter(RowPass::Whole).draw(&positioned(style), None);
+        assert_eq!(Some(drawn.foreground), drawn.background);
         assert_eq!(
-            foreground,
+            drawn.foreground,
             rgb(pack(fg_color)),
-            "reversed and invisible together should settle on the pre-swap \
-             foreground, since invisible acts after the swap"
+            "reversed and invisible together should settle on the pre-swap foreground"
         );
     }
 
@@ -2023,6 +2035,84 @@ mod tests {
         assert!(
             shapes_anew(&mut cache, &rebuilt, white),
             "a font size change reshapes"
+        );
+    }
+
+    /// Faint (SGR 2) is ink at half strength, Ghostty's default
+    /// `faint-opacity`, and never a translucent ground, even where the
+    /// ground is the foreground colour, as under a selection.
+    #[test]
+    fn faint_text_draws_its_glyph_at_half_alpha_over_an_opaque_ground() {
+        let mut style = plain_style(
+            SnapshotColor::Rgb(unpack(0x102030)),
+            SnapshotColor::Rgb(unpack(0x405060)),
+            false,
+        );
+        style.faint = true;
+        let mut cell = positioned(style);
+        let drawn = painter(RowPass::Whole).draw(&cell, None);
+        assert_eq!(
+            drawn.foreground,
+            Rgba {
+                a: 0.5,
+                ..rgb(0x102030)
+            }
+        );
+        assert_eq!(drawn.background, Some(rgb(0x405060)));
+
+        cell.selected = true;
+        let selected = painter(RowPass::Whole).draw(&cell, None);
+        assert_eq!(
+            selected.background,
+            Some(rgb(0x102030)),
+            "the selection ground stays opaque"
+        );
+        assert_eq!(
+            selected.foreground,
+            Rgba {
+                a: 0.5,
+                ..rgb(0x405060)
+            }
+        );
+    }
+
+    /// Selecting hidden text shows the selection over it while the glyphs
+    /// stay hidden, in every pass that draws them.
+    #[test]
+    fn a_selected_hidden_cell_shows_the_selection_and_still_hides_its_glyph() {
+        let mut style = plain_style(
+            SnapshotColor::Rgb(unpack(0x102030)),
+            SnapshotColor::Rgb(unpack(0x405060)),
+            false,
+        );
+        style.invisible = true;
+        let mut cell = positioned(style);
+        let plain = painter(RowPass::Whole).draw(&cell, None);
+        assert_eq!(plain.background, Some(rgb(0x405060)));
+        assert_eq!(
+            plain.foreground,
+            rgb(0x405060),
+            "hidden text is inked in its own ground"
+        );
+
+        cell.selected = true;
+        let selected = painter(RowPass::Whole).draw(&cell, None);
+        assert_eq!(
+            selected.background,
+            Some(rgb(0x102030)),
+            "the selection is shown"
+        );
+        assert_eq!(
+            selected.foreground,
+            rgb(0x102030),
+            "the glyph stays hidden in the selection's colour"
+        );
+        let text = painter(RowPass::Text).draw(&cell, None);
+        assert_eq!(text.background, None);
+        assert_eq!(
+            text.foreground,
+            rgb(0x102030),
+            "the text pass hides it against the same ground"
         );
     }
 }
