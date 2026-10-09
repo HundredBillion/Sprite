@@ -31,9 +31,6 @@ use crate::tokens::TokenRegistry;
 
 const STATUS: u32 = 0xf0a0a0;
 
-/// Half a blink. The rate every terminal has used since the VT100.
-pub(super) const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
-
 /// One placement's element: the image, cropped to its source rectangle and
 /// scaled to the size the terminal computed.
 ///
@@ -119,11 +116,15 @@ fn placeholder_element(
 }
 
 impl TerminalView {
-    /// One half-blink. Returns the pane to a visible cursor when nothing is
-    /// blinking, so a program that stops the blink cannot leave the cursor
-    /// hidden.
-    pub(super) fn tick_blink(&mut self, cx: &mut Context<Self>) {
-        // The existing wake also discovers silent foreground programs with no OSC title.
+    /// One beat of the window's clock.
+    ///
+    /// Every pane refreshes its title on every beat — a program that starts
+    /// without output gives no other sign — but only the pane with Pane Focus
+    /// blinks, so a window of many panes repaints one of them, not all. A pane
+    /// without Pane Focus, or with nothing blinking, holds its cursor visible,
+    /// so neither losing focus nor a program stopping the blink can leave the
+    /// cursor hidden.
+    pub(super) fn clock_tick(&mut self, cx: &mut Context<Self>) {
         self.refresh_display_title(cx);
         let terminal_blinks = self
             .bundle
@@ -136,7 +137,7 @@ impl TerminalView {
             Body::Grid { grid, .. } => grid.cursor_blinks(),
             Body::Elements { .. } | Body::List { .. } => false,
         });
-        if !(terminal_blinks || grid_blinks) {
+        if !(self.pane_focused() && (terminal_blinks || grid_blinks)) {
             if !self.blink_on {
                 self.blink_on = true;
                 cx.notify();

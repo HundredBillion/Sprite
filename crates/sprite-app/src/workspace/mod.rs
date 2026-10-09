@@ -16,6 +16,7 @@ mod reload;
 use reload::*;
 mod pane_factory;
 use pane_factory::*;
+mod clock;
 mod surface_routing;
 #[cfg(test)]
 mod test_support;
@@ -136,6 +137,8 @@ pub struct Workspace {
     _bounds: gpui::Subscription,
     /// Withdraws a close question when the window stops being the active one.
     _activation: gpui::Subscription,
+    /// The window's one clock: blink phase and title discovery for every pane.
+    _clock: gpui::Task<()>,
 }
 
 struct PaneTitle {
@@ -289,6 +292,7 @@ impl Workspace {
                 workspace.dismiss_pending_close(cx);
             }
         });
+        let clock = Self::spawn_clock(cx);
         let mut workspace = Self {
             tabs,
             endpoint,
@@ -312,6 +316,7 @@ impl Workspace {
             published: Vec::new(),
             _bounds: bounds,
             _activation: activation,
+            _clock: clock,
             config_path,
             _reload: reload_task,
             reload_sender,

@@ -103,6 +103,7 @@ impl PaintBenchmark {
                 cell_height: px(18.0),
                 font_family: "monospace".into(),
                 font_size: px(14.0),
+                focused: true,
             },
             split,
         )

@@ -45,6 +45,12 @@ fn focus_and_draw(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestCo
     redraw(cx);
 }
 
+/// One beat of the window clock, delivered the way the workspace delivers it.
+fn clock_beat(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext) {
+    view.update(cx, |view, cx| view.clock_tick(cx));
+    cx.run_until_parked();
+}
+
 /// Delivers the worker's refusal of a multi-line paste exactly as the event
 /// task delivers it.
 fn hold_unsafe_paste(
@@ -391,8 +397,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     }
     cx.run_until_parked();
     let queries = FOREGROUND_QUERIES.with(|count| count.get());
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     assert_eq!(
         FOREGROUND_QUERIES.with(|count| count.get()),
         queries,
@@ -420,8 +425,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         [Some("explicit"), Some("cat")]
     );
     let strings = TITLE_STRINGS.with(|count| count.get());
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     assert_eq!(
         TITLE_STRINGS.with(|count| count.get()),
         strings,
@@ -442,8 +446,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         );
         std::thread::yield_now();
     }
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     view.read_with(cx, |view, _| {
         assert!(view.title().is_none());
         assert!(view.close_warning().is_none());
@@ -465,19 +468,22 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         );
         std::thread::yield_now();
     }
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     view.read_with(cx, |view, _| {
         assert_eq!(view.title().unwrap().as_ref(), "cat")
     });
     assert_eq!(
         view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation),
         generation,
-        "the existing blink timer discovers a silent job without a new snapshot"
+        "the window clock discovers a silent job without a new snapshot"
     );
     assert_eq!(
         events.borrow().last().unwrap().as_ref().unwrap().as_ref(),
         "cat"
+    );
+    assert!(
+        !view.read_with(cx, |view, _| view.pane_focused()),
+        "the clock found that title for a pane without Pane Focus"
     );
 }
 
@@ -2208,6 +2214,84 @@ fn only_a_pane_with_pane_focus_may_write_the_clipboard(cx: &mut gpui::TestAppCon
     }));
     if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
         cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// A beat of the window clock repaints only the pane with Pane Focus. The
+/// other pane keeps a steady, visible cursor and is not asked to repaint at
+/// all; when focus moves, the roles swap and the pane left behind shows its
+/// cursor again at once.
+#[gpui::test]
+fn a_clock_beat_repaints_only_the_pane_with_pane_focus(cx: &mut gpui::TestAppContext) {
+    let mut settings = crate::config::Settings::default();
+    settings.cursor.blink = Some(true);
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (left, right, cx) = two_panes(cx, &settings, "printf READY; exec sleep 30");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for view in [&left, &right] {
+            wait_for_bundle(view, cx, |b| {
+                b.render.cursor.blinking
+                    && b.render.cursor.visible
+                    && b.pane.rows.iter().any(|r| r.text.contains("READY"))
+            });
+            // Only the clock may repaint from here on.
+            view.update(cx, |view, _| view._snapshots = Task::ready(()));
+        }
+        left.update_in(cx, |view, window, _| window.focus(&view.focus));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        redraw(cx);
+        assert!(left.read_with(cx, |view, _| view.pane_focused()));
+        assert!(!right.read_with(cx, |view, _| view.pane_focused()));
+
+        let notifications = |view: &gpui::Entity<TerminalView>,
+                             cx: &mut gpui::VisualTestContext| {
+            let count = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+            let seen = count.clone();
+            let subscription =
+                cx.update(|_, cx| cx.observe(view, move |_, _| seen.set(seen.get() + 1)));
+            (count, subscription)
+        };
+        let (left_count, _left) = notifications(&left, cx);
+        let (right_count, _right) = notifications(&right, cx);
+
+        for view in [&left, &right] {
+            clock_beat(view, cx);
+        }
+        assert_eq!(left_count.get(), 1, "the pane with Pane Focus blinks");
+        assert_eq!(
+            right_count.get(),
+            0,
+            "an unfocused pane is not repainted by the clock"
+        );
+        assert!(!left.read_with(cx, |view, _| view.blink_on));
+        assert!(
+            right.read_with(cx, |view, _| view.blink_on),
+            "and its cursor stays visible"
+        );
+
+        right.update_in(cx, |view, window, _| window.focus(&view.focus));
+        redraw(cx);
+        assert!(
+            left.read_with(cx, |view, _| view.blink_on),
+            "losing Pane Focus shows the cursor at once"
+        );
+        left_count.set(0);
+        right_count.set(0);
+        for view in [&left, &right] {
+            clock_beat(view, cx);
+        }
+        assert_eq!(left_count.get(), 0);
+        assert_eq!(right_count.get(), 1);
+    }));
+    for view in [&left, &right] {
+        if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+            cleanup.wait().unwrap();
+        }
     }
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);

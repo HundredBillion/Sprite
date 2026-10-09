@@ -280,6 +280,7 @@ impl TerminalView {
             cells: self.metrics.clone(),
             defaults: self.default_colors(),
             blink_on: self.blink_on,
+            focused: self.pane_focused(),
         }
     }
 }

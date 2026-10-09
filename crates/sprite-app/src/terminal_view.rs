@@ -32,7 +32,6 @@ use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FORE
 
 use geometry::physical;
 use input::Drag;
-use render::BLINK_INTERVAL;
 use surfaces::DockDrag;
 use surfaces::HostedSurface;
 pub(crate) use theme::CellMetrics;
@@ -147,7 +146,6 @@ pub struct TerminalView {
     preedit: Option<String>,
     _events: Task<()>,
     _snapshots: Task<()>,
-    _blink: Task<()>,
     _retry: Task<()>,
     retry_wake: async_channel::Sender<()>,
     /// Keeps the settings subscription alive for as long as the view is.
@@ -434,7 +432,6 @@ impl TerminalView {
             _pane_focus: pane_focus,
             _events: event_task,
             _snapshots: snapshot_task,
-            _blink: Self::spawn_blink(cx),
             _retry: retry_task,
             retry_wake,
             _settings: settings_subscription,
@@ -444,23 +441,6 @@ impl TerminalView {
         // change the worker hears exactly once.
         view.send(TerminalCommand::Focus(false));
         view
-    }
-
-    /// One timer per pane, running whether or not anything blinks: it wakes
-    /// twice a second, notices a steady cursor, and does nothing. A failed
-    /// pane has one too, because a grid Surface hosted in it may blink.
-    ///
-    /// Starting and stopping it as programs change the cursor would be more
-    /// moving parts for less than a millisecond of work.
-    fn spawn_blink(cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |view, cx| {
-            loop {
-                cx.background_executor().timer(BLINK_INTERVAL).await;
-                if view.update(cx, |view, cx| view.tick_blink(cx)).is_err() {
-                    return;
-                }
-            }
-        })
     }
 
     /// A view that shows why it could not start.
@@ -539,7 +519,6 @@ impl TerminalView {
             _pane_focus: pane_focus,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
-            _blink: Self::spawn_blink(cx),
             _retry: Task::ready(()),
             retry_wake: async_channel::bounded(1).0,
             _settings: settings_subscription,
@@ -642,6 +621,9 @@ impl TerminalView {
         }
         self.pane_focused = focused;
         self.admit_focus(focused);
+        // A pane gaining focus starts its blink from visible, and one losing
+        // it shows a steady cursor from the next frame on.
+        self.blink_on = true;
         if !focused {
             // Leaving the pane is a decision too: a paste held here is not
             // answered by a paste made after coming back.
@@ -859,6 +841,10 @@ impl sprite_pane::Pane for TerminalView {
 
     fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle_focus(window, cx);
+    }
+
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        self.clock_tick(cx);
     }
 
     fn title(&self) -> Option<SharedString> {

@@ -222,6 +222,9 @@ pub(crate) struct GridPaintSpec {
     pub cell_height: Pixels,
     pub font_family: SharedString,
     pub font_size: Pixels,
+    /// Whether the pane has Pane Focus. Without it a block cursor is drawn as
+    /// its outline.
+    pub focused: bool,
 }
 
 impl GridPaint {
@@ -249,6 +252,7 @@ impl GridPaint {
                 cell_height: metrics.cells.height(),
                 font_family: metrics.cells.family(),
                 font_size: metrics.cells.font_size(),
+                focused: metrics.focused,
             },
             split,
         )
@@ -297,10 +301,21 @@ impl GridPaint {
     }
 
     pub(crate) fn new(spec: GridPaintSpec) -> Self {
+        // A pane without Pane Focus shows where its cursor is without
+        // competing with the one being typed into: a block becomes its
+        // outline, while a bar or an underline is already slight enough to
+        // keep its shape. The pane holds such a cursor's blink phase visible.
+        let cursor = spec.cursor.map(|cursor| match cursor.style {
+            CursorStyle::Block if !spec.focused => CursorSnapshot {
+                style: CursorStyle::BlockHollow,
+                ..cursor
+            },
+            _ => cursor,
+        });
         Self {
             rows: spec.rows,
             pass: spec.pass,
-            cursor: spec.cursor,
+            cursor,
             cursor_color: spec.cursor_color,
             default_fg: spec.default_fg,
             default_bg: spec.default_bg,
@@ -1324,6 +1339,7 @@ mod tests {
             cell_height: px(16.8),
             font_family: ".SystemUIFont".into(),
             font_size: px(14.0),
+            focused: true,
         });
         for text in ["", " ", "\t", "\u{3000}", "\u{10eeee}"] {
             let mut cell = PositionedCell {
@@ -1371,6 +1387,64 @@ mod tests {
             let drawn = paint.draw(&cell, None);
             assert!(drawn.underline.is_none());
             assert!(drawn.strikethrough.is_none());
+        }
+    }
+
+    /// A pane without Pane Focus marks its cursor without competing with the
+    /// one being typed into: a block becomes its outline and leaves the cell
+    /// its own colours; a bar or an underline keeps its shape.
+    #[test]
+    fn an_unfocused_pane_outlines_a_block_cursor_and_keeps_other_shapes() {
+        let spec = |cursor: CursorSnapshot, focused: bool| GridPaintSpec {
+            rows: Arc::from([]),
+            pass: RowPass::Whole,
+            cursor: Some(cursor),
+            cursor_color: None,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x112233),
+            palette: None,
+            cell_width: px(8.4),
+            cell_height: px(16.8),
+            font_family: ".SystemUIFont".into(),
+            font_size: px(14.0),
+            focused,
+        };
+        let block = CursorSnapshot {
+            row: 0,
+            column: 0,
+            visible: true,
+            blinking: true,
+            style: CursorStyle::Block,
+        };
+        assert_eq!(
+            GridPaint::new(spec(block, true)).cursor.unwrap().style,
+            CursorStyle::Block
+        );
+        let unfocused = GridPaint::new(spec(block, false));
+        assert_eq!(unfocused.cursor.unwrap().style, CursorStyle::BlockHollow);
+        let cell = PositionedCell {
+            column: 0,
+            columns: 1,
+            text: "x".into(),
+            style: plain_style(SnapshotColor::Default, SnapshotColor::Default, false),
+            selected: false,
+            hovered_link: false,
+        };
+        let drawn = unfocused.draw(&cell, unfocused.cursor);
+        assert_eq!(
+            drawn.background,
+            Some(rgb(0x112233)),
+            "the cell is not inverted"
+        );
+        assert_eq!(drawn.foreground, rgb(0xffffff));
+        assert_eq!(
+            drawn.cursor.map(|cursor| cursor.style),
+            Some(CursorStyle::BlockHollow),
+            "the outline is still drawn over the cell"
+        );
+        for style in [CursorStyle::Bar, CursorStyle::Underline] {
+            let paint = GridPaint::new(spec(CursorSnapshot { style, ..block }, false));
+            assert_eq!(paint.cursor.unwrap().style, style);
         }
     }
 

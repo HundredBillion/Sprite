@@ -137,6 +137,9 @@ pub(crate) struct GridMetrics {
     /// The pane's default foreground and background, for a grid that set none.
     pub defaults: (Rgb, Rgb),
     pub blink_on: bool,
+    /// Whether the pane has Pane Focus. A grid's cursor follows the terminal's
+    /// rule: outlined and steady without it.
+    pub focused: bool,
 }
 
 /// How many whole cells of this metric fit in a box of this size.
@@ -233,6 +236,7 @@ pub(crate) fn render_grid(
         cell_height: metrics.cells.height(),
         font_family: metrics.cells.family().clone(),
         font_size: metrics.cells.font_size(),
+        focused: metrics.focused,
     });
     let width = px(f32::from(metrics.cells.width()) * f32::from(grid.cols()));
     let height = px(f32::from(metrics.cells.height()) * f32::from(grid.rows()));
@@ -615,6 +619,7 @@ mod tests {
                 crate::tokens::unpack(0x101014),
             ),
             blink_on: true,
+            focused: true,
         };
 
         assert_eq!(
@@ -671,6 +676,7 @@ mod tests {
                 crate::tokens::unpack(0x101014),
             ),
             blink_on: true,
+            focused: true,
         };
         // As for element Surfaces: the tree is rebuilt every frame and needs no
         // window to build; only painting does.
@@ -689,6 +695,7 @@ mod tests {
                 },
             ),
             blink_on: true,
+            focused: true,
         }
     }
 

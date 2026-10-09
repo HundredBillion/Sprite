@@ -94,6 +94,7 @@ fn surface_allocation_probe() {
             sprite_term::Rgb { r: 0, g: 0, b: 0 },
         ),
         blink_on: true,
+        focused: true,
     };
     let (mut grid, a, b) = measure(|| GridSurface::new(200, 60));
     println!(
