@@ -2328,3 +2328,107 @@ fn a_clock_beat_repaints_only_the_pane_with_pane_focus(cx: &mut gpui::TestAppCon
         std::panic::resume_unwind(panic);
     }
 }
+
+/// The centre of a viewport cell, in window coordinates.
+fn cell_center(
+    view: &gpui::Entity<TerminalView>,
+    cx: &mut gpui::VisualTestContext,
+    row: usize,
+    column: usize,
+) -> gpui::Point<gpui::Pixels> {
+    view.read_with(cx, |view, _| {
+        let origin = view.content_origin.unwrap_or(view.origin);
+        gpui::point(
+            origin.x + view.metrics.width() * (column as f32 + 0.5),
+            origin.y + view.metrics.height() * (row as f32 + 0.5),
+        )
+    })
+}
+
+#[gpui::test]
+fn a_drag_extends_from_the_pressed_content_after_output_scrolls(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+        Some(vec!["/bin/sh".into(), "-c".into(), "stty -echo; seq 1 300; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; printf '\\nafter-1\\nafter-2\\nafter-3'; sleep 30".into()]),
+        settings, Vec::new(), None,
+        PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+    ));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let row_of = |bundle: &SnapshotBundle, text: &str| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .position(|row| row.text.trim_end() == text)
+        };
+        let before = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.trim_end() == "READY")
+        });
+        let pressed_row = row_of(&before, "ANCHOR-TEXT").expect("the anchor line is on screen");
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let press = cell_center(&view, cx, pressed_row, 0);
+        cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::default());
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"go\n".to_vec()))
+        });
+        let after = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.trim_end() == "after-3")
+        });
+        let moved_row = row_of(&after, "ANCHOR-TEXT").expect("the anchor line is still on screen");
+        assert!(
+            moved_row < pressed_row,
+            "output scrolled the anchor line up"
+        );
+        let release = cell_center(&view, cx, moved_row, 10);
+        cx.simulate_mouse_move(release, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::default());
+        let bundle = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .render
+                .rows
+                .iter()
+                .any(|row| row.cells.iter().any(|cell| cell.selected))
+        });
+        let selected_rows: Vec<usize> = bundle
+            .render
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.cells.iter().any(|cell| cell.selected))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            selected_rows,
+            vec![moved_row],
+            "only the pressed line is selected"
+        );
+        let selected: String = bundle.render.rows[moved_row]
+            .cells
+            .iter()
+            .filter(|cell| cell.selected)
+            .map(|cell| cell.text.as_str())
+            .collect();
+        assert_eq!(selected, "ANCHOR-TEXT");
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

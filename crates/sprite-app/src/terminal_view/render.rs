@@ -508,14 +508,15 @@ impl Render for TerminalView {
                         Some(event.button),
                         event.modifiers,
                     ) {
-                        // The press drops whatever was selected and remembers
-                        // where a drag would start from. It selects nothing
-                        // itself — see `Drag::moved`.
+                        // The press drops whatever was selected and pins where
+                        // a drag would start from to the content under it, so
+                        // output that scrolls before the drag cannot move the
+                        // start. It selects nothing itself — see `Drag::moved`.
                         view.drag = Some(Drag {
                             anchor: cell,
                             moved: false,
                         });
-                        view.send(TerminalCommand::ClearSelection);
+                        view.send(TerminalCommand::BeginSelection { anchor: cell });
                     }
                 }),
             )
