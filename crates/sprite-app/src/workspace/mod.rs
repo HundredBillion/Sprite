@@ -64,7 +64,8 @@ const DIVIDER_GRAB_PX: f32 = 7.0;
 ///
 /// Roughly fifteen columns or six rows at the default font size. It holds the
 /// side, not the panes nested inside it: a side that is itself split shares
-/// this width among its own panes.
+/// this width among its own panes. A split narrower than two floors uses a
+/// quarter of itself instead, so even a small split can still be moved.
 const DIVIDER_FLOOR_PX: f32 = 120.0;
 /// How far one keyboard nudge moves a boundary.
 const DIVIDER_NUDGE_PX: f32 = 20.0;
