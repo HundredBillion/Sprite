@@ -19,8 +19,8 @@ repository split (`e69d28b`); BCA-09 dates from the first Surface socket
 - Surface Channel wire protocol version 1, its authentication, event ordering
   and existing refusal semantics are unchanged on the wire.
 - **New threads are allowed only where this PRD names them:** one writer thread
-  per live Surface connection (R-S1), and conditionally one cleanup thread
-  (R-W6).
+  per live Surface connection (R-S1), and one short-lived thread per pane
+  cleanup in progress (R-W6).
 - Linux and macOS source compatibility.
 - Work happens on `fix/bug-class-audit` in `.worktrees/bug-class-audit`; the
   original checkout stays unchanged. No release, version bump, publishing or
@@ -31,7 +31,7 @@ repository split (`e69d28b`); BCA-09 dates from the first Surface socket
 
 ## Bug classes and structural changes
 
-### C1. An answer is delivered to whoever is first in line (BCA-06, BCA-14)
+### C1. An answer is delivered to whoever is first in line (BCA-06)
 
 Observation pairs `TerminalEvent::History` and failures with waiters by arrival
 order, and every `TerminalEvent::Error` — including unrelated selection, key
@@ -45,8 +45,8 @@ encoding and write errors — fails the oldest waiter, shifting every later answ
   dropped. A waiter that times out removes its own ticket.
 - R-C1.3 A general `TerminalEvent::Error` updates the status line only and can
   never resolve a waiter.
-- R-C1.4 `ResolveHyperlink` and its `Hyperlink` answer carry a ticket; the view
-  ignores any answer that is not for its latest request.
+- R-C1.4 `ResolveHyperlink` already carries a `request_id` and is the model
+  for R-C1.1; it is unchanged except as BCA-14 requires.
 
 ### C2. The asker gives up but the work still happens (BCA-08)
 
@@ -58,8 +58,10 @@ while the request is still queued and later applies.
   atomically moves `Waiting → Claimed`.
 - R-C2.2 On timeout the endpoint attempts `Waiting → Abandoned`. If that
   succeeds, the reply "nothing was changed" is true and the window later
-  discards the request. If it fails (already claimed), the endpoint waits for
-  the window's real answer.
+  discards the request. If it fails (already claimed), the endpoint waits up
+  to 10 s more for the window's real answer; if none arrives it replies "the
+  window accepted this request and is still applying it". No timeout path ever
+  says "nothing was changed" about a claimed request.
 
 ### C3. A confirmation is answered by stale or accidental input (BCA-02, BCA-05, BCA-31)
 
@@ -70,13 +72,17 @@ text unbracketed without reading the clipboard.
 - R-C3.1 One `Confirmation<T>` type in `sprite-app`: `arm(subject)`,
   `answer(subject, is_held) -> bool`, `disarm()`. It confirms only for a
   non-repeat press on the same subject.
-- R-C3.2 Any other input reaching the pane or workspace (key, mouse, IME
-  commit) disarms it, as does focus loss. Disarming happens at the single input
-  funnel, not per call site.
+- R-C3.2 Deliberate input disarms it: any non-modifier key press other than
+  the confirming gesture, any mouse button press, an IME text commit, and loss
+  of Pane Focus. Mouse motion, hover, wheel/scroll, modifier-only presses,
+  resizes and terminal output do not. Disarming is called from the key, mouse
+  and IME handlers — not from `TerminalView::send`, which also carries hover
+  lookups and resizes.
 - R-C3.3 Close/quit confirmation uses it with the close scope as subject.
 - R-C3.4 Unsafe paste uses it with the held text as subject. The confirming
   paste reads the clipboard; if the clipboard text differs from the held text,
-  the hold is dropped and the new text goes through the normal safety check.
+  the hold is dropped and the new text goes through the normal safety check;
+  if the clipboard cannot be read, the hold is dropped and nothing is pasted.
 - R-C3.5 `WorkspaceAction::repeats()` is true only for focus movement, divider
   nudge and font zoom. All other workspace actions ignore `is_held` events
   (BCA-31: holding the split key makes one split).
@@ -106,11 +112,12 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
   Exceeding the bound marks the connection dead and shuts the socket down. The
   writer keeps the existing 2 s `SO_SNDTIMEO`; a timeout or failure marks the
   connection dead. Closing or dropping the connection stops the thread; joining
-  it never happens on the GPUI thread. Existing ordering (`opened` first,
+  it never happens on the GPUI thread. A graceful close first lets the writer
+  send what is queued (including `closed`) within the write timeout. Existing ordering (`opened` first,
   contiguous batches and gestures) is preserved because all writes share the
   one queue.
 - R-S2 Grid highlights keep a name → id reverse index so relinking one name is
-  O(1). A grid holds at most 65,536 defined attribute ids and 65,536 group
+  O(1). A grid holds at most 262,144 defined attribute ids and 262,144 group
   names; a message that would exceed either is refused whole as `Malformed`
   and changes nothing.
 - R-S3 The set of guide ids is computed once per `apply_rows` and kept;
@@ -123,8 +130,12 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
   foreground differs from the cached one. The cache is invalidated by any change
   of font family, font size, theme or scale factor. `PositionedCell.text` is a
   `SharedString` created at row layout.
-- R-R2 One window-level 530 ms blink clock owned by the workspace notifies only
-  the focused pane; input resets the phase as today.
+- R-R2 One 530 ms clock per Sprite Window replaces the per-pane timers. Each
+  tick, every pane refreshes its Pane Title discovery and notifies only if the
+  title changed; only the pane with Pane Focus toggles its blink phase and
+  repaints. Unfocused panes draw a steady cursor: a block cursor becomes a
+  hollow block, bar and underline keep their shape. A grid Surface's cursor
+  follows the same rule. Input resets the phase as today.
 - R-R3 Box drawing strokes use fixed-size arrays, not per-cell `Vec`s (BCA-29).
 - R-T1 After handling a message the worker drains already-queued messages
   (bounded: stop at 16 messages or 16 KiB of output, whichever comes first) before capturing, so a burst
@@ -165,18 +176,23 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 | BCA-22 | 1 MiB input backlog equals the 1 MiB paste limit; a near-limit bracketed paste always fails with a misleading error. | The backlog bound is derived as max clipboard bytes plus bracket overhead. |
 | BCA-24 | `ForegroundWatch` keeps a duplicate PTY master open after the session ends. | The duplicate closes when the session ends, so the slave hangs up. |
 | BCA-25 | PNG scratch buffer grows to the largest image and never shrinks. | The scratch buffer is released after each decode. |
-| BCA-26 | Selection anchor is re-resolved in viewport space on each drag event, so it drifts while output scrolls. | The anchor is pinned in `Point::Screen` space at gesture start. |
+| BCA-26 | Selection anchor is re-resolved in viewport space on each drag event, so it drifts while output scrolls. | The press that starts a selection gesture is marked as the start; the worker keeps the anchor as a libghostty `TrackedGridRef` for the rest of the gesture, so it follows its content through scrolling and scrollback eviction. If the anchored content is evicted, the selection is cleared rather than re-anchored elsewhere. |
 | BCA-27 | On Darwin a member dying mid-scan aborts the scan, yet escalation advances, consuming TERM and the single HUP. | A vanished member is skipped; escalation advances only after a signal was actually attempted. |
 | BCA-28 | Invisible attribute applied before selection inversion; selected hidden text shows no highlight. | Selected hidden cells show the selection background; glyphs stay hidden. |
 | BCA-30 | Kitty placeholder tiles are fractionally positioned layout nodes and can seam. | Tiles snap to the same device-pixel grid as cells. |
 
-## Conditional requirement
+## Pane cleanup off the shared executor (BCA-32)
 
-- R-W6 Pane cleanup waits (`ShutdownHandle::wait`) run on GPUI's background
-  executor. First establish from the vendored GPUI source whether the Linux
-  executor has a fixed worker count. If it does, move cleanup waits to one
-  workspace-owned cleanup thread; if not, record the evidence in the TSP and
-  make no change.
+- R-W6 Pane cleanup (HUP/TERM/KILL escalation and joins, up to several
+  seconds) currently blocks a GPUI background-executor thread. On Linux that
+  executor is a fixed pool of `available_parallelism()` threads
+  (`vendor/gpui/src/platform/linux/dispatcher.rs:30`), so closing or quitting
+  with as many busy panes as cores starves all other background work. Each
+  pane's cleanup runs on its own short-lived named thread and reports
+  completion through a channel that the existing pending-cleanup tracking
+  awaits. Cleanups stay parallel, so quit time does not grow with pane count;
+  threads exist only while a pane is shutting down. No blocking cleanup runs on
+  the GPUI thread or the shared background executor.
 
 ## Explicitly out of scope
 
@@ -200,5 +216,26 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 - Before the PR: `cargo test --workspace --locked --offline`, all-target
   `clippy -D warnings`, `cargo fmt --check`. Native macOS desktop behaviour that
   CI cannot run is listed as unexecuted, not claimed.
-- Two ADRs: correlated requests (tickets and claim-or-abandon), and Surface
-  writer threads (amending ADR 0018's blocking-write decision).
+- ADRs: 0028 (correlate answers by ticket; claim before applying) and 0029
+  (dedicated threads for Surface writes and pane cleanup, amending ADR 0018's
+  blocking write and ADR 0024's executor choice).
+
+## Grilling decisions (2026-10-09)
+
+- Cleanup threads: one short-lived thread per pane cleanup, not one serial
+  thread — quit time must not become the sum of per-pane deadlines.
+- Pane Focus requires the Sprite Window to be active (glossary term added);
+  a background app switch denies OSC 52 and sends focus-out, as other terminals do.
+- Confirmations disarm on deliberate input only (keys, button presses, IME
+  commits, focus loss) — never on hover, motion, scroll or resize, which also
+  pass through `TerminalView::send`.
+- Claimed relays wait at most 10 s more and then report "still applying".
+- Selection anchors use libghostty `TrackedGridRef`, because `Point::Screen`
+  still drifts once full scrollback evicts lines.
+- Highlight caps are 262,144 entries each: sprite.nvim forwards Neovim's
+  monotonically allocated attribute ids, and a refusal mid-session would
+  break that grid's highlighting.
+- The window clock still drives title discovery for every pane; only the
+  focused pane's blink repaints.
+- Hyperlink resolution already carries a request id; only BCA-14's
+  request-on-change remains.
