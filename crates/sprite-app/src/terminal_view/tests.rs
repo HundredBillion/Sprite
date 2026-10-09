@@ -1181,7 +1181,8 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
     ));
     let titles: String = (0..70).map(|i| format!("\x1b]2;burst-{i}\x07")).collect();
     let program = format!(
-        "stty raw -echo; printf '\\033[?1004hARMED'; while [ ! -e '{}' ]; do sleep 0.005; done; \
+        "stty raw -echo; dd bs=1 count=1 status=none >/dev/null; \
+         printf '\\033[?1004hARMED'; while [ ! -e '{}' ]; do sleep 0.005; done; \
          printf '%s' '{titles}'; head -c 327680 /dev/zero; \
          dd bs=1 count=3 status=none | od -An -tx1 | tr -d ' \\n'; printf 'END'; sleep 30",
         gate.to_str().unwrap()
@@ -1200,6 +1201,12 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
             window,
             cx,
         )
+    });
+    // The child turns reporting on only after this byte, which the worker
+    // handles after the pane's opening `Focus(false)`, so that message cannot
+    // put a report in front of the one the test is waiting for.
+    view.update(cx, |view, _| {
+        view.send(TerminalCommand::Input(b"g".to_vec()))
     });
     wait_for_bundle(&view, cx, |bundle| {
         bundle
