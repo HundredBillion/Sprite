@@ -158,6 +158,10 @@ pub(crate) struct Authenticated {
     pub reader: BufReader<UnixStream>,
     pub body: String,
     pub reply_connection: ReplyConnection,
+    /// This connection's place under the cap. A handler that leaves work
+    /// running after it returns keeps a share, so the connection still
+    /// counts until that work ends too.
+    pub slot: Arc<ConnectionSlot>,
 }
 
 type Connections = Arc<Mutex<HashMap<usize, UnixStream>>>;
@@ -169,7 +173,9 @@ pub(crate) struct ReplyConnection {
     id: usize,
 }
 
-struct ConnectionSlot {
+/// One connection's place under the cap, given back when the last share is
+/// dropped.
+pub(crate) struct ConnectionSlot {
     connections: Connections,
     id: usize,
 }
@@ -278,10 +284,10 @@ impl LocalSocket {
                         };
                         live.insert(id, cancel);
                         drop(live);
-                        let slot = ConnectionSlot {
+                        let slot = Arc::new(ConnectionSlot {
                             connections: Arc::clone(&connections),
                             id,
-                        };
+                        });
                         let running = Arc::clone(&running);
                         let key = Arc::clone(&key);
                         let handler = Arc::clone(&handler);
@@ -306,6 +312,7 @@ impl LocalSocket {
                                             connections: Arc::clone(&_slot.connections),
                                             id,
                                         },
+                                        slot: Arc::clone(&_slot),
                                     }),
                                     Err(_) => refused(&mut stream),
                                 }
@@ -335,6 +342,12 @@ impl LocalSocket {
     }
     pub fn key_hex(&self) -> String {
         self.key.to_hex()
+    }
+
+    /// How many connections hold a slot against the cap right now.
+    #[cfg(test)]
+    pub(crate) fn live_connections(&self) -> usize {
+        self.connections.lock().unwrap().len()
     }
 
     pub fn close(&mut self) {
