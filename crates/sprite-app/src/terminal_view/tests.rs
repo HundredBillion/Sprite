@@ -948,6 +948,158 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
     }
 }
 
+/// Waits for the outstanding hover answer by polling, not by condition: an
+/// answer that changes nothing no longer notifies, and a notification-driven
+/// condition would never wake for it.
+fn settle_hover(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        cx.run_until_parked();
+        if view.read_with(cx, |view, _| view.hover_request.is_none()) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hover answer did not arrive"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[gpui::test]
+fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let script = "stty -echo; printf '\\033]8;;https://example.com\\007LINK\\033]8;;\\007\\r\\nREADY\\r\\n'; IFS= read -r go; i=0; while [ $i -lt 5 ]; do printf '\\033[3;1Hrow%s' $i; sleep 0.05; i=$((i+1)); done; printf '\\033[4;1HQUIET'; IFS= read -r go; printf '\\033[1;10HCHANGED'; sleep 30";
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let requests = || HOVER_LINK_REQUESTS.with(|count| count.get());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("READY"))
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        // The first frame fits the grid to the window, and that resize
+        // redraws every row; it has to land before the hover is taken.
+        let sized = view.read_with(cx, |view, _| view.size);
+        wait_for_bundle(&view, cx, |bundle| {
+            sized.is_none_or(|size| bundle.render.size == size)
+        });
+        let (on_link, plain, beside) = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let width = view.metrics.width();
+            let height = view.metrics.height();
+            (
+                gpui::point(origin.x + width * 0.5, origin.y + height * 0.5),
+                gpui::point(origin.x + width * 30.5, origin.y + height * 10.5),
+                gpui::point(origin.x + width * 31.5, origin.y + height * 10.5),
+            )
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        cx.simulate_mouse_move(on_link, None, gpui::Modifiers::default());
+        executor.block_test(view.condition::<()>(cx, |view, _| {
+            view.hovered_link.is_some() && view.hover_request.is_none()
+        }));
+        let before = requests();
+        let generation = view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation);
+
+        // Output on other rows: the snapshots arrive, the link under the
+        // pointer is not asked about again, and it stays drawn.
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+        });
+        let quiet = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("QUIET"))
+        });
+        assert!(
+            quiet.generation > generation,
+            "output elsewhere produced snapshots"
+        );
+        assert_eq!(
+            requests(),
+            before,
+            "snapshots that leave the hovered row alone must not re-request its link"
+        );
+        view.read_with(cx, |view, _| {
+            let (stamped, _) = view.hovered_link.expect("the link stays hovered");
+            assert_eq!(
+                stamped,
+                view.bundle.as_ref().unwrap().generation,
+                "the kept answer is restamped so the painter still draws it"
+            );
+        });
+
+        // Output on the hovered row: its link is asked about again.
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+        });
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows[0].text.contains("CHANGED")
+        });
+        executor.block_test(view.condition::<()>(cx, |view, _| {
+            view.hover_request.is_none() && view.hovered_link.is_some()
+        }));
+        assert!(
+            requests() > before,
+            "a change to the hovered row re-requests its link"
+        );
+
+        // Two plain cells in turn: the second answer agrees with the first,
+        // so it must not repaint.
+        cx.simulate_mouse_move(plain, None, gpui::Modifiers::default());
+        settle_hover(&view, cx);
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = notified.clone();
+        let _observer =
+            cx.update(|_, cx| cx.observe(&view, move |_, _| counter.set(counter.get() + 1)));
+        let asked = requests();
+        cx.simulate_mouse_move(beside, None, gpui::Modifiers::default());
+        assert_eq!(
+            requests(),
+            asked + 1,
+            "moving to another cell asks about it"
+        );
+        settle_hover(&view, cx);
+        assert_eq!(
+            notified.get(),
+            0,
+            "an answer that changes nothing must not repaint"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[test]
 fn settings_callback_recovers_latest_values_after_real_event_pressure() {
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())

@@ -112,6 +112,10 @@ pub struct TerminalView {
     shape_cache: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
     hovered_link: Option<(u64, sprite_term::HyperlinkSpan)>,
     hover_request: Option<(u64, sprite_term::CellPosition)>,
+    /// The cell the current hover answer was asked about, and that cell's row
+    /// as it was then. Rows are shared between snapshots while their content
+    /// is unchanged, so the same allocation means the answer still holds.
+    hover_basis: Option<(sprite_term::CellPosition, Arc<sprite_term::RenderRow>)>,
     next_link_request: u64,
     /// Where the grid's top-left corner sits inside the pane.
     ///
@@ -165,6 +169,7 @@ thread_local! {
     pub(crate) static TITLE_STRINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static TITLE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static FOREGROUND_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static HOVER_LINK_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl TerminalView {
@@ -177,12 +182,57 @@ impl TerminalView {
             let request_id = self.next_link_request;
             self.next_link_request = self.next_link_request.wrapping_add(1);
             self.hover_request = Some((request_id, position));
+            self.hover_basis = self
+                .bundle
+                .as_ref()
+                .and_then(|bundle| bundle.render.rows.get(usize::from(position.row)))
+                .map(|row| (position, Arc::clone(row)));
+            #[cfg(test)]
+            HOVER_LINK_REQUESTS.with(|count| count.set(count.get() + 1));
             if !self.submit(TerminalCommand::ResolveHyperlink {
                 position,
                 request_id,
             }) {
                 self.hover_request = None;
+                self.hover_basis = None;
             }
+        }
+    }
+
+    /// Whether the newest snapshot still shows `position` exactly as it was
+    /// when its link was last asked about.
+    fn hover_basis_holds(&self, position: sprite_term::CellPosition) -> bool {
+        let Some((asked, row)) = &self.hover_basis else {
+            return false;
+        };
+        *asked == position
+            && self
+                .bundle
+                .as_ref()
+                .and_then(|bundle| bundle.render.rows.get(usize::from(position.row)))
+                .is_some_and(|current| Arc::ptr_eq(row, current))
+    }
+
+    /// Carries the hover across a new snapshot.
+    ///
+    /// Output elsewhere on screen does not change what is under the pointer,
+    /// so the answer already held is kept, restamped with the new generation
+    /// (which is what the painter checks), rather than asked for again. Only a
+    /// change to the hovered row itself asks again.
+    fn follow_hover(&mut self) {
+        let Some(cell) = self.hovered_cell else {
+            return;
+        };
+        // An answer still in flight re-checks the row when it arrives.
+        if self.hover_request.is_some() {
+            return;
+        }
+        if !self.hover_basis_holds(cell) {
+            self.request_hover_link(cell);
+            return;
+        }
+        if let (Some(bundle), Some((_, span))) = (self.bundle.as_ref(), self.hovered_link) {
+            self.hovered_link = Some((bundle.generation, span));
         }
     }
 
@@ -327,12 +377,16 @@ impl TerminalView {
                 }
                 if !decision.effects.is_empty() {
                     let applied = view.update(cx, |view, cx| {
+                        let mut repaint = false;
                         for effect in decision.effects {
-                            view.apply(effect, cx);
+                            repaint |= view.apply(effect, cx);
                         }
-                        // One notify for the batch: an event that asked for
-                        // nothing does not repaint.
-                        cx.notify();
+                        // One notify for the batch, and none for a batch that
+                        // changed nothing drawn: a hover answer agreeing with
+                        // the last one repaints nothing.
+                        if repaint {
+                            cx.notify();
+                        }
                     });
                     if applied.is_err() {
                         return;
@@ -360,11 +414,7 @@ impl TerminalView {
                             view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
                             view.refresh_display_title(cx);
-                            if view.hover_request.is_none()
-                                && let Some(cell) = view.hovered_cell
-                            {
-                                view.request_hover_link(cell);
-                            }
+                            view.follow_hover();
                             cx.notify();
                         }
                     })
@@ -424,6 +474,7 @@ impl TerminalView {
             layout_cache: Default::default(),
             shape_cache: Default::default(),
             hover_request: None,
+            hover_basis: None,
             next_link_request: 1,
             origin: point(px(grid.padding.get()), px(grid.padding.get())),
             padding: grid.padding.get(),
@@ -509,6 +560,7 @@ impl TerminalView {
             layout_cache: Default::default(),
             shape_cache: Default::default(),
             hover_request: None,
+            hover_basis: None,
             next_link_request: 1,
             origin: point(
                 px(crate::config::Grid::DEFAULT_PADDING),
@@ -529,17 +581,24 @@ impl TerminalView {
         }
     }
 
-    /// Performs one decided effect. Everything here needs `cx`; nothing here
-    /// decides anything.
-    fn apply(&mut self, effect: crate::terminal_events::Effect, cx: &mut Context<Self>) {
+    /// Performs one decided effect, returning whether it changed anything the
+    /// pane draws. Everything here needs `cx`; nothing here decides anything.
+    fn apply(&mut self, effect: crate::terminal_events::Effect, cx: &mut Context<Self>) -> bool {
         use crate::terminal_events::Effect;
         match effect {
-            Effect::Status(line) => self.status = Some(line),
+            Effect::Status(line) => {
+                self.status = Some(line);
+                true
+            }
             Effect::Title(title) => {
                 self.title = title.map(SharedString::from);
                 self.refresh_display_title(cx);
+                true
             }
-            Effect::HoldPaste(text) => self.unsafe_paste.arm(text),
+            Effect::HoldPaste(text) => {
+                self.unsafe_paste.arm(text);
+                true
+            }
             Effect::HyperlinkResolved {
                 position,
                 request_id,
@@ -553,30 +612,38 @@ impl TerminalView {
                         cx.open_url(&uri);
                     }
                 }
-                if self.hover_request == Some((request_id, position)) {
-                    self.hover_request = None;
-                    if self.hovered_cell == Some(position) {
-                        if self
-                            .bundle
-                            .as_ref()
-                            .is_some_and(|bundle| bundle.generation == generation)
-                        {
-                            self.hovered_link = span.map(|span| (generation, span));
-                        } else {
-                            self.request_hover_link(position);
-                        }
-                    }
-                    if let Some(cell) = self.hovered_cell.filter(|cell| *cell != position) {
-                        self.request_hover_link(cell);
-                    }
-                    cx.notify();
+                if self.hover_request != Some((request_id, position)) {
+                    return false;
                 }
+                self.hover_request = None;
+                let before = self.hovered_link.map(|(_, span)| span);
+                if self.hovered_cell == Some(position) {
+                    // The answer describes the row as it was asked about. While
+                    // that row is unchanged it still holds for the newest
+                    // snapshot, whatever generation the worker stamped it with.
+                    match self.bundle.as_ref().map(|bundle| bundle.generation) {
+                        Some(current)
+                            if current == generation || self.hover_basis_holds(position) =>
+                        {
+                            self.hovered_link = span.map(|span| (current, span));
+                        }
+                        _ => self.request_hover_link(position),
+                    }
+                }
+                if let Some(cell) = self.hovered_cell.filter(|cell| *cell != position) {
+                    self.request_hover_link(cell);
+                }
+                self.hovered_link.map(|(_, span)| span) != before
             }
-            Effect::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Effect::Clipboard(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                true
+            }
             Effect::DeliverHistory { ticket, snapshot } => {
                 if let Some(link) = &self.observation {
                     link.panes.deliver(link.pane, ticket, snapshot);
                 }
+                true
             }
             // A capture that failed answers the one request it belongs to,
             // with the reason, rather than leaving it to wait out the deadline.
@@ -584,6 +651,7 @@ impl TerminalView {
                 if let Some(link) = &self.observation {
                     link.panes.deliver_failure(link.pane, ticket, reason);
                 }
+                true
             }
         }
     }
