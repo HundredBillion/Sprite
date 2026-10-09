@@ -343,20 +343,48 @@ fn configure_child_environment(
     }
 }
 
+/// Opens a PTY pair, one open at a time per process, retrying a transient failure.
+///
+/// Concurrent `openpty` calls on macOS can transiently fail with errno -6, the
+/// kernel's "redo the open" code leaking to user space. The lock keeps sessions
+/// in this process from racing each other; the retry covers opens racing in
+/// other processes. Only `openpty` runs under the lock.
+fn open_pty(size: PtySize) -> Result<portable_pty::PtyPair, SessionError> {
+    static OPEN_PTY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const ATTEMPTS: usize = 3;
+    // portable-pty flattens the OS error into text, so the errno is matched there.
+    const TRANSIENT: &str = "code: -6,";
+
+    let mut attempt = 1;
+    loop {
+        let opened = {
+            let _one_at_a_time = OPEN_PTY
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            native_pty_system().openpty(size)
+        };
+        match opened {
+            Ok(pair) => return Ok(pair),
+            Err(error) if attempt < ATTEMPTS && format!("{error:?}").contains(TRANSIENT) => {
+                attempt += 1;
+            }
+            Err(error) => return Err(SessionError::new("open_pty", error)),
+        }
+    }
+}
+
 pub(super) fn start(
     config: &SessionConfig,
     commands: &SyncSender<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
 ) -> Result<Started, SessionError> {
     let size = config.size;
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: size.rows(),
-            cols: size.cols(),
-            pixel_width: size.pixel_width(),
-            pixel_height: size.pixel_height(),
-        })
-        .map_err(|error| SessionError::new("open_pty", error))?;
+    let pair = open_pty(PtySize {
+        rows: size.rows(),
+        cols: size.cols(),
+        pixel_width: size.pixel_width(),
+        pixel_height: size.pixel_height(),
+    })?;
 
     let mut command = CommandBuilder::new(&config.program);
     for argument in &config.args {
