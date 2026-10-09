@@ -2,20 +2,75 @@ use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession
 use std::sync::mpsc;
 use std::time::Duration;
 
+/// Standard base64, enough to spell an OSC 52 payload.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for group in bytes.chunks(3) {
+        let at = |index: usize| u32::from(group.get(index).copied().unwrap_or(0));
+        let bits = (at(0) << 16) | (at(1) << 8) | at(2);
+        for index in 0..4 {
+            if index <= group.len() {
+                out.push(char::from(
+                    ALPHABET[(bits >> (18 - 6 * index)) as usize & 63],
+                ));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `count` OSC 52 clipboard writes of `CLIP0`, `CLIP1`, …, as one string,
+/// sixteen bytes each.
+///
+/// Clipboard writes are the one parser notice the worker never coalesces — a
+/// title keeps only its latest value per pass — so they are how these tests
+/// put many lossless events into one pass.
+fn clipboard_writes(count: usize) -> String {
+    (0..count)
+        .map(|index| {
+            format!(
+                "\x1b]52;c;{}\x07",
+                base64(format!("CLIP{index}").as_bytes())
+            )
+        })
+        .collect()
+}
+
+/// A child that waits for one line before writing `writes`, then runs `then`.
+fn on_cue(writes: &str, then: &str) -> SessionConfig {
+    SessionConfig::command(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            format!("stty -echo; read _; printf '%s' '{writes}'; {then}").into(),
+        ],
+    )
+}
+
+/// Focuses the pane, then releases the child: an unfocused pane is denied the
+/// clipboard and the writes would raise nothing.
+fn focus_and_release(session: &mut TerminalSession) {
+    session.send(TerminalCommand::Focus(true)).unwrap();
+    session
+        .send(TerminalCommand::Input(b"\n".to_vec()))
+        .unwrap();
+}
+
 #[test]
-fn shutdown_retains_accepted_titles_without_consumer_progress() {
-    // One parser batch is one PTY read, which macOS caps at 1 KiB; 80 titles fit.
-    let titles: String = (0..80).map(|i| format!("\x1b]2;TITLE{i}\x07")).collect();
-    let script = format!("printf '%s' '{titles}'; sleep 30");
+fn shutdown_retains_accepted_clipboard_writes_without_consumer_progress() {
+    // One write, small enough for one PTY read even where a read returns at
+    // most 1 KiB, and more events than the mailbox's thirty-two ordinary slots.
+    let writes = clipboard_writes(60);
+    assert!(writes.len() <= 1024);
     let sprite_term::Spawned {
         mut session,
         mut events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec!["-c".into(), script.into()],
-    ))
-    .unwrap();
+    } = TerminalSession::spawn(on_cue(&writes, "sleep 30")).unwrap();
+    focus_and_release(&mut session);
     std::thread::sleep(Duration::from_millis(300));
     let handle = session.begin_shutdown().unwrap().unwrap();
     let (tx, rx) = mpsc::channel();
@@ -27,9 +82,9 @@ fn shutdown_retains_accepted_titles_without_consumer_progress() {
     let mut exited = false;
     while let Ok(event) = events.next_blocking() {
         match event {
-            TerminalEvent::TitleChanged(Some(title)) => {
+            TerminalEvent::ClipboardWrite(text) => {
                 assert!(!exited);
-                retained.push(title);
+                retained.push(text);
             }
             TerminalEvent::Exited(_) => exited = true,
             _ => {}
@@ -42,11 +97,11 @@ fn shutdown_retains_accepted_titles_without_consumer_progress() {
     assert!(exited);
     assert_eq!(
         retained.len(),
-        80,
-        "one accepted parser batch survives cancellation"
+        60,
+        "one accepted parser pass survives cancellation"
     );
-    for (i, title) in retained.iter().enumerate() {
-        assert_eq!(title, &format!("TITLE{i}"));
+    for (i, text) in retained.iter().enumerate() {
+        assert_eq!(text, &format!("CLIP{i}"));
     }
 }
 
@@ -97,29 +152,37 @@ fn every_submission_method_bounds_variable_sized_input() {
 }
 
 #[test]
-fn resumed_consumer_receives_all_titles_in_order() {
-    let sprite_term::Spawned { mut session, mut events, snapshots: _snapshots } = TerminalSession::spawn(
-        SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; sleep 0.2; exit 7".into()]),
-    ).unwrap();
+fn resumed_consumer_receives_all_clipboard_writes_in_order() {
+    let writes = clipboard_writes(100);
+    let sprite_term::Spawned {
+        mut session,
+        mut events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(on_cue(&writes, "sleep 0.2; exit 7")).unwrap();
+    focus_and_release(&mut session);
     std::thread::sleep(Duration::from_millis(100));
-    let mut titles = Vec::new();
+    let mut received = Vec::new();
     while let Ok(event) = events.next_blocking() {
-        if let sprite_term::TerminalEvent::TitleChanged(Some(title)) = event {
-            titles.push(title);
+        if let TerminalEvent::ClipboardWrite(text) = event {
+            received.push(text);
         }
     }
-    assert_eq!(titles.len(), 100);
-    for (index, title) in titles.iter().enumerate() {
-        assert_eq!(title, &format!("TITLE{index}"));
+    assert_eq!(received.len(), 100);
+    for (index, text) in received.iter().enumerate() {
+        assert_eq!(text, &format!("CLIP{index}"));
     }
     session.begin_shutdown().unwrap().unwrap().wait().unwrap();
 }
 
 #[test]
 fn dropping_the_consumer_releases_event_pressure() {
-    let sprite_term::Spawned { mut session, events, snapshots: _snapshots } = TerminalSession::spawn(
-        SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; sleep 30".into()]),
-    ).unwrap();
+    let writes = clipboard_writes(100);
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(on_cue(&writes, "sleep 30")).unwrap();
+    focus_and_release(&mut session);
     std::thread::sleep(Duration::from_millis(300));
     drop(events);
     let handle = session.begin_shutdown().unwrap().unwrap();
@@ -136,17 +199,13 @@ fn dropping_the_consumer_releases_event_pressure() {
 fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
     // One write: separate small writes exhaust the output permits while the consumer
     // stalls, and macOS PTYs then block the child before it can exit.
-    let titles: String = (0..100).map(|i| format!("\x1b]2;TITLE{i}\x07")).collect();
-    let script = format!("printf '%s' '{titles}'; exit 7");
+    let writes = clipboard_writes(100);
     let sprite_term::Spawned {
         mut session,
         mut events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec!["-c".into(), script.into()],
-    ))
-    .unwrap();
+    } = TerminalSession::spawn(on_cue(&writes, "exit 7")).unwrap();
+    focus_and_release(&mut session);
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let ended = session
@@ -162,23 +221,23 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let mut outcome = None;
-    let mut titles = Vec::new();
+    let mut received = Vec::new();
     while let Ok(event) = events.next_blocking() {
         match event {
-            TerminalEvent::TitleChanged(Some(title)) => {
+            TerminalEvent::ClipboardWrite(text) => {
                 assert!(
                     outcome.is_none(),
-                    "retained titles precede the final outcome"
+                    "retained writes precede the final outcome"
                 );
-                titles.push(title);
+                received.push(text);
             }
             TerminalEvent::Exited(exit) => outcome = Some(exit),
             _ => {}
         }
     }
-    assert!(titles.len() >= 32);
-    for (index, title) in titles.iter().enumerate() {
-        assert_eq!(title, &format!("TITLE{index}"));
+    assert!(received.len() >= 32);
+    for (index, text) in received.iter().enumerate() {
+        assert_eq!(text, &format!("CLIP{index}"));
     }
     let outcome = outcome.expect("reserved exit outcome");
     assert_eq!(outcome.code, Some(7));

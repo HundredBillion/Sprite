@@ -93,15 +93,27 @@ struct Owned {
     terminal: Terminal<'static, 'static>,
 }
 
+/// What the parser raised and the worker has not yet published.
+///
+/// A title, a working directory and the bell each keep only their latest
+/// state until publication: a program that retitles itself on every prompt or
+/// progress tick would otherwise spend the event budget on names nobody sees.
 #[derive(Default)]
 struct Notices {
     bell_pending: bool,
-    events: Vec<TerminalEvent>,
+    title: Option<Option<String>>,
+    working_directory: Option<Option<String>>,
 }
 
 impl Notices {
     fn take(&mut self) -> Vec<TerminalEvent> {
-        let mut events = std::mem::take(&mut self.events);
+        let mut events = Vec::new();
+        if let Some(title) = self.title.take() {
+            events.push(TerminalEvent::TitleChanged(title));
+        }
+        if let Some(directory) = self.working_directory.take() {
+            events.push(TerminalEvent::WorkingDirectoryChanged(directory));
+        }
         if std::mem::take(&mut self.bell_pending) {
             events.push(TerminalEvent::Bell);
         }
@@ -116,6 +128,38 @@ fn register_bell(
     terminal
         .on_bell(move |_terminal: &Terminal<'_, '_>| {
             notices.borrow_mut().bell_pending = true;
+        })
+        .map(|_| ())
+}
+
+fn register_title(
+    terminal: &mut Terminal<'static, 'static>,
+    notices: Rc<RefCell<Notices>>,
+) -> Result<(), libghostty_vt::Error> {
+    terminal
+        .on_title_changed(move |terminal: &Terminal<'_, '_>| {
+            let title = terminal
+                .title()
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            notices.borrow_mut().title = Some(title);
+        })
+        .map(|_| ())
+}
+
+fn register_pwd(
+    terminal: &mut Terminal<'static, 'static>,
+    notices: Rc<RefCell<Notices>>,
+) -> Result<(), libghostty_vt::Error> {
+    terminal
+        .on_pwd_changed(move |terminal: &Terminal<'_, '_>| {
+            let directory = terminal
+                .pwd()
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            notices.borrow_mut().working_directory = Some(directory);
         })
         .map(|_| ())
 }
@@ -822,5 +866,47 @@ mod closing_regressions {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+    use libghostty_vt::terminal::Options as TerminalOptions;
+
+    #[test]
+    fn a_pass_of_title_changes_yields_one_event_with_the_latest_title() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+        })
+        .expect("terminal");
+        let notices = Rc::new(RefCell::new(Notices::default()));
+        register_title(&mut terminal, Rc::clone(&notices)).expect("title callback");
+        register_pwd(&mut terminal, Rc::clone(&notices)).expect("pwd callback");
+
+        let retitles: String = (0..100)
+            .map(|index| format!("\x1b]2;title-{index}\x07"))
+            .collect();
+        terminal.vt_write(retitles.as_bytes());
+        // A second chunk in the same pass is still the same pass.
+        terminal.vt_write(b"\x1b]7;file:///tmp/one\x07\x1b]7;file:///tmp/two\x07");
+
+        let events = notices.borrow_mut().take();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    TerminalEvent::TitleChanged(Some(title)),
+                    TerminalEvent::WorkingDirectoryChanged(Some(directory)),
+                ] if title == "title-99" && directory.contains("/tmp/two")
+            ),
+            "{events:?}"
+        );
+        assert!(
+            notices.borrow_mut().take().is_empty(),
+            "a taken notice is not reported twice"
+        );
     }
 }

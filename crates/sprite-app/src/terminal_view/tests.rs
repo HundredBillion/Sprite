@@ -997,9 +997,10 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             .unwrap()
             .as_nanos()
     ));
-    // The title burst must fit one macOS PTY read (1 KiB) yet overflow the event mailbox;
+    // The burst must fit one macOS PTY read (1 KiB) yet overflow the event mailbox;
     // a split burst leaves the worker holding a second chunk and the command queue short of full.
-    let titles: String = (0..70).map(|i| format!("\x1b]2;burst-{i}\x07")).collect();
+    // Clipboard writes, because a title keeps only its latest value per pass.
+    let titles = crate::test_event_pressure::CLIPBOARD_WRITE.repeat(60);
     // ARMED proves the child waits at the gate, so a slow start cannot push the burst
     // past the pause below.
     let program = format!(
@@ -1028,6 +1029,11 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             .iter()
             .any(|row| row.text.contains("ARMED"))
     });
+    // An unfocused pane is denied the clipboard, so the burst would raise
+    // nothing. Pane Focus is real here: the view tells the worker itself,
+    // while the queue still has room, before the gate releases the burst.
+    focus_and_draw(&view, cx);
+    assert!(view.read_with(cx, |view, _| view.pane_focused()));
     std::fs::write(&gate, b"go").unwrap();
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
     let mut changed = settings.clone();
@@ -1164,10 +1170,10 @@ fn focus_refused_under_a_full_queue_is_delivered_once_admission_recovers() {
 
 /// Runs only inside `focus_refused_under_a_full_queue_is_delivered_once_admission_recovers`.
 ///
-/// The child turns focus reporting on, then waits at a gate. Once released it
-/// floods the event mailbox with titles while the UI thread is paused, so the
-/// worker stalls and the command queue fills. Pane Focus is gained while the
-/// queue is full; the refused `Focus(true)` must still reach the child — as
+/// The child turns focus reporting on, then waits at a gate. While the UI
+/// thread is paused, copy commands fill the event mailbox so the worker
+/// stalls, and once released the child's output fills the command queue.
+/// Pane Focus is gained while the queue is full; the refused `Focus(true)` must still reach the child — as
 /// CSI I — once the UI resumes and admission recovers.
 #[gpui::test]
 fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
@@ -1185,11 +1191,10 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
             .unwrap()
             .as_nanos()
     ));
-    let titles: String = (0..70).map(|i| format!("\x1b]2;burst-{i}\x07")).collect();
     let program = format!(
         "stty raw -echo; dd bs=1 count=1 status=none >/dev/null; \
          printf '\\033[?1004hARMED'; while [ ! -e '{}' ]; do sleep 0.005; done; \
-         printf '%s' '{titles}'; head -c 327680 /dev/zero; \
+         head -c 327680 /dev/zero; \
          dd bs=1 count=3 status=none | od -An -tx1 | tr -d ' \\n'; printf 'END'; sleep 30",
         gate.to_str().unwrap()
     );
@@ -1228,6 +1233,24 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
     redraw(cx);
     assert!(!view.read_with(cx, |view, _| view.pane_focused()));
 
+    // Lossless events the paused UI does not take: past the mailbox's
+    // thirty-two the worker stalls. Titles no longer do this — a pass keeps
+    // only the latest — and the clipboard is closed to an unfocused pane.
+    view.update(cx, |view, _| {
+        let mut accepted = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while accepted < 48 {
+            if view.submit(TerminalCommand::CopySelection) {
+                accepted += 1;
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the worker stalled before the copies were queued"
+                );
+                crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
+            }
+        }
+    });
     std::fs::write(&gate, b"go").unwrap();
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
     view.update_in(cx, |view, window, cx| {
@@ -1340,8 +1363,8 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
     let (sender, _exits) = async_channel::unbounded();
     // One write: separate small writes exhaust the output permits while the UI is paused,
     // and macOS PTYs then block the child before it can exit.
-    let titles: String = (0..150).map(|i| format!("\x1b]2;title{i}\x07")).collect();
-    let script = format!("sleep .3; printf '%s' '{titles}'; exit 7");
+    let burst = crate::test_event_pressure::CLIPBOARD_WRITE.repeat(150);
+    let script = format!("stty -echo; read _; printf '%s' '{burst}'; exit 7");
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
             Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
@@ -1357,6 +1380,14 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
         )
     });
     wait_for_bundle(&view, cx, |_| true);
+    // Pane Focus first, through the window, so the view itself tells the
+    // worker: an unfocused pane is denied the clipboard and the burst would
+    // raise no events at all. Only then is the child released.
+    focus_and_draw(&view, cx);
+    assert!(view.read_with(cx, |view, _| view.pane_focused()));
+    view.update(cx, |view, _| {
+        view.send(TerminalCommand::Input(b"\n".to_vec()))
+    });
     // Keep installed UI receivers paused until the natural mailbox deadline ends the worker.
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(2600));
     let mut latest = settings;

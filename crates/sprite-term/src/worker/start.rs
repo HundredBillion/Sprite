@@ -87,39 +87,11 @@ pub(super) fn initialize(
         return Err(SessionError::new("on_bell", error));
     }
 
-    let registered_title = terminal.on_title_changed({
-        let notices = Rc::clone(&notices);
-        move |terminal: &Terminal<'_, '_>| {
-            let title = terminal
-                .title()
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            notices
-                .borrow_mut()
-                .events
-                .push(TerminalEvent::TitleChanged(title));
-        }
-    });
-    if let Err(error) = registered_title {
+    if let Err(error) = register_title(&mut terminal, Rc::clone(&notices)) {
         return Err(SessionError::new("on_title_changed", error));
     }
 
-    let registered_pwd = terminal.on_pwd_changed({
-        let notices = Rc::clone(&notices);
-        move |terminal: &Terminal<'_, '_>| {
-            let pwd = terminal
-                .pwd()
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            notices
-                .borrow_mut()
-                .events
-                .push(TerminalEvent::WorkingDirectoryChanged(pwd));
-        }
-    });
-    if let Err(error) = registered_pwd {
+    if let Err(error) = register_pwd(&mut terminal, Rc::clone(&notices)) {
         return Err(SessionError::new("on_pwd_changed", error));
     }
 
