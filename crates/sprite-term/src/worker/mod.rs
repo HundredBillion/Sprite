@@ -32,8 +32,8 @@ mod start;
 use crate::hyperlink::resolve_hyperlink;
 use crate::input::keys::{encode_focus, encode_key};
 use crate::input::mouse::{
-    SelectionAnchor, WheelDestination, apply_selection, encode_mouse, encode_wheel, selection_text,
-    track_selection_anchor, wheel_destination,
+    PinnedAnchor, SelectionAnchor, WheelDestination, apply_selection, encode_mouse, encode_wheel,
+    selection_text, track_selection_anchor, wheel_destination,
 };
 use crate::input::paste::{encode_paste, paste_is_safe_to_perform};
 use start::{apply_color_defaults, apply_cursor_defaults};
@@ -123,7 +123,7 @@ struct Owned {
     mouse_encoder: libghostty_vt::mouse::Encoder<'static>,
     /// The content the current selection gesture's press landed on, until the
     /// next gesture or `ClearSelection`.
-    selection_anchor: Option<libghostty_vt::screen::TrackedGridRef>,
+    selection_anchor: Option<PinnedAnchor>,
     terminal: Terminal<'static, 'static>,
 }
 

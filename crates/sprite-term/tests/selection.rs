@@ -429,7 +429,8 @@ fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
     );
     // The smallest nonzero budget: libghostty keeps scrollback in whole pages
     // and prunes the oldest, which is what evicts the anchored line. (A zero
-    // budget rotates rows in place instead; see the TSP's drafter notes.)
+    // budget rotates rows in place, reusing the anchored line rather than
+    // evicting it, so a pin there would silently re-anchor.)
     config.scrollback_bytes = 4 * 1024;
     let sprite_term::Spawned {
         mut session,
@@ -466,4 +467,49 @@ fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
         .send(TerminalCommand::CopySelection)
         .expect("copy the selection");
     assert_eq!(copied(&events), "", "an evicted anchor selects nothing");
+}
+
+/// A pin belongs to the screen that was active when it was taken, so a gesture
+/// that spans a switch to the alternate screen selects nothing rather than
+/// mixing cells of two screens.
+#[test]
+fn a_gesture_does_not_extend_across_a_screen_switch() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
+        "stty -echo; printf 'PRIMARY-TEXT\\nREADY'; IFS= read -r go; \
+         printf '\\033[?1049h\\033[HALT-TEXT\\nALT-READY'; sleep 30",
+    );
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+
+    let before = snapshots.wait_for("the primary text", |bundle| {
+        row_of(bundle, "READY").is_some()
+    });
+    let pressed = at(row_of(&before, "PRIMARY-TEXT").expect("anchor row"), 0);
+    session
+        .send(TerminalCommand::BeginSelection { anchor: pressed })
+        .expect("press");
+    session
+        .send(TerminalCommand::Input(b"go\n".to_vec()))
+        .expect("release the child");
+    let alternate = snapshots.wait_for("the alternate screen", |bundle| {
+        row_of(bundle, "ALT-READY").is_some()
+    });
+
+    session
+        .send(TerminalCommand::Select {
+            anchor: pressed,
+            head: at(row_of(&alternate, "ALT-TEXT").expect("alt row"), 5),
+            mode: SelectionMode::Character,
+            rectangle: false,
+        })
+        .expect("extend the gesture");
+    session
+        .send(TerminalCommand::CopySelection)
+        .expect("copy the selection");
+    assert_eq!(copied(&events), "", "a pin does not cross screens");
 }

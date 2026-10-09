@@ -124,9 +124,11 @@ pub enum TerminalCommand {
     /// scrollback, and because a cell is only reported as selected when the
     /// terminal itself holds the selection.
     ///
-    /// In character mode, while a gesture begun with `BeginSelection` is under
-    /// way, the selection extends from that gesture's pinned anchor and this
-    /// `anchor` is not used; it describes a selection made without a press.
+    /// In character mode, after a `BeginSelection` every `Select` extends from
+    /// that press's pinned anchor until the next `BeginSelection` or
+    /// `ClearSelection`; this `anchor` is used only when no press has been
+    /// pinned. If the pinned content is gone or the other screen is now active,
+    /// the selection is cleared instead.
     Select {
         anchor: CellPosition,
         head: CellPosition,
