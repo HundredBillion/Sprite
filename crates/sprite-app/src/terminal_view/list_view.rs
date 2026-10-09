@@ -135,6 +135,20 @@ fn revealed_pixel_offset(
     offset.clamp(0.0, (rows as f32 * row_height - viewport).max(0.0))
 }
 
+/// A row's element identity is its key, not its position. GPUI keeps a
+/// press's pending click under the element's id, so a row inserted above
+/// between press and release must not hand that press to whichever row now
+/// sits where the pressed one was.
+fn row_element_id(surface: SurfaceId, key: &str) -> ElementId {
+    ElementId::NamedChild(
+        Box::new(ElementId::NamedInteger(
+            SharedString::from("surface-row"),
+            surface.0,
+        )),
+        SharedString::from(key.to_owned()),
+    )
+}
+
 #[cfg(test)]
 thread_local! { pub(super) static TRUNCATE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
@@ -165,6 +179,11 @@ impl VirtualListView {
             f32::from(self.scroll.0.borrow().base_handle.offset().y),
         );
         (top, visible as usize)
+    }
+
+    #[cfg(test)]
+    pub(super) fn viewport_bounds(&self) -> Option<Bounds<gpui::Pixels>> {
+        self.viewport
     }
 
     pub(super) fn new(
@@ -504,10 +523,7 @@ impl Render for VirtualListView {
                             .cloned()
                             .flatten();
                         let mut line = div()
-                            .id(ElementId::NamedInteger(
-                                SharedString::from(format!("surface-{}-row", surface.0)),
-                                index as u64,
-                            ))
+                            .id(row_element_id(surface, &row.id))
                             .relative()
                             .flex()
                             .w_full()
@@ -913,6 +929,16 @@ mod tests {
     fn scrollbar_handles_empty_and_fit_content() {
         assert_eq!(scrollbar_geometry(0.0, 20.0, 0.0), (0.0, 20.0));
         assert_eq!(scrollbar_geometry(20.0, 20.0, 7.0), (0.0, 20.0));
+    }
+    #[test]
+    fn a_rows_element_id_follows_its_key_not_its_position() {
+        let surface = SurfaceId(7);
+        assert_eq!(row_element_id(surface, "b"), row_element_id(surface, "b"));
+        assert_ne!(row_element_id(surface, "b"), row_element_id(surface, "c"));
+        assert_ne!(
+            row_element_id(surface, "b"),
+            row_element_id(SurfaceId(8), "b")
+        );
     }
     #[test]
     fn scrollbar_maps_first_last_and_tiny_viewport() {

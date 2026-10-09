@@ -2255,6 +2255,109 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_row_inserted_above_between_press_and_release_does_not_take_the_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn list_clicks(peer: &mut Peer) -> Vec<serde_json::Value> {
+            events(peer)
+                .into_iter()
+                .filter(|event| event["type"] == "list_click")
+                .collect()
+        }
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        let id = SurfaceId(986);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(fixture["description"].clone()),
+        );
+        assert_eq!(answer, Ok(()));
+        let rows = |revision: u64, keys: &[&str]| {
+            crate::surface::list::parse_op(&serde_json::json!({
+                "type": "list_rows", "revision": revision, "selected": null,
+                "rows": keys
+                    .iter()
+                    .map(|key| serde_json::json!({"id": key, "text": key, "indent": 0, "guides": []}))
+                    .collect::<Vec<_>>(),
+            }))
+            .unwrap()
+        };
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::List {
+                id,
+                pane,
+                op: rows(1, &["a", "b", "c"]),
+            },
+        );
+        // The first frame measures the list's viewport; the second lays its
+        // rows out inside it.
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let viewport = host.read_with(cx, |host, cx| {
+            let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("list")
+            };
+            view.read(cx)
+                .viewport_bounds()
+                .expect("the list was laid out")
+        });
+        // Rows start at the viewport's top while the list is unscrolled: this
+        // is the middle of the second row, "b".
+        let row_height = fixture["description"]["root"]["row_height"]
+            .as_f64()
+            .unwrap() as f32;
+        let on_b = gpui::point(
+            viewport.origin.x + px(40.0),
+            viewport.origin.y + px(row_height * 1.5),
+        );
+        list_clicks(&mut peer);
+
+        // With nothing in between, a press and release on b is a click on
+        // b: the harness does deliver row clicks.
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let control = list_clicks(&mut peer);
+        assert_eq!(control.len(), 1, "{control:?}");
+        assert_eq!(control[0]["id"], "b");
+
+        // A row arrives above b between press and release, so the pointer
+        // now rests on the newcomer. The press belonged to b; the release
+        // must not become a click on another row.
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::List {
+                id,
+                pane,
+                op: rows(2, &["a", "new", "b", "c"]),
+            },
+        );
+        draw_test_window(cx);
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let moved = list_clicks(&mut peer);
+        assert!(
+            moved.iter().all(|click| click["id"] == "b"),
+            "a press on b was released as {moved:?}"
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
     fn element_update_refuses_grid_and_preserves_text(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
