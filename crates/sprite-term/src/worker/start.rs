@@ -352,8 +352,7 @@ fn configure_child_environment(
 fn open_pty(size: PtySize) -> Result<portable_pty::PtyPair, SessionError> {
     static OPEN_PTY: std::sync::Mutex<()> = std::sync::Mutex::new(());
     const ATTEMPTS: usize = 3;
-    // portable-pty flattens the OS error into text, so the errno is matched there.
-    const TRANSIENT: &str = "code: -6,";
+    const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(2);
 
     let mut attempt = 1;
     loop {
@@ -365,12 +364,20 @@ fn open_pty(size: PtySize) -> Result<portable_pty::PtyPair, SessionError> {
         };
         match opened {
             Ok(pair) => return Ok(pair),
-            Err(error) if attempt < ATTEMPTS && format!("{error:?}").contains(TRANSIENT) => {
+            Err(error) if attempt < ATTEMPTS && is_transient_openpty_failure(&error) => {
                 attempt += 1;
+                thread::sleep(RETRY_PAUSE);
             }
             Err(error) => return Err(SessionError::new("open_pty", error)),
         }
     }
+}
+
+/// Whether an `openpty` failure is the transient errno -6.
+///
+/// The text is matched because the pinned portable-pty flattens the errno into a string.
+fn is_transient_openpty_failure(error: &impl std::fmt::Debug) -> bool {
+    format!("{error:?}").contains("Os { code: -6,")
 }
 
 pub(super) fn start(
@@ -455,6 +462,27 @@ fn spawn_child_waiter(
 
 #[cfg(test)]
 mod tests {
+    struct Text(String);
+
+    impl std::fmt::Debug for Text {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    fn openpty_error(errno: i32) -> Text {
+        Text(format!(
+            "failed to openpty: {:?}",
+            std::io::Error::from_raw_os_error(errno)
+        ))
+    }
+
+    #[test]
+    fn only_errno_minus_six_is_a_transient_openpty_failure() {
+        assert!(super::is_transient_openpty_failure(&openpty_error(-6)));
+        assert!(!super::is_transient_openpty_failure(&openpty_error(24)));
+    }
+
     #[test]
     fn child_environment_disables_inherited_no_color() {
         let mut command = portable_pty::CommandBuilder::new("sh");

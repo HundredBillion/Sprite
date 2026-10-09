@@ -11,11 +11,19 @@ use sprite_term::{SessionConfig, TerminalSession};
 use support::EventPump;
 
 const SESSIONS: usize = 16;
+const ROUNDS: usize = 12;
 
 /// Concurrent PTY allocation can transiently fail on macOS; a pane starting
 /// alongside others must not surface that as a start error.
 #[test]
 fn simultaneous_session_starts_all_reach_ready() {
+    // One round fails against an unfixed start only some of the time, so repeat.
+    for _ in 0..ROUNDS {
+        start_all_at_once();
+    }
+}
+
+fn start_all_at_once() {
     let barrier = Arc::new(Barrier::new(SESSIONS));
     let starters: Vec<_> = (0..SESSIONS)
         .map(|_| {
