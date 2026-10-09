@@ -12726,7 +12726,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 #### Cycle C — BCA-21: small splits can still move
 
-`divider_ratio` (divider.rs:137-146) returns 0.5 for any split with `extent < floor * 2`, so a split under 240 px cannot move at all. The fix is piecewise. A split of at least `2 * floor` keeps the full floor, exactly as today. A smaller split uses `extent / 4` as its floor, so its boundary moves within `[0.25, 0.75]`. Both the drag (`DividerDrag::ratio_for`, line 313) and the nudge (`nudged_ratio`, line 155) go through `divider_ratio`, so this one change fixes both.
+`divider_ratio` (divider.rs:137-146) returns 0.5 for any split with `extent < floor * 2`, so a split under 240 px cannot move at all. The fix is a smooth floor: `min(120 px, extent / 4)`, so a split's travel grows with its size and no split is pinned; splits of 480 px and wider are unchanged. Both the drag (`DividerDrag::ratio_for`, line 313) and the nudge (`nudged_ratio`, line 155) go through `divider_ratio`, so this one change fixes both.
 
 All existing divider tests stay unchanged except `a_split_too_small_for_two_floors_stays_even` (lines 530-536). That test asserts the defect, so the new tests replace it.
 
@@ -12865,8 +12865,8 @@ with
 ///
 /// Roughly fifteen columns or six rows at the default font size. It holds the
 /// side, not the panes nested inside it: a side that is itself split shares
-/// this width among its own panes. A split narrower than two floors uses a
-/// quarter of itself instead, so even a small split can still be moved.
+/// this width among its own panes. A split under four floors uses a quarter of
+/// itself instead, so a small split can still be moved.
 const DIVIDER_FLOOR_PX: f32 = 120.0;
 ```
 
@@ -13980,7 +13980,7 @@ Coordinator decisions (2026-10-09) are folded in; items marked *decided* need no
 
 ### (a) PRD requirements found impossible or wrong against the code
 
-- **a1. BCA-21 uses a piecewise rule instead of the PRD's `min(floor, extent / 4)`; the coordinator decided this.** The PRD formula would also lower the floor for splits from 240 to 480 px and break the existing 400 px divider tests. Under the chosen rule, a split of `2 * floor` (240 px) or more keeps the full floor as today. Only a smaller split uses `extent / 4`. The one cost is a jump at 240 px. A split of 239 px moves within [0.25, 0.75], but at exactly 240 px it is pinned at 0.5 as before, and just above 240 px it moves only within a narrow middle band. This is accepted as decided. The PRD's BCA-21 row should be updated to match.
+- **a1. BCA-21 was drafted as a piecewise rule; review found it pinned 240–280 px splits and the user replaced it with the PRD's smooth `min(floor, extent / 4)` (2026-10-09). The text below describes the superseded piecewise draft.** The PRD formula would also lower the floor for splits from 240 to 480 px and break the existing 400 px divider tests. Under the chosen rule, a split of `2 * floor` (240 px) or more keeps the full floor as today. Only a smaller split uses `extent / 4`. The one cost is a jump at 240 px. A split of 239 px moves within [0.25, 0.75], but at exactly 240 px it is pinned at 0.5 as before, and just above 240 px it moves only within a narrow middle band. This is accepted as decided. The PRD's BCA-21 row should be updated to match.
 - **a2. R-W6's "a separate background_executor task still runs" test cannot discriminate under GPUI's test dispatcher.** `TestDispatcher` runs every background runnable on the test thread and has no fixed pool. The gated cleanups at a62247e also `.await` their gate rather than block, so such a test passes before and after the fix. The plan instead asserts the thread name (`sprite-pane-cleanup`), not the test thread, one distinct thread per cleanup, and that all N cleanups block at the same moment (a 5 s rendezvous). The last point proves they are concurrent and never serialised on one executor thread. It fails at a62247e in about 10 s without hanging.
 - **a3. The existing quit-waits-for-cleanup tests cannot "keep passing" unchanged.** Their "open gate → `run_until_parked` → assert" sequence assumes cleanup runs on the test dispatcher. `run_until_parked` (`vendor/gpui/src/platform/test/dispatcher.rs:191`) never waits for a foreign thread, so with real threads those assertions would race. Their assertions are kept word for word. Only the wait changes: the `release` helper joins the cleanup thread before `run_until_parked`. Two tests that `block_test` on cleanup tasks also need `allow_parking()`.
 

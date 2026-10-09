@@ -184,7 +184,7 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 | BCA-17 | Virtual-list rows keyed by index; press and release can hit different rows. | Row element ids derive from the row key. |
 | BCA-19 | Config reload resets font zoom and reports a font change. | Zoom is held separately from `settings.font.size`; reload diffs file values and keeps zoom. |
 | BCA-20 | An unreadable explicit `--config` silently uses defaults. | An explicit path that cannot be read prints the same complaint reload uses to stderr, then continues with defaults. Discovery of an absent default file stays silent. |
-| BCA-21 | Splits smaller than twice the floor snap to 0.5 and cannot move. | Only when a split is too small to honour the full floor on both sides (`extent < 2 × floor`) does the floor become `extent / 4`, so those splits move within [0.25, 0.75]. Splits that can honour the full floor keep today's behaviour. |
+| BCA-21 | Splits smaller than twice the floor snap to 0.5 and cannot move. | The floor is `min(120 px, extent / 4)`, so a split's travel grows with its size and no split is pinned; splits of 480 px and wider are unchanged. |
 | BCA-22 | 1 MiB input backlog equals the 1 MiB paste limit; a near-limit bracketed paste always fails with a misleading error. | The backlog bound is derived as max clipboard bytes plus bracket overhead. |
 | BCA-24 | `ForegroundWatch` keeps a duplicate PTY master open after the session ends. | The duplicate closes when the session ends, so the slave hangs up. |
 | BCA-25 | PNG scratch buffer grows to the largest image and never shrinks. | The scratch buffer is released after each decode. |
@@ -239,6 +239,8 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 
 ## Grilling decisions (2026-10-09)
 
+- BCA-21 revised to a smooth floor after review found the piecewise rule
+  pinned 240–280 px splits (2026-10-09).
 - Cleanup threads: one short-lived thread per pane cleanup, not one serial
   thread — quit time must not become the sum of per-pane deadlines.
 - Pane Focus requires the Sprite Window to be active (glossary term added);

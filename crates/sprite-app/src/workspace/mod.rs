@@ -64,8 +64,8 @@ const DIVIDER_GRAB_PX: f32 = 7.0;
 ///
 /// Roughly fifteen columns or six rows at the default font size. It holds the
 /// side, not the panes nested inside it: a side that is itself split shares
-/// this width among its own panes. A split narrower than two floors uses a
-/// quarter of itself instead, so even a small split can still be moved.
+/// this width among its own panes. A split under four floors uses a quarter of
+/// itself instead, so a small split can still be moved.
 const DIVIDER_FLOOR_PX: f32 = 120.0;
 /// How far one keyboard nudge moves a boundary.
 const DIVIDER_NUDGE_PX: f32 = 20.0;
@@ -265,7 +265,8 @@ impl Workspace {
                             workspace.reload(request.reply_connection.as_ref(), cx)
                         }
                         // Printed from what the window is *using*, which after
-                        // a reload is not necessarily what the file says.
+                        // a reload is not necessarily what the file says, and
+                        // which includes the window's font zoom.
                         ConfigVerb::Print => workspace.active_settings().to_toml(),
                     })
                     .unwrap_or_else(|_| "this window is closing".to_owned());
