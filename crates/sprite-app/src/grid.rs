@@ -92,7 +92,7 @@ pub(crate) fn shared_text(text: &str) -> SharedString {
             let index = usize::from(byte - b' ');
             SharedString::new_static(&PRINTABLE_ASCII[index..=index])
         }
-        _ => SharedString::from(text.to_owned()),
+        _ => SharedString::new(text),
     }
 }
 

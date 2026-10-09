@@ -83,13 +83,17 @@ thread_local! {
     pub(crate) static SHAPED_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The most distinct shapes a pane keeps for reuse.
+/// The most distinct shapes a pane's shared pool keeps for reuse.
 ///
 /// A shaped line carries room for thirty-two decoration runs inline, a few
-/// kilobytes each, so one shape is shared by every cell that would shape
-/// identically and the pool of them is bounded. A screen of ordinary text
-/// needs a few hundred; output that gives every cell its own truecolour simply
-/// starts the pool again when it fills.
+/// kilobytes per line, so one shape is shared by every cell that would shape
+/// identically. A screen of ordinary text needs a few hundred; when the pool
+/// fills it is emptied and starts again.
+///
+/// This caps only the pool. Each row also keeps the shape of every glyph cell
+/// it painted, which the visible grid bounds rather than this constant: output
+/// that gives every cell its own truecolour leaves one shape per glyph cell,
+/// tens of megabytes for a 200x60 pane, until those rows change.
 const MAX_DISTINCT_SHAPES: usize = 4096;
 
 /// What every cached shape depends on besides the cell itself.
@@ -1802,7 +1806,7 @@ mod tests {
         assert_eq!(thin.expect("underline").thickness, px(1.0));
     }
 
-    /// The gate R-R1 sets, counted where Sprite calls `shape_line`: an
+    /// The shaping gate, counted where Sprite calls `shape_line`: an
     /// unchanged frame shapes nothing, a blink at most the cursor's cell, a
     /// one-row change only that row, and a font or theme change everything a
     /// cold cache would.
@@ -1870,6 +1874,98 @@ mod tests {
             rethemed,
             frame(cx),
             "a theme change reshapes everything a cold cache would"
+        );
+    }
+
+    /// One plain cell reading `a`, with `change` applied, in a row of its own.
+    fn one_cell_row(change: impl FnOnce(&mut PositionedCell)) -> Arc<Vec<PositionedCell>> {
+        let mut cell = PositionedCell {
+            column: 0,
+            columns: 1,
+            text: "a".into(),
+            style: plain_style(SnapshotColor::Default, SnapshotColor::Default, false),
+            selected: false,
+            hovered_link: false,
+        };
+        change(&mut cell);
+        Arc::new(vec![cell])
+    }
+
+    /// Bold, italic and a hovered link each shape differently from the plain
+    /// cell, so none of them may reuse its shape even with the same text and
+    /// colour.
+    #[test]
+    fn cells_differing_only_in_weight_slant_or_link_hover_never_share_a_shape() {
+        let context = ShapeContext {
+            family: "monospace".into(),
+            font_size: px(14.0),
+            scale: 2.0,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x000000),
+            palette: None,
+        };
+        let white = rgb(0xffffff);
+        let mut cache = ShapeCache::default();
+        cache.begin_frame(context, 1);
+        assert!(shapes_anew(&mut cache, &one_cell_row(|_| {}), white));
+        assert!(shapes_anew(
+            &mut cache,
+            &one_cell_row(|cell| cell.style.bold = true),
+            white
+        ));
+        assert!(shapes_anew(
+            &mut cache,
+            &one_cell_row(|cell| cell.style.italic = true),
+            white
+        ));
+        assert!(shapes_anew(
+            &mut cache,
+            &one_cell_row(|cell| cell.hovered_link = true),
+            white
+        ));
+        assert!(
+            !shapes_anew(&mut cache, &one_cell_row(|_| {}), white),
+            "an identical plain cell still finds its shape in the pool"
+        );
+    }
+
+    /// The pool holds at most `MAX_DISTINCT_SHAPES`; the shape that would go
+    /// past it empties the pool, so what was pooled before is shaped again.
+    #[test]
+    fn filling_the_shape_pool_empties_it() {
+        let context = ShapeContext {
+            family: "monospace".into(),
+            font_size: px(14.0),
+            scale: 2.0,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x000000),
+            palette: None,
+        };
+        let cells = one_cell_row(|_| {});
+        let mut cache = ShapeCache::default();
+        cache.begin_frame(context, 1);
+        for color in 0..MAX_DISTINCT_SHAPES as u32 {
+            assert!(shapes_anew(&mut cache, &cells, rgb(color)));
+        }
+        assert_eq!(cache.shapes.len(), MAX_DISTINCT_SHAPES);
+        assert!(
+            !shapes_anew(&mut cache, &cells, rgb(0)),
+            "a full pool still serves what it holds"
+        );
+
+        assert!(shapes_anew(
+            &mut cache,
+            &cells,
+            rgb(MAX_DISTINCT_SHAPES as u32)
+        ));
+        assert_eq!(
+            cache.shapes.len(),
+            1,
+            "going past the cap starts the pool again"
+        );
+        assert!(
+            shapes_anew(&mut cache, &cells, rgb(0)),
+            "a shape dropped with the pool is shaped again"
         );
     }
 
