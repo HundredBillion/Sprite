@@ -457,3 +457,86 @@ os._exit(7)
     let text = support::pane_text(&final_snapshot);
     assert!(text.contains("FINAL_EXIT_TAIL"), "final snapshot: {text:?}");
 }
+
+/// Once a session has ended on its own, nothing Sprite holds keeps the PTY
+/// open: a descendant that ignored the hangup and still holds the terminal
+/// sees it close, even while the application keeps the ended session.
+#[test]
+fn an_ended_session_releases_the_terminal_to_a_lingering_descendant() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
+    let pid_file = std::env::temp_dir().join(format!("sprite-hangup-{unique}.pid"));
+    let hung_up = std::env::temp_dir().join(format!("sprite-hangup-{unique}.done"));
+    struct Descendant(std::path::PathBuf, std::path::PathBuf);
+    impl Drop for Descendant {
+        fn drop(&mut self) {
+            if let Ok(pid) = std::fs::read_to_string(&self.0) {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", pid.trim()])
+                    .status();
+            }
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(&self.1);
+        }
+    }
+    let _descendant = Descendant(pid_file.clone(), hung_up.clone());
+    // The descendant ignores SIGHUP and blocks reading the terminal; a read
+    // only returns once no master is left open, and then it says so in a file.
+    let script = r#"import os, signal, sys
+r, w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    os.write(w, b'ready')
+    os.close(w)
+    try:
+        while os.read(0, 1):
+            pass
+    except OSError:
+        pass
+    with open(sys.argv[2], 'w') as f:
+        f.write('hung up')
+    os._exit(0)
+os.close(w)
+os.read(r, 5)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(pid))
+os._exit(0)
+"#;
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "python3",
+        vec![
+            "-c".into(),
+            script.into(),
+            pid_file.into_os_string(),
+            hung_up.clone().into_os_string(),
+        ],
+    ))
+    .expect("spawn parent and lingering descendant");
+    let events = EventPump::new(events);
+    events.expect_ready();
+    match events.next() {
+        TerminalEvent::Exited(exit) => assert!(!exit.requested),
+        other => panic!("expected natural Exited, got {other:?}"),
+    }
+    // `_session` is still alive here, as the application keeps an ended pane.
+    let deadline = std::time::Instant::now() + support::WATCHDOG;
+    while !hung_up.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the descendant still holds an open terminal after the session ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}

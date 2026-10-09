@@ -216,6 +216,9 @@ struct Runtime {
     inbox: Receiver<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
     shutdown: Arc<AtomicBool>,
+    /// Detached when the session closes, so its duplicate of the master
+    /// closes with the worker's own.
+    foreground: Arc<crate::ForegroundWatch>,
     exit_status: Option<Result<ExitStatus, String>>,
     pump_stopped: bool,
     fatal: Option<SessionError>,
@@ -268,6 +271,7 @@ pub(crate) fn run(
         inbox,
         events,
         shutdown,
+        foreground,
         exit_status: None,
         pump_stopped: true,
         fatal: None,

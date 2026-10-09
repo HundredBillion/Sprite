@@ -31,6 +31,7 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
         inbox,
         events,
         shutdown,
+        foreground,
         mut exit_status,
         mut pump_stopped,
         mut fatal,
@@ -162,9 +163,13 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
         })),
         None => {}
     }
-    events.seal(outcomes);
-
+    // Every descriptor this session holds on the PTY master closes before the
+    // outcome is published: the worker's own and the duplicate kept for
+    // foreground questions. A descendant still holding the terminal then sees
+    // it hang up, and whoever is told the session ended can rely on that.
     drop(master);
+    foreground.detach();
+    events.seal(outcomes);
     // Natural completion leaves ordinary jobs for a later explicit owner;
     // an attempted explicit cleanup must never spend its budget twice.
     if requested_at.is_none() {
