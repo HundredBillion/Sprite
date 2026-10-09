@@ -842,10 +842,11 @@ impl TerminalView {
     }
 
     /// Removes a Surface and returns its space to the grid. Always answers
-    /// `closed`: a write to a connection that is already gone simply fails
-    /// (and, per `SurfaceConnection::send`, marks it dead), and a client that
-    /// only half-closed its write side — it is done sending, but is still
-    /// reading — still hears `closed` the way its code expects.
+    /// `closed`: on a connection that is already dead the line is simply
+    /// dropped, and a client that only half-closed its write side — it is
+    /// done sending, but is still reading — still hears `closed` the way its
+    /// code expects, because the connection's writer sends everything queued
+    /// before it stops.
     pub(crate) fn close_surface(
         &mut self,
         id: SurfaceId,
@@ -1731,15 +1732,28 @@ mod tests {
         cx.update(|window, cx| handle.surface_request(request, window, cx));
     }
 
+    /// The program's end of a test Surface's socket, with a handle on the
+    /// window's end: events are written by the connection's writer thread,
+    /// so a read first waits for it to put everything already sent on the
+    /// wire.
+    struct Peer {
+        stream: std::os::unix::net::UnixStream,
+        connection: SurfaceConnection,
+    }
+
     fn open_request(
         host: &Entity<TerminalView>,
         cx: &mut gpui::VisualTestContext,
         id: SurfaceId,
         open: Open,
-    ) -> (Result<(), Refusal>, std::os::unix::net::UnixStream) {
-        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    ) -> (Result<(), Refusal>, Peer) {
+        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         peer.set_nonblocking(true).unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
+        let mut peer = Peer {
+            stream: peer,
+            connection: connection.clone(),
+        };
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         dispatch(
             host,
@@ -1781,10 +1795,11 @@ mod tests {
         });
     }
 
-    fn events(peer: &mut std::os::unix::net::UnixStream) -> Vec<serde_json::Value> {
+    fn events(peer: &mut Peer) -> Vec<serde_json::Value> {
         use std::io::Read;
+        peer.connection.settle();
         let mut wire = String::new();
-        if let Err(error) = peer.read_to_string(&mut wire) {
+        if let Err(error) = peer.stream.read_to_string(&mut wire) {
             assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         }
         wire.lines()
@@ -2019,15 +2034,22 @@ mod tests {
         );
         assert_eq!(answer, Ok(()));
         host.update(cx, |host, _| {
-            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0),px(0.0)));
+            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0), px(0.0)));
             let started = std::time::Instant::now();
-            host.report_grid_wheel(SurfaceId(989), &ScrollWheelEvent {position:gpui::point(px(1.0),px(1.0)),delta:gpui::ScrollDelta::Lines(gpui::point(0.0,1_000_000_000.0)),..Default::default()});
+            host.report_grid_wheel(
+                SurfaceId(989),
+                &ScrollWheelEvent {
+                    position: gpui::point(px(1.0), px(1.0)),
+                    delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 1_000_000_000.0)),
+                    ..Default::default()
+                },
+            );
             let elapsed = started.elapsed();
-            let (dead, buffer, queued) = host.surfaces.fill.as_ref().unwrap().connection.test_buffer_state();
-            println!("huge wheel: elapsed={elapsed:?} buffer_capacity={buffer} queued_capacity={queued} dead={dead}");
-            assert!(dead);
-            assert!(buffer <= crate::surface::channel::EVENT_BUFFER_BYTES);
-            assert!(queued <= crate::surface::channel::EVENT_BUFFER_BYTES);
+            let connection = &host.surfaces.fill.as_ref().unwrap().connection;
+            let (dead, pending) = (connection.is_dead(), connection.pending_bytes());
+            println!("huge wheel: elapsed={elapsed:?} pending={pending} dead={dead}");
+            assert!(dead, "a billion wheel events cannot fit the pending bound");
+            assert_eq!(pending, 0, "a dead connection holds nothing");
             assert!(elapsed < std::time::Duration::from_secs(5));
         });
         cx.update(|window, _| window.remove_window());
