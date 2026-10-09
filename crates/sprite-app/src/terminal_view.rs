@@ -292,6 +292,15 @@ impl TerminalView {
                             }
                             SessionState::NeverStarted => SessionState::NeverStarted,
                         };
+                        // An ended session answers nothing more, so a capture
+                        // still waiting on it fails now, with the reason,
+                        // rather than at the observation deadline.
+                        if let Some(link) = &view.observation {
+                            link.panes.fail_all(
+                                link.pane,
+                                "the pane's session ended before it answered".to_owned(),
+                            );
+                        }
                         let _ = view.retry_wake.force_send(());
                         view.refresh_display_title(cx);
                     });

@@ -150,6 +150,23 @@ impl WindowPanes {
         }
     }
 
+    /// Fails every request still waiting on a pane whose session has ended.
+    ///
+    /// An ended session answers nothing more, so its waiters learn why now
+    /// rather than at the deadline. The pane stays listed, because it is still
+    /// on screen; asking it again is refused when the request cannot be sent.
+    pub fn fail_all(&self, pane: PaneId, reason: String) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(entry) = entries.get_mut(&pane) {
+            for (_, waiter) in entry.waiting.drain() {
+                let _ = waiter.send(Err(reason.clone()));
+            }
+        }
+    }
+
     /// Hands one pane's answer to the request holding `ticket`.
     ///
     /// Called from the view, which is the single consumer of a session's
@@ -648,5 +665,38 @@ mod tests {
             pending.answer.try_recv().is_err(),
             "a later request does not receive an earlier abandoned answer"
         );
+    }
+
+    /// Every request waiting on a pane whose session ended is failed with the
+    /// reason, at once. The pane itself stays listed: it is still on screen.
+    #[test]
+    fn a_session_that_ends_fails_every_waiting_request_at_once() {
+        let panes = WindowPanes::new();
+        let session = session();
+        panes.register(PaneId(0), TabId(0), session.session.commands());
+        let first = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+        let second = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+
+        panes.fail_all(
+            PaneId(0),
+            "the pane's session ended before it answered".to_owned(),
+        );
+
+        for pending in [first, second] {
+            assert_eq!(
+                pending
+                    .answer
+                    .try_recv()
+                    .expect("released at once")
+                    .expect_err("failed"),
+                "the pane's session ended before it answered"
+            );
+        }
+        assert!(waiting(&panes, PaneId(0)).is_empty());
+        assert_eq!(panes.panes().len(), 1, "the pane is still listed");
     }
 }
