@@ -43,6 +43,33 @@ type Flow = ControlFlow<()>;
 /// return an error of its own.
 type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
 
+/// How much already-queued work one pass of the worker takes before it
+/// captures: sixteen messages, or sixteen KiB of output, whichever comes first.
+/// A burst then costs one snapshot rather than one per chunk, and a capture is
+/// still never postponed behind an unbounded queue.
+const BATCH_MESSAGES: usize = 16;
+const BATCH_OUTPUT_BYTES: usize = 16 * 1024;
+
+/// What one pass has taken so far, measured against the bounds above.
+#[derive(Default)]
+struct Batch {
+    messages: usize,
+    output_bytes: usize,
+}
+
+impl Batch {
+    fn admit(&mut self, message: &Message) {
+        self.messages += 1;
+        if let Message::PtyOutput(chunk) = message {
+            self.output_bytes += chunk.as_bytes().len();
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.messages >= BATCH_MESSAGES || self.output_bytes >= BATCH_OUTPUT_BYTES
+    }
+}
+
 /// How the PTY pump stopped.
 pub(crate) enum PumpOutcome {
     Canceled,
@@ -298,7 +325,67 @@ pub(crate) fn run(
 }
 
 impl Session {
-    fn handle(&mut self, message: Message) -> Flow {
+    /// Handles one message, then whatever was already queued behind it, and
+    /// captures once for the whole pass.
+    ///
+    /// A pass takes only what is already waiting — it never waits for more —
+    /// and stops at `BATCH_MESSAGES` messages or `BATCH_OUTPUT_BYTES` of output.
+    fn handle(&mut self, first: Message) -> Flow {
+        let mut batch = Batch::default();
+        let mut next = Some(first);
+        while let Some(message) = next.take() {
+            batch.admit(&message);
+            // What earlier output in this pass raised is published before
+            // anything else is handled, so a command's own event never
+            // overtakes the notices that preceded it.
+            if !matches!(message, Message::PtyOutput(_)) && self.publish_notices().is_break() {
+                // Nothing more is delivered, but a helper's report already
+                // taken from the queue is still recorded: each helper reports
+                // once, and closing waits for both reports.
+                if matches!(message, Message::PumpStopped(_) | Message::ChildExited(_)) {
+                    let _ = self.apply(message);
+                }
+                return Stop(());
+            }
+            self.apply(message)?;
+            if batch.is_full() || self.runtime.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            next = self.runtime.inbox.try_recv().ok();
+        }
+        self.publish_notices()?;
+        self.capture()
+    }
+
+    /// Publishes, as one batch, everything parsing has raised since the last
+    /// publication: the first refused reply, the latest title and working
+    /// directory, at most one bell, and every accepted clipboard write.
+    fn publish_notices(&mut self) -> Flow {
+        let mut batch = Vec::new();
+        if let Some(error) = self.write_error.borrow_mut().take() {
+            batch.push(TerminalEvent::Error(error));
+        }
+        batch.extend(self.notices.borrow_mut().take());
+        batch.extend(
+            self.clipboard_pending
+                .borrow_mut()
+                .drain(..)
+                .map(TerminalEvent::ClipboardWrite),
+        );
+        // Nothing to say is not a publication: the mailbox lock and the
+        // receiver's wake are spent only on something to deliver.
+        if batch.is_empty() {
+            return Continue(());
+        }
+        if self.runtime.events.publish(batch) {
+            Continue(())
+        } else {
+            Stop(())
+        }
+    }
+
+    /// Applies one message to the terminal. Capturing is the pass's business.
+    fn apply(&mut self, message: Message) -> Flow {
         let Self {
             owned:
                 Owned {
@@ -318,10 +405,7 @@ impl Session {
                 },
             input,
             commands,
-            write_error,
             focused,
-            clipboard_pending,
-            notices,
             pending,
             size,
             has_selection,
@@ -329,25 +413,11 @@ impl Session {
         } = self;
         match message {
             Message::PtyOutput(chunk) => {
-                // One chunk, one mutation batch, one generation.
+                // One chunk, one mutation, one generation. What the parser
+                // raised on the way is published when the pass ends.
                 terminal.vt_write(chunk.as_bytes());
                 pending.mutated();
                 drop(chunk);
-
-                let mut batch = Vec::new();
-                if let Some(error) = write_error.borrow_mut().take() {
-                    batch.push(TerminalEvent::Error(error));
-                }
-                batch.extend(notices.borrow_mut().take());
-                batch.extend(
-                    clipboard_pending
-                        .borrow_mut()
-                        .drain(..)
-                        .map(TerminalEvent::ClipboardWrite),
-                );
-                if !events.publish(batch) {
-                    return Stop(());
-                }
             }
             // Not a no-op: a wake. The snapshot slot holds one bundle
             // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
@@ -661,7 +731,7 @@ impl Session {
             Message::Shutdown => return Stop(()),
         }
 
-        self.capture()
+        Continue(())
     }
 
     fn capture(&mut self) -> Flow {
@@ -706,10 +776,12 @@ impl Session {
             let Ok(message) = self.runtime.inbox.recv_timeout(remaining) else {
                 break;
             };
+            // One message at a time and published as it goes: this drain must
+            // not pull commands out of the queue the way a pass would.
             if matches!(
                 message,
                 Message::PtyOutput(_) | Message::PumpStopped(_) | Message::ChildExited(_)
-            ) && self.handle(message).is_break()
+            ) && (self.apply(message).is_break() || self.publish_notices().is_break())
             {
                 break;
             }
@@ -908,5 +980,223 @@ mod notice_tests {
             notices.borrow_mut().take().is_empty(),
             "a taken notice is not reported twice"
         );
+    }
+}
+
+#[cfg(test)]
+mod coalescing_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Runs `body` on its own thread, failing rather than hanging the suite if
+    /// it has not finished in twenty seconds.
+    fn within_watchdog(body: impl FnOnce() + Send + 'static) {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            body();
+            let _ = done.send(());
+        });
+        match finished.recv_timeout(Duration::from_secs(20)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("watchdog: the worker test made no progress for twenty seconds")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the worker test failed; its assertion is printed above")
+            }
+        }
+    }
+
+    /// A real worker over a silent child whose inbox already holds output when
+    /// it starts.
+    ///
+    /// Events are published with no spare room, so the worker waits at each
+    /// publication until the test takes it. The test therefore decides when the
+    /// snapshot slot is empty, and sees every snapshot the worker publishes.
+    struct Fixture {
+        commands: SyncSender<Message>,
+        mailbox: Arc<crate::event_mailbox::Mailbox>,
+        events: crate::event_mailbox::Receiver,
+        snapshots: async_channel::Receiver<Arc<SnapshotBundle>>,
+        shutdown: Arc<AtomicBool>,
+        worker: JoinHandle<Option<pty_unix::SessionProcesses>>,
+    }
+
+    impl Fixture {
+        fn start(chunks: &[Vec<u8>]) -> Self {
+            Self::start_with(
+                chunks
+                    .iter()
+                    .map(|chunk| Message::PtyOutput(pty_unix::OutputChunk::detached(chunk)))
+                    .collect(),
+            )
+        }
+
+        fn start_with(queued: Vec<Message>) -> Self {
+            let (commands, inbox) = std::sync::mpsc::sync_channel(crate::WORKER_QUEUE_CAPACITY);
+            for message in queued {
+                assert!(
+                    commands.try_send(message).is_ok(),
+                    "the inbox holds every queued message"
+                );
+            }
+            let (events, receiver) = crate::event_mailbox::bounded(0);
+            let mailbox = Arc::clone(&events);
+            let (published, snapshots) = async_channel::bounded(1);
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let worker = std::thread::spawn({
+                let commands = commands.clone();
+                let shutdown = Arc::clone(&shutdown);
+                move || {
+                    run(
+                        SessionConfig::command(
+                            "/bin/sh",
+                            vec!["-c".into(), "exec sleep 30".into()],
+                        ),
+                        commands,
+                        inbox,
+                        events,
+                        published,
+                        shutdown,
+                        Arc::new(crate::ForegroundWatch::default()),
+                    )
+                }
+            });
+            Self {
+                commands,
+                mailbox,
+                events: receiver,
+                snapshots,
+                shutdown,
+                worker,
+            }
+        }
+
+        fn next_event(&self) -> TerminalEvent {
+            self.events
+                .next_blocking()
+                .expect("the worker is still publishing")
+        }
+
+        fn next_generation(&self) -> u64 {
+            self.snapshots
+                .recv_blocking()
+                .expect("the worker is still capturing")
+                .generation
+        }
+
+        /// Shuts the worker down; returns every event published after this
+        /// point and the generation of any snapshot left unread.
+        fn finish(self) -> (Vec<TerminalEvent>, Option<u64>) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            let _ = self.commands.send(Message::Shutdown);
+            if let Some(processes) = self.worker.join().expect("the worker did not panic") {
+                finish_shutdown(processes, std::time::Instant::now());
+            }
+            let mut remaining = Vec::new();
+            while let Ok(event) = self.events.next_blocking() {
+                remaining.push(event);
+            }
+            let unread = self
+                .snapshots
+                .try_recv()
+                .ok()
+                .map(|bundle| bundle.generation);
+            (remaining, unread)
+        }
+    }
+
+    fn title_of(event: TerminalEvent) -> String {
+        match event {
+            TerminalEvent::TitleChanged(Some(title)) => title,
+            other => panic!("expected a title, got {other:?}"),
+        }
+    }
+
+    /// Sixteen chunks already waiting are one pass: one snapshot and one title.
+    /// The seventeenth is the next pass.
+    #[test]
+    fn sixteen_queued_chunks_produce_one_snapshot() {
+        within_watchdog(|| {
+            let chunks: Vec<Vec<u8>> = (0..17)
+                .map(|index| format!("\x1b]2;title-{index}\x07line {index}\r\n").into_bytes())
+                .collect();
+            let fixture = Fixture::start(&chunks);
+            assert!(matches!(fixture.next_event(), TerminalEvent::Ready));
+            assert_eq!(fixture.next_generation(), 0, "the frame before any output");
+            assert_eq!(title_of(fixture.next_event()), "title-15");
+            assert_eq!(
+                fixture.next_generation(),
+                16,
+                "one snapshot for the first sixteen chunks"
+            );
+            assert_eq!(title_of(fixture.next_event()), "title-16");
+            assert_eq!(fixture.next_generation(), 17);
+            let (remaining, unread) = fixture.finish();
+            assert!(
+                !remaining
+                    .iter()
+                    .any(|event| matches!(event, TerminalEvent::TitleChanged(_))),
+                "{remaining:?}"
+            );
+            assert_eq!(unread, None, "nothing was left to capture");
+        });
+    }
+
+    /// A pass also ends once it has parsed 16 KiB of output.
+    #[test]
+    fn a_pass_stops_at_sixteen_kibibytes_of_output() {
+        within_watchdog(|| {
+            let chunks: Vec<Vec<u8>> = (0..3)
+                .map(|index| {
+                    let mut chunk = format!("\x1b]2;bytes-{index}\x07").into_bytes();
+                    chunk.resize(8 * 1024, b'x');
+                    chunk
+                })
+                .collect();
+            let fixture = Fixture::start(&chunks);
+            assert!(matches!(fixture.next_event(), TerminalEvent::Ready));
+            assert_eq!(fixture.next_generation(), 0);
+            assert_eq!(title_of(fixture.next_event()), "bytes-1");
+            assert_eq!(fixture.next_generation(), 2, "two 8 KiB chunks fill a pass");
+            assert_eq!(title_of(fixture.next_event()), "bytes-2");
+            assert_eq!(fixture.next_generation(), 3);
+            let (_, unread) = fixture.finish();
+            assert_eq!(unread, None);
+        });
+    }
+
+    /// A child's exit taken into a pass is recorded even when the pass then
+    /// ends because its notices cannot be delivered: the waiter reports an
+    /// exit only once, and closing waits for that report.
+    #[test]
+    fn an_exit_taken_into_a_refused_pass_is_still_recorded() {
+        within_watchdog(|| {
+            let fixture = Fixture::start_with(vec![
+                Message::PtyOutput(pty_unix::OutputChunk::detached(b"\x1b]2;unread\x07")),
+                Message::ChildExited(Ok(ExitStatus::with_exit_code(7))),
+            ]);
+            assert!(matches!(fixture.next_event(), TerminalEvent::Ready));
+            assert_eq!(fixture.next_generation(), 0);
+            // What the waiter does once the child has exited: the title nobody
+            // takes is refused two seconds from now, ending the pass. Nothing
+            // is read until the worker has finished, so the refusal happens.
+            fixture.mailbox.begin_natural_drain();
+            if let Some(processes) = fixture.worker.join().expect("the worker did not panic") {
+                finish_shutdown(processes, std::time::Instant::now());
+            }
+            let mut outcome = None;
+            while let Ok(event) = fixture.events.next_blocking() {
+                if let TerminalEvent::Exited(exit) = event {
+                    outcome = Some(exit);
+                }
+            }
+            let outcome = outcome.expect("an exit outcome");
+            assert_eq!(
+                (outcome.code, outcome.signal),
+                (Some(7), None),
+                "the queued exit, not the hangup closing sent afterwards"
+            );
+        });
     }
 }

@@ -77,6 +77,26 @@ impl OutputChunk {
     }
 }
 
+#[cfg(test)]
+impl OutputChunk {
+    /// A chunk that belongs to no pump, so a test can queue output for a
+    /// worker directly. Dropping it returns its buffer nowhere and wakes no one.
+    pub(crate) fn detached(bytes: &[u8]) -> Self {
+        let (returned, _closed) = sync_channel(1);
+        let (wake, _peer) = UnixStream::pair().expect("wake pair");
+        Self {
+            permit: Permit {
+                buffer: Some(bytes.to_vec()),
+                pool: BufferPool {
+                    returned,
+                    wake: Arc::new(wake),
+                },
+            },
+            len: bytes.len(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct BufferPool {
     returned: SyncSender<Vec<u8>>,
