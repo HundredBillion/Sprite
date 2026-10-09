@@ -4,7 +4,8 @@ use std::time::Duration;
 
 #[test]
 fn shutdown_retains_accepted_titles_without_consumer_progress() {
-    let titles: String = (0..100).map(|i| format!("\x1b]2;TITLE{i}\x07")).collect();
+    // One parser batch is one PTY read, which macOS caps at 1 KiB; 80 titles fit.
+    let titles: String = (0..80).map(|i| format!("\x1b]2;TITLE{i}\x07")).collect();
     let script = format!("printf '%s' '{titles}'; sleep 30");
     let sprite_term::Spawned {
         mut session,
@@ -41,7 +42,7 @@ fn shutdown_retains_accepted_titles_without_consumer_progress() {
     assert!(exited);
     assert_eq!(
         retained.len(),
-        100,
+        80,
         "one accepted parser batch survives cancellation"
     );
     for (i, title) in retained.iter().enumerate() {
@@ -133,9 +134,19 @@ fn dropping_the_consumer_releases_event_pressure() {
 
 #[test]
 fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
-    let sprite_term::Spawned { mut session, mut events, snapshots: _snapshots } = TerminalSession::spawn(
-        SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; exit 7".into()]),
-    ).unwrap();
+    // One write: separate small writes exhaust the output permits while the consumer
+    // stalls, and macOS PTYs then block the child before it can exit.
+    let titles: String = (0..100).map(|i| format!("\x1b]2;TITLE{i}\x07")).collect();
+    let script = format!("printf '%s' '{titles}'; exit 7");
+    let sprite_term::Spawned {
+        mut session,
+        mut events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        vec!["-c".into(), script.into()],
+    ))
+    .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let ended = session
