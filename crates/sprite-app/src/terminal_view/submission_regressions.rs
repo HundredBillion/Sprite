@@ -260,7 +260,9 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
                 {
                     let _ = ready_tx.send(());
                 }
-                if let sprite_term::TerminalEvent::History(history) = event
+                if let sprite_term::TerminalEvent::History {
+                    snapshot: history, ..
+                } = event
                     && history_tx.send(history).is_err()
                 {
                     break;
@@ -320,7 +322,10 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
         });
         submit_probe(
             commands.clone(),
-            TerminalCommand::CaptureHistory(sprite_term::HistoryLines::new(0)),
+            TerminalCommand::CaptureHistory {
+                ticket: sprite_term::Ticket::new(0),
+                lines: sprite_term::HistoryLines::new(0),
+            },
         );
         let settled = history_rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -330,7 +335,10 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
         });
         submit_probe(
             commands,
-            TerminalCommand::CaptureHistory(sprite_term::HistoryLines::new(0)),
+            TerminalCommand::CaptureHistory {
+                ticket: sprite_term::Ticket::new(0),
+                lines: sprite_term::HistoryLines::new(0),
+            },
         );
         let unchanged = history_rx
             .recv_timeout(std::time::Duration::from_secs(5))

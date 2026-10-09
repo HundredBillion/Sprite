@@ -561,10 +561,12 @@ impl Session {
                         emit(events, TerminalEvent::Error(error))?;
                     }
                 },
-                TerminalCommand::CaptureHistory(lines) => {
+                TerminalCommand::CaptureHistory { ticket, lines } => {
                     // Answered once, from this thread, against the same
                     // terminal the snapshots come from — so the rows returned
                     // belong to one generation rather than a moving target.
+                    // Both outcomes carry the ticket, so the answer can only
+                    // reach the request that asked.
                     let foreground = foreground_executable(master.as_ref());
                     match projector.capture_history(
                         pending.generation,
@@ -574,10 +576,16 @@ impl Session {
                         terminal,
                     ) {
                         Ok(history) => {
-                            emit(events, TerminalEvent::History(Arc::new(history)))?;
+                            emit(
+                                events,
+                                TerminalEvent::History {
+                                    ticket,
+                                    snapshot: Arc::new(history),
+                                },
+                            )?;
                         }
                         Err(error) => {
-                            emit(events, TerminalEvent::Error(error))?;
+                            emit(events, TerminalEvent::HistoryFailed { ticket, error })?;
                         }
                     }
                 }

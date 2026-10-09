@@ -29,7 +29,7 @@ mod workspace;
 pub use cli::{Invocation, SurfaceOpenArgs, TokenRegisterArgs, USAGE, WindowArgs, parse_arguments};
 pub use config::Settings;
 pub use observation::broker::{
-    Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report,
+    Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report, Withdraw,
     collect as collect_panes, parse as parse_request,
 };
 pub use observation::client::{run_config_print, run_config_reload, run_snapshot};

@@ -548,16 +548,16 @@ impl TerminalView {
                 }
             }
             Effect::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-            Effect::DeliverHistory(history) => {
+            Effect::DeliverHistory { ticket, snapshot } => {
                 if let Some(link) = &self.observation {
-                    link.panes.deliver(link.pane, history);
+                    link.panes.deliver(link.pane, ticket, snapshot);
                 }
             }
-            // A pane in a bad state must not leave an observation request
-            // waiting out the deadline: the pane cannot answer, and this is why.
-            Effect::FailRequest(reason) => {
+            // A capture that failed answers the one request it belongs to,
+            // with the reason, rather than leaving it to wait out the deadline.
+            Effect::FailRequest { ticket, reason } => {
                 if let Some(link) = &self.observation {
-                    link.panes.deliver_failure(link.pane, reason);
+                    link.panes.deliver_failure(link.pane, ticket, reason);
                 }
             }
         }

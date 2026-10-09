@@ -1,4 +1,4 @@
-use crate::{CellPosition, GraphicsSnapshot, HistorySnapshot};
+use crate::{CellPosition, GraphicsSnapshot, HistorySnapshot, Ticket};
 use std::fmt;
 use std::sync::Arc;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,8 +24,22 @@ pub enum TerminalEvent {
     Bell,
     /// The child set a new title.
     TitleChanged(Option<String>),
-    /// The answer to one [`crate::TerminalCommand::CaptureHistory`].
-    History(Arc<HistorySnapshot>),
+    /// The answer to one [`crate::TerminalCommand::CaptureHistory`], carrying
+    /// the ticket it was asked with.
+    History {
+        ticket: Ticket,
+        snapshot: Arc<HistorySnapshot>,
+    },
+    /// A [`crate::TerminalCommand::CaptureHistory`] that could not be
+    /// answered, carrying the ticket it was asked with.
+    ///
+    /// Separate from [`TerminalEvent::Error`] so that a failed capture reaches
+    /// only the request it belongs to: a general error says that something
+    /// went wrong, never whose request it was.
+    HistoryFailed {
+        ticket: Ticket,
+        error: SessionError,
+    },
     /// The answer to one [`crate::TerminalCommand::CaptureGraphics`].
     Graphics(Arc<GraphicsSnapshot>),
     /// The child reported a new working directory.
