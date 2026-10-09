@@ -250,6 +250,37 @@ The capture checker checks maximum counts/bytes and p95 isolated timing. A copy
 of the new report with `allocations_per_capture.budget = 0` fails at `104 > 0`.
 The actual report passes against both the original and new capture budgets.
 
+### Paint budgets re-frozen after the bug-class audit
+
+`design-review-paint-shared.json` was re-frozen on 2026-10-09 at commit d1fceb0
+by rerunning the full 30-sample release benchmark, per the regression policy in
+`checkpoint-1.md`. Machine: Darwin arm64, Apple M5 Pro, 18/18 cores;
+rustc 1.97.1 (8bab26f4f 2026-07-14); Cargo's default release profile; no
+compilation, tests or other benchmark running (one idle Sprite window, under
+1% CPU, was open). The run passed `--check-budgets design-review-paint-baseline.json` (the original
+pre-optimisation budgets), and a second 30-sample run passed
+`--check-budgets design-review-paint-shared.json`.
+
+| Scenario/pass | Allocations max | Allocation budget | Requested bytes max | Byte budget | Median ms | p95 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `whole_first_frame` | 3,122 | 3,435 | 747,376 | 822,114 | 0.343792 | 0.365375 |
+| `whole_same_generation_blink` | 0 | 0 | 0 | 0 | 0.352958 | 0.428875 |
+| `whole_hover` | 53 | 59 | 12,936 | 14,230 | 0.330458 | 0.364208 |
+| `whole_one_row_change` | 53 | 59 | 12,936 | 14,230 | 0.294417 | 0.322375 |
+| `split_first_frame` | 3,122 | 3,435 | 747,376 | 822,114 | 0.491125 | 0.507500 |
+| `split_same_generation_blink` | 0 | 0 | 0 | 0 | 0.430625 | 0.477458 |
+| `split_hover` | 53 | 59 | 12,936 | 14,230 | 0.431167 | 0.450167 |
+| `split_one_row_change` | 53 | 59 | 12,936 | 14,230 | 0.431500 | 0.440917 |
+
+Why the budgets moved: cell text is now a `SharedString` made when a row is
+laid out, not a `String` made each time a cell is painted. Laying out a row now
+allocates once per non-ASCII cell (printable ASCII borrows a static string;
+the fixture has 50 non-ASCII cells per row), so first frame, hover and one-row
+change rose inside this seam. Per-frame paint, which is outside this seam,
+fell: `a62247e` made a new string for every one of the 6,600 glyph cells on
+every frame, idle frames included, and paint now makes none. Same-generation
+blink still allocates nothing. See `bug-class-audit.md`.
+
 ### Carried timing gates
 
 The original session, observation and graphics harnesses were also run, without

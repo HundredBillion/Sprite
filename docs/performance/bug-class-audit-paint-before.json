@@ -12,20 +12,20 @@
       "transition": "fresh_driver_without_priming",
       "timing": {
         "unit": "ms",
-        "median": 0.343792,
-        "p95": 0.36537499999999995
+        "median": 0.30845900000000004,
+        "p95": 0.323625
       },
       "allocations": {
-        "median": 3122,
-        "p95": 3122,
-        "max": 3122,
-        "budget": 3435
+        "median": 122,
+        "p95": 122,
+        "max": 122,
+        "budget": 135
       },
       "bytes": {
-        "median": 747376,
-        "p95": 747376,
-        "max": 747376,
-        "budget": 822114
+        "median": 579376,
+        "p95": 579376,
+        "max": 579376,
+        "budget": 637314
       }
     },
     "whole_same_generation_blink": {
@@ -33,8 +33,8 @@
       "transition": "primed_generation_1_cursor_on_to_off",
       "timing": {
         "unit": "ms",
-        "median": 0.352958,
-        "p95": 0.428875
+        "median": 0.296417,
+        "p95": 0.343125
       },
       "allocations": {
         "median": 0,
@@ -54,20 +54,20 @@
       "transition": "primed_generation_1_hover_off_to_on",
       "timing": {
         "unit": "ms",
-        "median": 0.330458,
-        "p95": 0.364208
+        "median": 0.28245899999999996,
+        "p95": 0.30275
       },
       "allocations": {
-        "median": 53,
-        "p95": 53,
-        "max": 53,
-        "budget": 59
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
       },
       "bytes": {
-        "median": 12936,
-        "p95": 12936,
-        "max": 12936,
-        "budget": 14230
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
       }
     },
     "whole_one_row_change": {
@@ -75,20 +75,20 @@
       "transition": "primed_generation_1_to_2_one_changed_row",
       "timing": {
         "unit": "ms",
-        "median": 0.294417,
-        "p95": 0.322375
+        "median": 0.28033399999999997,
+        "p95": 0.28525
       },
       "allocations": {
-        "median": 53,
-        "p95": 53,
-        "max": 53,
-        "budget": 59
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
       },
       "bytes": {
-        "median": 12936,
-        "p95": 12936,
-        "max": 12936,
-        "budget": 14230
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
       }
     },
     "split_first_frame": {
@@ -96,20 +96,20 @@
       "transition": "fresh_driver_without_priming",
       "timing": {
         "unit": "ms",
-        "median": 0.49112500000000003,
-        "p95": 0.5075000000000001
+        "median": 0.457458,
+        "p95": 0.477125
       },
       "allocations": {
-        "median": 3122,
-        "p95": 3122,
-        "max": 3122,
-        "budget": 3435
+        "median": 122,
+        "p95": 122,
+        "max": 122,
+        "budget": 135
       },
       "bytes": {
-        "median": 747376,
-        "p95": 747376,
-        "max": 747376,
-        "budget": 822114
+        "median": 579376,
+        "p95": 579376,
+        "max": 579376,
+        "budget": 637314
       }
     },
     "split_same_generation_blink": {
@@ -117,8 +117,8 @@
       "transition": "primed_generation_1_cursor_on_to_off",
       "timing": {
         "unit": "ms",
-        "median": 0.43062500000000004,
-        "p95": 0.477458
+        "median": 0.42854200000000003,
+        "p95": 0.457
       },
       "allocations": {
         "median": 0,
@@ -138,20 +138,20 @@
       "transition": "primed_generation_1_hover_off_to_on",
       "timing": {
         "unit": "ms",
-        "median": 0.43116699999999997,
-        "p95": 0.45016700000000004
+        "median": 0.433208,
+        "p95": 0.451834
       },
       "allocations": {
-        "median": 53,
-        "p95": 53,
-        "max": 53,
-        "budget": 59
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
       },
       "bytes": {
-        "median": 12936,
-        "p95": 12936,
-        "max": 12936,
-        "budget": 14230
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
       }
     },
     "split_one_row_change": {
@@ -159,20 +159,20 @@
       "transition": "primed_generation_1_to_2_one_changed_row",
       "timing": {
         "unit": "ms",
-        "median": 0.43150000000000005,
-        "p95": 0.440917
+        "median": 0.429375,
+        "p95": 0.446541
       },
       "allocations": {
-        "median": 53,
-        "p95": 53,
-        "max": 53,
-        "budget": 59
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
       },
       "bytes": {
-        "median": 12936,
-        "p95": 12936,
-        "max": 12936,
-        "budget": 14230
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
       }
     }
   }
