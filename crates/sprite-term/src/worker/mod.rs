@@ -47,6 +47,9 @@ type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
 /// captures: sixteen messages, or sixteen KiB of output, whichever comes first.
 /// A burst then costs one snapshot rather than one per chunk, and a capture is
 /// still never postponed behind an unbounded queue.
+///
+/// The output bound is checked after a chunk is parsed, so a pass can parse
+/// just under one more chunk beyond it: at most about 32 KiB in all.
 const BATCH_MESSAGES: usize = 16;
 const BATCH_OUTPUT_BYTES: usize = 16 * 1024;
 
@@ -777,7 +780,7 @@ impl Session {
                 break;
             };
             // One message at a time and published as it goes: this drain must
-            // not pull commands out of the queue the way a pass would.
+            // not apply commands the way a pass would.
             if matches!(
                 message,
                 Message::PtyOutput(_) | Message::PumpStopped(_) | Message::ChildExited(_)
@@ -1166,15 +1169,21 @@ mod coalescing_tests {
         });
     }
 
-    /// A child's exit taken into a pass is recorded even when the pass then
-    /// ends because its notices cannot be delivered: the waiter reports an
-    /// exit only once, and closing waits for that report.
+    /// A helper's report taken into a pass is recorded even when the pass then
+    /// ends because its notices cannot be delivered: each helper reports only
+    /// once, and closing waits for that report.
+    ///
+    /// The report is the pump's, carrying a failure the real pump never has:
+    /// once the session closes, the real pump reports only that it was
+    /// cancelled, which carries no failure. So the error can reach the
+    /// outcomes only through the report taken into the pass, whichever
+    /// order the real reports arrive in.
     #[test]
-    fn an_exit_taken_into_a_refused_pass_is_still_recorded() {
+    fn a_report_taken_into_a_refused_pass_is_still_recorded() {
         within_watchdog(|| {
             let fixture = Fixture::start_with(vec![
                 Message::PtyOutput(pty_unix::OutputChunk::detached(b"\x1b]2;unread\x07")),
-                Message::ChildExited(Ok(ExitStatus::with_exit_code(7))),
+                Message::PumpStopped(PumpOutcome::ReadError("injected read failure".into())),
             ]);
             assert!(matches!(fixture.next_event(), TerminalEvent::Ready));
             assert_eq!(fixture.next_generation(), 0);
@@ -1185,17 +1194,16 @@ mod coalescing_tests {
             if let Some(processes) = fixture.worker.join().expect("the worker did not panic") {
                 finish_shutdown(processes, std::time::Instant::now());
             }
-            let mut outcome = None;
+            let mut failures = Vec::new();
             while let Ok(event) = fixture.events.next_blocking() {
-                if let TerminalEvent::Exited(exit) = event {
-                    outcome = Some(exit);
+                if let TerminalEvent::Error(error) = event {
+                    failures.push(error);
                 }
             }
-            let outcome = outcome.expect("an exit outcome");
-            assert_eq!(
-                (outcome.code, outcome.signal),
-                (Some(7), None),
-                "the queued exit, not the hangup closing sent afterwards"
+            assert!(
+                failures.iter().any(|error| error.operation == "pty_read"
+                    && error.message.contains("injected read failure")),
+                "the report taken into the refused pass was dropped: {failures:?}"
             );
         });
     }

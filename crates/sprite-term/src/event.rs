@@ -23,6 +23,9 @@ pub enum TerminalEvent {
     /// The child rang the bell.
     Bell,
     /// The child set a new title.
+    ///
+    /// Only the latest title in each publication is delivered, so titles set
+    /// in between may be skipped.
     TitleChanged(Option<String>),
     /// The answer to one [`crate::TerminalCommand::CaptureHistory`], carrying
     /// the ticket it was asked with.
@@ -43,6 +46,9 @@ pub enum TerminalEvent {
     /// The answer to one [`crate::TerminalCommand::CaptureGraphics`].
     Graphics(Arc<GraphicsSnapshot>),
     /// The child reported a new working directory.
+    ///
+    /// Only the latest directory in each publication is delivered, so
+    /// directories reported in between may be skipped.
     WorkingDirectoryChanged(Option<String>),
     /// The answer to `ResolveHyperlink`.
     ///
