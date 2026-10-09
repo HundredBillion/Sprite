@@ -123,11 +123,26 @@ pub enum TerminalCommand {
     /// application because libghostty models it over the whole screen including
     /// scrollback, and because a cell is only reported as selected when the
     /// terminal itself holds the selection.
+    ///
+    /// In character mode, while a gesture begun with `BeginSelection` is under
+    /// way, the selection extends from that gesture's pinned anchor and this
+    /// `anchor` is not used; it describes a selection made without a press.
     Select {
         anchor: CellPosition,
         head: CellPosition,
         mode: SelectionMode,
         rectangle: bool,
+    },
+    /// The press that starts a selection gesture.
+    ///
+    /// Drops whatever was selected and pins `anchor` to the content under it,
+    /// so every `Select` that follows extends from that content wherever output
+    /// has since moved it. If that content is evicted from scrollback, the
+    /// gesture selects nothing rather than re-anchoring on whatever replaced
+    /// it. The gesture lasts until the next `BeginSelection` or
+    /// `ClearSelection`.
+    BeginSelection {
+        anchor: CellPosition,
     },
     ClearSelection,
     /// Ask for the selected text. Answered with `SelectionCopied`.

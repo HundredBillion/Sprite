@@ -155,6 +155,7 @@ pub(super) fn initialize(
         projector,
         encoder,
         mouse_encoder,
+        selection_anchor: None,
         terminal,
     };
     Ok(Initialized {

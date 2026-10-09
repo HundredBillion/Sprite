@@ -3,6 +3,8 @@ use crate::{
     CellPosition, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton, MouseEvent,
     SelectionMode, SessionError, ValidTerminalSize, WheelEvent,
 };
+use libghostty_vt::screen::TrackedGridRef;
+use libghostty_vt::terminal::{Point, PointCoordinate};
 use libghostty_vt::{Terminal, key};
 const MAX_WHEEL_TURNS: u32 = 32;
 /// Who a wheel turn belongs to.
@@ -224,36 +226,71 @@ pub(crate) fn encode_mouse(
     Ok(Some(bytes))
 }
 
-/// Installs a selection described in viewport coordinates.
+/// Where a character-mode selection extends from.
+pub(crate) enum SelectionAnchor<'a> {
+    /// A viewport cell, resolved now.
+    Cell(CellPosition),
+    /// The content a gesture's press landed on, wherever output has moved it.
+    Tracked(&'a TrackedGridRef),
+}
+
+fn viewport_point(position: CellPosition) -> Point {
+    Point::Viewport(PointCoordinate {
+        x: position.column,
+        y: u32::from(position.row),
+    })
+}
+
+/// Pins a gesture's anchor to the content under a viewport cell, so it follows
+/// that content through scrolling, scrollback pruning and reflow.
+pub(crate) fn track_selection_anchor(
+    terminal: &Terminal<'_, '_>,
+    anchor: CellPosition,
+) -> Result<TrackedGridRef, SessionError> {
+    terminal
+        .track_grid_ref(viewport_point(anchor))
+        .map_err(|error| SessionError::new("selection_anchor", error))
+}
+
+/// Installs a selection whose head is a viewport cell.
 ///
 /// Word and line modes delegate to libghostty so Sprite agrees with Ghostty on
 /// what a word or a wrapped line is, rather than inventing its own boundaries.
+///
+/// Returns `false` when a tracked anchor has lost its content; the selection
+/// is then cleared rather than re-anchored on whatever took its place.
 pub(crate) fn apply_selection(
     terminal: &Terminal<'_, '_>,
-    anchor: CellPosition,
+    anchor: SelectionAnchor<'_>,
     head: CellPosition,
     mode: SelectionMode,
     rectangle: bool,
-) -> Result<(), SessionError> {
+) -> Result<bool, SessionError> {
     use libghostty_vt::selection::{SelectLineOptions, SelectWordOptions, Selection};
-    use libghostty_vt::terminal::{Point, PointCoordinate};
-
-    let point = |position: CellPosition| {
-        Point::Viewport(PointCoordinate {
-            x: position.column,
-            y: u32::from(position.row),
-        })
-    };
 
     let head_ref = terminal
-        .grid_ref(point(head))
+        .grid_ref(viewport_point(head))
         .map_err(|error| SessionError::new("selection_grid_ref", error))?;
 
     let selection = match mode {
         SelectionMode::Character => {
-            let anchor_ref = terminal
-                .grid_ref(point(anchor))
-                .map_err(|error| SessionError::new("selection_grid_ref", error))?;
+            let anchor_ref = match anchor {
+                SelectionAnchor::Cell(position) => terminal
+                    .grid_ref(viewport_point(position))
+                    .map_err(|error| SessionError::new("selection_grid_ref", error))?,
+                SelectionAnchor::Tracked(tracked) => {
+                    let pinned = tracked
+                        .snapshot(terminal)
+                        .map_err(|error| SessionError::new("selection_anchor", error))?;
+                    let Some(anchor_ref) = pinned else {
+                        terminal
+                            .set_selection(None)
+                            .map_err(|error| SessionError::new("clear_selection", error))?;
+                        return Ok(false);
+                    };
+                    anchor_ref
+                }
+            };
             Some(Selection::new(anchor_ref, head_ref, rectangle))
         }
         SelectionMode::Word => terminal
@@ -267,7 +304,7 @@ pub(crate) fn apply_selection(
     terminal
         .set_selection(selection.as_ref())
         .map_err(|error| SessionError::new("set_selection", error))?;
-    Ok(())
+    Ok(true)
 }
 
 /// The current selection as text, or empty when nothing is selected.

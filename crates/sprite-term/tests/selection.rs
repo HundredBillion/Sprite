@@ -7,7 +7,8 @@ mod support;
 use std::ffi::OsString;
 
 use sprite_term::{
-    CellPosition, SelectionMode, SessionConfig, TerminalCommand, TerminalEvent, TerminalSession,
+    CellPosition, SelectionMode, SessionConfig, SnapshotBundle, TerminalCommand, TerminalEvent,
+    TerminalSession,
 };
 
 use support::{EventPump, SnapshotPump, pane_text};
@@ -341,4 +342,128 @@ fn a_space_is_not_part_of_a_word() {
         .map(|cell| cell.text.as_str())
         .collect();
     assert_eq!(selected, "alpha", "the trailing space is a boundary");
+}
+
+/// The viewport row whose text is exactly `text`, if it is on screen.
+fn row_of(bundle: &SnapshotBundle, text: &str) -> Option<u16> {
+    bundle
+        .pane
+        .rows
+        .iter()
+        .position(|row| row.text.trim_end() == text)
+        .and_then(|row| u16::try_from(row).ok())
+}
+
+/// The text the next `SelectionCopied` carries.
+fn copied(events: &EventPump) -> String {
+    loop {
+        match events.next() {
+            TerminalEvent::SelectionCopied(text) => return text,
+            TerminalEvent::Error(error) => panic!("selection failed: {error}"),
+            _ => {}
+        }
+    }
+}
+
+/// The press that starts a gesture pins its anchor to the content under it,
+/// so a drag that continues after output scrolled still extends from that
+/// content, not from whatever now sits where it was.
+#[test]
+fn a_gesture_anchor_follows_its_content_while_output_scrolls() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(
+        "stty -echo; seq 1 100; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
+         printf '\\nafter-1\\nafter-2\\nafter-3'; sleep 30",
+    );
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+
+    // READY is the last thing printed before the child waits, so once it is
+    // on screen nothing else will move.
+    let before = snapshots.wait_for("the anchor line", |bundle| {
+        row_of(bundle, "READY").is_some()
+    });
+    let pressed = at(row_of(&before, "ANCHOR-TEXT").expect("anchor row"), 0);
+    session
+        .send(TerminalCommand::BeginSelection { anchor: pressed })
+        .expect("press");
+
+    session
+        .send(TerminalCommand::Input(b"go\n".to_vec()))
+        .expect("release the child");
+    let after = snapshots.wait_for("the scrolled output", |bundle| {
+        row_of(bundle, "after-3").is_some()
+    });
+    let moved = row_of(&after, "ANCHOR-TEXT").expect("the anchor line is still on screen");
+    assert!(moved < pressed.row, "output scrolled the anchor line up");
+
+    session
+        .send(TerminalCommand::Select {
+            anchor: pressed,
+            head: at(moved, 10),
+            mode: SelectionMode::Character,
+            rectangle: false,
+        })
+        .expect("extend the gesture");
+    session
+        .send(TerminalCommand::CopySelection)
+        .expect("copy the selection");
+    assert_eq!(copied(&events), "ANCHOR-TEXT");
+}
+
+/// When output evicts the anchored content from scrollback, the gesture
+/// selects nothing rather than re-anchoring on whatever replaced it.
+#[test]
+fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
+    let mut config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; seq 1 100; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
+             seq 1 20000; printf 'STREAM-DONE'; sleep 30",
+        ]),
+    );
+    // The smallest nonzero budget: libghostty keeps scrollback in whole pages
+    // and prunes the oldest, which is what evicts the anchored line. (A zero
+    // budget rotates rows in place instead; see the TSP's drafter notes.)
+    config.scrollback_bytes = 4 * 1024;
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+
+    let before = snapshots.wait_for("the anchor line", |bundle| {
+        row_of(bundle, "READY").is_some()
+    });
+    let pressed = at(row_of(&before, "ANCHOR-TEXT").expect("anchor row"), 0);
+    session
+        .send(TerminalCommand::BeginSelection { anchor: pressed })
+        .expect("press");
+    session
+        .send(TerminalCommand::Input(b"go\n".to_vec()))
+        .expect("release the child");
+    snapshots.wait_for("the end of the stream", |bundle| {
+        row_of(bundle, "STREAM-DONE").is_some()
+    });
+
+    session
+        .send(TerminalCommand::Select {
+            anchor: pressed,
+            head: at(0, 3),
+            mode: SelectionMode::Character,
+            rectangle: false,
+        })
+        .expect("extend the gesture");
+    session
+        .send(TerminalCommand::CopySelection)
+        .expect("copy the selection");
+    assert_eq!(copied(&events), "", "an evicted anchor selects nothing");
 }

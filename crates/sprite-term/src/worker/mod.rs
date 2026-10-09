@@ -32,8 +32,8 @@ mod start;
 use crate::hyperlink::resolve_hyperlink;
 use crate::input::keys::{encode_focus, encode_key};
 use crate::input::mouse::{
-    WheelDestination, apply_selection, encode_mouse, encode_wheel, selection_text,
-    wheel_destination,
+    SelectionAnchor, WheelDestination, apply_selection, encode_mouse, encode_wheel, selection_text,
+    track_selection_anchor, wheel_destination,
 };
 use crate::input::paste::{encode_paste, paste_is_safe_to_perform};
 use start::{apply_color_defaults, apply_cursor_defaults};
@@ -115,11 +115,15 @@ struct Started {
 }
 
 // Fields drop in declaration order, including on early return or unwind.
-// Projection scratch and both encoders must be released before terminal state.
+// Projection scratch, both encoders and the selection anchor must be released
+// before terminal state.
 struct Owned {
     projector: Projector<'static>,
     encoder: key::Encoder<'static>,
     mouse_encoder: libghostty_vt::mouse::Encoder<'static>,
+    /// The content the current selection gesture's press landed on, until the
+    /// next gesture or `ClearSelection`.
+    selection_anchor: Option<libghostty_vt::screen::TrackedGridRef>,
     terminal: Terminal<'static, 'static>,
 }
 
@@ -395,6 +399,7 @@ impl Session {
                     projector,
                     encoder,
                     mouse_encoder,
+                    selection_anchor,
                     terminal,
                 },
             runtime:
@@ -519,15 +524,41 @@ impl Session {
                         }
                     }
                 }
+                TerminalCommand::BeginSelection { anchor } => {
+                    // A new gesture: what was selected goes, and the press is
+                    // pinned to the content under it before later output can
+                    // move that content out from under the pointer.
+                    *selection_anchor = None;
+                    *has_selection = false;
+                    if let Err(error) = terminal
+                        .set_selection(None)
+                        .map_err(|error| SessionError::new("clear_selection", error))
+                    {
+                        emit(events, TerminalEvent::Error(error))?;
+                    }
+                    match track_selection_anchor(terminal, anchor) {
+                        Ok(tracked) => *selection_anchor = Some(tracked),
+                        // Reported; the gesture then extends from the cells its
+                        // `Select`s name, as a selection without a press does.
+                        Err(error) => emit(events, TerminalEvent::Error(error))?,
+                    }
+                    pending.mutated();
+                }
                 TerminalCommand::Select {
                     anchor,
                     head,
                     mode,
                     rectangle,
                 } => {
+                    let anchor = match selection_anchor.as_ref() {
+                        Some(tracked) => SelectionAnchor::Tracked(tracked),
+                        None => SelectionAnchor::Cell(anchor),
+                    };
                     match apply_selection(terminal, anchor, head, mode, rectangle) {
-                        Ok(()) => {
-                            *has_selection = true;
+                        // `false`: the anchored content was evicted, and the
+                        // selection was cleared rather than moved.
+                        Ok(installed) => {
+                            *has_selection = installed;
                             pending.mutated();
                         }
                         // A selection that cannot be resolved is reported, but
@@ -539,6 +570,7 @@ impl Session {
                     }
                 }
                 TerminalCommand::ClearSelection => {
+                    *selection_anchor = None;
                     *has_selection = false;
                     if let Err(error) = terminal
                         .set_selection(None)
