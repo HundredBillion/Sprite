@@ -15,7 +15,7 @@ impl Workspace {
             orientation,
             make_pane(
                 self.command.clone(),
-                self.settings.clone(),
+                self.active_settings(),
                 PaneServices {
                     panes: &self.panes,
                     endpoint: self.endpoint.as_ref(),
@@ -35,7 +35,7 @@ impl Workspace {
         }
         self.tabs.open(make_pane(
             self.command.clone(),
-            self.settings.clone(),
+            self.active_settings(),
             PaneServices {
                 panes: &self.panes,
                 endpoint: self.endpoint.as_ref(),

@@ -93,10 +93,19 @@ pub struct Workspace {
     /// serving threads, and the only route from a request to a pane.
     panes: Arc<WindowPanes>,
     focus: FocusHandle,
+    /// What the configuration file says, and nothing else.
+    ///
+    /// Font zoom is kept beside it in `font_zoom` rather than written into it,
+    /// so a reload compares the file with the file: zooming is not a
+    /// configuration change, and a reload that only recoloured the window
+    /// neither undoes the zoom nor reports a font change. What panes run with
+    /// is `active_settings`.
     settings: crate::config::Settings,
-    /// The size the configuration asked for, so "reset" returns to what a
-    /// person set rather than to Sprite's own default.
-    configured_font_size: crate::config::FontSize,
+    /// The size font zoom chose, while it differs from the file's.
+    ///
+    /// `None` follows the file's size. Reset clears it, which returns to what
+    /// a person configured rather than to Sprite's own default.
+    font_zoom: Option<crate::config::FontSize>,
     /// What every pane in this window runs instead of a login shell.
     ///
     /// Held so that a pane created later — by a split or a new tab — runs the
@@ -256,7 +265,7 @@ impl Workspace {
                         }
                         // Printed from what the window is *using*, which after
                         // a reload is not necessarily what the file says.
-                        ConfigVerb::Print => workspace.settings.to_toml(),
+                        ConfigVerb::Print => workspace.active_settings().to_toml(),
                     })
                     .unwrap_or_else(|_| "this window is closing".to_owned());
                 // The endpoint thread is waiting on this with a timeout of its
@@ -298,7 +307,7 @@ impl Workspace {
             endpoint,
             panes,
             command,
-            configured_font_size: settings.font.size,
+            font_zoom: None,
             settings,
             focus: cx.focus_handle(),
             mode: Mode::Idle,

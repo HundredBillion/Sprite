@@ -33,28 +33,42 @@ impl Workspace {
         // A keystroke has no complaints channel, so the size is simply held
         // inside the readable range; a file setting goes through the same
         // rule and says so when it had to.
-        let wanted = crate::config::FontSize::new(self.settings.font.size.get() + delta);
+        let wanted = crate::config::FontSize::new(self.font_size().get() + delta);
         self.apply_font_size(wanted, cx);
     }
     /// Back to the configured size, which is what a person means by "reset" —
     /// not back to Sprite's built-in default.
     pub(super) fn reset_font(&mut self, cx: &mut Context<Self>) {
-        let configured = self.configured_font_size;
+        let configured = self.settings.font.size;
         self.apply_font_size(configured, cx);
     }
+    /// Zooms to `size`. A size equal to the file's is no zoom at all, so the
+    /// window goes back to following the file.
     pub(super) fn apply_font_size(
         &mut self,
         size: crate::config::FontSize,
         cx: &mut Context<Self>,
     ) {
-        if size == self.settings.font.size {
+        let zoom = (size != self.settings.font.size).then_some(size);
+        if zoom == self.font_zoom {
             return;
         }
-        self.settings.font.size = size;
-        // The size is a setting like any other, so it travels the way a reload
-        // does: published once, applied by every pane with its own window.
-        cx.set_global(crate::config::ActiveSettings(self.settings.clone()));
+        self.font_zoom = zoom;
+        // The size travels the way a reload does: published once, applied by
+        // every pane with its own window.
+        cx.set_global(crate::config::ActiveSettings(self.active_settings()));
         cx.notify();
+    }
+    /// The size panes draw at: the zoom while there is one, else the file's.
+    pub(super) fn font_size(&self) -> crate::config::FontSize {
+        self.font_zoom.unwrap_or(self.settings.font.size)
+    }
+    /// What this window's panes run with: the file's settings, at the zoomed
+    /// size when there is one.
+    pub(super) fn active_settings(&self) -> crate::config::Settings {
+        let mut settings = self.settings.clone();
+        settings.font.size = self.font_size();
+        settings
     }
     pub(super) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
         let Some(pane) = self.tabs.active().and_then(|tab| tab.focused()) else {
@@ -419,12 +433,12 @@ mod tests {
             );
         });
         draw_workspace(cx);
-        let before = workspace.read_with(cx, |workspace, _| workspace.settings.font.size.get());
+        let before = workspace.read_with(cx, |workspace, _| workspace.font_size().get());
         cx.simulate_keystrokes("ctrl-shift-=");
         for _ in 0..2 {
             hold(cx, press("=", ctrl_shift()));
         }
-        let after = workspace.read_with(cx, |workspace, _| workspace.settings.font.size.get());
+        let after = workspace.read_with(cx, |workspace, _| workspace.font_size().get());
         assert!(
             (after - before - 3.0).abs() < 1e-3,
             "a held zoom key keeps stepping: {before} -> {after}"

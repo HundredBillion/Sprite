@@ -64,6 +64,9 @@ impl Workspace {
         };
         let (settings, complaints) = candidate;
 
+        // File against file: the zoom lives beside `self.settings`, so a
+        // zoomed window is not mistaken for a font change and the zoom
+        // outlasts the reload.
         let outcome = self.settings.diff(&settings);
         if outcome.has(crate::config::LiveChange::Colors) {
             cx.global_mut::<crate::tokens::TokenRegistry>()
@@ -72,12 +75,16 @@ impl Workspace {
         if outcome.has(crate::config::LiveChange::Observation) {
             self.change_observation(settings.pane_observation.enabled, reply, cx);
         }
+        self.settings = settings;
+        // A zoom that now matches the file's own size is no zoom at all, so
+        // the window follows the file from here on.
+        if self.font_zoom == Some(self.settings.font.size) {
+            self.font_zoom = None;
+        }
         // Published, not pushed: each pane observes the global with its own
         // window in hand, which is what a cell re-measure needs and what this
         // method, reached from an endpoint thread, does not have.
-        cx.set_global(crate::config::ActiveSettings(settings.clone()));
-        self.settings = settings;
-        self.configured_font_size = self.settings.font.size;
+        cx.set_global(crate::config::ActiveSettings(self.active_settings()));
         cx.notify();
 
         outcome.describe(&path, &complaints.0)
@@ -531,10 +538,7 @@ mod tests {
         std::fs::write(&path, "[font]\nsize = 21.0\n").unwrap();
         let (sender, size_before) = workspace.update(cx, |workspace, _| {
             workspace.config_path = Some(path.clone());
-            (
-                workspace.reload_sender.clone(),
-                workspace.settings.font.size,
-            )
+            (workspace.reload_sender.clone(), workspace.font_size())
         });
         assert_ne!(size_before, 21.0, "the file must ask for a change");
 
@@ -565,7 +569,8 @@ mod tests {
                 "the window took the request off its queue"
             );
             assert_eq!(
-                workspace.settings.font.size, size_before,
+                workspace.font_size(),
+                size_before,
                 "an abandoned reload must never be applied"
             );
         });
@@ -785,5 +790,113 @@ mod tests {
             }
         });
         std::fs::remove_file(path).unwrap();
+    }
+    /// Zoom is the person's, not the file's. A reload that only recolours the
+    /// window must neither undo three steps of zoom nor claim the font changed,
+    /// and reset still returns to the size the file asks for.
+    #[gpui::test]
+    fn a_colour_only_reload_keeps_the_zoom_and_reports_only_colours(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let path =
+            std::env::temp_dir().join(format!("sprite-zoom-reload-{}.toml", std::process::id()));
+        workspace.update(cx, |workspace, _| {
+            workspace.config_path = Some(path.clone());
+        });
+        draw_workspace(cx);
+        cx.simulate_keystrokes("ctrl-shift-= ctrl-shift-= ctrl-shift-=");
+        let zoomed = crate::config::Font::DEFAULT_SIZE + 3.0;
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<crate::config::ActiveSettings>().0.font.size,
+                zoomed,
+                "three zoom steps reached the panes"
+            );
+        });
+
+        // Observation stays off, as `test_workspace` set it, so the only
+        // difference from the running file is the background colour.
+        std::fs::write(
+            &path,
+            "[pane_observation]\nenabled = false\n\n[colors]\nbackground = \"#203040\"\n",
+        )
+        .unwrap();
+        let report = workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(
+            report,
+            format!("reloaded {}\napplied now: colors", path.display())
+        );
+        cx.update(|_, cx| {
+            let active = &cx.global::<crate::config::ActiveSettings>().0;
+            assert_eq!(active.font.size, zoomed, "the zoom survives the reload");
+            assert_eq!(
+                active.colors.background,
+                crate::config::Colors::parse_hex("#203040")
+            );
+        });
+        cx.simulate_keystrokes("ctrl-shift-0");
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<crate::config::ActiveSettings>().0.font.size,
+                crate::config::Font::DEFAULT_SIZE,
+                "reset returns to the file's size"
+            );
+        });
+    }
+
+    /// The file's size still matters while zoomed: it is where reset goes. An
+    /// unzoomed window simply follows it.
+    #[gpui::test]
+    fn a_reloaded_font_size_is_where_reset_goes_and_zoom_stays_on_top(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (workspace, cx) = test_workspace(cx);
+        let path = std::env::temp_dir().join(format!(
+            "sprite-zoom-size-reload-{}.toml",
+            std::process::id()
+        ));
+        workspace.update(cx, |workspace, _| {
+            workspace.config_path = Some(path.clone());
+        });
+        draw_workspace(cx);
+        let active_size = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| {
+                cx.global::<crate::config::ActiveSettings>()
+                    .0
+                    .font
+                    .size
+                    .get()
+            })
+        };
+        cx.simulate_keystrokes("ctrl-shift-=");
+        assert_eq!(active_size(cx), crate::config::Font::DEFAULT_SIZE + 1.0);
+
+        std::fs::write(
+            &path,
+            "[pane_observation]\nenabled = false\n\n[font]\nsize = 20\n",
+        )
+        .unwrap();
+        let report = workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        assert_eq!(
+            report,
+            format!("reloaded {}\napplied now: font", path.display())
+        );
+        assert_eq!(
+            active_size(cx),
+            crate::config::Font::DEFAULT_SIZE + 1.0,
+            "a zoomed window keeps its zoom"
+        );
+        cx.simulate_keystrokes("ctrl-shift-0");
+        assert_eq!(active_size(cx), 20.0, "reset goes to the new file size");
+
+        std::fs::write(
+            &path,
+            "[pane_observation]\nenabled = false\n\n[font]\nsize = 22\n",
+        )
+        .unwrap();
+        workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(active_size(cx), 22.0, "an unzoomed window follows the file");
     }
 }
