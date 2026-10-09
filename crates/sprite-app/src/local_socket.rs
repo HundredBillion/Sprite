@@ -1148,12 +1148,14 @@ mod tests {
 
         // A connection arrives while no descriptor is free to accept it with.
         let held = exhaust_descriptors();
-        let mut first = UnixStream::connect(&path).unwrap();
-        writeln!(first, "{key} first").unwrap();
+        let mut first = connect_with_retries(&path);
+        let _ = writeln!(first, "{key} first");
 
         // The listener waits that out without spinning.
         let before = cpu_time();
         crate::test_blocking_wait::pause(Duration::from_millis(600));
+        // Only meaningful where a failed accept leaves the connection queued
+        // (Linux); macOS drops it, so poll has nothing to report there.
         let spent = cpu_time().saturating_sub(before);
         assert!(
             spent < Duration::from_millis(200),
@@ -1164,8 +1166,8 @@ mod tests {
         // that waited; macOS discards it when `accept` fails, so a second one
         // arrives as well and either proves the listener survived.
         drop(held);
-        let mut retry = UnixStream::connect(&path).unwrap();
-        writeln!(retry, "{key} retry").unwrap();
+        let mut retry = connect_with_retries(&path);
+        let _ = writeln!(retry, "{key} retry");
         let body = received
             .recv_timeout(Duration::from_secs(2))
             .expect("the listener must survive running out of descriptors");
@@ -1176,14 +1178,7 @@ mod tests {
         // macOS can refuse a connect with ENOTCONN just after descriptors
         // were freed or taken, and discards a connection a failed accept
         // touched, so neither the connect nor the write is required to land.
-        let mut second = (0..20)
-            .find_map(|_| {
-                UnixStream::connect(&path).ok().or_else(|| {
-                    crate::test_blocking_wait::pause(Duration::from_millis(10));
-                    None
-                })
-            })
-            .expect("a connection to the resting listener");
+        let mut second = connect_with_retries(&path);
         let _ = writeln!(second, "{key} second");
         crate::test_blocking_wait::pause(Duration::from_millis(250));
         let (done, completed) = mpsc::channel();
@@ -1196,6 +1191,45 @@ mod tests {
             .expect("closing must end a resting listener");
         drop(held);
         drop((first, second, retry));
+    }
+
+    /// Connects, retrying briefly: macOS can refuse a connect with ENOTCONN
+    /// just after descriptors were freed or taken.
+    fn connect_with_retries(path: &Path) -> UnixStream {
+        (0..20)
+            .find_map(|_| {
+                UnixStream::connect(path).ok().or_else(|| {
+                    crate::test_blocking_wait::pause(Duration::from_millis(10));
+                    None
+                })
+            })
+            .expect("all 20 attempts to connect to the listener failed")
+    }
+
+    /// A close wakes a listener that is mid-rest instead of letting it sleep
+    /// out the rest, and an undisturbed rest lasts about one period.
+    #[test]
+    fn a_rest_ends_when_the_socket_closes_and_lasts_a_period_otherwise() {
+        let running = AtomicBool::new(true);
+        let (cancellation, cancelled) = UnixStream::pair().unwrap();
+
+        let started = Instant::now();
+        assert!(!rest(&cancelled, &running));
+        let undisturbed = started.elapsed();
+        assert!(
+            undisturbed >= Duration::from_millis(u64::from(ACCEPT_REST_MS) - 10),
+            "{undisturbed:?}"
+        );
+
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            drop(cancellation);
+        });
+        let started = Instant::now();
+        assert!(rest(&cancelled, &running));
+        let woken = started.elapsed();
+        closer.join().unwrap();
+        assert!(woken < Duration::from_millis(60), "{woken:?}");
     }
 
     /// No failed `accept` ends the listener. Only "nothing was waiting" and an
