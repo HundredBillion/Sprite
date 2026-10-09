@@ -52,11 +52,18 @@ const READ_CHUNK_BYTES: usize = 16 * 1024;
 /// Sixteen outstanding output chunks, leaving one worker queue slot free.
 const OUTPUT_PERMITS: usize = 16;
 
+/// What bracketed paste adds around a paste: `ESC [ 200 ~` before it and
+/// `ESC [ 201 ~` after it.
+const BRACKETED_PASTE_OVERHEAD: usize = 12;
+
 /// Input waiting for the PTY to have room, beyond which more is refused and
-/// reported rather than held. Sixty-four maximal pastes: a program this far
-/// behind has stopped reading, and hoarding more for it would only hide that
-/// from the person typing.
-const INPUT_BACKLOG_BYTES: usize = 1024 * 1024;
+/// reported rather than held.
+///
+/// Exactly one largest admitted paste with its brackets: anything smaller and
+/// a paste the session already accepted would be refused as if the program had
+/// stopped reading. A program further behind than that has stopped reading,
+/// and hoarding more for it would only hide that from the person typing.
+const INPUT_BACKLOG_BYTES: usize = crate::max_clipboard_bytes() + BRACKETED_PASTE_OVERHEAD;
 
 /// The worker's handle on the pump thread.
 pub(crate) struct Pump {
@@ -136,9 +143,9 @@ pub(crate) struct InputQueue {
 impl InputQueue {
     /// Queues `bytes` for the PTY, after everything queued before them.
     ///
-    /// Never blocks. Refused, with the reason, once a megabyte is already
-    /// waiting — see `INPUT_BACKLOG_BYTES` — and once the pump has stopped,
-    /// when there is nothing left to write to.
+    /// Never blocks. Refused, with the reason, once the backlog would exceed
+    /// `INPUT_BACKLOG_BYTES`, and once the pump has stopped, when there is
+    /// nothing left to write to.
     pub(crate) fn write(&self, bytes: Vec<u8>) -> Result<(), SessionError> {
         if bytes.is_empty() {
             return Ok(());

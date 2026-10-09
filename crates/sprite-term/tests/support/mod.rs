@@ -178,6 +178,22 @@ impl EventPump {
         }
         None
     }
+
+    /// Looks for an error event within a short window, ignoring everything
+    /// else. A healthy session is silent, so this cannot block indefinitely;
+    /// the window exists for the same reason as `try_next_clipboard`'s.
+    pub fn try_next_error(&self) -> Option<SessionError> {
+        let deadline = Instant::now() + Duration::from_millis(750);
+        while Instant::now() < deadline {
+            match self.receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(TerminalEvent::Error(error))) => return Some(error),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

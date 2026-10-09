@@ -349,3 +349,33 @@ fn confirmed_paste_returns_to_live_output() {
 fn withheld_paste_keeps_the_history_viewport() {
     paste_from_history(TerminalCommand::Paste("z\n".into()), false);
 }
+
+/// A bracketed paste of the largest text a paste may carry is queued whole.
+///
+/// The input backlog must leave room for the brackets around the largest
+/// admitted paste; otherwise that paste is refused with a claim that the
+/// program stopped reading, when it never had the chance.
+#[test]
+fn a_bracketed_paste_of_the_largest_allowed_text_is_accepted() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf '\\033[?2004h'; printf 'READY\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    // The clipboard bound, which `Paste` admission itself enforces.
+    let largest = "x".repeat(1024 * 1024);
+    session
+        .send(TerminalCommand::Paste(largest))
+        .expect("a paste at the clipboard bound is admitted");
+
+    let refused = events.try_next_error();
+    assert!(
+        refused.is_none(),
+        "the input backlog refused it: {refused:?}"
+    );
+}
