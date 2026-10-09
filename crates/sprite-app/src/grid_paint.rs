@@ -49,11 +49,14 @@
 //! grid on whole pixels. What it buys is that no edge in the pane is ever half
 //! covered.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, Font, FontFeatures, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Position, Rgba,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Position, Rgba, ShapedLine,
     SharedString, StrikethroughStyle, Style, TextRun, Window, fill, outline, point, px, relative,
     rgb,
 };
@@ -71,6 +74,148 @@ use crate::grid::{Col, Row, Snapped, column_edge, row_edge};
 /// A fraction rather than a constant, because a cursor two logical pixels wide
 /// is a bold stripe at size 8 and nearly invisible at size 48.
 pub(crate) const CURSOR_STROKE: f32 = 0.12;
+
+#[cfg(test)]
+thread_local! {
+    /// How many cells this thread has asked the text system to shape. Counted
+    /// beside the one grid `shape_line` call, so a test can see what a frame
+    /// actually cost.
+    pub(crate) static SHAPED_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The most distinct shapes a pane keeps for reuse.
+///
+/// A shaped line carries room for thirty-two decoration runs inline, a few
+/// kilobytes each, so one shape is shared by every cell that would shape
+/// identically and the pool of them is bounded. A screen of ordinary text
+/// needs a few hundred; output that gives every cell its own truecolour simply
+/// starts the pool again when it fills.
+const MAX_DISTINCT_SHAPES: usize = 4096;
+
+/// What every cached shape depends on besides the cell itself.
+///
+/// A change to any of it changes how every glyph is shaped or coloured, so the
+/// whole cache goes rather than being checked cell by cell.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ShapeContext {
+    pub family: SharedString,
+    pub font_size: Pixels,
+    pub scale: f32,
+    pub default_fg: Rgb,
+    pub default_bg: Rgb,
+    pub palette: Option<Arc<[Rgb; 256]>>,
+}
+
+/// Everything that makes two cells shape to the same line.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ShapeKey {
+    text: SharedString,
+    bold: bool,
+    italic: bool,
+    /// A hovered link is drawn a pixel larger.
+    enlarged: bool,
+    /// The drawn colour, bit for bit: the text system bakes it into the line.
+    color: [u32; 4],
+}
+
+fn color_bits(color: Rgba) -> [u32; 4] {
+    [
+        color.r.to_bits(),
+        color.g.to_bits(),
+        color.b.to_bits(),
+        color.a.to_bits(),
+    ]
+}
+
+/// One cell's slot: the colour it was shaped in, and the shape.
+type ShapedSlot = Option<(Rgba, Arc<ShapedLine>)>;
+
+/// The shapes of one laid-out row.
+#[derive(Default)]
+struct ShapedRow {
+    /// The row these shapes belong to. The layout cache hands back the same
+    /// allocation while a row is unchanged, so a different one means the row
+    /// was rebuilt and its shapes start again.
+    source: Option<Arc<Vec<PositionedCell>>>,
+    cells: Vec<ShapedSlot>,
+}
+
+/// Shaped glyphs kept between frames, filled lazily as cells are painted.
+///
+/// Sits beside the layout cache: rows the layout reuses keep their shapes, and
+/// a cell is shaped again only when the colour it is drawn in differs from the
+/// one it was shaped in. Shapes themselves are pooled, so a rebuilt row whose
+/// cells look as they did before finds them without asking the text system.
+#[derive(Default)]
+pub(crate) struct ShapeCache {
+    context: Option<ShapeContext>,
+    rows: Vec<ShapedRow>,
+    shapes: HashMap<ShapeKey, Arc<ShapedLine>>,
+}
+
+impl ShapeCache {
+    /// Starts a frame of `rows` rows drawn under `context`, dropping every
+    /// shape if the font, theme or scale changed since the last.
+    pub(crate) fn begin_frame(&mut self, context: ShapeContext, rows: usize) {
+        if self.context.as_ref() != Some(&context) {
+            self.context = Some(context);
+            self.rows.clear();
+            self.shapes.clear();
+        }
+        self.rows.truncate(rows);
+    }
+
+    /// The shape for cell `column` of row `row`, drawn in `color`, calling
+    /// `shape` only when neither the row nor the pool already holds it.
+    pub(crate) fn shaped(
+        &mut self,
+        row: usize,
+        cells: &Arc<Vec<PositionedCell>>,
+        column: usize,
+        color: Rgba,
+        shape: impl FnOnce() -> ShapedLine,
+    ) -> Arc<ShapedLine> {
+        if self.rows.len() <= row {
+            self.rows.resize_with(row + 1, ShapedRow::default);
+        }
+        let slots = &mut self.rows[row];
+        if !slots
+            .source
+            .as_ref()
+            .is_some_and(|source| Arc::ptr_eq(source, cells))
+        {
+            slots.source = Some(Arc::clone(cells));
+            slots.cells.clear();
+            slots.cells.resize(cells.len(), None);
+        }
+        if let Some((drawn, line)) = &slots.cells[column]
+            && *drawn == color
+        {
+            return Arc::clone(line);
+        }
+        let cell = &cells[column];
+        let key = ShapeKey {
+            text: cell.text.clone(),
+            bold: cell.style.bold,
+            italic: cell.style.italic,
+            enlarged: cell.hovered_link,
+            color: color_bits(color),
+        };
+        let line = match self.shapes.get(&key) {
+            Some(line) => Arc::clone(line),
+            None => {
+                if self.shapes.len() >= MAX_DISTINCT_SHAPES {
+                    self.shapes.clear();
+                }
+                let line = Arc::new(shape());
+                self.shapes.insert(key, Arc::clone(&line));
+                line
+            }
+        };
+        slots.cells[column] = Some((color, Arc::clone(&line)));
+        line
+    }
+}
 
 /// Which part of a row a pass draws.
 ///
@@ -203,6 +348,7 @@ pub(crate) struct GridPaint {
     cell_height: Pixels,
     font_family: SharedString,
     font_size: Pixels,
+    shapes: Rc<RefCell<ShapeCache>>,
 }
 
 /// Everything one row pass needs to paint itself.
@@ -222,6 +368,7 @@ pub(crate) struct GridPaintSpec {
     pub cell_height: Pixels,
     pub font_family: SharedString,
     pub font_size: Pixels,
+    pub shapes: Rc<RefCell<ShapeCache>>,
     /// Whether the pane has Pane Focus. Without it a block cursor is drawn as
     /// its outline.
     pub focused: bool,
@@ -233,6 +380,7 @@ impl GridPaint {
         rows: crate::grid::PositionedRows,
         metrics: &crate::surface::render::GridMetrics,
         split: bool,
+        shapes: &Rc<RefCell<ShapeCache>>,
     ) -> (Self, Option<Self>) {
         let cursor = snapshot
             .map(|snapshot| snapshot.cursor)
@@ -252,6 +400,7 @@ impl GridPaint {
                 cell_height: metrics.cells.height(),
                 font_family: metrics.cells.family(),
                 font_size: metrics.cells.font_size(),
+                shapes: Rc::clone(shapes),
                 focused: metrics.focused,
             },
             split,
@@ -265,6 +414,7 @@ impl GridPaint {
                 pass: RowPass::Background,
                 palette: spec.palette.clone(),
                 font_family: spec.font_family.clone(),
+                shapes: Rc::clone(&spec.shapes),
                 ..spec
             });
             spec.pass = RowPass::Text;
@@ -324,6 +474,19 @@ impl GridPaint {
             cell_height: spec.cell_height,
             font_family: spec.font_family,
             font_size: spec.font_size,
+            shapes: spec.shapes,
+        }
+    }
+
+    /// What the shapes this element paints depend on, at `scale`.
+    fn shape_context(&self, scale: f32) -> ShapeContext {
+        ShapeContext {
+            family: self.font_family.clone(),
+            font_size: self.font_size,
+            scale,
+            default_fg: self.default_fg,
+            default_bg: self.default_bg,
+            palette: self.palette.clone(),
         }
     }
 }
@@ -488,6 +651,17 @@ struct CellBounds {
     bottom: Snapped,
 }
 
+/// Which laid-out cell a glyph is, and the cache its shape is kept in.
+///
+/// One argument rather than four: the cache keys a shape by the row's
+/// allocation and the cell's place in it, and those travel together.
+struct GlyphTarget<'a> {
+    row: usize,
+    cells: &'a Arc<Vec<PositionedCell>>,
+    column: usize,
+    shapes: &'a mut ShapeCache,
+}
+
 impl Element for GridPaint {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -559,6 +733,11 @@ impl Element for GridPaint {
         let row_edge = |row: Row| row_edge(bounds.origin.y, self.cell_height, row, scale);
 
         let rows = Arc::clone(&self.rows);
+        let shapes = Rc::clone(&self.shapes);
+        let mut shapes = shapes.borrow_mut();
+        if self.pass != RowPass::Background {
+            shapes.begin_frame(self.shape_context(scale), rows.len());
+        }
         // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
             let top = row_edge(Row(index));
@@ -611,7 +790,7 @@ impl Element for GridPaint {
                 continue;
             }
 
-            for (cell, drawn) in cells.iter().zip(resolved.clone()) {
+            for (column, (cell, drawn)) in cells.iter().zip(resolved.clone()).enumerate() {
                 let span = cell.span();
                 let bounds = CellBounds {
                     left: edge(Col(span.start)),
@@ -619,7 +798,13 @@ impl Element for GridPaint {
                     top,
                     bottom,
                 };
-                self.paint_glyph(cell, &drawn, bounds, scale, window, cx);
+                let target = GlyphTarget {
+                    row: index,
+                    cells,
+                    column,
+                    shapes: &mut shapes,
+                };
+                self.paint_glyph(target, &drawn, bounds, scale, window, cx);
                 self.paint_decorations(cell, &drawn, bounds, window);
                 self.paint_cursor(&drawn, bounds, scale, window);
             }
@@ -631,17 +816,32 @@ fn blank_glyph(text: &str) -> bool {
     text.is_empty() || text.chars().all(char::is_whitespace) || text.starts_with('\u{10eeee}')
 }
 
+/// Whether a cell's text goes to the text system, rather than being skipped
+/// as blank or drawn as block or box geometry. `paint_glyph` makes the same
+/// decision in the same order.
+pub(crate) fn reaches_text_system(text: &str) -> bool {
+    if blank_glyph(text) {
+        return false;
+    }
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => block_fill(ch).is_none() && box_glyph(ch).is_none(),
+        _ => true,
+    }
+}
+
 impl GridPaint {
     /// Draws one cell's text on its own pixel, clipped to its own column.
     fn paint_glyph(
         &self,
-        cell: &PositionedCell,
+        target: GlyphTarget<'_>,
         drawn: &Drawn,
         bounds: CellBounds,
         scale: f32,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let cell = &target.cells[target.column];
         // A cell holding nothing but blanks has no ink, and shaping one costs
         // the same as shaping a letter. Most of a terminal is blank.
         if blank_glyph(&cell.text) {
@@ -662,24 +862,37 @@ impl GridPaint {
         if self.paint_box(cell, drawn, bounds, scale, window) {
             return;
         }
+        debug_assert!(reaches_text_system(&cell.text));
 
-        let text = cell.text.clone();
-        let run = TextRun {
-            len: text.len(),
-            font: terminal_font(&self.font_family, cell.style.bold, cell.style.italic),
-            color: drawn.foreground.into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let font_size = if cell.hovered_link {
-            self.font_size + px(1.0)
-        } else {
-            self.font_size
-        };
-        let line = window
-            .text_system()
-            .shape_line(text, font_size, &[run], None);
+        // Shaped once for the colour it is drawn in and kept with its row: a
+        // frame that changes nothing about this cell reuses the shape, so an
+        // idle or blinking pane asks the text system for nothing.
+        let line = target.shapes.shaped(
+            target.row,
+            target.cells,
+            target.column,
+            drawn.foreground,
+            || {
+                #[cfg(test)]
+                SHAPED_CELLS.with(|count| count.set(count.get() + 1));
+                let run = TextRun {
+                    len: cell.text.len(),
+                    font: terminal_font(&self.font_family, cell.style.bold, cell.style.italic),
+                    color: drawn.foreground.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let font_size = if cell.hovered_link {
+                    self.font_size + px(1.0)
+                } else {
+                    self.font_size
+                };
+                window
+                    .text_system()
+                    .shape_line(cell.text.clone(), font_size, &[run], None)
+            },
+        );
 
         // The origin is the cell's snapped corner, the same one its background
         // and its neighbours use. The text system rasterises a glyph at one of
@@ -922,6 +1135,58 @@ impl IntoElement for GridPaint {
 mod tests {
     use super::*;
     use crate::tokens::unpack;
+
+    /// A view that paints one fixture snapshot through the live painter, so a
+    /// test can count what a real frame asks the text system for.
+    struct ShapeProbe {
+        snapshot: RenderSnapshot,
+        layout: crate::grid::LayoutCache,
+        shapes: Rc<RefCell<ShapeCache>>,
+        blink_on: bool,
+        font_size: Pixels,
+    }
+
+    impl gpui::Render for ShapeProbe {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            use gpui::{ParentElement, Styled};
+            let rows = crate::grid::prepare_rows(&mut self.layout, Some(&self.snapshot), None);
+            let cursor =
+                Some(self.snapshot.cursor).filter(|cursor| self.blink_on || !cursor.blinking);
+            let (paint, _) = GridPaint::prepare_spec(
+                GridPaintSpec {
+                    rows,
+                    pass: RowPass::Whole,
+                    cursor,
+                    cursor_color: self.snapshot.cursor_color,
+                    default_fg: self.snapshot.default_foreground,
+                    default_bg: self.snapshot.default_background,
+                    palette: Some(Arc::clone(&self.snapshot.palette)),
+                    cell_width: px(8.4),
+                    cell_height: px(18.0),
+                    font_family: "monospace".into(),
+                    font_size: self.font_size,
+                    focused: true,
+                    shapes: Rc::clone(&self.shapes),
+                },
+                false,
+            );
+            gpui::div().size_full().child(paint)
+        }
+    }
+
+    /// Asks the cache for one cell and reports whether it had to shape.
+    fn shapes_anew(cache: &mut ShapeCache, cells: &Arc<Vec<PositionedCell>>, color: Rgba) -> bool {
+        let mut shaped = false;
+        let _ = cache.shaped(0, cells, 0, color, || {
+            shaped = true;
+            ShapedLine::default()
+        });
+        shaped
+    }
 
     #[test]
     fn benchmark_samples_prepare_real_blink_hover_and_one_row_transitions() {
@@ -1339,6 +1604,7 @@ mod tests {
             cell_height: px(16.8),
             font_family: ".SystemUIFont".into(),
             font_size: px(14.0),
+            shapes: Default::default(),
             focused: true,
         });
         for text in ["", " ", "\t", "\u{3000}", "\u{10eeee}"] {
@@ -1407,6 +1673,7 @@ mod tests {
             cell_height: px(16.8),
             font_family: ".SystemUIFont".into(),
             font_size: px(14.0),
+            shapes: Default::default(),
             focused,
         };
         let block = CursorSnapshot {
@@ -1533,5 +1800,133 @@ mod tests {
         assert_eq!(strikethrough.expect("strikethrough").thickness, px(3.0));
         let (thin, _) = decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(8.0));
         assert_eq!(thin.expect("underline").thickness, px(1.0));
+    }
+
+    /// The gate R-R1 sets, counted where Sprite calls `shape_line`: an
+    /// unchanged frame shapes nothing, a blink at most the cursor's cell, a
+    /// one-row change only that row, and a font or theme change everything a
+    /// cold cache would.
+    #[gpui::test]
+    fn shaping_happens_only_for_cells_whose_drawn_text_changed(cx: &mut gpui::TestAppContext) {
+        let (probe, cx) = cx.add_window_view(|_, _| ShapeProbe {
+            snapshot: crate::paint_benchmark::fixture(),
+            layout: Default::default(),
+            shapes: Default::default(),
+            blink_on: true,
+            font_size: px(14.0),
+        });
+        let frame = |cx: &mut gpui::VisualTestContext| -> usize {
+            SHAPED_CELLS.with(|count| count.set(0));
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            SHAPED_CELLS.with(|count| count.get())
+        };
+
+        // Opening the window already painted a frame, so the count starts
+        // from a cold cache to see what a first frame costs.
+        probe.update(cx, |probe, _| probe.shapes = Rc::default());
+        let first = frame(cx);
+        assert!(first > 0, "the first frame shapes what it shows");
+        assert_eq!(frame(cx), 0, "an unchanged frame shapes nothing");
+
+        probe.update(cx, |probe, _| probe.blink_on = false);
+        assert!(frame(cx) <= 1, "a blink reshapes at most the cursor's cell");
+        probe.update(cx, |probe, _| probe.blink_on = true);
+        assert!(frame(cx) <= 1, "a blink reshapes at most the cursor's cell");
+
+        probe.update(cx, |probe, _| {
+            probe.snapshot.generation += 1;
+            Arc::make_mut(&mut probe.snapshot.rows[30]).cells[10].text = "Z".into();
+        });
+        let shapeable = probe.update(cx, |probe, _| {
+            crate::grid::lay_out_row(&probe.snapshot.rows[30])
+                .iter()
+                .filter(|cell| reaches_text_system(&cell.text))
+                .count()
+        });
+        let one_row = frame(cx);
+        assert!(one_row >= 1, "the changed cell is shaped");
+        assert!(
+            one_row <= shapeable,
+            "only the changed row may reshape: {one_row} shapes for {shapeable} cells"
+        );
+
+        probe.update(cx, |probe, _| probe.font_size = px(15.0));
+        let refont = frame(cx);
+        probe.update(cx, |probe, _| probe.shapes = Rc::default());
+        let cold = frame(cx);
+        assert!(cold > 0);
+        assert_eq!(
+            refont, cold,
+            "a font change reshapes everything a cold cache would"
+        );
+
+        probe.update(cx, |probe, _| probe.snapshot.default_foreground.r ^= 0xff);
+        let rethemed = frame(cx);
+        probe.update(cx, |probe, _| probe.shapes = Rc::default());
+        assert_eq!(
+            rethemed,
+            frame(cx),
+            "a theme change reshapes everything a cold cache would"
+        );
+    }
+
+    /// Scale factor cannot be changed on a test window, so its invalidation is
+    /// checked on the cache directly, alongside colour and row identity.
+    #[test]
+    fn a_scale_or_font_change_drops_every_cached_shape() {
+        let context = |scale: f32, font_size: f32| ShapeContext {
+            family: "monospace".into(),
+            font_size: px(font_size),
+            scale,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x000000),
+            palette: None,
+        };
+        let row = || {
+            Arc::new(vec![PositionedCell {
+                column: 0,
+                columns: 1,
+                text: "a".into(),
+                style: plain_style(SnapshotColor::Default, SnapshotColor::Default, false),
+                selected: false,
+                hovered_link: false,
+            }])
+        };
+        let white = rgb(0xffffff);
+        let mut cache = ShapeCache::default();
+        let cells = row();
+        cache.begin_frame(context(2.0, 14.0), 1);
+        assert!(shapes_anew(&mut cache, &cells, white));
+        cache.begin_frame(context(2.0, 14.0), 1);
+        assert!(
+            !shapes_anew(&mut cache, &cells, white),
+            "an unchanged frame reuses the shape"
+        );
+        assert!(
+            shapes_anew(&mut cache, &cells, rgb(0xff0000)),
+            "a new drawn colour reshapes"
+        );
+        assert!(
+            !shapes_anew(&mut cache, &cells, white),
+            "the earlier colour is still pooled"
+        );
+        let rebuilt = row();
+        assert!(
+            !shapes_anew(&mut cache, &rebuilt, white),
+            "a rebuilt row with the same text finds its shape in the pool"
+        );
+        cache.begin_frame(context(1.0, 14.0), 1);
+        assert!(
+            shapes_anew(&mut cache, &rebuilt, white),
+            "a scale change reshapes"
+        );
+        cache.begin_frame(context(1.0, 16.0), 1);
+        assert!(
+            shapes_anew(&mut cache, &rebuilt, white),
+            "a font size change reshapes"
+        );
     }
 }

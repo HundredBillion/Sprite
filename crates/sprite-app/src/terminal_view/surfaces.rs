@@ -42,6 +42,8 @@ pub(super) enum Body {
         /// element root's box does. A grid root refuses `style` and `border`,
         /// so those never arrive here.
         root: Element,
+        /// The grid's shaped glyphs, kept between frames as the terminal's are.
+        shapes: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
     },
     /// The renderer replaces this model later without changing the wire mutation seam.
     List {
@@ -59,6 +61,7 @@ impl Body {
             Element::Grid { size, .. } => Body::Grid {
                 grid: Box::new(GridSurface::new(size.cols, size.rows)),
                 root,
+                shapes: Default::default(),
             },
             Element::VirtualList { config } => {
                 let config = config.as_ref().clone();
@@ -1135,8 +1138,8 @@ impl TerminalView {
                 Some(cx.entity()),
                 images,
             ),
-            Body::Grid { grid, .. } => {
-                crate::surface::render::render_grid(grid, highlights, metrics)
+            Body::Grid { grid, shapes, .. } => {
+                crate::surface::render::render_grid(grid, highlights, metrics, shapes)
             }
             Body::List { view, .. } => {
                 let focused = focused == Some(&surface.focus);

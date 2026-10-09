@@ -314,7 +314,8 @@ impl Render for TerminalView {
         // is above the text, so the common case never pays for it.
         let split = !below_background.is_empty() || !below_text.is_empty();
 
-        let (background_grid, text_grid) = GridPaint::prepare(snapshot, rows, &metrics, split);
+        let (background_grid, text_grid) =
+            GridPaint::prepare(snapshot, rows, &metrics, split, &self.shape_cache);
 
         // With nothing hosted, the frame must cost what it cost before
         // Surfaces existed: no registry clone, no layer construction.

@@ -3,7 +3,9 @@
 //! kept by their SVG text, so redraws — and updates that keep an SVG —
 //! reuse them, and an update releases the ones it no longer draws.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
 use gpui::{
@@ -13,7 +15,7 @@ use gpui::{
 use sprite_term::Rgb;
 
 use crate::config::Highlights;
-use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass, pack};
+use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass, ShapeCache, pack};
 use crate::surface::SurfaceId;
 use crate::surface::channel::{SurfaceConnection, event_click};
 use crate::surface::description::{Description, Element};
@@ -302,6 +304,7 @@ pub(crate) fn render_grid(
     grid: &mut GridSurface,
     highlights: &Highlights,
     metrics: &GridMetrics,
+    shapes: &Rc<RefCell<ShapeCache>>,
 ) -> AnyElement {
     let (default_fg, default_bg) = grid.default_colors(metrics.defaults);
     // A blinking cursor is absent for half of each blink, exactly as the
@@ -322,6 +325,7 @@ pub(crate) fn render_grid(
         cell_height: metrics.cells.height(),
         font_family: metrics.cells.family().clone(),
         font_size: metrics.cells.font_size(),
+        shapes: Rc::clone(shapes),
         focused: metrics.focused,
     });
     let width = px(f32::from(metrics.cells.width()) * f32::from(grid.cols()));
@@ -830,7 +834,12 @@ mod tests {
         };
         // As for element Surfaces: the tree is rebuilt every frame and needs no
         // window to build; only painting does.
-        let _element = render_grid(&mut grid, &crate::config::Highlights::default(), &metrics);
+        let _element = render_grid(
+            &mut grid,
+            &crate::config::Highlights::default(),
+            &metrics,
+            &Rc::default(),
+        );
     }
 
     fn metrics(cell_width: f32, cell_height: f32) -> GridMetrics {

@@ -101,15 +101,18 @@ fn surface_allocation_probe() {
         "grid cell_bytes={} create allocations={a} bytes={b}",
         std::mem::size_of::<Cell>()
     );
-    let (_, a, b) = measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics));
+    let shapes = std::rc::Rc::default();
+    let (_, a, b) =
+        measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics, &shapes));
     println!("grid first render allocations={a} bytes={b}");
-    let (_, a, b) = measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics));
+    let (_, a, b) =
+        measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics, &shapes));
     println!("grid idle render allocations={a} bytes={b}");
     assert!(a <= 1 && b <= 1_024);
     let op = parse_ops(&json!({"type":"rows","rows":[{"row":30,"cells":[["👩‍💻",2]]}]})).unwrap();
     let (_, a, b) = measure(|| {
         grid.apply_all(op).unwrap();
-        render::render_grid(&mut grid, &Highlights::default(), &metrics)
+        render::render_grid(&mut grid, &Highlights::default(), &metrics, &shapes)
     });
     println!("grid one-row update/render allocations={a} bytes={b}");
     // Each laid-out cell carries its paint-ready text, which is 8 bytes wider

@@ -40,6 +40,7 @@ pub struct PaintBenchmark {
     snapshot: RenderSnapshot,
     changed: RenderSnapshot,
     cache: crate::grid::LayoutCache,
+    shapes: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
 }
 
 impl Default for PaintBenchmark {
@@ -59,6 +60,7 @@ impl PaintBenchmark {
             snapshot,
             changed,
             cache: Default::default(),
+            shapes: Default::default(),
         }
     }
 
@@ -103,6 +105,7 @@ impl PaintBenchmark {
                 cell_height: px(18.0),
                 font_family: "monospace".into(),
                 font_size: px(14.0),
+                shapes: std::rc::Rc::clone(&self.shapes),
                 focused: true,
             },
             split,
