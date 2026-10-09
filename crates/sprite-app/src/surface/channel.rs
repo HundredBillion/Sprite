@@ -231,7 +231,8 @@ struct Queue {
     /// Newline-terminated event lines, in the order they were sent.
     queued: Vec<u8>,
     /// Bytes the writer has taken from `queued` and is still writing. They
-    /// count against the bound until the write returns.
+    /// count against the bound until the write returns or the connection
+    /// dies.
     in_flight: usize,
     /// The writer thread has returned.
     #[cfg(test)]
@@ -269,9 +270,12 @@ impl Shared {
     /// the socket is closed both ways too, so the connection thread's blocked
     /// read and the writer's blocked write both return at once. A refused
     /// open leaves it open: the connection thread writes the refusal next.
+    /// A write still in progress no longer counts as pending: it can only
+    /// fail now, so a dead connection holds nothing.
     fn kill(&self, mut queue: MutexGuard<'_, Queue>, shut_down: bool) {
         queue.dead = true;
         queue.queued = Vec::new();
+        queue.in_flight = 0;
         drop(queue);
         if shut_down {
             let _ = self.stream.shutdown(Shutdown::Both);
