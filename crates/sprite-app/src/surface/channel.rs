@@ -10,13 +10,13 @@
 //! newline-delimited JSON. The connection closing — or the program dying —
 //! removes the Surface, so nothing is ever left on screen without an owner.
 
+use crate::workspace::{Patience, Relayed};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,6 +52,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
 /// How long a connection waits for the window to answer a request.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The same wait, plus the bounded extra wait for a request the window has
+/// already claimed.
+const REPLY_PATIENCE: Patience = Patience::new(REPLY_TIMEOUT);
 
 const NOT_ANSWERING: &str = "this window is no longer answering";
 const NO_ANSWER: &str = "this window did not answer in time";
@@ -396,8 +399,8 @@ impl std::fmt::Debug for SurfaceConnection {
 }
 
 /// How the window answers a request: once, or not at all if it is closing.
-pub type Reply = SyncSender<Result<(), Refusal>>;
-pub type JsonReply = SyncSender<Result<Value, Refusal>>;
+pub type Reply = Relayed<Result<(), Refusal>>;
+pub type JsonReply = Relayed<Result<Value, Refusal>>;
 
 /// What a connection asks the window to do. Crosses from a connection thread
 /// to the GPUI thread; the pane is named so the window can find the view.
@@ -495,6 +498,27 @@ impl SurfaceRequest {
             | Self::Closed { .. }
             | Self::Grid { .. }
             | Self::List { .. } => {}
+        }
+    }
+
+    /// Takes a request that is waiting for an answer, so the window may act
+    /// on it.
+    ///
+    /// False only when its connection has already given up and told its
+    /// program so; such a request must be dropped unapplied. A request nobody
+    /// waits on is always the window's.
+    pub(crate) fn claim(&self) -> bool {
+        match self {
+            Self::Capabilities { reply, .. } => reply.claim(),
+            Self::Open { reply, .. }
+            | Self::FocusPane { reply, .. }
+            | Self::RegisterToken { reply, .. } => reply.claim(),
+            Self::Update { .. }
+            | Self::Focus { .. }
+            | Self::Close { .. }
+            | Self::Closed { .. }
+            | Self::Grid { .. }
+            | Self::List { .. } => true,
         }
     }
 }
@@ -652,7 +676,7 @@ fn serve_surface(
     let handle = connection.clone();
     let id = SurfaceId(NEXT_SURFACE.fetch_add(1, Ordering::SeqCst));
     use crate::workspace::{RelayError, relay};
-    match relay(requests, REPLY_TIMEOUT, |reply| SurfaceRequest::Open {
+    match relay(requests, REPLY_PATIENCE, |reply| SurfaceRequest::Open {
         id,
         pane,
         open,
@@ -672,13 +696,14 @@ fn serve_surface(
             refuse(&mut stream, NOT_ANSWERING);
             return;
         }
-        Err(RelayError::Timeout) => {
+        // The wire reason is the same either way. An abandoned `Open` is
+        // dropped unapplied, but one the window claimed may still place a
+        // Surface after this; telling the window this Surface is already gone
+        // covers both, so it never keeps one with a dead connection.
+        // `close_surface` ignores an unknown id.
+        Err(RelayError::Timeout | RelayError::Applying) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
-            // The `Open` may still be sitting in the window's queue and get
-            // served later; tell the window this Surface is already gone so
-            // it never places one with a dead connection. `close_surface`
-            // ignores an unknown id, so this is safe either way.
             let _ = requests.send_blocking(SurfaceRequest::Closed { id, pane });
             return;
         }
@@ -731,18 +756,20 @@ fn serve_surface(
 fn one_shot<T>(
     stream: &mut UnixStream,
     requests: &async_channel::Sender<SurfaceRequest>,
-    request: impl FnOnce(SyncSender<Result<T, Refusal>>) -> SurfaceRequest,
+    request: impl FnOnce(Relayed<Result<T, Refusal>>) -> SurfaceRequest,
     success: impl FnOnce(T) -> String,
 ) {
     use crate::workspace::{RelayError, relay};
-    match relay(requests, REPLY_TIMEOUT, request) {
+    match relay(requests, REPLY_PATIENCE, request) {
         Ok(Ok(value)) => {
             let _ = writeln!(stream, "{}", success(value));
             let _ = stream.shutdown(Shutdown::Write);
         }
         Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
         Err(RelayError::Disconnected) => refuse(stream, NOT_ANSWERING),
-        Err(RelayError::Timeout) => refuse(stream, NO_ANSWER),
+        // The refusal on the wire is unchanged. It says the window did not
+        // answer, which is true of both, and never that nothing changed.
+        Err(RelayError::Timeout | RelayError::Applying) => refuse(stream, NO_ANSWER),
     }
 }
 

@@ -1749,7 +1749,7 @@ mod tests {
                 id,
                 open,
                 connection: connection.clone(),
-                reply,
+                reply: reply.into(),
             },
         );
         let answer = receiver.try_recv().unwrap();
@@ -2184,7 +2184,7 @@ mod tests {
                 pane,
                 owner_pid: std::process::id(),
                 return_target: ReturnTarget::Terminal,
-                reply,
+                reply: reply.into(),
             },
         );
         assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
@@ -2265,7 +2265,7 @@ mod tests {
             SurfaceRequest::FocusPane {
                 pane,
                 target: FocusTarget::Terminal,
-                reply,
+                reply: reply.into(),
             },
         );
         assert_eq!(receiver.try_recv().unwrap(), Ok(()));
@@ -2421,7 +2421,7 @@ mod tests {
                     pane,
                     owner_pid: pid,
                     return_target: ReturnTarget::Terminal,
-                    reply,
+                    reply: reply.into(),
                 },
             );
             let answer = receiver.try_recv().unwrap();
@@ -2480,7 +2480,7 @@ mod tests {
                 pane,
                 owner_pid,
                 return_target: ReturnTarget::Terminal,
-                reply,
+                reply: reply.into(),
             },
         );
         assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));

@@ -575,7 +575,7 @@ mod tests {
                 .reload_sender
                 .try_send(ReloadRequest {
                     what: ConfigVerb::Reload,
-                    reply,
+                    reply: reply.into(),
                     reply_connection: None,
                 })
                 .unwrap();

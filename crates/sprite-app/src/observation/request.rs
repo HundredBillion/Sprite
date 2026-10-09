@@ -20,7 +20,7 @@ use crate::observation::broker::{self, Denied, PaneSource, Refusal};
 use crate::observation::endpoint::DENIED;
 use crate::observation::schema;
 use crate::pane_tree::PaneId;
-use crate::workspace::ReloadRequest;
+use crate::workspace::{Patience, ReloadRequest};
 
 /// Which panes a caller asked about.
 ///
@@ -209,7 +209,7 @@ pub(crate) enum ConfigVerb {
 }
 
 /// How long an endpoint thread will wait for the window to answer a reload.
-const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const RELOAD_PATIENCE: Patience = Patience::new(std::time::Duration::from_secs(2));
 
 /// Answers one authenticated request.
 ///
@@ -240,7 +240,7 @@ pub(crate) fn respond(
     // rule observation lives by: a caller that could not read this window's
     // panes cannot reload its settings either.
     if let Some(verb) = config_request(body) {
-        return ask_window(reload, verb, reply_connection);
+        return ask_window(reload, verb, reply_connection, RELOAD_PATIENCE);
     }
     let query = match parse(body) {
         Ok(query) => query,
@@ -306,22 +306,30 @@ fn config_request(body: &str) -> Option<ConfigVerb> {
     }
 }
 
-/// Hands the question to the GPUI thread and waits, briefly, for its answer.
+/// Hands the question to the GPUI thread and waits, within `patience`, for
+/// its answer.
 fn ask_window(
     reload: &async_channel::Sender<ReloadRequest>,
     what: ConfigVerb,
     reply_connection: Option<crate::local_socket::ReplyConnection>,
+    patience: Patience,
 ) -> String {
     use crate::workspace::{RelayError, relay};
-    match relay(reload, RELOAD_TIMEOUT, |reply| ReloadRequest {
+    match relay(reload, patience, |reply| ReloadRequest {
         what,
         reply,
         reply_connection,
     }) {
         Ok(answer) => answer,
         Err(RelayError::Disconnected) => "this window is no longer answering".to_owned(),
+        // Said only once the request is abandoned, which the window can then
+        // no longer apply.
         Err(RelayError::Timeout) => {
             "this window did not answer in time; nothing was changed".to_owned()
+        }
+        // The window took the request, so the change may be happening now.
+        Err(RelayError::Applying) => {
+            "the window accepted this request and is still applying it".to_owned()
         }
     }
 }
@@ -329,10 +337,13 @@ fn ask_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigVerb, DENIED, Query, ReloadRequest, Scope, config_request, parse, render, respond,
+        ConfigVerb, DENIED, Query, ReloadRequest, Scope, ask_window, config_request, parse, render,
+        respond,
     };
     use crate::pane_tree::PaneId;
+    use crate::workspace::Patience;
     use sprite_term::HistoryLines;
+    use std::time::Duration;
 
     #[test]
     fn surface_verbs_cannot_enter_the_observation_grammar() {
@@ -601,6 +612,62 @@ mod tests {
         assert_eq!(
             answer, DENIED,
             "a pane outside this window must get the plain refusal"
+        );
+    }
+
+    /// "Nothing was changed" is said only about a request the window can no
+    /// longer apply.
+    #[test]
+    fn a_reload_the_window_never_took_says_nothing_was_changed() {
+        let (reload, requests) = async_channel::bounded::<ReloadRequest>(1);
+        let answer = ask_window(
+            &reload,
+            ConfigVerb::Reload,
+            None,
+            Patience {
+                answer: Duration::from_millis(30),
+                after_claim: Duration::from_secs(5),
+            },
+        );
+        assert_eq!(
+            answer,
+            "this window did not answer in time; nothing was changed"
+        );
+        let late = requests.try_recv().expect("the request is still queued");
+        assert!(!late.reply.claim(), "and the window can no longer apply it");
+    }
+
+    /// A reload the window has taken but not finished is reported as under
+    /// way, never as unchanged.
+    #[test]
+    fn a_reload_the_window_took_but_has_not_finished_is_still_applying() {
+        let (reload, requests) = async_channel::bounded::<ReloadRequest>(1);
+        let (finished, done) = std::sync::mpsc::channel::<()>();
+        let window = std::thread::spawn(move || {
+            let request = requests
+                .recv_blocking()
+                .expect("a request reached the window");
+            assert!(request.reply.claim(), "taken before the endpoint gave up");
+            // Held open without an answer, as a window still applying would.
+            let _ = done.recv();
+            drop(request);
+        });
+        // A first wait long enough that the stand-in window certainly claims
+        // the request inside it.
+        let answer = ask_window(
+            &reload,
+            ConfigVerb::Reload,
+            None,
+            Patience {
+                answer: Duration::from_secs(1),
+                after_claim: Duration::from_millis(100),
+            },
+        );
+        finished.send(()).unwrap();
+        window.join().unwrap();
+        assert_eq!(
+            answer,
+            "the window accepted this request and is still applying it"
         );
     }
 }

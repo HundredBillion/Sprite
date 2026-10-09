@@ -105,31 +105,180 @@ pub(super) fn open_endpoint(
 ///
 /// The reply travels on a `std::sync::mpsc` channel rather than an async one
 /// because the waiting side is a plain thread that needs a *timeout*: a wedged
-/// GPUI thread must cost the endpoint one two-second wait, not a thread that
-/// never returns.
+/// GPUI thread must cost the endpoint a bounded wait, not a thread that never
+/// returns. It carries the request's claim, which the window must win before
+/// it reloads anything.
 pub(crate) struct ReloadRequest {
     pub(crate) what: ConfigVerb,
-    pub(crate) reply: std::sync::mpsc::SyncSender<String>,
+    pub(crate) reply: Relayed<String>,
     pub(crate) reply_connection: Option<crate::local_socket::ReplyConnection>,
 }
 
-pub(crate) enum RelayError {
-    Disconnected,
-    Timeout,
+/// How much longer an asker waits once the window has claimed its request.
+///
+/// Bounded, because a wedged GPUI thread must not pin an endpoint thread and
+/// its connection slot forever. Generous, because by then the work is under
+/// way and the only honest early answer is that it still is.
+pub(crate) const AFTER_CLAIM: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Where one relayed request stands, shared by the thread that asked and the
+/// window that answers.
+///
+/// It starts waiting and leaves that state exactly once: the window claims it
+/// in order to apply it, or the asker abandons it in order to report that
+/// nothing changed. Both moves are one atomic step out of waiting, so
+/// whichever comes second learns that it lost before it acts.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Claim(Arc<std::sync::atomic::AtomicU8>);
+
+impl Claim {
+    const WAITING: u8 = 0;
+    const CLAIMED: u8 = 1;
+    const ABANDONED: u8 = 2;
+
+    fn leave_waiting(&self, to: u8) -> Result<u8, u8> {
+        self.0.compare_exchange(
+            Self::WAITING,
+            to,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+    }
+
+    /// Moves a waiting request to claimed. True when the window may apply it.
+    fn claim(&self) -> bool {
+        matches!(
+            self.leave_waiting(Self::CLAIMED),
+            Ok(_) | Err(Self::CLAIMED)
+        )
+    }
+
+    /// Moves a waiting request to abandoned. True when the window can no
+    /// longer apply it, so the asker may say that nothing changed.
+    pub(crate) fn abandon(&self) -> bool {
+        matches!(
+            self.leave_waiting(Self::ABANDONED),
+            Ok(_) | Err(Self::ABANDONED)
+        )
+    }
 }
 
+/// The answering half of a relayed request: where the answer goes, and the
+/// claim that decides whether there may be one.
+///
+/// Public because Surface requests carry it and are public; only `send` is
+/// usable outside this crate.
+pub struct Relayed<Answer> {
+    claim: Claim,
+    reply: std::sync::mpsc::SyncSender<Answer>,
+}
+
+impl<Answer> Relayed<Answer> {
+    /// A waiting request's reply, and the asker's hold on its claim.
+    pub(crate) fn waiting(reply: std::sync::mpsc::SyncSender<Answer>) -> (Self, Claim) {
+        let claim = Claim::default();
+        (
+            Self {
+                claim: claim.clone(),
+                reply,
+            },
+            claim,
+        )
+    }
+
+    /// Takes the request for applying.
+    ///
+    /// False when the asker has already given up and told its caller that
+    /// nothing changed: the request must then be dropped without being
+    /// applied.
+    pub(crate) fn claim(&self) -> bool {
+        self.claim.claim()
+    }
+
+    /// Sends the answer to an asker that may have stopped listening.
+    pub fn send(&self, answer: Answer) -> Result<(), std::sync::mpsc::SendError<Answer>> {
+        self.reply.send(answer)
+    }
+}
+
+/// A reply nobody has claimed or abandoned yet, for a request built by hand.
+impl<Answer> From<std::sync::mpsc::SyncSender<Answer>> for Relayed<Answer> {
+    fn from(reply: std::sync::mpsc::SyncSender<Answer>) -> Self {
+        Self::waiting(reply).0
+    }
+}
+
+impl<Answer> std::fmt::Debug for Relayed<Answer> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Relayed")
+            .field("claim", &self.claim)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How long an asker waits on the window.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Patience {
+    /// For the window to answer. A request it has not claimed by then is
+    /// abandoned, and will never be applied.
+    pub(crate) answer: std::time::Duration,
+    /// Further, when the window claimed the request before the asker could
+    /// abandon it.
+    pub(crate) after_claim: std::time::Duration,
+}
+
+impl Patience {
+    /// Waits `answer` for the window, and [`AFTER_CLAIM`] more once it has
+    /// claimed the request.
+    pub(crate) const fn new(answer: std::time::Duration) -> Self {
+        Self {
+            answer,
+            after_claim: AFTER_CLAIM,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum RelayError {
+    /// The window is gone; the request never reached it.
+    Disconnected,
+    /// The window did not claim the request in time and now never will, so
+    /// nothing was applied.
+    Timeout,
+    /// The window claimed the request and has not answered within the extra
+    /// wait. It may still be applying it, so nobody may say nothing changed.
+    Applying,
+}
+
+/// Hands a request to the window and waits, within `patience`, for its answer.
+///
+/// The request carries a claim the window must win before acting on it. When
+/// the first wait runs out, the asker tries to abandon the claim instead; only
+/// if that succeeds is the request known never to be applied. If the window
+/// won first, the asker keeps waiting for the real answer, up to
+/// `patience.after_claim`.
 pub(crate) fn relay<Request, Answer>(
     sender: &async_channel::Sender<Request>,
-    timeout: std::time::Duration,
-    request: impl FnOnce(std::sync::mpsc::SyncSender<Answer>) -> Request,
+    patience: Patience,
+    request: impl FnOnce(Relayed<Answer>) -> Request,
 ) -> Result<Answer, RelayError> {
     let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    let (reply, claim) = Relayed::waiting(reply);
     sender
         .send_blocking(request(reply))
         .map_err(|_| RelayError::Disconnected)?;
+    // A reply dropped unanswered ends this wait early too; the claim, not the
+    // channel, then decides what may be said.
+    if let Ok(answer) = answer.recv_timeout(patience.answer) {
+        return Ok(answer);
+    }
+    if claim.abandon() {
+        return Err(RelayError::Timeout);
+    }
     answer
-        .recv_timeout(timeout)
-        .map_err(|_| RelayError::Timeout)
+        .recv_timeout(patience.after_claim)
+        .map_err(|_| RelayError::Applying)
 }
 
 #[cfg(test)]
@@ -364,5 +513,150 @@ mod tests {
             .diff(&Settings::default())
             .describe(std::path::Path::new("/tmp/config.toml"), &[]);
         assert!(unchanged.contains("nothing changed"));
+    }
+
+    /// A reload the endpoint has given up on was reported as "nothing was
+    /// changed", so the window must never apply it afterwards.
+    ///
+    /// The GPUI thread is not run while the endpoint waits, which is exactly
+    /// what a busy window looks like from an endpoint thread; the window then
+    /// reaches the queued request only after the endpoint has answered.
+    #[gpui::test]
+    fn a_reload_the_endpoint_gave_up_on_is_never_applied(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let path = std::env::temp_dir().join(format!(
+            "sprite-abandoned-reload-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "[font]\nsize = 21.0\n").unwrap();
+        let (sender, size_before) = workspace.update(cx, |workspace, _| {
+            workspace.config_path = Some(path.clone());
+            (
+                workspace.reload_sender.clone(),
+                workspace.settings.font.size,
+            )
+        });
+        assert_ne!(size_before, 21.0, "the file must ask for a change");
+
+        let endpoint = std::thread::spawn(move || {
+            relay(
+                &sender,
+                Patience {
+                    answer: std::time::Duration::from_millis(50),
+                    after_claim: std::time::Duration::from_secs(5),
+                },
+                |reply| ReloadRequest {
+                    what: ConfigVerb::Reload,
+                    reply,
+                    reply_connection: None,
+                },
+            )
+        });
+        let outcome = endpoint.join().unwrap();
+        assert!(
+            matches!(outcome, Err(RelayError::Timeout)),
+            "the endpoint gave up and may say nothing changed: {outcome:?}"
+        );
+
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                workspace.reload_sender.is_empty(),
+                "the window took the request off its queue"
+            );
+            assert_eq!(
+                workspace.settings.font.size, size_before,
+                "an abandoned reload must never be applied"
+            );
+        });
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Once the window has claimed a request, its real answer is what the
+    /// asker reports, even when it arrives after the first wait.
+    ///
+    /// Claimed by the asker's own closure, before the request is sent, so the
+    /// claim is certain to precede the asker's attempt to abandon it.
+    #[test]
+    fn a_claimed_request_returns_the_real_answer_after_the_first_wait() {
+        let (sender, requests) = async_channel::bounded::<Relayed<String>>(1);
+        let window = std::thread::spawn(move || {
+            let reply = requests.recv_blocking().expect("a request");
+            crate::test_blocking_wait::pause(std::time::Duration::from_millis(200));
+            reply
+                .send("applied".to_owned())
+                .expect("the asker is still listening");
+        });
+        let started = std::time::Instant::now();
+        let answer = relay(
+            &sender,
+            Patience {
+                answer: std::time::Duration::from_millis(40),
+                after_claim: std::time::Duration::from_secs(5),
+            },
+            |reply: Relayed<String>| {
+                assert!(reply.claim(), "nobody has given up yet");
+                reply
+            },
+        );
+        window.join().unwrap();
+        assert_eq!(answer.expect("the window's real answer"), "applied");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+    }
+
+    /// The wait after a claim is bounded, and what it ends with never says
+    /// nothing was changed.
+    #[test]
+    fn a_claimed_request_that_is_not_answered_in_time_is_still_applying() {
+        let (sender, requests) = async_channel::bounded::<Relayed<String>>(1);
+        let (finished, done) = std::sync::mpsc::channel::<()>();
+        let window = std::thread::spawn(move || {
+            // Held open without an answer, as a window still applying would.
+            let reply = requests.recv_blocking().expect("a request");
+            let _ = done.recv();
+            drop(reply);
+        });
+        let started = std::time::Instant::now();
+        let answer = relay(
+            &sender,
+            Patience {
+                answer: std::time::Duration::from_millis(30),
+                after_claim: std::time::Duration::from_millis(120),
+            },
+            |reply: Relayed<String>| {
+                assert!(reply.claim());
+                reply
+            },
+        );
+        let waited = started.elapsed();
+        finished.send(()).unwrap();
+        window.join().unwrap();
+        assert!(
+            matches!(answer, Err(RelayError::Applying)),
+            "a claimed request is never reported as a timeout: {answer:?}"
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(150),
+            "{waited:?}"
+        );
+        assert!(waited < std::time::Duration::from_secs(2), "{waited:?}");
+    }
+
+    /// Abandoning and claiming exclude each other: a request the asker gave
+    /// up on can no longer be claimed by the window.
+    #[test]
+    fn an_abandoned_request_can_no_longer_be_claimed() {
+        let (sender, requests) = async_channel::bounded::<Relayed<String>>(1);
+        let answer = relay(
+            &sender,
+            Patience {
+                answer: std::time::Duration::from_millis(20),
+                after_claim: std::time::Duration::from_secs(5),
+            },
+            |reply| reply,
+        );
+        assert!(matches!(answer, Err(RelayError::Timeout)), "{answer:?}");
+        let late = requests.try_recv().expect("the request is still queued");
+        assert!(!late.claim(), "the window must drop it unapplied");
     }
 }

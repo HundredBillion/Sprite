@@ -19,7 +19,7 @@ use pane_factory::*;
 mod surface_routing;
 #[cfg(test)]
 mod test_support;
-pub(crate) use reload::{RelayError, ReloadRequest, relay};
+pub(crate) use reload::{Patience, RelayError, Relayed, ReloadRequest, relay};
 
 use gpui::prelude::*;
 use gpui::{
@@ -238,6 +238,12 @@ impl Workspace {
         });
         let reload_task = cx.spawn(async move |workspace, cx| {
             while let Ok(request) = reload_rx.recv().await {
+                // An endpoint that gave up waiting has already told its caller
+                // that nothing was changed. Reloading now would make that
+                // untrue, so a request it abandoned is dropped unapplied.
+                if !request.reply.claim() {
+                    continue;
+                }
                 let answer = workspace
                     .update(cx, |workspace, cx| match request.what {
                         ConfigVerb::Reload => {
