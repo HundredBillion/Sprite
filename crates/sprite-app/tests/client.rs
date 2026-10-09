@@ -516,6 +516,28 @@ fn config_print_validates_the_window_answer_before_printing() {
     assert!(outcome.out.contains(settings.trim_end()));
 }
 
+/// A file named outright that cannot be read is said to be unreadable, in the
+/// words a reload uses, rather than quietly replaced by defaults.
+#[test]
+fn config_print_says_when_a_named_file_cannot_be_read() {
+    let missing = scratch().join("missing.toml");
+    let path = missing.to_string_lossy().into_owned();
+    let outcome = run(&["config", "print", "--config", &path], &[]);
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert!(
+        outcome
+            .errors
+            .contains(&format!("sprite: {path} could not be read: ")),
+        "{}",
+        outcome.errors
+    );
+    assert!(
+        outcome.out.starts_with(&format!("# {path}\n")),
+        "{}",
+        outcome.out
+    );
+}
+
 #[test]
 fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
     use std::io::{BufRead, BufReader, Write};

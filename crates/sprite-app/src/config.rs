@@ -6,7 +6,8 @@
 //! Otherwise discovery uses `$HOME/.config/sprite/config.toml`.
 //! `sprite --config <path>` selects a file for that window.
 //!
-//! Startup falls back to defaults if the file is unreadable or invalid TOML.
+//! Startup falls back to defaults if the file is unreadable or invalid TOML,
+//! and says so; only a discovered file that is absent is silent.
 //! Explicit reload rejects whole-file errors and preserves the active settings.
 //! Unusable fields use defaults or clamped values and produce complaints.
 //! Typed differences define which settings apply live or only to future sessions.
@@ -503,12 +504,29 @@ impl Settings {
         }
     }
 
-    /// Reads one file. A missing file is not a complaint: most people have none.
+    /// Reads the file discovery found. Only its absence is not a complaint:
+    /// most people have no configuration file, but one that is there and
+    /// cannot be read is somebody's settings going unused.
     pub fn load_from(path: &Path) -> (Self, Complaints) {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return (Self::default(), Complaints::default());
-        };
-        Self::parse(&text)
+        match std::fs::metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (Self::default(), Complaints::default())
+            }
+            _ => Self::load_explicit(path),
+        }
+    }
+
+    /// Reads a file somebody named outright, with `--config`.
+    ///
+    /// Naming a file says it should be used, so one that cannot be read —
+    /// missing, forbidden, or not a file at all — is a complaint in the same
+    /// words a reload uses. The defaults stand in for it, because a terminal
+    /// must open.
+    pub fn load_explicit(path: &Path) -> (Self, Complaints) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse(&text),
+            Err(error) => (Self::default(), Complaints(vec![unreadable(path, &error)])),
+        }
     }
 
     /// Reads one file as a *candidate*, keeping a whole-file failure separate.
@@ -520,8 +538,7 @@ impl Settings {
     /// callers need to tell those apart, so this reports it as an error rather
     /// than folding it into the complaints.
     pub fn load_candidate(path: &Path) -> Result<(Self, Complaints), String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|error| unreadable(path, &error))?;
         Self::parse_candidate(&text)
     }
 
@@ -547,6 +564,12 @@ impl Settings {
         let raw: raw::RawConfig = toml::from_str(text).map_err(|error| error.to_string())?;
         Ok(raw.validate())
     }
+}
+
+/// Why a configuration file could not be read, worded once so that startup,
+/// `config print` and reload all say it the same way.
+fn unreadable(path: &Path, error: &std::io::Error) -> String {
+    format!("{} could not be read: {error}", path.display())
 }
 
 /// Where this user's configuration lives, when it can be located at all.
@@ -1244,6 +1267,71 @@ mod tests {
         assert!(
             complaints.0.is_empty(),
             "most people have no configuration file, which is not a problem"
+        );
+    }
+    /// A file somebody named outright is one they expect to be used. Not being
+    /// able to read it is said, in exactly the words a reload uses, whatever
+    /// the reason; the window still opens with the defaults.
+    #[test]
+    fn an_explicit_file_that_cannot_be_read_is_said_in_the_words_reload_uses() {
+        let directory =
+            std::env::temp_dir().join(format!("sprite-explicit-config-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let missing = directory.join("missing.toml");
+        // A missing file, and a directory where a file was expected.
+        for path in [missing.as_path(), directory.as_path()] {
+            let (settings, complaints) = Settings::load_explicit(path);
+            assert_eq!(settings, Settings::default());
+            let reload = Settings::load_candidate(path).unwrap_err();
+            assert!(
+                reload.starts_with(&format!("{} could not be read: ", path.display())),
+                "{reload}"
+            );
+            assert_eq!(complaints.0, vec![reload], "{}", path.display());
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn an_explicit_file_without_read_permission_is_a_complaint() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "sprite-forbidden-config-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "[font]\nsize = 20\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads whatever it likes, so there is nothing to prove there.
+        if std::fs::read_to_string(&path).is_ok() {
+            std::fs::remove_file(&path).unwrap();
+            return;
+        }
+        let (settings, complaints) = Settings::load_explicit(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(settings, Settings::default());
+        assert_eq!(complaints.0.len(), 1, "{:?}", complaints.0);
+        assert!(
+            complaints.0[0].starts_with(&format!("{} could not be read: ", path.display())),
+            "{:?}",
+            complaints.0
+        );
+    }
+
+    /// Only *absence* of the discovered file is silent. One that is there and
+    /// cannot be read is somebody's settings going unused.
+    #[test]
+    fn a_discovered_file_that_is_there_but_cannot_be_read_is_a_complaint() {
+        let directory =
+            std::env::temp_dir().join(format!("sprite-discovered-config-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let (settings, complaints) = Settings::load_from(&directory);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(settings, Settings::default());
+        assert_eq!(complaints.0.len(), 1, "{:?}", complaints.0);
+        assert!(
+            complaints.0[0].starts_with(&format!("{} could not be read: ", directory.display())),
+            "{:?}",
+            complaints.0
         );
     }
 }
