@@ -1,5 +1,6 @@
 //! Decode Kitty Unicode image placeholders in terminal cells.
 
+use gpui::{Pixels, px};
 use sprite_term::{Placement, SnapshotColor};
 use std::collections::HashMap;
 
@@ -354,6 +355,52 @@ pub(super) fn fit_image(
     })
 }
 
+/// Where one placeholder tile and the image inside it sit, relative to the
+/// grid's corner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TileGeometry {
+    pub left: Pixels,
+    pub top: Pixels,
+    pub width: Pixels,
+    pub height: Pixels,
+    /// The image's corner, relative to the tile's own.
+    pub image_left: Pixels,
+    pub image_top: Pixels,
+}
+
+/// Places one tile on the device-pixel grid the cells are painted on.
+///
+/// The tile's edges are the snapped column and row edges the painter uses, so
+/// a tile meets its neighbours and the cells beside it edge to edge. The image
+/// inside is positioned from the placement's own unsnapped corner, which every
+/// tile of it shares, so the picture is one continuous image across tiles.
+pub(super) fn tile_geometry(
+    cell: &ImageCell<'_>,
+    fit: &ImageFit,
+    cell_width: Pixels,
+    cell_height: Pixels,
+    scale: f32,
+) -> TileGeometry {
+    use crate::grid::{Col, Row, column_edge, row_edge};
+    let column = u32::from(cell.column);
+    let left = column_edge(px(0.0), cell_width, Col(column), scale).pixels();
+    let right = column_edge(px(0.0), cell_width, Col(column + 1), scale).pixels();
+    let top = row_edge(px(0.0), cell_height, Row(cell.row), scale).pixels();
+    let bottom = row_edge(px(0.0), cell_height, Row(cell.row + 1), scale).pixels();
+    let image_left =
+        px((f32::from(cell.column) - cell.image_column as f32) * f32::from(cell_width) + fit.left);
+    let image_top =
+        px((cell.row as f32 - cell.image_row as f32) * f32::from(cell_height) + fit.top);
+    TileGeometry {
+        left,
+        top,
+        width: right - left,
+        height: bottom - top,
+        image_left: image_left - left,
+        image_top: image_top - top,
+    }
+}
+
 fn rgb_id(color: SnapshotColor) -> Option<u32> {
     let SnapshotColor::Rgb(color) = color else {
         return None;
@@ -516,5 +563,63 @@ mod tests {
             (0.0, 1.5, 30.0, 15.0)
         );
         assert!(fit_image(0, 20, 30.0, 18.0).is_none());
+    }
+
+    /// Placeholder tiles are laid out by taffy, which rounds in device pixels.
+    /// A tile whose edges and size are already whole device pixels, on the
+    /// same grid the painter snaps cells to, lands exactly on its cell and
+    /// meets its neighbour; the image inside is placed from the corner every
+    /// tile of the placement shares, so it runs on without a step.
+    #[test]
+    fn placeholder_tiles_snap_to_the_cell_grid_and_share_one_image_origin() {
+        use crate::grid::{Col, Row, column_edge, row_edge};
+        let placement = placement(1001, 3);
+        let (width, height, scale) = (px(8.4), px(16.8), 2.0);
+        let fit = fit_image(40, 40, 2.0 * 8.4, 16.8).unwrap();
+        let tile = |column: u16, image_column: u32| {
+            tile_geometry(
+                &ImageCell {
+                    placement: &placement,
+                    column,
+                    row: 3,
+                    image_column,
+                    image_row: 0,
+                },
+                &fit,
+                width,
+                height,
+                scale,
+            )
+        };
+        let (first, second) = (tile(5, 0), tile(6, 1));
+        for value in [
+            first.left,
+            first.top,
+            first.width,
+            first.height,
+            second.left,
+            second.width,
+        ] {
+            let device = f32::from(value) * scale;
+            assert!(
+                (device - device.round()).abs() < 1e-3,
+                "{value:?} is not on a device pixel"
+            );
+        }
+        assert_eq!(
+            first.left,
+            column_edge(px(0.0), width, Col(5), scale).pixels()
+        );
+        assert_eq!(first.top, row_edge(px(0.0), height, Row(3), scale).pixels());
+        assert_eq!(
+            first.left + first.width,
+            second.left,
+            "neighbouring tiles meet"
+        );
+        let origin = |tile: TileGeometry| f32::from(tile.left + tile.image_left);
+        assert!(
+            (origin(first) - origin(second)).abs() < 1e-3,
+            "both tiles place the image from the same corner"
+        );
     }
 }

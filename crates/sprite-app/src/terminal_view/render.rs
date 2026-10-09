@@ -83,32 +83,35 @@ fn placeholder_element(
     image: &sprite_term::ImagePixels,
     cell_width: Pixels,
     cell_height: Pixels,
+    scale: f32,
 ) -> Option<gpui::Div> {
     let placement = cell.placement;
     if cell.image_column >= placement.columns || cell.image_row >= placement.rows {
         return None;
     }
-    let width = f32::from(cell_width);
-    let height = f32::from(cell_height);
     let fit = super::placeholder::fit_image(
         image.width,
         image.height,
-        placement.columns as f32 * width,
-        placement.rows as f32 * height,
+        placement.columns as f32 * f32::from(cell_width),
+        placement.rows as f32 * f32::from(cell_height),
     )?;
+    // Whole device pixels throughout, on the grid the cells are painted on:
+    // taffy then has nothing to round, and a tile can neither leave a seam
+    // against its neighbour nor sit half a pixel off its cell.
+    let tile = super::placeholder::tile_geometry(cell, &fit, cell_width, cell_height, scale);
     Some(
         div()
             .absolute()
-            .left(px(f32::from(cell.column) * width))
-            .top(px(cell.row as f32 * height))
-            .w(cell_width)
-            .h(cell_height)
+            .left(tile.left)
+            .top(tile.top)
+            .w(tile.width)
+            .h(tile.height)
             .overflow_hidden()
             .child(
                 img(ImageSource::Render(texture))
                     .absolute()
-                    .left(px(fit.left - cell.image_column as f32 * width))
-                    .top(px(fit.top - cell.image_row as f32 * height))
+                    .left(tile.image_left)
+                    .top(tile.image_top)
                     .w(px(fit.width))
                     .h(px(fit.height)),
             ),
@@ -157,6 +160,7 @@ impl TerminalView {
         rows: &[std::sync::Arc<Vec<PositionedCell>>],
         cell_width: Pixels,
         cell_height: Pixels,
+        scale: f32,
     ) -> [Vec<gpui::Div>; 3] {
         let mut layers = [Vec::new(), Vec::new(), Vec::new()];
         let Some(frame) = self.bundle.as_ref().and_then(|b| b.graphics.as_ref()) else {
@@ -200,9 +204,14 @@ impl TerminalView {
             let Some(texture) = self.textures.get(image.id, image.generation) else {
                 continue;
             };
-            if let Some(element) =
-                placeholder_element(&cell, texture, image.as_ref(), cell_width, cell_height)
-            {
+            if let Some(element) = placeholder_element(
+                &cell,
+                texture,
+                image.as_ref(),
+                cell_width,
+                cell_height,
+                scale,
+            ) {
                 layers[1].push(element);
             }
         }
@@ -308,7 +317,7 @@ impl Render for TerminalView {
         // Images first, because whether any belong below the text decides how
         // the rows themselves are drawn.
         let [below_background, below_text, above_text] =
-            self.image_layers(&rows, cell_width, cell_height);
+            self.image_layers(&rows, cell_width, cell_height, window.scale_factor());
         // The split costs an extra pass over the cells, so it is taken only
         // when something actually needs to sit between them. The Kitty default
         // is above the text, so the common case never pays for it.
