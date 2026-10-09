@@ -7,6 +7,11 @@ use std::cell::Cell;
 pub(crate) struct Sample {
     pub allocations: usize,
     pub bytes: usize,
+    /// Bytes released on the measured thread, a reallocation's old block
+    /// included. With `bytes` this says what the work left allocated.
+    pub freed: usize,
+    /// The largest single block requested.
+    pub largest: usize,
 }
 
 thread_local! {
@@ -23,6 +28,16 @@ fn record(bytes: usize) {
         if let Some(mut count) = sample.get() {
             count.allocations += 1;
             count.bytes += bytes;
+            count.largest = count.largest.max(bytes);
+            sample.set(Some(count));
+        }
+    });
+}
+
+fn record_free(bytes: usize) {
+    let _ = SAMPLE.try_with(|sample| {
+        if let Some(mut count) = sample.get() {
+            count.freed += bytes;
             sample.set(Some(count));
         }
     });
@@ -42,10 +57,12 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         record(new_size);
+        record_free(layout.size());
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        record_free(layout.size());
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -73,5 +90,10 @@ fn counts_real_allocations_and_ignores_work_outside_measurement() {
     });
     assert_eq!(sample.allocations, 1);
     assert_eq!(sample.bytes, 29);
+    assert_eq!(
+        sample.freed, 29,
+        "the vector was dropped inside the measurement"
+    );
+    assert_eq!(sample.largest, 29);
     assert_eq!(outside.len(), 13);
 }
