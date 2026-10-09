@@ -1,8 +1,9 @@
 //! Draws a Surface Description: one GPUI element per described element,
-//! built fresh on every frame the way GPUI's own views are. Decoded SVGs stay
-//! with the description so redraws reuse them and an update releases them.
+//! built fresh on every frame the way GPUI's own views are. Decoded SVGs are
+//! kept by their SVG text, so redraws — and updates that keep an SVG —
+//! reuse them, and an update releases the ones it no longer draws.
 
-use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use gpui::{
@@ -21,16 +22,101 @@ use crate::surface::style;
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
+/// The decoded images of one element Surface, kept across frames and across
+/// updates for as long as its description draws them.
+///
+/// Keyed by the SVG text itself: the map hashes it to find an entry and then
+/// compares the stored text, so two different SVGs can never share a
+/// picture. Elements that draw the same SVG share one decode, and an update
+/// that keeps an SVG keeps its decode wherever in the tree it moved.
 #[derive(Default)]
 pub(crate) struct ElementImageCache {
-    images: BTreeMap<u64, Option<Arc<RenderImage>>>,
+    images: HashMap<Arc<str>, Option<Arc<RenderImage>>>,
     retained_bytes: usize,
+    #[cfg(test)]
+    decodes: usize,
+}
+
+impl ElementImageCache {
+    /// The picture for one SVG, decoded only if no earlier frame or
+    /// description already did. A decode is bounded by what the Surface's
+    /// budget has left, so the pictures it holds never pass 64 MiB together.
+    fn picture(&mut self, svg: &str) -> Option<Arc<RenderImage>> {
+        if let Some(picture) = self.images.get(svg) {
+            return picture.clone();
+        }
+        #[cfg(test)]
+        {
+            self.decodes += 1;
+        }
+        let available = MAX_SURFACE_IMAGE_BYTES - self.retained_bytes;
+        let picture = if available >= MAX_SVG_RASTER_BYTES {
+            render_svg(svg, None)
+        } else {
+            render_svg_with_budget(svg, None, available)
+        };
+        if let Some(picture) = &picture {
+            self.retained_bytes += picture.as_bytes(0).expect("raster frame").len();
+        }
+        self.images.insert(Arc::from(svg), picture.clone());
+        picture
+    }
+
+    /// Keeps the decodes `description` still draws and releases the rest, so
+    /// the budget counts only images on screen. A decode that failed or did
+    /// not fit is forgotten too: the next frame tries it again against
+    /// whatever the update freed.
+    pub(crate) fn retain_drawn_by(&mut self, description: &Description) {
+        let mut drawn = HashSet::new();
+        drawn_images(&description.root, &mut drawn);
+        self.images
+            .retain(|svg, picture| picture.is_some() && drawn.contains(&**svg));
+        self.retained_bytes = self
+            .images
+            .values()
+            .flatten()
+            .map(|picture| picture.as_bytes(0).expect("raster frame").len())
+            .sum();
+    }
+}
+
+/// The SVG text of every image a description's tree draws.
+fn drawn_images<'a>(node: &'a Element, drawn: &mut HashSet<&'a str>) {
+    match node {
+        Element::Image { svg, .. } => {
+            drawn.insert(svg.as_str());
+        }
+        Element::Box { children, .. } | Element::List { children, .. } => {
+            for child in children {
+                drawn_images(child, drawn);
+            }
+        }
+        Element::Text { .. }
+        | Element::Button { .. }
+        | Element::Grid { .. }
+        | Element::VirtualList { .. } => {}
+    }
 }
 
 #[cfg(test)]
 impl ElementImageCache {
-    pub(crate) fn image_id(&self, index: u64) -> Option<gpui::ImageId> {
-        self.images.get(&index)?.as_ref().map(|image| image.id)
+    pub(crate) fn image_for(&self, svg: &str) -> Option<Arc<RenderImage>> {
+        self.images.get(svg).cloned().flatten()
+    }
+
+    /// The SVG texts the cache holds entries for, sorted.
+    pub(crate) fn cached_texts(&self) -> Vec<&str> {
+        let mut texts: Vec<&str> = self.images.keys().map(|svg| &**svg).collect();
+        texts.sort_unstable();
+        texts
+    }
+
+    pub(crate) fn decodes(&self) -> usize {
+        self.decodes
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 }
 
@@ -301,21 +387,9 @@ fn element(
 
     let (mut boxed, text, on_click, children) = match node {
         Element::Image { style, svg } => {
-            let picture = images.images.entry(index).or_insert_with(|| {
-                let available = MAX_SURFACE_IMAGE_BYTES - images.retained_bytes;
-                let picture = if available >= MAX_SVG_RASTER_BYTES {
-                    render_svg(svg, None)
-                } else {
-                    render_svg_with_budget(svg, None, available)
-                };
-                if let Some(picture) = &picture {
-                    images.retained_bytes += picture.as_bytes(0).expect("raster frame").len();
-                }
-                picture
-            });
-            return match picture {
+            return match images.picture(svg) {
                 Some(picture) => {
-                    style::apply_all(img(picture.clone()), &style.utilities).into_any_element()
+                    style::apply_all(img(picture), &style.utilities).into_any_element()
                 }
                 None => div().into_any_element(),
             };
@@ -425,9 +499,17 @@ mod tests {
         let (ours, _peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
-        let node = json!({"kind":"image","svg":"<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'/>"});
+        // Distinct texts: identical SVGs would share a single decode.
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'><desc>{n}</desc></svg>"
+            )
+        };
+        let nodes = (0..5)
+            .map(|n| json!({"kind":"image","svg":svg(n)}))
+            .collect::<Vec<_>>();
         let document = description::parse(
-            &json!({"version":1,"root":{"kind":"box","children":vec![node.clone();5]}}),
+            &json!({"version":1,"root":{"kind":"box","children":nodes}}),
             &registry,
         )
         .unwrap()
@@ -441,15 +523,13 @@ mod tests {
             None,
             &mut cache,
         );
-        let retained: usize = cache
-            .images
-            .values()
-            .flatten()
+        let retained: usize = (0..5)
+            .filter_map(|n| cache.image_for(&svg(n)))
             .map(|image| image.as_bytes(0).unwrap().len())
             .sum();
         assert_eq!(retained, 64 * 1024 * 1024);
-        assert!(cache.images[&5].is_none());
-        let first = cache.images[&1].as_ref().unwrap().id;
+        assert!(cache.image_for(&svg(4)).is_none());
+        let first = cache.image_for(&svg(0)).unwrap().id;
         let _ = render(
             &document,
             SurfaceId(1),
@@ -458,12 +538,15 @@ mod tests {
             None,
             &mut cache,
         );
-        assert_eq!(cache.images[&1].as_ref().unwrap().id, first);
-        assert!(cache.images[&5].is_none());
+        assert_eq!(cache.image_for(&svg(0)).unwrap().id, first);
+        assert!(cache.image_for(&svg(4)).is_none());
         cache = ElementImageCache::default();
-        let fresh = description::parse(&json!({"version":1,"root":node}), &registry)
-            .unwrap()
-            .description;
+        let fresh = description::parse(
+            &json!({"version":1,"root":{"kind":"image","svg":svg(4)}}),
+            &registry,
+        )
+        .unwrap()
+        .description;
         let _ = render(
             &fresh,
             SurfaceId(1),
@@ -472,7 +555,69 @@ mod tests {
             None,
             &mut cache,
         );
-        assert!(cache.images[&0].is_some());
+        assert!(cache.image_for(&svg(4)).is_some());
+    }
+
+    #[test]
+    fn retaining_a_new_description_releases_what_it_does_not_draw_and_retries_what_did_not_fit() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        // Each one is a distinct 16 MiB raster: four fill the 64 MiB budget.
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = |numbers: &[usize]| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"box","children":numbers
+                    .iter()
+                    .map(|n| json!({"kind":"image","svg":svg(*n)}))
+                    .collect::<Vec<_>>()}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let mut cache = ElementImageCache::default();
+        let _ = render(
+            &document(&[0, 1, 2, 3, 4]),
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        assert!(
+            cache.image_for(&svg(4)).is_none(),
+            "the fifth image is over the budget"
+        );
+        let kept = cache.image_for(&svg(1)).unwrap();
+        let decodes = cache.decodes();
+
+        let next = document(&[1, 4]);
+        cache.retain_drawn_by(&next);
+        assert_eq!(cache.retained_bytes(), 16 * 1024 * 1024);
+        assert!(cache.image_for(&svg(0)).is_none());
+        let _ = render(
+            &next,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        // Entries hold the full SVG text and a lookup compares it, so the
+        // cache holds exactly the two texts drawn, each under its own text.
+        assert_eq!(cache.cached_texts(), [svg(1).as_str(), svg(4).as_str()]);
+        assert!(Arc::ptr_eq(&kept, &cache.image_for(&svg(1)).unwrap()));
+        assert!(
+            cache.image_for(&svg(4)).is_some(),
+            "the update freed room for it"
+        );
+        assert_eq!(cache.decodes(), decodes + 1);
+        assert_eq!(cache.retained_bytes(), 32 * 1024 * 1024);
     }
 
     #[test]
@@ -493,9 +638,14 @@ mod tests {
         let (ours, _theirs) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
-        let document = |color| {
+        let svg = |color: &str| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>"
+            )
+        };
+        let document = |color: &str| {
             description::parse(
-                &json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":format!("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>")}}),
+                &json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":svg(color)}}),
                 &registry,
             )
             .unwrap()
@@ -511,7 +661,7 @@ mod tests {
             None,
             &mut cache,
         );
-        let first = cache.images[&0].as_ref().unwrap().clone();
+        let first = cache.image_for(&svg("blue")).unwrap();
         let _ = render(
             &blue,
             SurfaceId(1),
@@ -520,13 +670,13 @@ mod tests {
             None,
             &mut cache,
         );
-        assert!(Arc::ptr_eq(&first, cache.images[&0].as_ref().unwrap()));
+        assert!(Arc::ptr_eq(&first, &cache.image_for(&svg("blue")).unwrap()));
         let first_id = first.id;
         drop(first);
         let red = document("red");
         cache = ElementImageCache::default();
         let _ = render(&red, SurfaceId(1), &registry, &connection, None, &mut cache);
-        let second = cache.images[&0].as_ref().unwrap();
+        let second = cache.image_for(&svg("red")).unwrap();
         assert_eq!(&second.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
         assert_ne!(second.id, first_id);
     }

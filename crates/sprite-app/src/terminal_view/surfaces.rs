@@ -109,11 +109,18 @@ impl Body {
                 *root = replacement;
                 view.update(cx, |view, cx| view.reconfigure(config, cx));
             }
-            (body @ Self::Elements { .. }, root) => {
-                *body = Self::Elements {
-                    description: Description { root },
-                    images: Default::default(),
-                };
+            (
+                Self::Elements {
+                    description,
+                    images,
+                },
+                root,
+            ) => {
+                *description = Description { root };
+                // Images the new description still draws keep their decode;
+                // the rest are released, so the budget counts only what is
+                // on screen.
+                images.retain_drawn_by(description);
             }
             _ => {
                 return Err(Refusal::Malformed(
@@ -1642,7 +1649,12 @@ mod tests {
         });
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
-        let document = |color| serde_json::json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":format!("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>")}});
+        let svg = |color: &str| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>"
+            )
+        };
+        let document = |color: &str| serde_json::json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":svg(color)}});
         host.update_in(cx, |view, window, cx| {
             view.open_surface(
                 SurfaceId(2),
@@ -1675,7 +1687,7 @@ mod tests {
                 None,
                 images,
             );
-            let first = images.image_id(0).unwrap();
+            let first = images.image_for(&svg("blue")).unwrap().id;
             let _ = crate::surface::render::render(
                 description,
                 SurfaceId(2),
@@ -1684,7 +1696,7 @@ mod tests {
                 None,
                 images,
             );
-            (first, images.image_id(0).unwrap())
+            (first, images.image_for(&svg("blue")).unwrap().id)
         });
         assert_eq!(first, again);
         host.update(cx, |view, cx| {
@@ -1692,7 +1704,10 @@ mod tests {
             let Body::Elements { images, .. } = &view.surfaces.fill.as_ref().unwrap().body else {
                 panic!("expected elements")
             };
-            assert!(images.image_id(0).is_none());
+            assert!(
+                images.image_for(&svg("blue")).is_none(),
+                "blue is no longer drawn, so its decode was released"
+            );
         });
         let replacement = host.update(cx, |view, _| {
             let surface = view.surfaces.fill.as_mut().unwrap();
@@ -1712,13 +1727,124 @@ mod tests {
                 None,
                 images,
             );
-            images.image_id(0).unwrap()
+            images.image_for(&svg("red")).unwrap().id
         });
         assert_ne!(first, replacement);
         host.update_in(cx, |view, window, cx| {
             view.close_surface(SurfaceId(2), window, cx)
         });
         assert!(host.read_with(cx, |view, _| view.surfaces.fill.is_none()));
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn an_update_keeps_the_decode_of_an_unchanged_svg_and_decodes_a_changed_one_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let svg = |color: &str| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>"
+            )
+        };
+        let document = |first: &str, second: &str| {
+            serde_json::json!({"version":1,"root":{"kind":"box","children":[
+                {"kind":"image","style":"w_4 h_4","svg":svg(first)},
+                {"kind":"image","style":"w_4 h_4","svg":svg(second)}
+            ]}})
+        };
+        let id = SurfaceId(3);
+        host.update_in(cx, |view, window, cx| {
+            view.open_surface(
+                id,
+                Open {
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None },
+                    focus: false,
+                    description: document("blue", "green"),
+                },
+                connection,
+                window,
+                cx,
+            )
+            .unwrap();
+        });
+        let registry = TokenRegistry::new(&settings.colors);
+        // Builds the Surface's elements as a frame does, then reports how many
+        // SVGs its cache has decoded in all and what it holds for each colour.
+        let frame = |view: &mut TerminalView, colors: &[&str]| {
+            let surface = view.surfaces.fill.as_mut().unwrap();
+            let connection = surface.connection.clone();
+            let Body::Elements {
+                description,
+                images,
+            } = &mut surface.body
+            else {
+                panic!("expected elements")
+            };
+            let _ = crate::surface::render::render(
+                description,
+                id,
+                &registry,
+                &connection,
+                None,
+                images,
+            );
+            (
+                images.decodes(),
+                colors
+                    .iter()
+                    .map(|color| images.image_for(&svg(color)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let (decodes, first) = host.update(cx, |view, _| frame(view, &["blue", "green"]));
+        assert_eq!(decodes, 2);
+        let blue = first[0].clone().expect("blue decoded");
+        let green = first[1].clone().expect("green decoded");
+
+        host.update(cx, |view, cx| {
+            view.update_surface(id, document("blue", "green"), cx)
+        });
+        let (decodes, again) = host.update(cx, |view, _| frame(view, &["blue", "green"]));
+        assert_eq!(decodes, 2, "an identical update decoded its SVGs again");
+        assert!(std::sync::Arc::ptr_eq(&blue, again[0].as_ref().unwrap()));
+        assert!(std::sync::Arc::ptr_eq(&green, again[1].as_ref().unwrap()));
+
+        host.update(cx, |view, cx| {
+            view.update_surface(id, document("blue", "red"), cx)
+        });
+        let (decodes, changed) = host.update(cx, |view, _| frame(view, &["blue", "green", "red"]));
+        assert_eq!(decodes, 3, "only the changed SVG is decoded");
+        assert!(std::sync::Arc::ptr_eq(&blue, changed[0].as_ref().unwrap()));
+        assert!(
+            changed[1].is_none(),
+            "green is no longer drawn, so its pixels are released"
+        );
+        assert!(changed[2].is_some());
+        host.update(cx, |view, _| {
+            let Body::Elements { images, .. } = &view.surfaces.fill.as_ref().unwrap().body else {
+                panic!("expected elements")
+            };
+            assert_eq!(
+                images.retained_bytes(),
+                2 * 4 * 4 * 4,
+                "the budget counts only the images the description draws"
+            );
+        });
         cx.update(|window, _| window.remove_window());
         drop(host);
     }
