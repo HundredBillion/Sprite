@@ -12,6 +12,19 @@ use sprite_term::{CommandSender, TerminalCommand};
 /// the event mailbox.
 pub(crate) const CLIPBOARD_WRITE: &str = "\x1b]52;c;Q0xJUA==\x07";
 
+/// A shell script for a child under event pressure: it waits for
+/// [`focus_and_release`], writes the clipboard a hundred times, prints a
+/// mebibyte, then runs `tail`.
+///
+/// The writes are notices the worker cannot coalesce, so they fill the event
+/// mailbox; the output behind them is more than a paused consumer lets the
+/// worker take.
+pub(crate) fn pressure_script(tail: &str) -> String {
+    format!(
+        "stty -echo; read _; i=0; while [ $i -lt 100 ]; do printf '\\033]52;c;Q0xJUA==\\007'; i=$((i+1)); done; head -c 1048576 /dev/zero; {tail}"
+    )
+}
+
 /// Focuses the pane, then releases a child that began with `read _`.
 ///
 /// An unfocused pane is denied the clipboard and raises nothing, and the

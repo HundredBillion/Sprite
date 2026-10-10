@@ -20,7 +20,21 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
     });
     // The release line can arrive before `stty -echo` runs and be echoed, so
     // the link is written from the top-left corner where the test looks for it.
-    let sprite_term::Spawned { session, mut events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; read _; i=0; while [ $i -lt 100 ]; do printf '\\033]52;c;Q0xJUA==\\007'; i=$((i+1)); done; head -c 1048576 /dev/zero; printf '\\033[H\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30".into()])).unwrap();
+    let sprite_term::Spawned {
+        session,
+        mut events,
+        mut snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            crate::test_event_pressure::pressure_script(
+                "printf '\\033[H\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30",
+            )
+            .into(),
+        ],
+    ))
+    .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
@@ -141,7 +155,18 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::failed("reload revert".into(), ".SystemUIFont".into(), window, cx)
     });
-    let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; read _; i=0; while [ $i -lt 100 ]; do printf '\\033]52;c;Q0xJUA==\\007'; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+    let sprite_term::Spawned {
+        session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            crate::test_event_pressure::pressure_script("sleep 30").into(),
+        ],
+    ))
+    .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
@@ -221,7 +246,7 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
                 cx,
             )
         });
-        let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; read _; i=0; while [ $i -lt 100 ]; do printf '\\033]52;c;Q0xJUA==\\007'; i=$((i+1)); done; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done".into()]);
+        let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), crate::test_event_pressure::pressure_script("printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done").into()]);
         let defaults = theme::session_defaults(&settings);
         config.colors = defaults.colors;
         config.cursor = defaults.cursor;
@@ -504,7 +529,18 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
             cx,
         )
     });
-    let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; read _; i=0; while [ $i -lt 100 ]; do printf '\\033]52;c;Q0xJUA==\\007'; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+    let sprite_term::Spawned {
+        session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            crate::test_event_pressure::pressure_script("sleep 30").into(),
+        ],
+    ))
+    .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();

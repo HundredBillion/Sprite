@@ -349,7 +349,14 @@ mod tests {
 
     #[test]
     fn saturated_observation_refuses_without_holding_the_ui_registry() {
-        let mut spawned = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; read _; i=0; while [ $i -lt 100 ]; do printf '\\033]52;c;Q0xJUA==\\007'; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+        let mut spawned = TerminalSession::spawn(SessionConfig::command(
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                crate::test_event_pressure::pressure_script("sleep 30").into(),
+            ],
+        ))
+        .unwrap();
         crate::test_event_pressure::focus_and_release(&spawned.session.commands());
         crate::test_blocking_wait::pause(Duration::from_millis(300));
         spawned.snapshots.next_blocking().unwrap();
