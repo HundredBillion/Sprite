@@ -364,7 +364,9 @@ fn open_pty(size: PtySize) -> Result<portable_pty::PtyPair, SessionError> {
         };
         match opened {
             Ok(pair) => return Ok(pair),
-            Err(error) if attempt < ATTEMPTS && is_transient_openpty_failure(&error) => {
+            Err(error)
+                if attempt < ATTEMPTS && is_transient_openpty_failure(&format!("{error:?}")) =>
+            {
                 attempt += 1;
                 thread::sleep(RETRY_PAUSE);
             }
@@ -376,8 +378,8 @@ fn open_pty(size: PtySize) -> Result<portable_pty::PtyPair, SessionError> {
 /// Whether an `openpty` failure is the transient errno -6.
 ///
 /// The text is matched because the pinned portable-pty flattens the errno into a string.
-fn is_transient_openpty_failure(error: &impl std::fmt::Debug) -> bool {
-    format!("{error:?}").contains("Os { code: -6,")
+fn is_transient_openpty_failure(error: &str) -> bool {
+    error.contains("Os { code: -6,")
 }
 
 pub(super) fn start(
@@ -462,19 +464,11 @@ fn spawn_child_waiter(
 
 #[cfg(test)]
 mod tests {
-    struct Text(String);
-
-    impl std::fmt::Debug for Text {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(&self.0)
-        }
-    }
-
-    fn openpty_error(errno: i32) -> Text {
-        Text(format!(
+    fn openpty_error(errno: i32) -> String {
+        format!(
             "failed to openpty: {:?}",
             std::io::Error::from_raw_os_error(errno)
-        ))
+        )
     }
 
     #[test]
