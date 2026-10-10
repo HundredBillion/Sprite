@@ -371,22 +371,27 @@ pub(super) struct TileGeometry {
 /// Places one tile on the device-pixel grid the cells are painted on.
 ///
 /// The tile's edges are the snapped column and row edges the painter uses, so
-/// a tile meets its neighbours and the cells beside it edge to edge. The image
-/// inside is positioned from the placement's own unsnapped corner, which every
-/// tile of it shares, so the picture is one continuous image across tiles.
+/// a tile meets its neighbours and the cells beside it edge to edge. Like the
+/// painter's, they are snapped where they fall in the window, `grid_origin`
+/// being the grid's corner there, and then given relative to that corner. The
+/// image inside is positioned from the placement's own unsnapped corner, which
+/// every tile of it shares, so the picture is one continuous image across
+/// tiles.
 pub(super) fn tile_geometry(
     cell: &ImageCell<'_>,
     fit: &ImageFit,
+    grid_origin: gpui::Point<Pixels>,
     cell_width: Pixels,
     cell_height: Pixels,
     scale: f32,
 ) -> TileGeometry {
     use crate::grid::{Col, Row, column_edge, row_edge};
     let column = u32::from(cell.column);
-    let left = column_edge(px(0.0), cell_width, Col(column), scale).pixels();
-    let right = column_edge(px(0.0), cell_width, Col(column + 1), scale).pixels();
-    let top = row_edge(px(0.0), cell_height, Row(cell.row), scale).pixels();
-    let bottom = row_edge(px(0.0), cell_height, Row(cell.row + 1), scale).pixels();
+    let (x, y) = (grid_origin.x, grid_origin.y);
+    let left = column_edge(x, cell_width, Col(column), scale).pixels() - x;
+    let right = column_edge(x, cell_width, Col(column + 1), scale).pixels() - x;
+    let top = row_edge(y, cell_height, Row(cell.row), scale).pixels() - y;
+    let bottom = row_edge(y, cell_height, Row(cell.row + 1), scale).pixels() - y;
     let image_left =
         px((f32::from(cell.column) - cell.image_column as f32) * f32::from(cell_width) + fit.left);
     let image_top =
@@ -586,6 +591,7 @@ mod tests {
                     image_row: 0,
                 },
                 &fit,
+                gpui::point(px(0.0), px(0.0)),
                 width,
                 height,
                 scale,
@@ -621,5 +627,51 @@ mod tests {
             (origin(first) - origin(second)).abs() < 1e-3,
             "both tiles place the image from the same corner"
         );
+    }
+
+    /// The painter snaps a cell's edges against where the grid sits in the
+    /// window, so a grid whose corner is not on a device pixel has cells off
+    /// the origin-0 grid. A tile is snapped the same way, then given relative
+    /// to the grid's corner, so it still lands exactly on its cell.
+    #[test]
+    fn placeholder_tiles_snap_against_where_the_grid_sits_in_the_window() {
+        use crate::grid::{Col, Row, column_edge, row_edge};
+        let placement = placement(1001, 3);
+        let (width, height, scale) = (px(8.4), px(16.8), 2.0);
+        let grid = gpui::point(px(10.3), px(5.1));
+        let fit = fit_image(40, 40, 2.0 * 8.4, 16.8).unwrap();
+        let tile = tile_geometry(
+            &ImageCell {
+                placement: &placement,
+                column: 5,
+                row: 3,
+                image_column: 0,
+                image_row: 0,
+            },
+            &fit,
+            grid,
+            width,
+            height,
+            scale,
+        );
+        let painted = |edge: Pixels| f32::from(edge);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let left = column_edge(grid.x, width, Col(5), scale).pixels();
+        let right = column_edge(grid.x, width, Col(6), scale).pixels();
+        let top = row_edge(grid.y, height, Row(3), scale).pixels();
+        let bottom = row_edge(grid.y, height, Row(4), scale).pixels();
+        assert!(
+            close(painted(grid.x + tile.left), painted(left)),
+            "tile left {:?} against cell {left:?}",
+            grid.x + tile.left
+        );
+        assert!(close(painted(grid.y + tile.top), painted(top)));
+        assert!(close(painted(tile.width), painted(right - left)));
+        assert!(close(painted(tile.height), painted(bottom - top)));
+        // The picture still starts at the placement's own corner.
+        assert!(close(
+            painted(tile.left + tile.image_left),
+            5.0 * 8.4 + fit.left
+        ));
     }
 }

@@ -81,6 +81,7 @@ fn placeholder_element(
     cell: &super::placeholder::ImageCell<'_>,
     texture: Arc<gpui::RenderImage>,
     image: &sprite_term::ImagePixels,
+    grid_origin: gpui::Point<Pixels>,
     cell_width: Pixels,
     cell_height: Pixels,
     scale: f32,
@@ -98,7 +99,8 @@ fn placeholder_element(
     // Whole device pixels throughout, on the grid the cells are painted on:
     // taffy then has nothing to round, and a tile can neither leave a seam
     // against its neighbour nor sit half a pixel off its cell.
-    let tile = super::placeholder::tile_geometry(cell, &fit, cell_width, cell_height, scale);
+    let tile =
+        super::placeholder::tile_geometry(cell, &fit, grid_origin, cell_width, cell_height, scale);
     Some(
         div()
             .absolute()
@@ -158,6 +160,7 @@ impl TerminalView {
     pub(super) fn image_layers(
         &self,
         rows: &[std::sync::Arc<Vec<PositionedCell>>],
+        grid_origin: gpui::Point<Pixels>,
         cell_width: Pixels,
         cell_height: Pixels,
         scale: f32,
@@ -208,6 +211,7 @@ impl TerminalView {
                 &cell,
                 texture,
                 image.as_ref(),
+                grid_origin,
                 cell_width,
                 cell_height,
                 scale,
@@ -316,8 +320,18 @@ impl Render for TerminalView {
 
         // Images first, because whether any belong below the text decides how
         // the rows themselves are drawn.
-        let [below_background, below_text, above_text] =
-            self.image_layers(&rows, cell_width, cell_height, window.scale_factor());
+        // Placeholder tiles snap against the grid's corner in the window, as
+        // the painter snaps cells. Layout has not run yet, so that is where
+        // the last frame put it; before the first frame, the pane's own
+        // offset stands in.
+        let grid_origin = self.content_origin.unwrap_or(origin);
+        let [below_background, below_text, above_text] = self.image_layers(
+            &rows,
+            grid_origin,
+            cell_width,
+            cell_height,
+            window.scale_factor(),
+        );
         // The split costs an extra pass over the cells, so it is taken only
         // when something actually needs to sit between them. The Kitty default
         // is above the text, so the common case never pays for it.
