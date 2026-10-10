@@ -19,6 +19,10 @@ pub(crate) enum Effect {
         uri: Option<String>,
         span: Option<sprite_term::HyperlinkSpan>,
     },
+    /// The child asked, through OSC 52, to write the clipboard. Honoured only
+    /// while its pane still has Pane Focus when the view writes it.
+    ChildClipboard(String),
+    /// The person copied their selection; theirs to write whatever has focus.
     Clipboard(String),
     /// One request's capture, for the request holding `ticket`.
     DeliverHistory {
@@ -126,9 +130,15 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
             });
         }
 
-        // Terminal Core already applied the OSC 52 policy for one and the
-        // person asked for the other; neither needs a policy here.
-        Ok(TerminalEvent::ClipboardWrite(text)) | Ok(TerminalEvent::SelectionCopied(text)) => {
+        // Terminal Core applied the OSC 52 policy when the child asked, but
+        // focus can move before the write lands, so the view checks Pane Focus
+        // again. The person asked for their own copy, which needs no policy.
+        Ok(TerminalEvent::ClipboardWrite(text)) => {
+            if !text.is_empty() {
+                effects.push(Effect::ChildClipboard(text));
+            }
+        }
+        Ok(TerminalEvent::SelectionCopied(text)) => {
             if !text.is_empty() {
                 effects.push(Effect::Clipboard(text));
             }
@@ -254,11 +264,13 @@ mod tests {
         assert!(effects(TerminalEvent::SelectionCopied(String::new())).is_empty());
     }
 
+    /// The child's OSC 52 write and the person's own copy stay distinct, so
+    /// the view can hold the child's to Pane Focus and never the person's.
     #[test]
-    fn clipboard_writes_carry_their_text() {
+    fn clipboard_writes_carry_their_text_and_who_asked() {
         assert!(matches!(
             effects(TerminalEvent::ClipboardWrite("copied".to_owned())).as_slice(),
-            [Effect::Clipboard(text)] if text == "copied"
+            [Effect::ChildClipboard(text)] if text == "copied"
         ));
         assert!(matches!(
             effects(TerminalEvent::SelectionCopied("selected".to_owned())).as_slice(),

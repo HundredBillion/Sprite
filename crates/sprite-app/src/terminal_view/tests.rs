@@ -2403,6 +2403,101 @@ fn only_a_pane_with_pane_focus_may_write_the_clipboard(cx: &mut gpui::TestAppCon
     }
 }
 
+/// The worker checks Pane Focus when the child asks, but a write it accepted
+/// can still be on its way when the pane loses focus. The view checks again
+/// as it writes, so a pane without Pane Focus never takes the clipboard. The
+/// person's own copy is theirs to make whatever has focus.
+#[gpui::test]
+fn a_child_clipboard_write_arriving_after_focus_is_lost_is_dropped_and_a_copy_is_not(
+    cx: &mut gpui::TestAppContext,
+) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let script = "stty -echo; printf 'COPYME\\n'; exec sleep 30";
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("before".to_owned()));
+    let clipboard =
+        |cx: &mut gpui::VisualTestContext| cx.read_from_clipboard().and_then(|item| item.text());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |b| {
+            b.pane.rows.iter().any(|r| r.text.contains("COPYME"))
+        });
+        focus_and_draw(&view, cx);
+        assert!(view.read_with(cx, |view, _| view.pane_focused()));
+        cx.deactivate_window();
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |view, _| view.pane_focused()));
+
+        // Delivered exactly as the event task delivers a write the worker
+        // emitted while the pane still had focus.
+        let drawn = view.update(cx, |view, cx| {
+            let decision = crate::terminal_events::decide(Ok(
+                sprite_term::TerminalEvent::ClipboardWrite("from the child".to_owned()),
+            ));
+            let mut drawn = false;
+            for effect in decision.effects {
+                drawn |= view.apply(effect, cx);
+            }
+            drawn
+        });
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("before"),
+            "a pane without Pane Focus may not write the clipboard"
+        );
+        assert!(!drawn, "a dropped write changes nothing the pane draws");
+
+        let start = sprite_term::CellPosition { row: 0, column: 0 };
+        let end = sprite_term::CellPosition { row: 0, column: 5 };
+        view.update(cx, |view, _| {
+            assert!(view.submit(TerminalCommand::Select {
+                anchor: start,
+                head: end,
+                mode: sprite_term::SelectionMode::Character,
+                rectangle: false,
+            }));
+            assert!(view.submit(TerminalCommand::CopySelection));
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while clipboard(cx).as_deref() == Some("before") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the copy never reached the clipboard"
+            );
+            crate::test_blocking_wait::pause(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("COPYME"),
+            "the person's own copy is written without Pane Focus"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// A beat of the window clock repaints only the pane with Pane Focus. The
 /// other pane keeps a steady, visible cursor and is not asked to repaint at
 /// all; when focus moves, the roles swap and the pane left behind shows its

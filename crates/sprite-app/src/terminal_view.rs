@@ -635,7 +635,11 @@ impl TerminalView {
                 }
                 self.hovered_link.map(|(_, span)| span) != before
             }
-            Effect::Clipboard(text) => {
+            // The worker accepted this while the pane had Pane Focus, but the
+            // event may have waited in the channel while focus moved. Only
+            // this thread knows whether the pane holds focus as it writes.
+            Effect::ChildClipboard(_) if !self.pane_focused => false,
+            Effect::ChildClipboard(text) | Effect::Clipboard(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 true
             }
