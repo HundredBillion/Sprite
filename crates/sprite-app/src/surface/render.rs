@@ -1,7 +1,8 @@
 //! Draws a Surface Description: one GPUI element per described element,
 //! built fresh on every frame the way GPUI's own views are. Decoded SVGs are
-//! kept by their SVG text, so redraws — and updates that keep an SVG —
-//! reuse them, and an update releases the ones it no longer draws.
+//! kept by their SVG text, so updates that keep an SVG reuse its decode, and
+//! an update releases the ones it no longer draws. Redraws find each decode by
+//! its place in the tree, without touching the text.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -31,19 +32,50 @@ use crate::tokens::{Role, TokenRegistry};
 /// compares the stored text, so two different SVGs can never share a
 /// picture. Elements that draw the same SVG share one decode, and an update
 /// that keeps an SVG keeps its decode wherever in the tree it moved.
+///
+/// The text is looked up once per description. A description may carry
+/// megabytes of SVG, so each image's picture is then kept by its tree-order
+/// index and every later frame finds it there.
 #[derive(Default)]
 pub(crate) struct ElementImageCache {
     images: HashMap<Arc<str>, Option<Arc<RenderImage>>>,
+    /// What each image of the current description resolved to, by its index
+    /// in tree order: `None` until that image is first drawn, then the
+    /// picture, or `Some(None)` for one that failed or did not fit. Emptied by
+    /// `retain_drawn_by`, which every change of description goes through.
+    placed: Vec<Option<Option<Arc<RenderImage>>>>,
     retained_bytes: usize,
     #[cfg(test)]
     decodes: usize,
+    #[cfg(test)]
+    text_lookups: usize,
 }
 
 impl ElementImageCache {
+    /// The picture for the image at tree-order `index`, drawing `svg`. Only the
+    /// first frame of a description looks the text up; later frames take what
+    /// that lookup found.
+    fn picture(&mut self, index: u64, svg: &str) -> Option<Arc<RenderImage>> {
+        let index = index as usize;
+        if let Some(Some(picture)) = self.placed.get(index) {
+            return picture.clone();
+        }
+        let picture = self.lookup(svg);
+        if self.placed.len() <= index {
+            self.placed.resize(index + 1, None);
+        }
+        self.placed[index] = Some(picture.clone());
+        picture
+    }
+
     /// The picture for one SVG, decoded only if no earlier frame or
     /// description already did. A decode is bounded by what the Surface's
     /// budget has left, so the pictures it holds never pass 64 MiB together.
-    fn picture(&mut self, svg: &str) -> Option<Arc<RenderImage>> {
+    fn lookup(&mut self, svg: &str) -> Option<Arc<RenderImage>> {
+        #[cfg(test)]
+        {
+            self.text_lookups += 1;
+        }
         if let Some(picture) = self.images.get(svg) {
             return picture.clone();
         }
@@ -69,6 +101,7 @@ impl ElementImageCache {
     /// not fit is forgotten too: the next frame tries it again against
     /// whatever the update freed.
     pub(crate) fn retain_drawn_by(&mut self, description: &Description) {
+        self.placed.clear();
         let mut drawn = HashSet::new();
         drawn_images(&description.root, &mut drawn);
         self.images
@@ -115,6 +148,10 @@ impl ElementImageCache {
 
     pub(crate) fn decodes(&self) -> usize {
         self.decodes
+    }
+
+    pub(crate) fn text_lookups(&self) -> usize {
+        self.text_lookups
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -391,7 +428,7 @@ fn element(
 
     let (mut boxed, text, on_click, children) = match node {
         Element::Image { style, svg } => {
-            return match images.picture(svg) {
+            return match images.picture(index, svg) {
                 Some(picture) => {
                     style::apply_all(img(picture), &style.utilities).into_any_element()
                 }
@@ -622,6 +659,67 @@ mod tests {
         );
         assert_eq!(cache.decodes(), decodes + 1);
         assert_eq!(cache.retained_bytes(), 32 * 1024 * 1024);
+    }
+
+    /// A description may carry megabytes of SVG text. It is looked up by that
+    /// text once per description; every later frame finds each picture by its
+    /// place in the tree, so a repaint never hashes or compares the text.
+    #[test]
+    fn an_unchanged_description_never_looks_its_svg_text_up_again() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = |numbers: &[usize]| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"box","children":numbers
+                    .iter()
+                    .map(|n| json!({"kind":"box","children":[{"kind":"image","svg":svg(*n)}]}))
+                    .collect::<Vec<_>>()}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let frame = |description: &Description, cache: &mut ElementImageCache| {
+            let _ = render(
+                description,
+                SurfaceId(1),
+                &registry,
+                &connection,
+                None,
+                cache,
+            );
+        };
+        let mut cache = ElementImageCache::default();
+        let first = document(&[0, 1, 0]);
+        frame(&first, &mut cache);
+        assert_eq!(cache.text_lookups(), 3, "the first frame finds each image");
+        assert_eq!(cache.decodes(), 2, "the repeated SVG shares one decode");
+        let shown = cache.image_for(&svg(1)).unwrap();
+        for _ in 0..5 {
+            frame(&first, &mut cache);
+        }
+        assert_eq!(
+            cache.text_lookups(),
+            3,
+            "later frames find every picture by position"
+        );
+        assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
+
+        // An update is looked up afresh, once, and keeps the decodes it still
+        // draws wherever they moved in the tree.
+        let moved = document(&[1, 2]);
+        cache.retain_drawn_by(&moved);
+        frame(&moved, &mut cache);
+        frame(&moved, &mut cache);
+        assert_eq!(cache.text_lookups(), 5);
+        assert_eq!(cache.decodes(), 3, "only the new SVG is decoded");
+        assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
     }
 
     #[test]

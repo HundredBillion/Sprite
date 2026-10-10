@@ -155,10 +155,12 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
   the latest of each, as the bell already is (BCA-23).
   Tests that used title floods to create event pressure move to OSC 52
   clipboard writes, the only parser event that is never coalesced.
-- R-S4 Element Surface images are cached by a hash of SVG text plus scaled
-  pixel size and survive `update`; entries the new description no longer
-  references are dropped, so the 16 MiB per-bitmap and 64 MiB per-Surface
-  budgets still hold (BCA-10).
+- R-S4 Element Surface images are cached by their full SVG text (the decode
+  does not depend on pixel size) and survive `update`; entries the new
+  description no longer references are dropped, so the 16 MiB per-bitmap and
+  64 MiB per-Surface budgets still hold (BCA-10). The text is looked up once
+  per description; later frames find each image's decode by its tree
+  position.
 
 ### C7. Registry state coupled to endpoint lifetime (BCA-11)
 
