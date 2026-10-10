@@ -172,12 +172,7 @@ fn register_title(
 ) -> Result<(), libghostty_vt::Error> {
     terminal
         .on_title_changed(move |terminal: &Terminal<'_, '_>| {
-            let title = terminal
-                .title()
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            notices.borrow_mut().title = Some(title);
+            notices.borrow_mut().title = Some(reported(terminal.title()));
         })
         .map(|_| ())
 }
@@ -188,14 +183,18 @@ fn register_pwd(
 ) -> Result<(), libghostty_vt::Error> {
     terminal
         .on_pwd_changed(move |terminal: &Terminal<'_, '_>| {
-            let directory = terminal
-                .pwd()
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            notices.borrow_mut().working_directory = Some(directory);
+            notices.borrow_mut().working_directory = Some(reported(terminal.pwd()));
         })
         .map(|_| ())
+}
+
+/// What a title or directory change reports: the new value, or `None` when
+/// the program cleared it or it could not be read.
+fn reported<E>(value: Result<&str, E>) -> Option<String> {
+    value
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 struct Pending {
