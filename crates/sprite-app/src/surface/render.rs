@@ -167,16 +167,25 @@ pub(crate) fn render(
     host: Option<Entity<TerminalView>>,
     images: &mut ElementImageCache,
 ) -> AnyElement {
-    let mut next = 0u64;
     element(
         &description.root,
         surface,
         registry,
         connection,
         &host,
-        &mut next,
+        &mut Walk::default(),
         images,
     )
+}
+
+/// What one walk of a description numbers as it goes.
+#[derive(Default)]
+struct Walk<'a> {
+    /// The next element's place in tree order, by which an image finds its
+    /// decode.
+    next: u64,
+    /// How many clickable elements so far send each event name.
+    clicks: HashMap<&'a str, u64>,
 }
 
 pub(crate) const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -412,19 +421,17 @@ pub(crate) fn apply_described_style<E: Styled>(
     target
 }
 
-fn element(
-    node: &Element,
+fn element<'a>(
+    node: &'a Element,
     surface: SurfaceId,
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
     host: &Option<Entity<TerminalView>>,
-    next: &mut u64,
+    walk: &mut Walk<'a>,
     images: &mut ElementImageCache,
 ) -> AnyElement {
-    // Numbered in tree order, so a clickable element's identity is stable for
-    // as long as the description keeps its shape.
-    let index = *next;
-    *next += 1;
+    let index = walk.next;
+    walk.next += 1;
 
     let (mut boxed, text, on_click, children) = match node {
         Element::Image { style, svg } => {
@@ -468,20 +475,29 @@ fn element(
     boxed = boxed.children(
         children
             .iter()
-            .map(|child| element(child, surface, registry, connection, host, next, images)),
+            .map(|child| element(child, surface, registry, connection, host, walk, images)),
     );
 
     match on_click {
         None => boxed.into_any_element(),
         Some(name) => {
+            // Identified by the event it sends, not by its place in the
+            // tree. A press and its release are matched by id, so an update
+            // between them that moves another element under the pointer
+            // must not hand that element the press. Elements sending the
+            // same event are told apart by their order among themselves;
+            // mistaking one for another sends the same event either way.
+            let occurrence = walk.clicks.entry(name.as_str()).or_default();
+            let id = ElementId::NamedInteger(
+                SharedString::from(format!("surface-{}-{name}", surface.0)),
+                *occurrence,
+            );
+            *occurrence += 1;
             let name = name.clone();
             let connection = connection.clone();
             let host = host.clone();
             boxed
-                .id(ElementId::NamedInteger(
-                    SharedString::from(format!("surface-{}", surface.0)),
-                    index,
-                ))
+                .id(id)
                 .on_click(move |_event, window, cx| {
                     let event = event_click(&name);
                     match &host {

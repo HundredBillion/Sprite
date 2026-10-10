@@ -2360,6 +2360,75 @@ mod tests {
         drop(host);
     }
 
+    /// The same guarantee for an element Surface's clickable elements: a
+    /// press on one is never released as a click on whatever the update put
+    /// under the pointer in its place.
+    #[gpui::test]
+    fn an_element_inserted_between_press_and_release_does_not_take_the_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn clicks(peer: &mut Peer) -> Vec<serde_json::Value> {
+            events(peer)
+                .into_iter()
+                .filter(|event| event["type"] == "event")
+                .collect()
+        }
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(987);
+        let pane = crate::pane_tree::PaneId(1);
+        // Side by side, each taking an equal share of the width.
+        let row = |names: &[&str]| {
+            serde_json::json!({"version": 1, "root": {
+                "kind": "box", "style": "flex flex_row size_full",
+                "children": names
+                    .iter()
+                    .map(|name| serde_json::json!({
+                        "kind": "box", "style": "flex_1 h_full", "text": name, "on_click": name,
+                    }))
+                    .collect::<Vec<_>>(),
+            }})
+        };
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(row(&["a", "b"])));
+        assert_eq!(answer, Ok(()));
+        draw_test_window(cx);
+        // Three fifths across: on b while there are two, and on the newcomer
+        // once a third arrives between them.
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let on_b = gpui::point(viewport.width * 0.6, viewport.height * 0.5);
+        clicks(&mut peer);
+
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let control = clicks(&mut peer);
+        assert_eq!(control.len(), 1, "{control:?}");
+        assert_eq!(control[0]["name"], "b");
+
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: row(&["a", "new", "b"]),
+            },
+        );
+        draw_test_window(cx);
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let moved = clicks(&mut peer);
+        assert!(
+            moved.iter().all(|click| click["name"] == "b"),
+            "a press on b was released as {moved:?}"
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
     #[gpui::test]
     fn element_update_refuses_grid_and_preserves_text(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
