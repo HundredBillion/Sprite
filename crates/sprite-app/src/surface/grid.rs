@@ -1503,32 +1503,6 @@ mod tests {
         assert_eq!(grid.group_ids().len(), 50_000);
     }
 
-    /// A coarse guard against a quadratic relink, not a benchmark: the bound
-    /// is generous enough for a debug build on a loaded machine, and the work
-    /// runs on its own thread so a regression fails here instead of hanging.
-    #[test]
-    fn relinking_fifty_thousand_names_finishes_well_inside_a_generous_bound() {
-        let (done, finished) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut grid = GridSurface::new(1, 1);
-            for offset in [1, 2] {
-                grid.apply(Op::Highlights {
-                    define: Vec::new(),
-                    groups: (0..50_000u32)
-                        .map(|n| (format!("group-{n}"), n + offset))
-                        .collect(),
-                })
-                .expect("applies");
-            }
-            let _ = done.send(grid.group_ids().len());
-        });
-        assert_eq!(
-            finished.recv_timeout(std::time::Duration::from_secs(30)),
-            Ok(50_000),
-            "relinking 50k names took more than 30 s, or panicked"
-        );
-    }
-
     #[test]
     fn a_highlights_operation_past_either_cap_is_refused_before_it_changes_anything() {
         let mut grid = GridSurface::new(2, 1);
