@@ -210,10 +210,10 @@ impl Placement {
 /// yet written — so at most this plus one event waits, and no single event
 /// is refused for its size alone. A program that lets this much pile up is
 /// not reading; its connection is closed rather than allowed to grow.
-pub(crate) const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 /// The largest buffer a writer keeps between writes, so one burst does not
 /// pin its memory for the rest of the connection's life.
-pub(crate) const EVENT_BUFFER_BYTES: usize = 64 * 1024;
+const KEPT_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
 /// What one connection's handles and its writer thread share. The lock is
 /// held to queue lines or to take them, never across a socket write.
@@ -316,7 +316,7 @@ impl Drop for Handle {
 /// `opened` ahead of them, so nothing a program was sent ever arrives ahead
 /// of the confirmation that let it.
 ///
-/// An event is queued only while fewer than [`MAX_PENDING_BYTES`] are
+/// An event is queued only while fewer than `MAX_PENDING_BYTES` are
 /// pending. Sending with the bound already reached, a write that times out,
 /// or a failed write marks the connection dead and shuts the socket down;
 /// the connection thread's read then ends and the window hears the Surface
@@ -348,13 +348,17 @@ impl SurfaceConnection {
             stream,
         });
         let writer = Arc::clone(&shared);
-        // Detached on purpose, and it still always ends. It returns as soon
-        // as the connection is dead. Once the last handle is gone nothing more
-        // can be queued, so what is left to drain is finite — at most the
-        // pending bound plus one event — and every write that stops making
-        // progress fails after `WRITE_TIMEOUT` and kills the connection. So
-        // the thread outlives its last handle by at most that drain, and no
-        // thread — the GPUI thread least of all — ever waits to join it.
+        // Detached on purpose, and nothing ever waits to join it, the GPUI
+        // thread least of all. It returns as soon as the connection is dead.
+        // Once the last handle is gone nothing more can be queued, so what is
+        // left to drain is at most the pending bound plus one event, and a
+        // write that makes no progress for `WRITE_TIMEOUT` fails and kills
+        // the connection. That bounds the bytes, not the time: a reader that
+        // takes a few bytes at a time, each sooner than the timeout, keeps
+        // this thread and its slot for as long as it keeps reading. It holds
+        // one of the endpoint's slots and no more, so the cap on connections
+        // still caps writer threads, and only a program running as the same
+        // user can connect at all.
         drop(
             std::thread::Builder::new()
                 .name("sprite-surface-writer".to_owned())
@@ -515,7 +519,7 @@ fn write_events(shared: &Shared) {
         let mut stream = &shared.stream;
         let written = stream.write_all(&outgoing).and_then(|()| stream.flush());
         outgoing.clear();
-        if outgoing.capacity() > EVENT_BUFFER_BYTES {
+        if outgoing.capacity() > KEPT_WRITE_BUFFER_BYTES {
             outgoing = Vec::new();
         }
         let Ok(mut queue) = shared.queue.lock() else {
@@ -778,7 +782,8 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
     } = connection;
     match first_line(&body) {
         Ok(FirstRequest::Open { pane, open }) => {
-            serve_surface(stream, reader, slot, pane, open, requests)
+            let connection = SurfaceConnection::holding(&stream, Some(slot));
+            serve_surface(stream, reader, connection, pane, open, requests)
         }
         Ok(FirstRequest::Capabilities {
             pane,
@@ -827,12 +832,15 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
 fn serve_surface(
     mut stream: UnixStream,
     mut reader: BufReader<UnixStream>,
-    slot: Arc<ConnectionSlot>,
+    connection: std::io::Result<SurfaceConnection>,
     pane: PaneId,
     open: Open,
     requests: &async_channel::Sender<SurfaceRequest>,
 ) {
-    let Ok(connection) = SurfaceConnection::holding(&stream, Some(slot)) else {
+    // A connection with no writer could never be sent `opened`. Say so
+    // rather than closing it with no answer.
+    let Ok(connection) = connection else {
+        refuse(&mut stream, NOT_ANSWERING);
         return;
     };
     // Kept on this thread for as long as the connection lives: `connection`
@@ -1158,8 +1166,40 @@ mod tests {
         assert_eq!(connection.pending_bytes(), 0);
     }
 
+    /// A Surface the window cannot give a writer to is told so, rather than
+    /// having its connection closed with no answer, and the window never
+    /// hears of it.
     #[test]
-    fn chunked_batches_keep_the_gesture_lock_across_every_flush() {
+    fn a_surface_that_cannot_get_a_writer_is_refused_with_a_reason() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        // Set while both ends are open: macOS refuses it on a closed pair.
+        peer.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        let (requests, window) = async_channel::bounded(1);
+        serve_surface(
+            stream,
+            reader,
+            Err(std::io::Error::other("no thread for a writer")),
+            PaneId(1),
+            Open {
+                placement: Placement::Overlay,
+                focus: false,
+                description: json!({}),
+            },
+            &requests,
+        );
+        let mut wire = String::new();
+        std::io::Read::read_to_string(&mut peer, &mut wire).unwrap();
+        let refusal: Value =
+            serde_json::from_str(wire.lines().next().expect("a refusal line")).unwrap();
+        assert_eq!(refusal["type"], "refused");
+        assert_eq!(refusal["reason"], NOT_ANSWERING);
+        assert!(window.try_recv().is_err(), "the window was asked nothing");
+    }
+
+    #[test]
+    fn concurrent_batches_each_reach_the_wire_in_one_piece() {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         assert!(connection.establish(&event_opened(SurfaceId(1))));
