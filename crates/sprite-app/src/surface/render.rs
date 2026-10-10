@@ -160,17 +160,22 @@ impl ElementImageCache {
     }
 }
 
-/// An element Surface's description and the decodes it draws. The cache finds
-/// pictures by their place in the description's tree, so the two only change
-/// together: `replace` is the one way to give the body a new description.
+/// An element Surface's description, with what it derives from the tree: the
+/// decodes it draws and its clickable elements' ids. Both are kept by place in
+/// the tree, so they only change with the description: `replace` is the one way
+/// to give the body a new one.
 pub(crate) struct ElementBody {
+    surface: SurfaceId,
     description: Description,
+    clicks: Vec<ElementId>,
     images: ElementImageCache,
 }
 
 impl ElementBody {
-    pub(crate) fn new(description: Description) -> Self {
+    pub(crate) fn new(surface: SurfaceId, description: Description) -> Self {
         Self {
+            surface,
+            clicks: click_ids(&description.root, surface),
             description,
             images: ElementImageCache::default(),
         }
@@ -180,20 +185,21 @@ impl ElementBody {
     /// decode; the rest are released, so the budget counts only what is on
     /// screen.
     pub(crate) fn replace(&mut self, description: Description) {
+        self.clicks = click_ids(&description.root, self.surface);
         self.description = description;
         self.images.retain_drawn_by(&self.description);
     }
 
     pub(crate) fn render(
         &mut self,
-        surface: SurfaceId,
         registry: &TokenRegistry,
         connection: &SurfaceConnection,
         host: Option<Entity<TerminalView>>,
     ) -> AnyElement {
         render(
             &self.description,
-            surface,
+            &self.clicks,
+            self.surface,
             registry,
             connection,
             host,
@@ -213,8 +219,11 @@ impl ElementBody {
     }
 }
 
+/// `clicks` holds the id of each clickable element in `description`, in tree
+/// order, as `click_ids` builds them.
 fn render(
     description: &Description,
+    clicks: &[ElementId],
     surface: SurfaceId,
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
@@ -227,19 +236,70 @@ fn render(
         registry,
         connection,
         &host,
-        &mut Walk::default(),
+        &mut Walk {
+            next: 0,
+            clicks: clicks.iter(),
+        },
         images,
     )
 }
 
 /// What one walk of a description numbers as it goes.
-#[derive(Default)]
 struct Walk<'a> {
     /// The next element's place in tree order, by which an image finds its
     /// decode.
     next: u64,
-    /// How many clickable elements so far send each event name.
-    clicks: HashMap<&'a str, u64>,
+    /// The ids of the clickable elements not yet reached, in tree order.
+    clicks: std::slice::Iter<'a, ElementId>,
+}
+
+/// The GPUI id of each clickable element under `root`, in tree order.
+///
+/// Identified by the event it sends, not by its place in the tree. A press
+/// and its release are matched by id, so an update between them that moves
+/// another element under the pointer must not hand that element the press.
+/// Elements sending the same event are told apart by their order among
+/// themselves; mistaking one for another sends the same event either way.
+fn click_ids(root: &Element, surface: SurfaceId) -> Vec<ElementId> {
+    let mut ids = Vec::new();
+    let mut sent: HashMap<&str, u64> = HashMap::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let (on_click, children) = match node {
+            Element::Box {
+                on_click, children, ..
+            }
+            | Element::List {
+                on_click, children, ..
+            } => (on_click, children.as_slice()),
+            Element::Text { on_click, .. } | Element::Button { on_click, .. } => {
+                (on_click, &[][..])
+            }
+            Element::Image { .. } | Element::Grid { .. } | Element::VirtualList { .. } => {
+                continue;
+            }
+        };
+        if let Some(name) = on_click {
+            #[cfg(test)]
+            CLICK_IDS_BUILT.with(|built| built.set(built.get() + 1));
+            let occurrence = sent.entry(name.as_str()).or_default();
+            ids.push(ElementId::NamedInteger(
+                SharedString::from(format!("surface-{}-{name}", surface.0)),
+                *occurrence,
+            ));
+            *occurrence += 1;
+        }
+        // Reversed onto the stack so the first child is visited first.
+        pending.extend(children.iter().rev());
+    }
+    ids
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many clickable-element ids this thread has built, counted where
+    /// the id's name is formatted, so a test can see what a frame cost.
+    static CLICK_IDS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -475,13 +535,13 @@ pub(crate) fn apply_described_style<E: Styled>(
     target
 }
 
-fn element<'a>(
-    node: &'a Element,
+fn element(
+    node: &Element,
     surface: SurfaceId,
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
     host: &Option<Entity<TerminalView>>,
-    walk: &mut Walk<'a>,
+    walk: &mut Walk<'_>,
     images: &mut ElementImageCache,
 ) -> AnyElement {
     let index = walk.next;
@@ -522,6 +582,11 @@ fn element<'a>(
         ),
         Element::Grid { .. } | Element::VirtualList { .. } => return div().into_any_element(),
     };
+    // Taken before the children, which come after this element in tree order.
+    let click = on_click.as_ref().map(|name| {
+        let id = walk.clicks.next();
+        (name, id.expect("every clickable element has an id").clone())
+    });
     boxed = apply_described_style(boxed, node, registry);
     if let Some(text) = text {
         boxed = boxed.child(SharedString::from(text.to_owned()));
@@ -532,21 +597,9 @@ fn element<'a>(
             .map(|child| element(child, surface, registry, connection, host, walk, images)),
     );
 
-    match on_click {
+    match click {
         None => boxed.into_any_element(),
-        Some(name) => {
-            // Identified by the event it sends, not by its place in the
-            // tree. A press and its release are matched by id, so an update
-            // between them that moves another element under the pointer
-            // must not hand that element the press. Elements sending the
-            // same event are told apart by their order among themselves;
-            // mistaking one for another sends the same event either way.
-            let occurrence = walk.clicks.entry(name.as_str()).or_default();
-            let id = ElementId::NamedInteger(
-                SharedString::from(format!("surface-{}-{name}", surface.0)),
-                *occurrence,
-            );
-            *occurrence += 1;
+        Some((name, id)) => {
             let name = name.clone();
             let connection = connection.clone();
             let host = host.clone();
@@ -628,6 +681,7 @@ mod tests {
         let mut cache = ElementImageCache::default();
         let _ = render(
             &document,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
@@ -643,6 +697,7 @@ mod tests {
         let first = cache.image_for(&svg(0)).unwrap().id;
         let _ = render(
             &document,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
@@ -660,6 +715,7 @@ mod tests {
         .description;
         let _ = render(
             &fresh,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
@@ -694,6 +750,7 @@ mod tests {
         let mut cache = ElementImageCache::default();
         let _ = render(
             &document(&[0, 1, 2, 3, 4]),
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
@@ -713,6 +770,7 @@ mod tests {
         assert!(cache.image_for(&svg(0)).is_none());
         let _ = render(
             &next,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
@@ -758,6 +816,7 @@ mod tests {
         let frame = |description: &Description, cache: &mut ElementImageCache| {
             let _ = render(
                 description,
+                &[],
                 SurfaceId(1),
                 &registry,
                 &connection,
@@ -790,6 +849,43 @@ mod tests {
         assert_eq!(cache.text_lookups(), 5);
         assert_eq!(cache.decodes(), 3, "only the new SVG is decoded");
         assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
+    }
+
+    /// A clickable element's id names the event it sends, so building it
+    /// formats a string. That is done once per description, not per frame.
+    #[test]
+    fn an_unchanged_description_builds_its_click_ids_once() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let document = |names: &[&str]| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"box","children":names
+                    .iter()
+                    .map(|name| json!({"kind":"button","text":name,"on_click":name}))
+                    .collect::<Vec<_>>()}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let built = || CLICK_IDS_BUILT.with(|built| built.get());
+        let start = built();
+        let mut body = ElementBody::new(SurfaceId(1), document(&["a", "b", "a"]));
+        for _ in 0..6 {
+            let _ = body.render(&registry, &connection, None);
+        }
+        assert_eq!(
+            built() - start,
+            3,
+            "one id per clickable, built once for all six frames"
+        );
+
+        body.replace(document(&["b"]));
+        for _ in 0..3 {
+            let _ = body.render(&registry, &connection, None);
+        }
+        assert_eq!(built() - start, 4, "an update builds its own ids, once");
     }
 
     #[test]
@@ -827,6 +923,7 @@ mod tests {
         let mut cache = ElementImageCache::default();
         let _ = render(
             &blue,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
@@ -836,6 +933,7 @@ mod tests {
         let first = cache.image_for(&svg("blue")).unwrap();
         let _ = render(
             &blue,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
@@ -847,7 +945,15 @@ mod tests {
         drop(first);
         let red = document("red");
         cache = ElementImageCache::default();
-        let _ = render(&red, SurfaceId(1), &registry, &connection, None, &mut cache);
+        let _ = render(
+            &red,
+            &[],
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
         let second = cache.image_for(&svg("red")).unwrap();
         assert_eq!(&second.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
         assert_ne!(second.id, first_id);
@@ -880,14 +986,8 @@ mod tests {
 
         // Building the element tree needs no window; that is the property
         // this test locks down, since every frame rebuilds it.
-        let _element = render(
-            &parsed.description,
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut ElementImageCache::default(),
-        );
+        let _element =
+            ElementBody::new(SurfaceId(1), parsed.description).render(&registry, &connection, None);
     }
 
     #[test]

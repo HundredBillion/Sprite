@@ -73,7 +73,7 @@ impl Body {
             | Element::List { .. }
             | Element::Text { .. }
             | Element::Button { .. }
-            | Element::Image { .. } => Body::Elements(ElementBody::new(Description { root })),
+            | Element::Image { .. } => Body::Elements(ElementBody::new(id, Description { root })),
         }
     }
 
@@ -1111,7 +1111,7 @@ impl TerminalView {
         }
         let body = match &mut surface.body {
             Body::Elements(elements) => {
-                elements.render(surface.id, registry, &surface.connection, Some(cx.entity()))
+                elements.render(registry, &surface.connection, Some(cx.entity()))
             }
             Body::Grid { grid, shapes, .. } => {
                 crate::surface::render::render_grid(grid, highlights, metrics, shapes)
@@ -1654,9 +1654,9 @@ mod tests {
                 panic!("expected elements")
             };
             let registry = TokenRegistry::new(&settings.colors);
-            let _ = elements.render(SurfaceId(2), &registry, &connection, None);
+            let _ = elements.render(&registry, &connection, None);
             let first = elements.images().image_for(&svg("blue")).unwrap().id;
-            let _ = elements.render(SurfaceId(2), &registry, &connection, None);
+            let _ = elements.render(&registry, &connection, None);
             (first, elements.images().image_for(&svg("blue")).unwrap().id)
         });
         assert_eq!(first, again);
@@ -1677,12 +1677,7 @@ mod tests {
             let Body::Elements(elements) = &mut surface.body else {
                 panic!("expected elements")
             };
-            let _ = elements.render(
-                SurfaceId(2),
-                &TokenRegistry::new(&settings.colors),
-                &connection,
-                None,
-            );
+            let _ = elements.render(&TokenRegistry::new(&settings.colors), &connection, None);
             elements.images().image_for(&svg("red")).unwrap().id
         });
         assert_ne!(first, replacement);
@@ -1746,7 +1741,7 @@ mod tests {
             let Body::Elements(elements) = &mut surface.body else {
                 panic!("expected elements")
             };
-            let _ = elements.render(id, &registry, &connection, None);
+            let _ = elements.render(&registry, &connection, None);
             let images = elements.images();
             (
                 images.decodes(),
