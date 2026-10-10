@@ -42,7 +42,8 @@ pub(crate) struct ElementImageCache {
     /// What each image of the current description resolved to, by its index
     /// in tree order: `None` until that image is first drawn, then the
     /// picture, or `Some(None)` for one that failed or did not fit. Emptied by
-    /// `retain_drawn_by`, which every change of description goes through.
+    /// `retain_drawn_by`, which `ElementBody::replace` calls with every new
+    /// description.
     placed: Vec<Option<Option<Arc<RenderImage>>>>,
     retained_bytes: usize,
     #[cfg(test)]
@@ -100,7 +101,7 @@ impl ElementImageCache {
     /// the budget counts only images on screen. A decode that failed or did
     /// not fit is forgotten too: the next frame tries it again against
     /// whatever the update freed.
-    pub(crate) fn retain_drawn_by(&mut self, description: &Description) {
+    fn retain_drawn_by(&mut self, description: &Description) {
         self.placed.clear();
         let mut drawn = HashSet::new();
         drawn_images(&description.root, &mut drawn);
@@ -159,7 +160,60 @@ impl ElementImageCache {
     }
 }
 
-pub(crate) fn render(
+/// An element Surface's description and the decodes it draws. The cache finds
+/// pictures by their place in the description's tree, so the two only change
+/// together: `replace` is the one way to give the body a new description.
+pub(crate) struct ElementBody {
+    description: Description,
+    images: ElementImageCache,
+}
+
+impl ElementBody {
+    pub(crate) fn new(description: Description) -> Self {
+        Self {
+            description,
+            images: ElementImageCache::default(),
+        }
+    }
+
+    /// Draws `description` from now on. Images it still draws keep their
+    /// decode; the rest are released, so the budget counts only what is on
+    /// screen.
+    pub(crate) fn replace(&mut self, description: Description) {
+        self.description = description;
+        self.images.retain_drawn_by(&self.description);
+    }
+
+    pub(crate) fn render(
+        &mut self,
+        surface: SurfaceId,
+        registry: &TokenRegistry,
+        connection: &SurfaceConnection,
+        host: Option<Entity<TerminalView>>,
+    ) -> AnyElement {
+        render(
+            &self.description,
+            surface,
+            registry,
+            connection,
+            host,
+            &mut self.images,
+        )
+    }
+}
+
+#[cfg(test)]
+impl ElementBody {
+    pub(crate) fn description(&self) -> &Description {
+        &self.description
+    }
+
+    pub(crate) fn images(&self) -> &ElementImageCache {
+        &self.images
+    }
+}
+
+fn render(
     description: &Description,
     surface: SurfaceId,
     registry: &TokenRegistry,

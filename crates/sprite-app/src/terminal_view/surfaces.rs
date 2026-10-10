@@ -25,16 +25,14 @@ use crate::surface::channel::{
 use crate::surface::description::{self, BodyKind, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
 use crate::surface::list::ListOp;
+use crate::surface::render::ElementBody;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
 
 /// What a Surface draws: an element tree replaced whole on `update`, or a
 /// grid mutated by operations.
 pub(super) enum Body {
-    Elements {
-        description: Description,
-        images: crate::surface::render::ElementImageCache,
-    },
+    Elements(ElementBody),
     Grid {
         grid: Box<GridSurface>,
         /// The description's root element, kept for the `bg` and `color` it
@@ -75,16 +73,13 @@ impl Body {
             | Element::List { .. }
             | Element::Text { .. }
             | Element::Button { .. }
-            | Element::Image { .. } => Body::Elements {
-                description: Description { root },
-                images: Default::default(),
-            },
+            | Element::Image { .. } => Body::Elements(ElementBody::new(Description { root })),
         }
     }
 
     fn kind(&self) -> BodyKind {
         match self {
-            Self::Elements { .. } => BodyKind::Elements,
+            Self::Elements(_) => BodyKind::Elements,
             Self::Grid { .. } => BodyKind::Grid,
             Self::List { .. } => BodyKind::List,
         }
@@ -112,19 +107,7 @@ impl Body {
                 *root = replacement;
                 view.update(cx, |view, cx| view.reconfigure(config, cx));
             }
-            (
-                Self::Elements {
-                    description,
-                    images,
-                },
-                root,
-            ) => {
-                *description = Description { root };
-                // Images the new description still draws keep their decode;
-                // the rest are released, so the budget counts only what is
-                // on screen.
-                images.retain_drawn_by(description);
-            }
+            (Self::Elements(elements), root) => elements.replace(Description { root }),
             _ => {
                 return Err(Refusal::Malformed(
                     "an update must preserve the Surface body kind".to_owned(),
@@ -1127,17 +1110,9 @@ impl TerminalView {
             surface.told = Some(told);
         }
         let body = match &mut surface.body {
-            Body::Elements {
-                description,
-                images,
-            } => crate::surface::render::render(
-                description,
-                surface.id,
-                registry,
-                &surface.connection,
-                Some(cx.entity()),
-                images,
-            ),
+            Body::Elements(elements) => {
+                elements.render(surface.id, registry, &surface.connection, Some(cx.entity()))
+            }
             Body::Grid { grid, shapes, .. } => {
                 crate::surface::render::render_grid(grid, highlights, metrics, shapes)
             }
@@ -1675,38 +1650,22 @@ mod tests {
         let (first, again) = host.update(cx, |view, _| {
             let surface = view.surfaces.fill.as_mut().unwrap();
             let connection = surface.connection.clone();
-            let Body::Elements {
-                description,
-                images,
-            } = &mut surface.body
-            else {
+            let Body::Elements(elements) = &mut surface.body else {
                 panic!("expected elements")
             };
-            let _ = crate::surface::render::render(
-                description,
-                SurfaceId(2),
-                &TokenRegistry::new(&settings.colors),
-                &connection,
-                None,
-                images,
-            );
-            let first = images.image_for(&svg("blue")).unwrap().id;
-            let _ = crate::surface::render::render(
-                description,
-                SurfaceId(2),
-                &TokenRegistry::new(&settings.colors),
-                &connection,
-                None,
-                images,
-            );
-            (first, images.image_for(&svg("blue")).unwrap().id)
+            let registry = TokenRegistry::new(&settings.colors);
+            let _ = elements.render(SurfaceId(2), &registry, &connection, None);
+            let first = elements.images().image_for(&svg("blue")).unwrap().id;
+            let _ = elements.render(SurfaceId(2), &registry, &connection, None);
+            (first, elements.images().image_for(&svg("blue")).unwrap().id)
         });
         assert_eq!(first, again);
         host.update(cx, |view, cx| {
             view.update_surface(SurfaceId(2), document("red"), cx);
-            let Body::Elements { images, .. } = &view.surfaces.fill.as_ref().unwrap().body else {
+            let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
                 panic!("expected elements")
             };
+            let images = elements.images();
             assert!(
                 images.image_for(&svg("blue")).is_none(),
                 "blue is no longer drawn, so its decode was released"
@@ -1715,22 +1674,16 @@ mod tests {
         let replacement = host.update(cx, |view, _| {
             let surface = view.surfaces.fill.as_mut().unwrap();
             let connection = surface.connection.clone();
-            let Body::Elements {
-                description,
-                images,
-            } = &mut surface.body
-            else {
+            let Body::Elements(elements) = &mut surface.body else {
                 panic!("expected elements")
             };
-            let _ = crate::surface::render::render(
-                description,
+            let _ = elements.render(
                 SurfaceId(2),
                 &TokenRegistry::new(&settings.colors),
                 &connection,
                 None,
-                images,
             );
-            images.image_for(&svg("red")).unwrap().id
+            elements.images().image_for(&svg("red")).unwrap().id
         });
         assert_ne!(first, replacement);
         host.update_in(cx, |view, window, cx| {
@@ -1790,21 +1743,11 @@ mod tests {
         let frame = |view: &mut TerminalView, colors: &[&str]| {
             let surface = view.surfaces.fill.as_mut().unwrap();
             let connection = surface.connection.clone();
-            let Body::Elements {
-                description,
-                images,
-            } = &mut surface.body
-            else {
+            let Body::Elements(elements) = &mut surface.body else {
                 panic!("expected elements")
             };
-            let _ = crate::surface::render::render(
-                description,
-                id,
-                &registry,
-                &connection,
-                None,
-                images,
-            );
+            let _ = elements.render(id, &registry, &connection, None);
+            let images = elements.images();
             (
                 images.decodes(),
                 colors
@@ -1839,9 +1782,10 @@ mod tests {
         );
         assert!(changed[2].is_some());
         host.update(cx, |view, _| {
-            let Body::Elements { images, .. } = &view.surfaces.fill.as_ref().unwrap().body else {
+            let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
                 panic!("expected elements")
             };
+            let images = elements.images();
             assert_eq!(
                 images.retained_bytes(),
                 2 * 4 * 4 * 4,
@@ -2453,11 +2397,10 @@ mod tests {
         );
         assert_eq!(events(&mut peer)[0]["type"], "refused");
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "before"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "before"));
         });
         dispatch(
             &host,
@@ -2470,11 +2413,10 @@ mod tests {
         );
         assert!(events(&mut peer).is_empty());
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "after"));
         });
     }
 
@@ -2535,11 +2477,10 @@ mod tests {
             },
         );
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "after"));
         });
         dispatch(
             &host,
@@ -2552,11 +2493,10 @@ mod tests {
         );
         assert_eq!(events(&mut peer)[0]["type"], "refused");
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "after"));
         });
         dispatch(
             &host,
