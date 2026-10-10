@@ -252,34 +252,42 @@ The actual report passes against both the original and new capture budgets.
 
 ### Paint budgets re-frozen after the bug-class audit
 
-`design-review-paint-shared.json` was re-frozen on 2026-10-09 at commit d1fceb0
-by rerunning the full 30-sample release benchmark, per the regression policy in
-`checkpoint-1.md`. Machine: Darwin arm64, Apple M5 Pro, 18/18 cores;
-rustc 1.97.1 (8bab26f4f 2026-07-14); Cargo's default release profile; no
-compilation, tests or other benchmark running (one idle Sprite window, under
-1% CPU, was open). The run passed `--check-budgets design-review-paint-baseline.json` (the original
+`design-review-paint-shared.json` was re-frozen on 2026-10-09 at commit 52cb4cf,
+whose code is that of 0fdbc7c, by rerunning the full 30-sample release
+benchmark, per the regression policy in `checkpoint-1.md`. Each budget is p95
+plus a tenth of p95, rounded up. Machine: Darwin arm64, Apple M5 Pro, 18/18
+cores; rustc 1.97.1 (8bab26f4f 2026-07-14); Cargo's default release profile; no
+compilation, tests or other benchmark running. The machine was loaded:
+OrbStack Helper used 550–700% CPU throughout, Microsoft Defender 11–31%, and
+seven `llm-wiki` Python processes were at 86–112% CPU each as the run started.
+The user's Sprite app and a release `sprite` from another checkout were open
+and idle, each under 2% CPU. Allocation counts do not depend on load; the
+timings below do. The run passed
+`--check-budgets design-review-paint-baseline.json` (the original
 pre-optimisation budgets), and a second 30-sample run passed
 `--check-budgets design-review-paint-shared.json`.
 
 | Scenario/pass | Allocations max | Allocation budget | Requested bytes max | Byte budget | Median ms | p95 ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `whole_first_frame` | 3,122 | 3,435 | 747,376 | 822,114 | 0.343792 | 0.365375 |
-| `whole_same_generation_blink` | 0 | 0 | 0 | 0 | 0.352958 | 0.428875 |
-| `whole_hover` | 53 | 59 | 12,936 | 14,230 | 0.330458 | 0.364208 |
-| `whole_one_row_change` | 53 | 59 | 12,936 | 14,230 | 0.294417 | 0.322375 |
-| `split_first_frame` | 3,122 | 3,435 | 747,376 | 822,114 | 0.491125 | 0.507500 |
-| `split_same_generation_blink` | 0 | 0 | 0 | 0 | 0.430625 | 0.477458 |
-| `split_hover` | 53 | 59 | 12,936 | 14,230 | 0.431167 | 0.450167 |
-| `split_one_row_change` | 53 | 59 | 12,936 | 14,230 | 0.431500 | 0.440917 |
+| `whole_first_frame` | 122 | 135 | 579,376 | 637,314 | 0.369625 | 0.491333 |
+| `whole_same_generation_blink` | 0 | 0 | 0 | 0 | 0.377708 | 0.686375 |
+| `whole_hover` | 3 | 4 | 10,136 | 11,150 | 0.331125 | 0.372209 |
+| `whole_one_row_change` | 3 | 4 | 10,136 | 11,150 | 0.336500 | 0.392208 |
+| `split_first_frame` | 122 | 135 | 579,376 | 637,314 | 0.602125 | 0.696833 |
+| `split_same_generation_blink` | 0 | 0 | 0 | 0 | 0.532250 | 0.585250 |
+| `split_hover` | 3 | 4 | 10,136 | 11,150 | 0.566500 | 0.572625 |
+| `split_one_row_change` | 3 | 4 | 10,136 | 11,150 | 0.569458 | 0.737709 |
 
-Why the budgets moved: cell text is now a `SharedString` made when a row is
-laid out, not a `String` made each time a cell is painted. Laying out a row now
-allocates once per non-ASCII cell (printable ASCII borrows a static string;
-the fixture has 50 non-ASCII cells per row), so first frame, hover and one-row
-change rose inside this seam. Per-frame paint, which is outside this seam,
-fell: `a62247e` made a new string for every one of the 6,600 glyph cells on
-every frame, idle frames included, and paint now makes none. Same-generation
-blink still allocates nothing. See `bug-class-audit.md`.
+Why the budgets moved: they are back where they were before the audit. A
+first draft of the audit's paint work made each cell's text-system string when
+its row was laid out, which raised first-frame allocations from 122 to 3,122
+and hover and one-row allocations from 3 to 53, and the budgets were re-frozen
+at 3,435 / 822,114 and 59 / 14,230 for it. That draft was reverted. A laid-out
+cell now keeps the terminal's compact cell text, and the string is made only
+when a shape is made, on a shape-cache miss. The measured seam therefore
+allocates exactly as it did at `a62247e`, while per-frame paint, outside this
+seam, no longer makes a string for every one of the 6,600 glyph cells on every
+frame. Same-generation blink still allocates nothing. See `bug-class-audit.md`.
 
 ### Carried timing gates
 

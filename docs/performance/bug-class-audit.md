@@ -6,14 +6,18 @@ enforced: no budget in this file is a gate.
 
 ## What changed in the measured seam
 
-- Cell text is a `SharedString` made once when a row is laid out. Printable
-  ASCII borrows a static string; other text is copied once per layout of its
-  row. At `a62247e` paint copied every glyph cell's text into a new string on
-  every frame, outside this benchmark's measured seam.
+- A laid-out cell keeps the terminal's compact `CellText`: empty and
+  single-scalar text is stored inline, and longer text is shared through an
+  `Arc<str>`, so the laid-out cell shares the terminal cell's string. The text
+  system's `SharedString` is made only when a shape is made, on a shape-cache
+  miss. At `a62247e` paint copied every glyph cell's
+  text into a new string on every frame, outside this benchmark's measured
+  seam.
 - Glyphs are shaped through a per-row shape cache beside the layout cache: a
   cell is shaped again only when its drawn colour differs from the one it was
   shaped in, and the cache is dropped on any font, theme or scale change.
-  Shapes are pooled per pane (at most 4,096 distinct shapes).
+  Shapes are pooled per pane (at most 4,096 distinct shapes). Hidden cells are
+  never shaped and carry no decorations.
 - Box-drawing strokes and outlines are fixed arrays; drawing one allocates
   nothing.
 
@@ -39,9 +43,20 @@ TERM=xterm-ghostty target/release/sprite-paint-bench --samples 30 --shaping \
 ```
 
 Machine: Darwin arm64, Apple M5 Pro, 18 cores (18 logical); rustc 1.97.1
-(8bab26f4f 2026-07-14); release profile; 30 samples per metric; no
-compilation, tests or other benchmark running (one idle Sprite window, under 1%
-CPU, was open). Recorded on 2026-10-09; the "after" run is at commit d1fceb0.
+(8bab26f4f 2026-07-14); release profile; 30 samples per metric. The "before"
+run was recorded on 2026-10-09 with no compilation, tests or other benchmark
+running and one idle Sprite window (under 1% CPU) open. The "after" run was
+recorded on 2026-10-09 at 23:08 at commit 52cb4cf, whose code is that of
+0fdbc7c, with no compilation, tests or other benchmark running, on a loaded
+machine:
+
+- OrbStack Helper used 550–700% CPU, about six to seven of the 18 cores,
+  before and during every run.
+- Microsoft Defender used 11–31%, and WindowServer about 11%.
+- Seven `llm-wiki` Python processes were at 86–112% CPU each just before the
+  re-freeze run started and had fallen below 10% by the two runs after it.
+- The user's Sprite app (`/Applications/Sprite.app`) and a release `sprite`
+  built from another checkout were open and idle, each under 2% CPU.
 
 ## Preparation and decisions (existing seam)
 
@@ -58,45 +73,46 @@ CPU, was open). Recorded on 2026-10-09; the "after" run is at commit d1fceb0.
 
 | Scenario/pass | Allocations max (after) | Bytes max (after) | Median ms (after) | p95 ms (after) |
 | --- | ---: | ---: | ---: | ---: |
-| `whole_first_frame` | 3,122 | 747,376 | 0.396334 | 0.716834 |
-| `whole_same_generation_blink` | 0 | 0 | 0.317083 | 0.369292 |
-| `whole_hover` | 53 | 12,936 | 0.323417 | 0.381542 |
-| `whole_one_row_change` | 53 | 12,936 | 0.326625 | 0.380041 |
-| `split_first_frame` | 3,122 | 747,376 | 0.562167 | 0.639500 |
-| `split_same_generation_blink` | 0 | 0 | 0.480791 | 0.588916 |
-| `split_hover` | 53 | 12,936 | 0.496833 | 0.553042 |
-| `split_one_row_change` | 53 | 12,936 | 0.489000 | 0.527833 |
+| `whole_first_frame` | 122 | 579,376 | 0.323083 | 0.404375 |
+| `whole_same_generation_blink` | 0 | 0 | 0.295250 | 0.326792 |
+| `whole_hover` | 3 | 10,136 | 0.282708 | 0.297417 |
+| `whole_one_row_change` | 3 | 10,136 | 0.291917 | 0.294875 |
+| `split_first_frame` | 122 | 579,376 | 0.472667 | 0.508416 |
+| `split_same_generation_blink` | 0 | 0 | 0.432250 | 0.484375 |
+| `split_hover` | 3 | 10,136 | 0.454667 | 0.500875 |
+| `split_one_row_change` | 3 | 10,136 | 0.450791 | 0.520959 |
 
-Same-generation blink allocates nothing before and after. First frame, hover
-and one-row change now allocate once per non-ASCII cell in each row laid out
-(the fixture has 50 per row), because that text is made at layout instead of
-at paint: layout allocations rose inside this seam. Per-frame paint
-allocations, outside it, fell: the paint path this replaces made a new string
-for every one of the 6,600 glyph cells on every frame, idle ones included, and
-paint now makes none.
+Allocations and requested bytes are identical before and after in every
+transition: 122 allocations and 579,376 bytes for a first frame, 3 and 10,136
+for hover and a one-row change, and nothing for a same-generation blink. Laying
+out a row clones each cell's compact text, which allocates nothing, so the
+measured preparation allocates exactly as it did at `a62247e`. Per-frame
+paint, outside this seam, now allocates less: `a62247e` made a new string for
+every one of the 6,600 glyph cells on every frame, idle frames included, and
+paint now makes one only when a shape is made.
 
-Bytes rose by 2,800 per laid-out row (168,000 for the 60-row first frame, 2,800
-for hover and one-row change). Each laid-out cell's paint-ready text is 8 bytes
-wider than the terminal's compact cell text (200 cells, 1,600 bytes), and each
-of the 50 non-ASCII cells' text is one 24-byte shared allocation (1,200 bytes).
+A first draft of this work built the text system's string at layout instead.
+That raised first-frame allocations from 122 to 3,122, and hover and one-row
+allocations from 3 to 53, because every non-ASCII cell's text was copied once
+per layout of its row. It was reverted before merge, and a test now holds the
+fixture's first frame at 122 allocations and hover and one-row change at 3.
 
-Timing is recorded, not gated. Medians in this seam were 7–28% higher in the
-"after" run. Same-generation blink allocates nothing in either run and still
-rose 7–12%, so the per-cell draw decision's new work (faint and hidden text
-are now resolved there) and run-to-run noise account for part of it. The
-re-freeze run a few minutes later measured 0–19% above "before". The paint-side
-saving is outside this seam and is not timed.
+Timing is recorded, not gated. "After" medians were within 0–5% of "before"
+(−0.4% for whole same-generation blink, +5.0% for split hover and split
+one-row change). The "after" run shared the machine with OrbStack's load
+described above and the "before" run did not, so part of that difference may
+be load. The re-freeze run a few seconds earlier, which overlapped the end of
+the Python burst, measured 17–33% above "before"; the budget-check run after it
+measured 1–17% above. The paint-side saving is outside this seam and is not
+timed.
 
 ### Surface allocation probe
 
 `surface_performance::surface_allocation_probe` measures the grid Surface's
-one-row update and render. Its byte bound was raised from 12,000 to 13,000 for
-the same reason as above: the relaid 200-cell row's buffer is 1,600 bytes
-larger. That update now allocates 6 times instead of 7, because the changed
-cell's text is interned once and shared between lookup and paint, and requests
-12,528 bytes instead of 10,960. The probe's first render requests about
-96,000 bytes more (60 rows of 200 cells, 8 bytes each). Its allocation bounds
-are unchanged.
+one-row update and render. Its bounds are those of `a62247e`, including the
+12,000-byte bound on that update. The update now allocates 6 times and
+requests 10,928 bytes, against 7 and 10,960 at `a62247e`, because the changed
+cell's text is interned once and the laid-out cell shares that string.
 
 ## Budgets re-frozen
 
@@ -110,17 +126,19 @@ re-frozen after the bug-class audit".
 
 | Scenario/pass | Allocations max | Allocation budget | Requested bytes max | Byte budget |
 | --- | ---: | ---: | ---: | ---: |
-| `whole_first_frame` | 3,122 | 3,435 | 747,376 | 822,114 |
+| `whole_first_frame` | 122 | 135 | 579,376 | 637,314 |
 | `whole_same_generation_blink` | 0 | 0 | 0 | 0 |
-| `whole_hover` | 53 | 59 | 12,936 | 14,230 |
-| `whole_one_row_change` | 53 | 59 | 12,936 | 14,230 |
-| `split_first_frame` | 3,122 | 3,435 | 747,376 | 822,114 |
+| `whole_hover` | 3 | 4 | 10,136 | 11,150 |
+| `whole_one_row_change` | 3 | 4 | 10,136 | 11,150 |
+| `split_first_frame` | 122 | 135 | 579,376 | 637,314 |
 | `split_same_generation_blink` | 0 | 0 | 0 | 0 |
-| `split_hover` | 53 | 59 | 12,936 | 14,230 |
-| `split_one_row_change` | 53 | 59 | 12,936 | 14,230 |
+| `split_hover` | 3 | 4 | 10,136 | 11,150 |
+| `split_one_row_change` | 3 | 4 | 10,136 | 11,150 |
 
-The whole first frame's 747,376 requested bytes are within 3% of the original
-baseline byte budget of 772,667: little headroom remains against that file.
+These are the budgets the file held at `a62247e`. They replace the 3,435 /
+822,114 and 59 / 14,230 budgets frozen for the reverted first draft. The whole
+first frame's 579,376 requested bytes are 25% below the original baseline byte
+budget of 772,667.
 
 ## Shaping (counts; not timed)
 
@@ -140,7 +158,10 @@ shapes now.
 | `split_one_row_change` | 6,601 | 1 |
 
 The first frame shapes fewer than 6,600 because identical cells drawn in the
-same colour share one pooled shape.
+same colour share one pooled shape. The fixture has no hidden cells, so never
+shaping them leaves these counts unchanged. The counts match those of the
+first draft: building the string later changed what a shape costs to make, not
+how many are made.
 
 The same gate is enforced at Sprite's real `shape_line` call site by
 `grid_paint::tests::shaping_happens_only_for_cells_whose_drawn_text_changed`
@@ -151,7 +172,7 @@ change equal to a cold cache).
 
 | Gate | Result |
 | --- | --- |
-| `TERM=dumb cargo test --workspace --locked --offline` | pass: 937 passed, 0 failed, 3 ignored (45 test binaries; run with `--no-fail-fast`) |
+| `TERM=dumb cargo test --workspace --locked --offline` | pass at 0fdbc7c: 950 passed, 0 failed, 3 ignored (45 test binaries; run with `--no-fail-fast`) |
 | `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | pass |
 | `cargo fmt --all --check` | pass |
 | `sprite-paint-bench --samples 30 --check-budgets docs/performance/design-review-paint-shared.json` (release) | pass (exit 0) |
