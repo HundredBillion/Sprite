@@ -506,13 +506,15 @@ impl Settings {
 
     /// Reads the file discovery found. Only its absence is not a complaint:
     /// most people have no configuration file, but one that is there and
-    /// cannot be read is somebody's settings going unused.
+    /// cannot be read is somebody's settings going unused. One read decides
+    /// both, so nothing can change between asking whether the file is there
+    /// and reading it.
     pub fn load_from(path: &Path) -> (Self, Complaints) {
-        match std::fs::metadata(path) {
+        match std::fs::read_to_string(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 (Self::default(), Complaints::default())
             }
-            _ => Self::load_explicit(path),
+            read => Self::from_read(path, read),
         }
     }
 
@@ -523,7 +525,11 @@ impl Settings {
     /// words a reload uses. The defaults stand in for it, because a terminal
     /// must open.
     pub fn load_explicit(path: &Path) -> (Self, Complaints) {
-        match std::fs::read_to_string(path) {
+        Self::from_read(path, std::fs::read_to_string(path))
+    }
+
+    fn from_read(path: &Path, read: std::io::Result<String>) -> (Self, Complaints) {
+        match read {
             Ok(text) => Self::parse(&text),
             Err(error) => (Self::default(), Complaints(vec![unreadable(path, &error)])),
         }
