@@ -123,11 +123,28 @@ pub enum TerminalCommand {
     /// application because libghostty models it over the whole screen including
     /// scrollback, and because a cell is only reported as selected when the
     /// terminal itself holds the selection.
+    ///
+    /// In character mode, after a `BeginSelection` every `Select` extends from
+    /// that press's pinned anchor until the next `BeginSelection` or
+    /// `ClearSelection`; this `anchor` is used only when no press has been
+    /// pinned. If the pinned content is gone or the other screen is now active,
+    /// the selection is cleared instead.
     Select {
         anchor: CellPosition,
         head: CellPosition,
         mode: SelectionMode,
         rectangle: bool,
+    },
+    /// The press that starts a selection gesture.
+    ///
+    /// Drops whatever was selected and pins `anchor` to the content under it,
+    /// so every `Select` that follows extends from that content wherever output
+    /// has since moved it. If that content is evicted from scrollback, the
+    /// gesture selects nothing rather than re-anchoring on whatever replaced
+    /// it. The gesture lasts until the next `BeginSelection` or
+    /// `ClearSelection`.
+    BeginSelection {
+        anchor: CellPosition,
     },
     ClearSelection,
     /// Ask for the selected text. Answered with `SelectionCopied`.
@@ -166,15 +183,20 @@ pub enum TerminalCommand {
         request_id: u64,
     },
     Capture,
-    /// Ask for the active screen plus up to N lines of history, answered once
-    /// with [`crate::TerminalEvent::History`].
+    /// Ask for the active screen plus up to `lines` of history, answered once
+    /// with [`crate::TerminalEvent::History`] or
+    /// [`crate::TerminalEvent::HistoryFailed`], either of which carries this
+    /// `ticket`.
     ///
     /// Deliberately not part of the render bundle. Snapshots carry no history
     /// because rebuilding a full scrollback on every capture would cost
     /// thousands of allocations a second for rows the renderer never draws;
     /// observation has the opposite need, so it asks separately and pays only
     /// when it asks.
-    CaptureHistory(HistoryLines),
+    CaptureHistory {
+        ticket: Ticket,
+        lines: HistoryLines,
+    },
     /// Ask what images this pane is holding, answered once with
     /// [`crate::TerminalEvent::Graphics`].
     ///
@@ -190,6 +212,25 @@ pub enum TerminalCommand {
     SetColors(ColorDefaults),
     /// Replace this pane's default cursor, as a reload does.
     SetCursor(CursorDefaults),
+}
+
+/// Names one request so that its answer can find whoever asked.
+///
+/// Chosen by the asker and echoed back unchanged. Terminal Core attaches no
+/// meaning to the value; it promises only that the answer to a request carries
+/// that request's ticket, so an asker never has to rely on the order answers
+/// arrive in, which any unrelated event emitted in between would shift.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Ticket(u64);
+
+impl Ticket {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 /// How many lines of history an observation request wants.

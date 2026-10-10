@@ -16,10 +16,11 @@ mod reload;
 use reload::*;
 mod pane_factory;
 use pane_factory::*;
+mod clock;
 mod surface_routing;
 #[cfg(test)]
 mod test_support;
-pub(crate) use reload::{RelayError, ReloadRequest, relay};
+pub(crate) use reload::{Patience, RelayError, Relayed, ReloadRequest, relay};
 
 use gpui::prelude::*;
 use gpui::{
@@ -63,7 +64,8 @@ const DIVIDER_GRAB_PX: f32 = 7.0;
 ///
 /// Roughly fifteen columns or six rows at the default font size. It holds the
 /// side, not the panes nested inside it: a side that is itself split shares
-/// this width among its own panes.
+/// this width among its own panes. A split under four floors uses a quarter of
+/// itself instead, so a small split can still be moved.
 const DIVIDER_FLOOR_PX: f32 = 120.0;
 /// How far one keyboard nudge moves a boundary.
 const DIVIDER_NUDGE_PX: f32 = 20.0;
@@ -92,10 +94,19 @@ pub struct Workspace {
     /// serving threads, and the only route from a request to a pane.
     panes: Arc<WindowPanes>,
     focus: FocusHandle,
+    /// What the configuration file says, and nothing else.
+    ///
+    /// Font zoom is kept beside it in `font_zoom` rather than written into it,
+    /// so a reload compares the file with the file: zooming is not a
+    /// configuration change, and a reload that only recoloured the window
+    /// neither undoes the zoom nor reports a font change. What panes run with
+    /// is `active_settings`.
     settings: crate::config::Settings,
-    /// The size the configuration asked for, so "reset" returns to what a
-    /// person set rather than to Sprite's own default.
-    configured_font_size: crate::config::FontSize,
+    /// The size font zoom chose, while it differs from the file's.
+    ///
+    /// `None` follows the file's size. Reset clears it, which returns to what
+    /// a person configured rather than to Sprite's own default.
+    font_zoom: Option<crate::config::FontSize>,
     /// What every pane in this window runs instead of a login shell.
     ///
     /// Held so that a pane created later — by a split or a new tab — runs the
@@ -106,6 +117,10 @@ pub struct Workspace {
     stopping: bool,
     #[cfg(test)]
     cleanup_gates: std::collections::VecDeque<async_channel::Receiver<()>>,
+    /// Each pane cleanup thread, in the order it started, so a test can wait
+    /// for one to finish before it runs the executor.
+    #[cfg(test)]
+    cleanup_threads: Vec<Option<std::thread::JoinHandle<()>>>,
     /// The file this window was told to read, if it was told.
     ///
     /// Kept so a reload re-reads *that* file rather than quietly switching to
@@ -134,6 +149,10 @@ pub struct Workspace {
     dividers: Vec<(DividerPlacement, SharedString)>,
     published: Vec<(PaneId, Placement)>,
     _bounds: gpui::Subscription,
+    /// Withdraws a close question when the window stops being the active one.
+    _activation: gpui::Subscription,
+    /// The window's one clock: blink phase and title discovery for every pane.
+    _clock: gpui::Task<()>,
 }
 
 struct PaneTitle {
@@ -188,7 +207,7 @@ impl Workspace {
         // The endpoint's threads are not the GPUI thread, and a reload has to
         // touch views. So a request crosses back on a channel and is answered
         // from here, with the endpoint thread waiting on a reply of its own.
-        let (reload_tx, reload_rx) = async_channel::bounded::<ReloadRequest>(1);
+        let (reload_tx, reload_rx) = reload_channel();
         let endpoint = settings
             .pane_observation
             .enabled
@@ -238,14 +257,21 @@ impl Workspace {
         });
         let reload_task = cx.spawn(async move |workspace, cx| {
             while let Ok(request) = reload_rx.recv().await {
+                // An endpoint that gave up waiting has already told its caller
+                // that nothing was changed. Reloading now would make that
+                // untrue, so a request it abandoned is dropped unapplied.
+                if !request.reply.claim() {
+                    continue;
+                }
                 let answer = workspace
                     .update(cx, |workspace, cx| match request.what {
                         ConfigVerb::Reload => {
                             workspace.reload(request.reply_connection.as_ref(), cx)
                         }
                         // Printed from what the window is *using*, which after
-                        // a reload is not necessarily what the file says.
-                        ConfigVerb::Print => workspace.settings.to_toml(),
+                        // a reload is not necessarily what the file says, and
+                        // which includes the window's font zoom.
+                        ConfigVerb::Print => workspace.active_settings().to_toml(),
                     })
                     .unwrap_or_else(|_| "this window is closing".to_owned());
                 // The endpoint thread is waiting on this with a timeout of its
@@ -273,12 +299,21 @@ impl Workspace {
                 cx.notify();
             }
         });
+        // Switching to another window or application is leaving the pane, and
+        // a close question asked before that is not answered by a press made
+        // after coming back.
+        let activation = cx.observe_window_activation(window, |workspace, window, cx| {
+            if !window.is_window_active() {
+                workspace.dismiss_pending_close(cx);
+            }
+        });
+        let clock = Self::spawn_clock(cx);
         let mut workspace = Self {
             tabs,
             endpoint,
             panes,
             command,
-            configured_font_size: settings.font.size,
+            font_zoom: None,
             settings,
             focus: cx.focus_handle(),
             mode: Mode::Idle,
@@ -286,6 +321,8 @@ impl Workspace {
             stopping: false,
             #[cfg(test)]
             cleanup_gates: Default::default(),
+            #[cfg(test)]
+            cleanup_threads: Vec::new(),
             window_title: None,
             wanted_title: "Sprite".into(),
             pane_titles: Default::default(),
@@ -295,6 +332,8 @@ impl Workspace {
             dividers: Vec::new(),
             published: Vec::new(),
             _bounds: bounds,
+            _activation: activation,
+            _clock: clock,
             config_path,
             _reload: reload_task,
             reload_sender,
@@ -471,6 +510,14 @@ impl Render for Workspace {
             // one event reaching two consumers, which the terminal's input
             // rules forbid.
             .capture_key_down(cx.listener(Self::key_down))
+            // A button press is a deliberate act, like an unrelated key, so it
+            // withdraws a close question wherever it lands. Capture phase, so a
+            // pane or divider that handles the press itself cannot hide it.
+            .capture_any_mouse_down(cx.listener(
+                |workspace, _: &gpui::MouseDownEvent, _window, cx| {
+                    workspace.dismiss_pending_close(cx);
+                },
+            ))
             .when(strip > 0.0, |element| {
                 element.child(
                     div()

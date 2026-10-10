@@ -17,6 +17,14 @@ use std::time::{Duration, Instant};
 
 const KEY_BYTES: usize = 32;
 
+/// How long the listener rests after `accept` fails for any reason other than
+/// "nothing is waiting".
+///
+/// Long enough that a listener the system has run out of descriptors for costs
+/// nothing while it waits, short enough that service resumes almost as soon as
+/// they are freed.
+const ACCEPT_REST_MS: u16 = 100;
+
 /// The longest socket path this platform can actually carry.
 ///
 /// A Unix socket address keeps its path in `sockaddr_un.sun_path`, which is 108
@@ -150,6 +158,10 @@ pub(crate) struct Authenticated {
     pub reader: BufReader<UnixStream>,
     pub body: String,
     pub reply_connection: ReplyConnection,
+    /// This connection's place under the cap. A handler that leaves work
+    /// running after it returns keeps a share, so the connection still
+    /// counts until that work ends too.
+    pub slot: Arc<ConnectionSlot>,
 }
 
 type Connections = Arc<Mutex<HashMap<usize, UnixStream>>>;
@@ -161,7 +173,9 @@ pub(crate) struct ReplyConnection {
     id: usize,
 }
 
-struct ConnectionSlot {
+/// One connection's place under the cap, given back when the last share is
+/// dropped.
+pub(crate) struct ConnectionSlot {
     connections: Connections,
     id: usize,
 }
@@ -225,7 +239,14 @@ impl LocalSocket {
                         ];
                         match poll(&mut fds, PollTimeout::NONE) {
                             Err(Errno::EINTR) => continue,
-                            Err(_) => break,
+                            // A failing `poll` is waited out like a failing
+                            // `accept`: only closing the socket ends the loop.
+                            Err(_) => {
+                                if rest(&cancelled, &running) {
+                                    break;
+                                }
+                                continue;
+                            }
                             Ok(_) => {}
                         }
                         if !running.load(Ordering::SeqCst)
@@ -235,15 +256,13 @@ impl LocalSocket {
                         }
                         let stream = match listener.accept() {
                             Ok((stream, _)) => stream,
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                                ) =>
-                            {
+                            Err(error) if !rests_after(&error) => continue,
+                            Err(_) => {
+                                if rest(&cancelled, &running) {
+                                    break;
+                                }
                                 continue;
                             }
-                            Err(_) => break,
                         };
                         // BSD-derived systems hand the listener's O_NONBLOCK to accepted
                         // sockets; the handshake and handlers rely on blocking reads
@@ -263,10 +282,10 @@ impl LocalSocket {
                         };
                         live.insert(id, cancel);
                         drop(live);
-                        let slot = ConnectionSlot {
+                        let slot = Arc::new(ConnectionSlot {
                             connections: Arc::clone(&connections),
                             id,
-                        };
+                        });
                         let running = Arc::clone(&running);
                         let key = Arc::clone(&key);
                         let handler = Arc::clone(&handler);
@@ -291,6 +310,7 @@ impl LocalSocket {
                                             connections: Arc::clone(&_slot.connections),
                                             id,
                                         },
+                                        slot: Arc::clone(&_slot),
                                     }),
                                     Err(_) => refused(&mut stream),
                                 }
@@ -320,6 +340,12 @@ impl LocalSocket {
     }
     pub fn key_hex(&self) -> String {
         self.key.to_hex()
+    }
+
+    /// How many connections hold a slot against the cap right now.
+    #[cfg(test)]
+    pub(crate) fn live_connections(&self) -> usize {
+        self.connections.lock().unwrap().len()
     }
 
     pub fn close(&mut self) {
@@ -358,6 +384,36 @@ impl Drop for LocalSocket {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+/// Whether the listener rests before trying again after `accept` fails. No
+/// failure ends the listener; only closing the socket does.
+///
+/// Nothing waiting after all, or a signal interrupting the call, goes straight
+/// back to `poll`. Anything else rests first, because `poll` would report the
+/// same waiting connection at once and going straight back would spin.
+/// Running out of descriptors (`EMFILE`, `ENFILE`), buffers (`ENOBUFS`) or
+/// memory (`ENOMEM`), and a peer that hung up mid-accept (`ECONNABORTED`), all
+/// pass, so the listener waits them out. An unexpected error is treated the
+/// same way rather than ending the loop: a listener that stops silently leaves
+/// a socket that accepts connections nobody will ever serve.
+fn rests_after(error: &io::Error) -> bool {
+    !matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
+}
+
+/// Rests for [`ACCEPT_REST_MS`], waking early if the socket is closed.
+///
+/// Returns whether the socket is being closed.
+fn rest(cancelled: &UnixStream, running: &AtomicBool) -> bool {
+    let mut fds = [PollFd::new(cancelled.as_fd(), PollFlags::POLLIN)];
+    if poll(&mut fds, PollTimeout::from(ACCEPT_REST_MS)).is_err() {
+        // A failing `poll` must not turn the rest into a spin.
+        std::thread::sleep(Duration::from_millis(u64::from(ACCEPT_REST_MS)));
+    }
+    !running.load(Ordering::SeqCst) || !fds[0].revents().unwrap_or_else(PollFlags::empty).is_empty()
 }
 
 pub(crate) fn bind_private(socket: &Path) -> io::Result<UnixListener> {
@@ -979,5 +1035,225 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("unlinked listener must close");
         assert_eq!(client.read(&mut [0]).unwrap(), 0);
+    }
+
+    /// Lowers this process's soft descriptor limit.
+    fn lower_descriptor_limit(limit: nix::libc::rlim_t) {
+        let mut current = nix::libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit and setrlimit only read and write the struct they
+        // are given.
+        unsafe {
+            assert_eq!(
+                nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &mut current),
+                0
+            );
+            let lowered = nix::libc::rlimit {
+                rlim_cur: current.rlim_cur.min(limit),
+                rlim_max: current.rlim_max,
+            };
+            assert_eq!(nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &lowered), 0);
+        }
+    }
+
+    /// Opens descriptors until the process has none left, then gives one back
+    /// for the caller's own end of a connection.
+    fn exhaust_descriptors() -> Vec<File> {
+        let mut held = Vec::new();
+        loop {
+            match File::open("/dev/null") {
+                Ok(file) => held.push(file),
+                Err(error) if error.raw_os_error() == Some(Errno::EMFILE as i32) => break,
+                Err(error) => panic!("exhausting descriptors failed another way: {error}"),
+            }
+        }
+        held.pop()
+            .expect("at least one descriptor opens under the lowered limit");
+        held
+    }
+
+    /// CPU time this process has used, user and system together.
+    fn cpu_time() -> Duration {
+        let mut usage = std::mem::MaybeUninit::<nix::libc::rusage>::zeroed();
+        // SAFETY: getrusage fills the struct it is given and reads nothing
+        // else; it is fully written when the call returns 0.
+        let usage = unsafe {
+            assert_eq!(
+                nix::libc::getrusage(nix::libc::RUSAGE_SELF, usage.as_mut_ptr()),
+                0
+            );
+            usage.assume_init()
+        };
+        let time = |value: nix::libc::timeval| {
+            Duration::from_secs(value.tv_sec as u64) + Duration::from_micros(value.tv_usec as u64)
+        };
+        time(usage.ru_utime) + time(usage.ru_stime)
+    }
+
+    /// Running out of descriptors is a pause, not the end of the listener.
+    ///
+    /// `accept` fails with `EMFILE` while a connection waits, and keeps failing
+    /// until descriptors are freed. The listener used to stop at the first
+    /// failure, leaving a socket nobody served; skipping the failure instead
+    /// would spin, because `poll` keeps reporting the waiting connection.
+    #[test]
+    fn running_out_of_descriptors_rests_the_listener_instead_of_ending_it() {
+        const CHILD: &str = "SPRITE_ACCEPT_EXHAUSTION_TEST_CHILD";
+        // The descriptor limit is process-wide, so it is lowered in a child
+        // running only this test rather than under parallel neighbours.
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "local_socket::tests::running_out_of_descriptors_rests_the_listener_instead_of_ending_it",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "the subprocess must run and pass its exact test\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use std::os::fd::AsRawFd;
+
+        let scratch = Scratch::new();
+        let (bodies, received) = mpsc::channel();
+        let mut socket = LocalSocket::open_in(
+            scratch.0.clone(),
+            Arc::new(ObservationKey::generate().unwrap()),
+            POLICY,
+            rejected,
+            move |connection| {
+                let _ = bodies.send(connection.body);
+            },
+        )
+        .unwrap();
+        let key = socket.key_hex();
+        let path = socket.socket_path().to_owned();
+        // A limit just above what is open now, so exhausting it is quick and
+        // freeing it leaves room for an accept and its clones.
+        let lowest_free = File::open("/dev/null").unwrap().as_raw_fd();
+        lower_descriptor_limit(lowest_free as nix::libc::rlim_t + 32);
+
+        // A connection arrives while no descriptor is free to accept it with.
+        let held = exhaust_descriptors();
+        let mut first = connect_with_retries(&path);
+        let _ = writeln!(first, "{key} first");
+
+        // The listener waits that out without spinning.
+        let before = cpu_time();
+        crate::test_blocking_wait::pause(Duration::from_millis(600));
+        // Only meaningful where a failed accept leaves the connection queued
+        // (Linux); macOS drops it, so poll has nothing to report there.
+        let spent = cpu_time().saturating_sub(before);
+        assert!(
+            spent < Duration::from_millis(200),
+            "the listener spun for {spent:?} of CPU while descriptors were exhausted"
+        );
+
+        // Once descriptors return, a connection is served. Linux keeps the one
+        // that waited; macOS discards it when `accept` fails, so a second one
+        // arrives as well and either proves the listener survived.
+        drop(held);
+        let mut retry = connect_with_retries(&path);
+        let _ = writeln!(retry, "{key} retry");
+        let body = received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the listener must survive running out of descriptors");
+        assert!(["first", "retry"].contains(&body.as_str()), "{body}");
+
+        // Closing still ends a listener that is resting.
+        let held = exhaust_descriptors();
+        // macOS can refuse a connect with ENOTCONN just after descriptors
+        // were freed or taken, and discards a connection a failed accept
+        // touched, so neither the connect nor the write is required to land.
+        let mut second = connect_with_retries(&path);
+        let _ = writeln!(second, "{key} second");
+        crate::test_blocking_wait::pause(Duration::from_millis(250));
+        let (done, completed) = mpsc::channel();
+        std::thread::spawn(move || {
+            socket.close();
+            done.send(()).unwrap();
+        });
+        completed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("closing must end a resting listener");
+        drop(held);
+        drop((first, second, retry));
+    }
+
+    /// Connects, retrying briefly: macOS can refuse a connect with ENOTCONN
+    /// just after descriptors were freed or taken.
+    fn connect_with_retries(path: &Path) -> UnixStream {
+        (0..20)
+            .find_map(|_| {
+                UnixStream::connect(path).ok().or_else(|| {
+                    crate::test_blocking_wait::pause(Duration::from_millis(10));
+                    None
+                })
+            })
+            .expect("all 20 attempts to connect to the listener failed")
+    }
+
+    /// A close wakes a listener that is mid-rest instead of letting it sleep
+    /// out the rest, and an undisturbed rest lasts about one period.
+    #[test]
+    fn a_rest_ends_when_the_socket_closes_and_lasts_a_period_otherwise() {
+        let running = AtomicBool::new(true);
+        let (cancellation, cancelled) = UnixStream::pair().unwrap();
+
+        let started = Instant::now();
+        assert!(!rest(&cancelled, &running));
+        let undisturbed = started.elapsed();
+        assert!(
+            undisturbed >= Duration::from_millis(u64::from(ACCEPT_REST_MS) - 10),
+            "{undisturbed:?}"
+        );
+
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            drop(cancellation);
+        });
+        let started = Instant::now();
+        assert!(rest(&cancelled, &running));
+        let woken = started.elapsed();
+        closer.join().unwrap();
+        assert!(woken < Duration::from_millis(60), "{woken:?}");
+    }
+
+    /// Only "nothing was waiting" and an interrupted call go straight back to
+    /// `poll`; every other failed `accept` rests first. Checked here as well as
+    /// by the exhaustion test, because on macOS a failed accept drops the
+    /// waiting connection, so that test cannot see a listener that skips the
+    /// rest and spins, and no test can make the other failures happen.
+    #[test]
+    fn only_a_spurious_or_interrupted_accept_skips_the_rest() {
+        let rests = |errno: Errno| rests_after(&io::Error::from_raw_os_error(errno as i32));
+        for errno in [
+            Errno::EMFILE,
+            Errno::ENFILE,
+            Errno::ECONNABORTED,
+            Errno::ENOBUFS,
+            Errno::ENOMEM,
+            Errno::EBADF,
+            Errno::EINVAL,
+        ] {
+            assert!(rests(errno), "{errno}");
+        }
+        assert!(!rests(Errno::EAGAIN) && !rests(Errno::EINTR));
     }
 }

@@ -10,14 +10,14 @@
 //! newline-delimited JSON. The connection closing — or the program dying —
 //! removes the Surface, so nothing is ever left on screen without an owner.
 
+use crate::workspace::{Patience, Relayed};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -26,7 +26,7 @@ use sprite_term::Rgb;
 pub use super::wire::*;
 use super::wire::{FirstRequest, Message, first_line, stream_line};
 use crate::local_socket::{
-    Authenticated, LocalSocket, ObservationKey, TransportPolicy, runtime_directory,
+    Authenticated, ConnectionSlot, LocalSocket, ObservationKey, TransportPolicy, runtime_directory,
 };
 use crate::pane_tree::PaneId;
 use crate::surface::{Refusal, SurfaceId};
@@ -52,6 +52,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
 /// How long a connection waits for the window to answer a request.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The same wait, plus the bounded extra wait for a request the window has
+/// already claimed.
+const REPLY_PATIENCE: Patience = Patience::new(REPLY_TIMEOUT);
 
 const NOT_ANSWERING: &str = "this window is no longer answering";
 const NO_ANSWER: &str = "this window did not answer in time";
@@ -202,190 +205,359 @@ impl Placement {
     }
 }
 
-pub(crate) const EVENT_BUFFER_BYTES: usize = 64 * 1024;
+/// How far behind a program may fall. An event is queued whenever fewer
+/// than this many bytes are pending — queued, or taken by the writer and not
+/// yet written — so at most this plus one event waits, and no single event
+/// is refused for its size alone. A program that lets this much pile up is
+/// not reading; its connection is closed rather than allowed to grow.
+const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
+/// The largest buffer a writer keeps between writes, so one burst does not
+/// pin its memory for the rest of the connection's life.
+const KEPT_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
-fn append_event_line(buffer: &mut Vec<u8>, line: &str) {
-    let needed = buffer.len() + line.len() + 1;
-    if needed > buffer.capacity() {
-        buffer.reserve_exact(needed.next_power_of_two() - buffer.len());
-    }
-    buffer.extend_from_slice(line.as_bytes());
-    buffer.push(b'\n');
-}
-
-/// The stream a [`SurfaceConnection`] writes to, plus whatever a program has
-/// sent before the connection thread answered the open. All of it lives
-/// behind the one lock, so nothing here ever waits on anything else that
-/// might be waiting on it.
-struct Wire {
-    stream: UnixStream,
-    /// Set once, by [`establish`](SurfaceConnection::establish) or
-    /// [`abandon`](SurfaceConnection::abandon): `opened` has been answered
-    /// one way or the other, so `send` no longer needs to queue.
+/// What one connection's handles and its writer thread share. The lock is
+/// held to queue lines or to take them, never across a socket write.
+#[derive(Default)]
+struct Queue {
+    /// `opened` is at the front of `queued`, so the writer may start. Lines
+    /// queued before then wait behind it.
     ready: bool,
-    /// Set by [`abandon`](SurfaceConnection::abandon): the open was refused
-    /// or never answered, so every `send` from here on reports the client
-    /// gone rather than queuing forever.
+    /// The client is gone — refused, overflowed, timed out, or a write
+    /// failed. Nothing more is queued or written.
     dead: bool,
-    /// Lines a program sent before `ready`, in the order they arrived.
-    /// `establish` drains this onto the wire, after `opened` and before
-    /// returning — a program does not wait for that to happen.
+    /// Every handle has been dropped: the writer sends what is queued and
+    /// stops.
+    closing: bool,
+    /// Newline-terminated event lines, in the order they were sent.
     queued: Vec<u8>,
-    buffer: Vec<u8>,
+    /// Bytes the writer has taken from `queued` and is still writing. They
+    /// count against the bound until the write returns or the connection
+    /// dies.
+    in_flight: usize,
+    /// The writer thread has returned.
+    #[cfg(test)]
+    finished: bool,
 }
 
-impl Wire {
-    fn fail(&mut self) -> bool {
-        self.dead = true;
-        self.buffer.clear();
-        self.queued.clear();
-        let _ = self.stream.shutdown(Shutdown::Both);
-        false
+impl Queue {
+    /// Whether the writer has anything to do: lines it may send, or a
+    /// reason to stop.
+    fn has_work(&self) -> bool {
+        self.dead || self.closing || (self.ready && !self.queued.is_empty())
     }
 
-    fn write_buffer(&mut self) -> bool {
-        let ok = self
-            .stream
-            .write_all(&self.buffer)
-            .and_then(|_| self.stream.flush())
-            .is_ok();
-        self.buffer.clear();
-        ok || self.fail()
+    /// Notes that the writer has returned, for the tests that wait on it.
+    fn finish(&mut self) {
+        #[cfg(test)]
+        {
+            self.finished = true;
+        }
     }
+}
 
-    fn buffer_line(&mut self, line: &str) -> bool {
-        if line.len() >= EVENT_BUFFER_BYTES {
-            if !self.write_buffer() {
-                return false;
-            }
-            // Large caller-owned lines need no equally large transport allocation.
-            let ok = self
-                .stream
-                .write_all(line.as_bytes())
-                .and_then(|_| self.stream.write_all(b"\n"))
-                .and_then(|_| self.stream.flush())
-                .is_ok();
-            return ok || self.fail();
+struct Shared {
+    queue: Mutex<Queue>,
+    /// Wakes the writer when it has work, and anyone waiting on the writer
+    /// when it has made progress.
+    changed: Condvar,
+    /// The socket. Only the writer thread writes to it; any other thread
+    /// only ever shuts it down, which never blocks.
+    stream: UnixStream,
+}
+
+impl Shared {
+    /// Marks the connection dead and drops what was queued. With `shut_down`
+    /// the socket is closed both ways too, so the connection thread's blocked
+    /// read and the writer's blocked write both return at once. A refused
+    /// open leaves it open: the connection thread writes the refusal next.
+    /// A write still in progress no longer counts as pending: it can only
+    /// fail now, so a dead connection holds nothing.
+    fn kill(&self, mut queue: MutexGuard<'_, Queue>, shut_down: bool) {
+        queue.dead = true;
+        queue.queued = Vec::new();
+        queue.in_flight = 0;
+        drop(queue);
+        if shut_down {
+            let _ = self.stream.shutdown(Shutdown::Both);
         }
-        if self.buffer.len() + line.len() + 1 > EVENT_BUFFER_BYTES && !self.write_buffer() {
-            return false;
+        self.changed.notify_all();
+    }
+}
+
+/// Owned by every clone of one [`SurfaceConnection`]. Dropping the last one
+/// tells the writer to finish; it never waits for the writer to do so.
+struct Handle {
+    shared: Arc<Shared>,
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        if let Ok(mut queue) = self.shared.queue.lock() {
+            queue.closing = true;
         }
-        append_event_line(&mut self.buffer, line);
-        self.buffer.len() != EVENT_BUFFER_BYTES || self.write_buffer()
+        self.shared.changed.notify_all();
     }
 }
 
 /// The window's end of one Surface's connection: the only way events reach
 /// the program. Cloneable across threads because click handlers, focus
-/// listeners, and the view all hold one — cloning shares the same lock and
-/// the same underlying socket, it does not open a second one.
+/// listeners, and the view all hold one — cloning shares the same queue and
+/// the same socket, it does not open a second one.
+///
+/// Nothing here writes to the socket. Each connection owns one writer thread
+/// that does, so `send`, `send_batch` and `establish` only queue and return:
+/// a program that stops reading can never stall the GPUI thread. They all
+/// share one queue, so lines reach the wire in the order they were queued and
+/// a batch arrives in one piece.
 ///
 /// A program may accept an `open` and send its first event in the same
 /// breath, before the reply that accepted it has even reached the connection
-/// thread — GPUI does not block a caller on a socket write. So `send` never
-/// waits: before `opened` has gone out, it queues the line and returns
-/// `true` immediately; [`establish`](Self::establish) writes `opened`, then
-/// the queue, in order, so nothing a program sent ever arrives ahead of the
-/// confirmation that let it.
-/// Before acceptance, exceeding 64 KiB of queued events closes the connection:
-/// the queue cannot flush without putting events ahead of `opened`.
+/// thread. Lines queued before [`establish`](Self::establish) wait: it puts
+/// `opened` ahead of them, so nothing a program was sent ever arrives ahead
+/// of the confirmation that let it.
+///
+/// An event is queued only while fewer than `MAX_PENDING_BYTES` are
+/// pending. Sending with the bound already reached, a write that times out,
+/// or a failed write marks the connection dead and shuts the socket down;
+/// the connection thread's read then ends and the window hears the Surface
+/// closed. Once the last clone is dropped the writer sends what is still
+/// queued — `closed` included — ends its side, and returns. Nothing joins
+/// the writer, so dropping a connection never waits on it.
 #[derive(Clone)]
 pub struct SurfaceConnection {
-    wire: Arc<Mutex<Wire>>,
+    handle: Arc<Handle>,
 }
 
 impl SurfaceConnection {
+    /// A connection outside any endpoint, holding no slot.
+    #[cfg(test)]
     pub(crate) fn new(stream: &UnixStream) -> std::io::Result<Self> {
+        Self::holding(stream, None)
+    }
+
+    /// A connection whose writer keeps `slot` until it returns, so a
+    /// connection still draining events counts against the endpoint's cap
+    /// after its connection thread has gone, and the cap on connections is
+    /// also the cap on writer threads.
+    fn holding(stream: &UnixStream, slot: Option<Arc<ConnectionSlot>>) -> std::io::Result<Self> {
         let stream = stream.try_clone()?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        let shared = Arc::new(Shared {
+            queue: Mutex::new(Queue::default()),
+            changed: Condvar::new(),
+            stream,
+        });
+        let writer = Arc::clone(&shared);
+        // Detached on purpose, and nothing ever waits to join it, the GPUI
+        // thread least of all. It returns as soon as the connection is dead.
+        // Once the last handle is gone nothing more can be queued, so what is
+        // left to drain is at most the pending bound plus one event, and a
+        // write that makes no progress for `WRITE_TIMEOUT` fails and kills
+        // the connection. That bounds the bytes, not the time: a reader that
+        // takes a few bytes at a time, each sooner than the timeout, keeps
+        // this thread and its slot for as long as it keeps reading. It holds
+        // one of the endpoint's slots and no more, so the cap on connections
+        // still caps writer threads, and only a program running as the same
+        // user can connect at all.
+        drop(
+            std::thread::Builder::new()
+                .name("sprite-surface-writer".to_owned())
+                .spawn(move || {
+                    let _slot = slot;
+                    write_events(&writer);
+                })?,
+        );
         Ok(Self {
-            wire: Arc::new(Mutex::new(Wire {
-                stream,
-                ready: false,
-                dead: false,
-                queued: Vec::new(),
-                buffer: Vec::new(),
-            })),
+            handle: Arc::new(Handle { shared }),
         })
     }
 
-    /// Sends one event line, or queues it if `opened` has not gone out yet.
-    /// `false` means the client is gone — refused, timed out, or the
-    /// connection has already closed. A write failure can leave a sent prefix.
-    /// A failed write marks the connection dead: the socket is shut down so
-    /// the connection thread's blocked read notices at once and reports the
-    /// Surface closed, rather than every later `send` paying the write
-    /// timeout again for a client that is never coming back.
+    /// Queues one event line. `false` means the client is gone — refused,
+    /// overflowed, timed out, or a write already failed — and nothing was
+    /// queued. `true` means only that the line is queued, not that the
+    /// program has read it.
     pub fn send(&self, line: &str) -> bool {
         self.send_batch([line])
     }
 
-    /// Keeps a complete gesture under one lock, flushing at most 64 KiB at a time.
-    /// A write failure stops consuming the event iterator immediately.
+    /// Queues a complete gesture under one lock, so no other sender's lines
+    /// land inside it. A line that finds the pending bound already reached
+    /// kills the connection, and the iterator is not consumed past it.
     pub fn send_batch<'a>(&self, lines: impl IntoIterator<Item = &'a str>) -> bool {
-        let Ok(mut wire) = self.wire.lock() else {
+        let shared = &self.handle.shared;
+        let Ok(mut queue) = shared.queue.lock() else {
             return false;
         };
-        if wire.dead {
+        if queue.dead {
             return false;
         }
-        wire.buffer.clear();
         for line in lines {
-            if wire.ready {
-                if !wire.buffer_line(line) {
-                    return false;
-                }
-            } else {
-                if line.len() >= EVENT_BUFFER_BYTES - wire.queued.len() {
-                    return wire.fail();
-                }
-                append_event_line(&mut wire.queued, line);
+            if queue.queued.len() + queue.in_flight >= MAX_PENDING_BYTES {
+                shared.kill(queue, true);
+                return false;
             }
+            queue.queued.extend_from_slice(line.as_bytes());
+            queue.queued.push(b'\n');
         }
-        !wire.ready || wire.write_buffer()
+        drop(queue);
+        shared.changed.notify_all();
+        true
     }
 
-    /// Writes the connection's first line, then every line a program queued
-    /// before it, in the order they arrived. Called once, by the connection
+    /// Puts the connection's first line ahead of every line a program queued
+    /// before it, and lets the writer start. Called once, by the connection
     /// thread that decided to accept the Surface — never by the program.
-    /// Stops at the first failed write and marks the wire dead, as `send`
-    /// does: a client that is gone is not written to a thousand more times.
+    /// `false` means the connection was already dead, or what a program
+    /// queued before it had already reached the pending bound.
     pub(crate) fn establish(&self, line: &str) -> bool {
-        let Ok(mut wire) = self.wire.lock() else {
+        let shared = &self.handle.shared;
+        let Ok(mut queue) = shared.queue.lock() else {
             return false;
         };
-        if wire.dead {
+        if queue.dead {
             return false;
         }
-        wire.ready = true;
-        if !wire.buffer_line(line) || !wire.write_buffer() {
+        if queue.queued.len() >= MAX_PENDING_BYTES {
+            shared.kill(queue, true);
             return false;
         }
-        let Wire { queued, buffer, .. } = &mut *wire;
-        std::mem::swap(buffer, queued);
-        wire.write_buffer()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_buffer_state(&self) -> (bool, usize, usize) {
-        let wire = self.wire.lock().unwrap();
-        (wire.dead, wire.buffer.capacity(), wire.queued.capacity())
-    }
-
-    #[cfg(test)]
-    fn is_dead(&self) -> bool {
-        self.wire.lock().map(|wire| wire.dead).unwrap_or(true)
+        let mut first = Vec::with_capacity(line.len() + 1 + queue.queued.len());
+        first.extend_from_slice(line.as_bytes());
+        first.push(b'\n');
+        first.extend_from_slice(&queue.queued);
+        queue.queued = first;
+        queue.ready = true;
+        drop(queue);
+        shared.changed.notify_all();
+        true
     }
 
     /// Marks the connection dead and drops anything a program queued: the
     /// open was refused or never answered, so nothing it sent was ever going
     /// to reach the wire, and a later `send` must say so rather than queue
-    /// forever.
+    /// forever. The socket stays open for the refusal the connection thread
+    /// writes next.
     fn abandon(&self) {
-        if let Ok(mut wire) = self.wire.lock() {
-            wire.dead = true;
-            wire.queued.clear();
+        let shared = &self.handle.shared;
+        if let Ok(queue) = shared.queue.lock() {
+            shared.kill(queue, false);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_dead(&self) -> bool {
+        self.handle
+            .shared
+            .queue
+            .lock()
+            .map(|queue| queue.dead)
+            .unwrap_or(true)
+    }
+
+    /// Bytes queued or being written; zero once the connection is dead.
+    #[cfg(test)]
+    pub(crate) fn pending_bytes(&self) -> usize {
+        let queue = self.handle.shared.queue.lock().unwrap();
+        queue.queued.len() + queue.in_flight
+    }
+
+    /// Waits until the writer has put everything queued on the wire — or the
+    /// connection died, or was never established — so a test can read the
+    /// socket without racing the writer thread.
+    #[cfg(test)]
+    pub(crate) fn settle(&self) {
+        let shared = &self.handle.shared;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut queue = shared.queue.lock().unwrap();
+        while !queue.dead && queue.ready && (!queue.queued.is_empty() || queue.in_flight > 0) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "the writer did not drain its queue in 5 s");
+            queue = shared.changed.wait_timeout(queue, left).unwrap().0;
+        }
+    }
+
+    /// A view of this connection's writer that, unlike a clone, does not
+    /// keep the writer running.
+    #[cfg(test)]
+    pub(crate) fn writer(&self) -> WriterProbe {
+        WriterProbe(Arc::clone(&self.handle.shared))
+    }
+}
+
+/// A connection's writer thread: waits for queued lines and writes them,
+/// holding the lock only to take them. It returns when the connection dies,
+/// or when every handle is gone and nothing that may be sent is left.
+fn write_events(shared: &Shared) {
+    let mut outgoing = Vec::new();
+    loop {
+        let Ok(mut queue) = shared.queue.lock() else {
+            return;
+        };
+        while !queue.has_work() {
+            queue = match shared.changed.wait(queue) {
+                Ok(queue) => queue,
+                Err(_) => return,
+            };
+        }
+        if queue.dead || !queue.ready || queue.queued.is_empty() {
+            // Dead, or closing with nothing left that may be sent. A
+            // connection that was opened and is closing cleanly ends its
+            // side, so the program reads every event and then the end of the
+            // stream. A dead one was already shut down, or — refused — is
+            // about to carry the connection thread's refusal.
+            if !queue.dead && queue.ready {
+                let _ = shared.stream.shutdown(Shutdown::Write);
+            }
+            queue.finish();
+            drop(queue);
+            shared.changed.notify_all();
+            return;
+        }
+        std::mem::swap(&mut outgoing, &mut queue.queued);
+        queue.in_flight = outgoing.len();
+        drop(queue);
+        let mut stream = &shared.stream;
+        let written = stream.write_all(&outgoing).and_then(|()| stream.flush());
+        outgoing.clear();
+        if outgoing.capacity() > KEPT_WRITE_BUFFER_BYTES {
+            outgoing = Vec::new();
+        }
+        let Ok(mut queue) = shared.queue.lock() else {
+            return;
+        };
+        queue.in_flight = 0;
+        if written.is_err() {
+            // The write timed out or failed: the program is not reading, or
+            // is gone. Shutting the socket down ends the connection thread's
+            // read, and the window hears the Surface closed.
+            let _ = shared.stream.shutdown(Shutdown::Both);
+            queue.finish();
+            shared.kill(queue, false);
+            return;
+        }
+        drop(queue);
+        shared.changed.notify_all();
+    }
+}
+
+/// A test's handle on one connection's writer thread.
+#[cfg(test)]
+pub(crate) struct WriterProbe(Arc<Shared>);
+
+#[cfg(test)]
+impl WriterProbe {
+    /// Whether the writer thread returned within `limit`.
+    pub(crate) fn finished_within(&self, limit: Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        let mut queue = self.0.queue.lock().unwrap();
+        while !queue.finished {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            queue = self.0.changed.wait_timeout(queue, left).unwrap().0;
+        }
+        true
     }
 }
 
@@ -396,8 +568,8 @@ impl std::fmt::Debug for SurfaceConnection {
 }
 
 /// How the window answers a request: once, or not at all if it is closing.
-pub type Reply = SyncSender<Result<(), Refusal>>;
-pub type JsonReply = SyncSender<Result<Value, Refusal>>;
+pub type Reply = Relayed<Result<(), Refusal>>;
+pub type JsonReply = Relayed<Result<Value, Refusal>>;
 
 /// What a connection asks the window to do. Crosses from a connection thread
 /// to the GPUI thread; the pane is named so the window can find the view.
@@ -497,6 +669,27 @@ impl SurfaceRequest {
             | Self::List { .. } => {}
         }
     }
+
+    /// Takes a request that is waiting for an answer, so the window may act
+    /// on it.
+    ///
+    /// False only when its connection has already given up and told its
+    /// program so; such a request must be dropped unapplied. A request nobody
+    /// waits on is always the window's.
+    pub(crate) fn claim(&self) -> bool {
+        match self {
+            Self::Capabilities { reply, .. } => reply.claim(),
+            Self::Open { reply, .. }
+            | Self::FocusPane { reply, .. }
+            | Self::RegisterToken { reply, .. } => reply.claim(),
+            Self::Update { .. }
+            | Self::Focus { .. }
+            | Self::Close { .. }
+            | Self::Closed { .. }
+            | Self::Grid { .. }
+            | Self::List { .. } => true,
+        }
+    }
 }
 
 impl sprite_pane::PaneRequest for SurfaceRequest {
@@ -584,11 +777,13 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
         mut stream,
         reader,
         body,
+        slot,
         ..
     } = connection;
     match first_line(&body) {
         Ok(FirstRequest::Open { pane, open }) => {
-            serve_surface(stream, reader, pane, open, requests)
+            let connection = SurfaceConnection::holding(&stream, Some(slot));
+            serve_surface(stream, reader, connection, pane, open, requests)
         }
         Ok(FirstRequest::Capabilities {
             pane,
@@ -637,22 +832,26 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
 fn serve_surface(
     mut stream: UnixStream,
     mut reader: BufReader<UnixStream>,
+    connection: std::io::Result<SurfaceConnection>,
     pane: PaneId,
     open: Open,
     requests: &async_channel::Sender<SurfaceRequest>,
 ) {
-    let Ok(connection) = SurfaceConnection::new(&stream) else {
+    // A connection with no writer could never be sent `opened`. Say so
+    // rather than closing it with no answer.
+    let Ok(connection) = connection else {
+        refuse(&mut stream, NOT_ANSWERING);
         return;
     };
     // Kept on this thread for as long as the connection lives: `connection`
-    // itself moves into the request below, to the window, and every byte
-    // this thread writes afterward — `opened`, and every refusal once the
-    // Surface is open — has to go through the same lock the window's events
-    // do, or the two race for the socket exactly as they used to.
+    // itself moves into the request below, to the window, and every line
+    // this thread sends afterward — `opened`, and every refusal once the
+    // Surface is open — goes into the same queue the window's events do, so
+    // the connection's one writer puts them all on the wire in order.
     let handle = connection.clone();
     let id = SurfaceId(NEXT_SURFACE.fetch_add(1, Ordering::SeqCst));
     use crate::workspace::{RelayError, relay};
-    match relay(requests, REPLY_TIMEOUT, |reply| SurfaceRequest::Open {
+    match relay(requests, REPLY_PATIENCE, |reply| SurfaceRequest::Open {
         id,
         pane,
         open,
@@ -672,13 +871,14 @@ fn serve_surface(
             refuse(&mut stream, NOT_ANSWERING);
             return;
         }
-        Err(RelayError::Timeout) => {
+        // The wire reason is the same either way. An abandoned `Open` is
+        // dropped unapplied, but one the window claimed may still place a
+        // Surface after this; telling the window this Surface is already gone
+        // covers both, so it never keeps one with a dead connection.
+        // `close_surface` ignores an unknown id.
+        Err(RelayError::Timeout | RelayError::Applying) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
-            // The `Open` may still be sitting in the window's queue and get
-            // served later; tell the window this Surface is already gone so
-            // it never places one with a dead connection. `close_surface`
-            // ignores an unknown id, so this is safe either way.
             let _ = requests.send_blocking(SurfaceRequest::Closed { id, pane });
             return;
         }
@@ -731,18 +931,20 @@ fn serve_surface(
 fn one_shot<T>(
     stream: &mut UnixStream,
     requests: &async_channel::Sender<SurfaceRequest>,
-    request: impl FnOnce(SyncSender<Result<T, Refusal>>) -> SurfaceRequest,
+    request: impl FnOnce(Relayed<Result<T, Refusal>>) -> SurfaceRequest,
     success: impl FnOnce(T) -> String,
 ) {
     use crate::workspace::{RelayError, relay};
-    match relay(requests, REPLY_TIMEOUT, request) {
+    match relay(requests, REPLY_PATIENCE, request) {
         Ok(Ok(value)) => {
             let _ = writeln!(stream, "{}", success(value));
             let _ = stream.shutdown(Shutdown::Write);
         }
         Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
         Err(RelayError::Disconnected) => refuse(stream, NOT_ANSWERING),
-        Err(RelayError::Timeout) => refuse(stream, NO_ANSWER),
+        // The refusal on the wire is unchanged. It says the window did not
+        // answer, which is true of both, and never that nothing changed.
+        Err(RelayError::Timeout | RelayError::Applying) => refuse(stream, NO_ANSWER),
     }
 }
 
@@ -824,6 +1026,33 @@ mod tests {
         serde_json::from_str(text.trim()).unwrap_or_else(|_| panic!("not JSON: {text:?}"))
     }
 
+    /// Reads a peer's end of a pair to the end of its stream, 1 KiB at a
+    /// time. On macOS a reader already blocked in `recv` can miss the wakeup
+    /// from a `shutdown(Write)` on a socket that has a send timeout, though
+    /// the next read sees the end at once. In production the descriptor
+    /// closes right after and wakes it again; a test that still holds its
+    /// own copy of the window's end has no such second wakeup. So a short
+    /// read timeout makes the reader look again, and only a stream that
+    /// really never ends fails.
+    fn read_to_eof(peer: &mut UnixStream) -> Vec<u8> {
+        use std::io::Read;
+        peer.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("timeout");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            match peer.read(&mut chunk) {
+                Ok(0) => return received,
+                Ok(count) => received.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "the stream never ended");
+                }
+                Err(error) => panic!("read failed: {error}"),
+            }
+        }
+    }
+
     fn open_message(pane: u64) -> Value {
         json!({
             "type": "open", "version": VERSION, "pane": pane, "position": "dock",
@@ -849,14 +1078,17 @@ mod tests {
         let lines = std::iter::repeat_n(line.as_str(), 1_000_000_000).inspect(|_| {
             consumed.set(consumed.get() + 1);
             assert!(
-                consumed.get() <= 4096,
-                "iterator consumed past the bounded transport window"
+                consumed.get() <= MAX_PENDING_BYTES / 1024 + 1,
+                "iterator consumed past the pending bound"
             );
         });
         assert!(!connection.send_batch(lines));
         assert!(connection.is_dead());
-        let (_, buffer, queued) = connection.test_buffer_state();
-        assert!(buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
+        assert_eq!(
+            connection.pending_bytes(),
+            0,
+            "a dead connection holds nothing"
+        );
         println!(
             "backpressured batch consumed {} of 1000000000 lines",
             consumed.get()
@@ -864,11 +1096,17 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_chunk_does_not_consume_the_remaining_iterator() {
+    fn a_failed_write_leaves_later_batches_unconsumed() {
         let (stream, peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
+        let writer = connection.writer();
         assert!(connection.establish(&event_opened(SurfaceId(1))));
         drop(peer);
+        // Whether the writer meets the closed peer on `opened` or on this
+        // line, its write fails and the connection dies.
+        let _ = connection.send("{}");
+        assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+        assert!(connection.is_dead());
         let line = "x".repeat(1023);
         let consumed = std::cell::Cell::new(0);
         assert!(
@@ -877,8 +1115,7 @@ mod tests {
                     .inspect(|_| consumed.set(consumed.get() + 1))
             )
         );
-        assert_eq!(consumed.get(), EVENT_BUFFER_BYTES / 1024);
-        assert!(connection.is_dead());
+        assert_eq!(consumed.get(), 0);
     }
 
     #[test]
@@ -887,19 +1124,14 @@ mod tests {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let line = "x".repeat(1023);
-        assert!(connection.send_batch(std::iter::repeat_n(
-            line.as_str(),
-            EVENT_BUFFER_BYTES / 1024
-        )));
-        assert_eq!(
-            connection.wire.lock().unwrap().queued.len(),
-            EVENT_BUFFER_BYTES
+        assert!(
+            connection.send_batch(std::iter::repeat_n(line.as_str(), MAX_PENDING_BYTES / 1024))
         );
+        assert_eq!(connection.pending_bytes(), MAX_PENDING_BYTES);
         assert!(!connection.send("overflow"));
-        assert_eq!(connection.wire.lock().unwrap().queued.len(), 0);
+        assert_eq!(connection.pending_bytes(), 0);
         assert!(!connection.establish(&event_opened(SurfaceId(1))));
-        let (dead, buffer, queued) = connection.test_buffer_state();
-        assert!(dead && buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
+        assert!(connection.is_dead());
         let mut received = Vec::new();
         peer.read_to_end(&mut received).unwrap();
         assert!(
@@ -920,23 +1152,59 @@ mod tests {
                     .inspect(|_| consumed.set(consumed.get() + 1))
             )
         );
-        assert_eq!(consumed.get(), EVENT_BUFFER_BYTES / 1024 + 1);
+        assert_eq!(consumed.get(), MAX_PENDING_BYTES / 1024 + 1);
         assert!(connection.is_dead());
+        // One event is never refused for its own size: it is admitted
+        // because nothing was pending, and the next one finds the bound
+        // reached.
         let (stream, _peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
-        assert!(!connection.send(&"x".repeat(EVENT_BUFFER_BYTES)));
-        assert_eq!(connection.test_buffer_state(), (true, 0, 0));
+        assert!(connection.send(&"x".repeat(MAX_PENDING_BYTES)));
+        assert_eq!(connection.pending_bytes(), MAX_PENDING_BYTES + 1);
+        assert!(!connection.send("x"));
+        assert!(connection.is_dead());
+        assert_eq!(connection.pending_bytes(), 0);
+    }
+
+    /// A Surface the window cannot give a writer to is told so, rather than
+    /// having its connection closed with no answer, and the window never
+    /// hears of it.
+    #[test]
+    fn a_surface_that_cannot_get_a_writer_is_refused_with_a_reason() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        // Set while both ends are open: macOS refuses it on a closed pair.
+        peer.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        let (requests, window) = async_channel::bounded(1);
+        serve_surface(
+            stream,
+            reader,
+            Err(std::io::Error::other("no thread for a writer")),
+            PaneId(1),
+            Open {
+                placement: Placement::Overlay,
+                focus: false,
+                description: json!({}),
+            },
+            &requests,
+        );
+        let mut wire = String::new();
+        std::io::Read::read_to_string(&mut peer, &mut wire).unwrap();
+        let refusal: Value =
+            serde_json::from_str(wire.lines().next().expect("a refusal line")).unwrap();
+        assert_eq!(refusal["type"], "refused");
+        assert_eq!(refusal["reason"], NOT_ANSWERING);
+        assert!(window.try_recv().is_err(), "the window was asked nothing");
     }
 
     #[test]
-    fn chunked_batches_keep_the_gesture_lock_across_every_flush() {
-        use std::io::Read;
+    fn concurrent_batches_each_reach_the_wire_in_one_piece() {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         assert!(connection.establish(&event_opened(SurfaceId(1))));
         let reader = std::thread::spawn(move || {
-            let mut wire = String::new();
-            peer.read_to_string(&mut wire).unwrap();
+            let wire = String::from_utf8(read_to_eof(&mut peer)).unwrap();
             wire.lines()
                 .map(|line| serde_json::from_str::<Value>(line).unwrap())
                 .collect::<Vec<_>>()
@@ -953,13 +1221,10 @@ mod tests {
                 });
             }
         });
-        connection
-            .wire
-            .lock()
-            .unwrap()
-            .stream
-            .shutdown(Shutdown::Write)
-            .unwrap();
+        assert!(!connection.is_dead());
+        // A graceful close: the writer sends everything queued, then ends
+        // its side, so the reader reaches the end of the stream.
+        drop(connection);
         let events = reader.join().unwrap();
         assert_eq!(events.len(), 513);
         assert_eq!(events[0]["type"], "opened");
@@ -972,8 +1237,6 @@ mod tests {
                     .all(|event| event["sender"] == chunk[0]["sender"])
             );
         }
-        let (dead, buffer, queued) = connection.test_buffer_state();
-        assert!(!dead && buffer <= EVENT_BUFFER_BYTES && queued <= EVENT_BUFFER_BYTES);
     }
 
     #[test]
@@ -995,15 +1258,8 @@ mod tests {
                 });
             }
         });
-        connection
-            .wire
-            .lock()
-            .unwrap()
-            .stream
-            .shutdown(Shutdown::Write)
-            .unwrap();
-        let mut received = String::new();
-        std::io::Read::read_to_string(&mut peer, &mut received).unwrap();
+        drop(connection);
+        let received = String::from_utf8(read_to_eof(&mut peer)).unwrap();
         let messages = received
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -1023,58 +1279,30 @@ mod tests {
     }
 
     #[test]
-    fn batch_buffer_is_reused_and_closed_peers_stop_further_sends() {
+    fn a_closed_peer_stops_further_sends() {
         let (stream, peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
+        let writer = connection.writer();
         assert!(connection.establish(&event_opened(SurfaceId(1))));
         assert!(connection.send_batch(["one", "two"]));
-        let (pointer, capacity) = {
-            let wire = connection.wire.lock().unwrap();
-            (wire.buffer.as_ptr(), wire.buffer.capacity())
-        };
-        assert!(connection.send_batch(["abc", "def"]));
-        {
-            let wire = connection.wire.lock().unwrap();
-            assert_eq!(
-                (wire.buffer.as_ptr(), wire.buffer.capacity()),
-                (pointer, capacity)
-            );
-        }
         drop(peer);
-        assert!(!connection.send_batch(["gone"]));
+        let _ = connection.send_batch(["gone"]);
+        assert!(writer.finished_within(WRITE_TIMEOUT * 10));
         assert!(connection.is_dead());
         assert!(!connection.send_batch(["later"]));
     }
 
     #[test]
     fn a_large_batch_delivers_every_byte_while_the_peer_drains_in_small_chunks() {
-        use std::io::Read;
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let opened = event_opened(SurfaceId(1));
         assert!(connection.establish(&opened));
         let line = json!({"payload":"x".repeat(2*1024*1024)}).to_string();
         let expected = format!("{opened}\n{line}\n{line}\n");
-        let reader = std::thread::spawn(move || {
-            let mut received = Vec::new();
-            let mut chunk = [0; 1024];
-            loop {
-                let count = peer.read(&mut chunk).unwrap();
-                if count == 0 {
-                    break;
-                }
-                received.extend_from_slice(&chunk[..count]);
-            }
-            received
-        });
+        let reader = std::thread::spawn(move || read_to_eof(&mut peer));
         assert!(connection.send_batch([line.as_str(), line.as_str()]));
-        connection
-            .wire
-            .lock()
-            .unwrap()
-            .stream
-            .shutdown(Shutdown::Write)
-            .unwrap();
+        drop(connection);
         assert_eq!(reader.join().unwrap(), expected.as_bytes());
     }
 
@@ -1083,11 +1311,15 @@ mod tests {
         use std::io::Read;
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
+        let writer = connection.writer();
         let opened = event_opened(SurfaceId(1));
         assert!(connection.establish(&opened));
         let line = "x".repeat(2 * 1024 * 1024);
         let expected = format!("{opened}\n{line}\n");
-        assert!(!connection.send_batch([line.as_str()]));
+        // The line fits the pending bound, so it is queued; the writer meets
+        // the stall and waits out its write timeout.
+        assert!(connection.send_batch([line.as_str()]));
+        assert!(writer.finished_within(WRITE_TIMEOUT * 10));
         assert!(connection.is_dead());
         assert!(!connection.send("later"));
         let mut received = Vec::new();
@@ -1422,16 +1654,17 @@ mod tests {
         assert_eq!(line(&mut reader), json!({ "type": "focus" }));
     }
 
-    /// A client that stops reading fills the socket; the write that hits the
-    /// timeout marks the connection dead, and every send after it returns at
-    /// once instead of waiting the timeout again.
+    /// A client that stops reading fills the socket and then the pending
+    /// queue; passing the bound marks the connection dead, and every send
+    /// after it returns at once instead of queuing more.
     #[test]
-    fn a_failed_write_marks_the_connection_dead_and_later_sends_return_at_once() {
+    fn overflowing_the_queue_marks_the_connection_dead_and_later_sends_return_at_once() {
         let (here, there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         assert!(connection.establish(&event_opened(SurfaceId(1))));
-        // `there` is kept open and never read, so writes block until the
-        // socket buffer is full and the write timeout fires.
+        // `there` is kept open and never read, so once the socket buffer is
+        // full the sends pile up in the pending queue until one finds the
+        // bound reached; none of them blocks.
         let line = "x".repeat(64 * 1024);
         let mut failed = false;
         for _ in 0..1024 {
@@ -1455,6 +1688,197 @@ mod tests {
         drop(there);
     }
 
+    /// The GPUI thread hands events to a connection and moves on: a program
+    /// that has stopped reading costs it nothing, however many events pile
+    /// up. Past the pending bound the connection dies and its socket is shut
+    /// down, so the program sees the end of the stream.
+    #[test]
+    fn sends_to_a_peer_that_never_reads_return_at_once_then_the_connection_closes() {
+        use std::io::Read;
+        let (here, mut there) = UnixStream::pair().expect("pair");
+        let connection = SurfaceConnection::new(&here).expect("connection");
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        // 200 × 64 KiB is 12.5 MiB: several socket buffers, and three times
+        // the pending bound.
+        let line = "x".repeat(64 * 1024);
+        let started = Instant::now();
+        for _ in 0..200 {
+            connection.send(&line);
+        }
+        let elapsed = started.elapsed();
+        // Under one write timeout: a single blocking write that waits it out
+        // fails this, however fast the rest are.
+        assert!(
+            elapsed < WRITE_TIMEOUT / 2,
+            "200 sends to a peer that never reads took {elapsed:?} on the calling thread"
+        );
+        assert!(
+            connection.is_dead(),
+            "12.5 MiB of events cannot fit the pending bound"
+        );
+        there
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut received = Vec::new();
+        there
+            .read_to_end(&mut received)
+            .expect("the socket was shut down, so the peer reads to its end");
+    }
+
+    /// Dropping the last handle is a graceful close: everything already
+    /// queued — the window's `closed` included — still reaches the program,
+    /// and then its stream ends.
+    #[test]
+    fn a_graceful_close_sends_everything_queued_then_ends_the_stream() {
+        let (here, mut there) = UnixStream::pair().expect("pair");
+        let connection = SurfaceConnection::new(&here).expect("connection");
+        let opened = event_opened(SurfaceId(1));
+        assert!(connection.establish(&opened));
+        let lines: Vec<String> = (0..100)
+            .map(|i| json!({"type":"focus","i":i}).to_string())
+            .collect();
+        assert!(connection.send_batch(lines.iter().map(String::as_str)));
+        assert!(connection.send(&event_closed()));
+        drop(connection);
+        // The writer ends its side after the last line.
+        let received = String::from_utf8(read_to_eof(&mut there)).unwrap();
+        let expected = std::iter::once(opened)
+            .chain(lines)
+            .chain([event_closed()])
+            .map(|line| line + "\n")
+            .collect::<String>();
+        assert_eq!(received, expected);
+        drop(here);
+    }
+
+    /// The last handle is often dropped on the GPUI thread, so dropping it
+    /// must never wait for the writer — even one stuck in a write — and the
+    /// writer must still end on its own.
+    #[test]
+    fn dropping_the_last_handle_never_waits_for_a_stalled_writer() {
+        let (here, _there) = UnixStream::pair().expect("pair");
+        let connection = SurfaceConnection::new(&here).expect("connection");
+        let writer = connection.writer();
+        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        // Far more than a socket buffer holds, so the writer blocks in its
+        // write until the timeout.
+        assert!(connection.send(&"x".repeat(2 * 1024 * 1024)));
+        let started = Instant::now();
+        drop(connection);
+        assert!(
+            started.elapsed() < WRITE_TIMEOUT / 2,
+            "dropping a connection waited on its writer"
+        );
+        assert!(
+            writer.finished_within(WRITE_TIMEOUT * 10),
+            "the writer outlived its connection and its write timeout"
+        );
+    }
+
+    /// An event is never refused for its own size: one larger than the whole
+    /// pending bound is admitted because nothing else was pending, and a
+    /// program that reads gets every byte of it.
+    #[test]
+    fn a_single_event_larger_than_the_bound_is_delivered_whole() {
+        let (here, mut there) = UnixStream::pair().expect("pair");
+        let connection = SurfaceConnection::new(&here).expect("connection");
+        let opened = event_opened(SurfaceId(1));
+        assert!(connection.establish(&opened));
+        let reader = std::thread::spawn(move || read_to_eof(&mut there));
+        let paste = event_paste(&"x".repeat(MAX_PENDING_BYTES + 1024 * 1024));
+        // Only `opened` can be pending, far under the bound, so the line is
+        // admitted however large it is.
+        assert!(connection.send(&paste));
+        drop(connection);
+        assert_eq!(
+            reader.join().unwrap(),
+            format!("{opened}\n{paste}\n").into_bytes()
+        );
+        drop(here);
+    }
+
+    /// The connection cap is also the cap on writer threads: a program that
+    /// closes its Surface while events are still queued for it keeps its
+    /// slot until the writer has delivered them and returned, however long a
+    /// slow reader stretches that out.
+    #[test]
+    fn a_draining_writer_keeps_its_connection_slot_until_it_returns() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicBool;
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (connections, connection) = mpsc::channel();
+        let (closes, closed) = mpsc::channel();
+        let _window = window(rx, move |request| {
+            match request {
+                SurfaceRequest::Open {
+                    connection, reply, ..
+                } => {
+                    reply.send(Ok(())).expect("reply");
+                    connections.send(connection).expect("connection");
+                }
+                SurfaceRequest::Close { .. } => {
+                    closes.send(()).expect("close");
+                    return false;
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+            true
+        });
+        let (mut stream, _reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("open");
+        let connection = connection
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the window saw the open");
+        // A reader that takes a little at a time, often enough that the
+        // writer keeps making progress and never meets its write timeout.
+        let draining = Arc::new(AtomicBool::new(false));
+        let reader = std::thread::spawn({
+            let mut stream = stream.try_clone().expect("clone");
+            let draining = Arc::clone(&draining);
+            move || {
+                let mut received = 0;
+                let mut chunk = [0; 4096];
+                loop {
+                    let count = stream.read(&mut chunk).expect("read");
+                    if count == 0 {
+                        return received;
+                    }
+                    received += count;
+                    if !draining.load(Ordering::SeqCst) {
+                        std::thread::sleep(WRITE_TIMEOUT / 10);
+                    }
+                }
+            }
+        });
+        let event = "x".repeat(1024 * 1024);
+        assert!(connection.send(&event));
+        writeln!(stream, "{}", json!({"type":"close"})).expect("close");
+        closed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the window saw the close");
+        drop(connection);
+        // The connection thread has returned and every handle is gone, but
+        // the writer is still delivering the megabyte.
+        let watching = Instant::now();
+        while watching.elapsed() < WRITE_TIMEOUT * 2 {
+            assert_eq!(
+                endpoint.transport.live_connections(),
+                1,
+                "a writer still draining gave up its connection slot"
+            );
+            std::thread::sleep(WRITE_TIMEOUT / 20);
+        }
+        draining.store(true, Ordering::SeqCst);
+        let received = reader.join().expect("reader");
+        assert!(received > event.len(), "every queued byte arrived");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while endpoint.transport.live_connections() != 0 {
+            assert!(Instant::now() < deadline, "the slot outlived its writer");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// A program that connects and says nothing must not hold a connection
     /// thread forever.
     #[test]
@@ -1469,17 +1893,22 @@ mod tests {
         assert!(start.elapsed() >= HANDSHAKE_TIMEOUT);
     }
 
-    /// `establish` stops writing at the first failure and marks the wire dead,
-    /// so a queue of a thousand lines to a gone client costs one write.
+    /// The writer stops at the first failed write and marks the connection
+    /// dead, so it does not keep writing a queue to a client that is gone.
     #[test]
-    fn establish_stops_at_the_first_failed_write() {
+    fn the_writer_stops_at_the_first_failed_write() {
         let (here, there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
+        let writer = connection.writer();
         for _ in 0..4 {
             assert!(connection.send(&event_focus()));
         }
         drop(there);
-        assert!(!connection.establish(&event_opened(SurfaceId(1))));
+        assert!(
+            connection.establish(&event_opened(SurfaceId(1))),
+            "establish only queues"
+        );
+        assert!(writer.finished_within(WRITE_TIMEOUT * 10));
         assert!(connection.is_dead());
         assert!(!connection.send(&event_focus()));
     }

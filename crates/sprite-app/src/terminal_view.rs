@@ -32,7 +32,6 @@ use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FORE
 
 use geometry::physical;
 use input::Drag;
-use render::BLINK_INTERVAL;
 use surfaces::DockDrag;
 use surfaces::HostedSurface;
 pub(crate) use theme::CellMetrics;
@@ -48,6 +47,12 @@ pub struct TerminalView {
     applied_settings: crate::config::Settings,
     pending_settings: Option<crate::config::Settings>,
     pending_resize: Option<sprite_term::ValidTerminalSize>,
+    /// The Pane Focus the worker still has to be told, kept while the command
+    /// queue refuses it so the latest value is delivered when room returns.
+    pending_focus: Option<bool>,
+    /// The Pane Focus the worker last accepted, so a change that is undone
+    /// before it was delivered sends nothing at all.
+    told_focus: bool,
     admission_closed: bool,
     admission_notice: bool,
     /// An ended pane keeps its worker handle until cleanup can join it.
@@ -74,7 +79,10 @@ pub struct TerminalView {
     fallback_colors: (Rgb, Rgb),
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<sprite_term::ValidTerminalSize>,
-    /// How this pane is reached by observation, if the window has an endpoint.
+    /// How this pane is reached by observation. Every pane a window opens
+    /// has one; it is `None` for a pane whose session never started, once
+    /// the pane has begun shutting down, and in tests that build a view
+    /// without a window's registry.
     observation: Option<crate::observation::panes::PaneLink>,
     /// What programs have asked this pane to draw beside or over its grid.
     surfaces: SurfaceHost<HostedSurface>,
@@ -101,8 +109,14 @@ pub struct TerminalView {
     pending_link_click: Option<u64>,
     hovered_cell: Option<sprite_term::CellPosition>,
     layout_cache: crate::grid::LayoutCache,
+    /// Shaped glyphs kept between frames, beside the layout they belong to.
+    shape_cache: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
     hovered_link: Option<(u64, sprite_term::HyperlinkSpan)>,
     hover_request: Option<(u64, sprite_term::CellPosition)>,
+    /// The cell the current hover answer was asked about, and that cell's row
+    /// as it was then. Rows are shared between snapshots while their content
+    /// is unchanged, so the same allocation means the answer still holds.
+    hover_basis: Option<(sprite_term::CellPosition, Arc<sprite_term::RenderRow>)>,
     next_link_request: u64,
     /// Where the grid's top-left corner sits inside the pane.
     ///
@@ -117,13 +131,21 @@ pub struct TerminalView {
     /// hit testing uses what paint reported rather than a position computed
     /// twice and liable to disagree.
     content_origin: Option<gpui::Point<Pixels>>,
-    /// A paste withheld as unsafe, awaiting a second explicit request.
-    pending_unsafe_paste: Option<String>,
+    /// A paste withheld as unsafe, awaiting a second explicit request for the
+    /// same text.
+    unsafe_paste: crate::confirmation::Confirmation<String>,
     /// Whether the cursor is in the visible half of its blink.
     ///
     /// Always true for a cursor that does not blink, so the phase costs a
     /// non-blinking pane nothing.
     blink_on: bool,
+    /// Whether this pane has Pane Focus: it holds the keyboard in its window,
+    /// and that window is the active one. The worker is told every change,
+    /// because the same fact decides whether the child may write the clipboard
+    /// and whether it hears focus reports.
+    pane_focused: bool,
+    /// Keeps the focus and window-activation observers alive.
+    _pane_focus: [gpui::Subscription; 3],
     /// Text an input method is composing.
     ///
     /// Shown at the cursor and deliberately *not* sent: the terminal learns
@@ -131,7 +153,6 @@ pub struct TerminalView {
     preedit: Option<String>,
     _events: Task<()>,
     _snapshots: Task<()>,
-    _blink: Task<()>,
     _retry: Task<()>,
     retry_wake: async_channel::Sender<()>,
     /// Keeps the settings subscription alive for as long as the view is.
@@ -149,6 +170,7 @@ thread_local! {
     pub(crate) static TITLE_STRINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static TITLE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static FOREGROUND_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static HOVER_LINK_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl TerminalView {
@@ -161,12 +183,57 @@ impl TerminalView {
             let request_id = self.next_link_request;
             self.next_link_request = self.next_link_request.wrapping_add(1);
             self.hover_request = Some((request_id, position));
+            self.hover_basis = self
+                .bundle
+                .as_ref()
+                .and_then(|bundle| bundle.render.rows.get(usize::from(position.row)))
+                .map(|row| (position, Arc::clone(row)));
+            #[cfg(test)]
+            HOVER_LINK_REQUESTS.with(|count| count.set(count.get() + 1));
             if !self.submit(TerminalCommand::ResolveHyperlink {
                 position,
                 request_id,
             }) {
                 self.hover_request = None;
+                self.hover_basis = None;
             }
+        }
+    }
+
+    /// Whether the newest snapshot still shows `position` exactly as it was
+    /// when its link was last asked about.
+    fn hover_basis_holds(&self, position: sprite_term::CellPosition) -> bool {
+        let Some((asked, row)) = &self.hover_basis else {
+            return false;
+        };
+        *asked == position
+            && self
+                .bundle
+                .as_ref()
+                .and_then(|bundle| bundle.render.rows.get(usize::from(position.row)))
+                .is_some_and(|current| Arc::ptr_eq(row, current))
+    }
+
+    /// Carries the hover across a new snapshot.
+    ///
+    /// Output elsewhere on screen does not change what is under the pointer,
+    /// so the answer already held is kept, restamped with the new generation
+    /// (which is what the painter checks), rather than asked for again. Only a
+    /// change to the hovered row itself asks again.
+    fn follow_hover(&mut self) {
+        let Some(cell) = self.hovered_cell else {
+            return;
+        };
+        // An answer still in flight re-checks the row when it arrives.
+        if self.hover_request.is_some() {
+            return;
+        }
+        if !self.hover_basis_holds(cell) {
+            self.request_hover_link(cell);
+            return;
+        }
+        if let (Some(bundle), Some((_, span))) = (self.bundle.as_ref(), self.hovered_link) {
+            self.hovered_link = Some((bundle.generation, span));
         }
     }
 
@@ -292,6 +359,15 @@ impl TerminalView {
                             }
                             SessionState::NeverStarted => SessionState::NeverStarted,
                         };
+                        // An ended session answers nothing more, so a capture
+                        // still waiting on it fails now, with the reason,
+                        // rather than at the observation deadline.
+                        if let Some(link) = &view.observation {
+                            link.panes.fail_all(
+                                link.pane,
+                                "the pane's session ended before it answered".to_owned(),
+                            );
+                        }
                         let _ = view.retry_wake.force_send(());
                         view.refresh_display_title(cx);
                     });
@@ -302,12 +378,16 @@ impl TerminalView {
                 }
                 if !decision.effects.is_empty() {
                     let applied = view.update(cx, |view, cx| {
+                        let mut repaint = false;
                         for effect in decision.effects {
-                            view.apply(effect, cx);
+                            repaint |= view.apply(effect, cx);
                         }
-                        // One notify for the batch: an event that asked for
-                        // nothing does not repaint.
-                        cx.notify();
+                        // One notify for the batch, and none for a batch that
+                        // changed nothing drawn: a hover answer agreeing with
+                        // the last one repaints nothing.
+                        if repaint {
+                            cx.notify();
+                        }
                     });
                     if applied.is_err() {
                         return;
@@ -335,11 +415,7 @@ impl TerminalView {
                             view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
                             view.refresh_display_title(cx);
-                            if view.hover_request.is_none()
-                                && let Some(cell) = view.hovered_cell
-                            {
-                                view.request_hover_link(cell);
-                            }
+                            view.follow_hover();
                             cx.notify();
                         }
                     })
@@ -360,10 +436,14 @@ impl TerminalView {
             });
 
         let (retry_task, retry_wake) = Self::spawn_retry(window, cx);
-        Self {
+        let focus = cx.focus_handle();
+        let pane_focus = Self::observe_pane_focus(&focus, window, cx);
+        let mut view = Self {
             applied_settings,
             pending_settings: None,
             pending_resize: None,
+            pending_focus: None,
+            told_focus: false,
             admission_closed: false,
             admission_notice: false,
             session: SessionState::Running(session),
@@ -380,7 +460,7 @@ impl TerminalView {
             textures: crate::graphics_cache::GraphicsCache::with_budget(
                 graphics.texture_bytes.get(),
             ),
-            focus: cx.focus_handle(),
+            focus,
             fallback_colors,
             size: Some(initial_size),
             allocated: None,
@@ -393,38 +473,29 @@ impl TerminalView {
             hovered_cell: None,
             hovered_link: None,
             layout_cache: Default::default(),
+            shape_cache: Default::default(),
             hover_request: None,
+            hover_basis: None,
             next_link_request: 1,
             origin: point(px(grid.padding.get()), px(grid.padding.get())),
             padding: grid.padding.get(),
             content_origin: None,
-            pending_unsafe_paste: None,
+            unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
+            pane_focused: false,
+            _pane_focus: pane_focus,
             _events: event_task,
             _snapshots: snapshot_task,
-            _blink: Self::spawn_blink(cx),
             _retry: retry_task,
             retry_wake,
             _settings: settings_subscription,
-        }
-    }
-
-    /// One timer per pane, running whether or not anything blinks: it wakes
-    /// twice a second, notices a steady cursor, and does nothing. A failed
-    /// pane has one too, because a grid Surface hosted in it may blink.
-    ///
-    /// Starting and stopping it as programs change the cursor would be more
-    /// moving parts for less than a millisecond of work.
-    fn spawn_blink(cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |view, cx| {
-            loop {
-                cx.background_executor().timer(BLINK_INTERVAL).await;
-                if view.update(cx, |view, cx| view.tick_blink(cx)).is_err() {
-                    return;
-                }
-            }
-        })
+        };
+        // The worker starts out denying focus. Saying so explicitly means the
+        // two sides agree from the first byte, and every later message is a
+        // change the worker hears exactly once.
+        view.send(TerminalCommand::Focus(false));
+        view
     }
 
     /// A view that shows why it could not start.
@@ -436,7 +507,7 @@ impl TerminalView {
     fn failed(
         message: String,
         font_family: SharedString,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // A failed pane still re-shapes its message when the font changes; a
@@ -450,10 +521,14 @@ impl TerminalView {
                 let settings = cx.global::<crate::config::ActiveSettings>().0.clone();
                 view.apply_settings(&settings, window, cx);
             });
+        let focus = cx.focus_handle();
+        let pane_focus = Self::observe_pane_focus(&focus, window, cx);
         Self {
             applied_settings: crate::config::Settings::default(),
             pending_settings: None,
             pending_resize: None,
+            pending_focus: None,
+            told_focus: false,
             admission_closed: false,
             admission_notice: false,
             session: SessionState::NeverStarted,
@@ -469,7 +544,7 @@ impl TerminalView {
             ),
             bundle: None,
             textures: crate::graphics_cache::GraphicsCache::default(),
-            focus: cx.focus_handle(),
+            focus,
             fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
             allocated: None,
@@ -484,7 +559,9 @@ impl TerminalView {
             hovered_cell: None,
             hovered_link: None,
             layout_cache: Default::default(),
+            shape_cache: Default::default(),
             hover_request: None,
+            hover_basis: None,
             next_link_request: 1,
             origin: point(
                 px(crate::config::Grid::DEFAULT_PADDING),
@@ -492,29 +569,37 @@ impl TerminalView {
             ),
             padding: crate::config::Grid::DEFAULT_PADDING,
             content_origin: None,
-            pending_unsafe_paste: None,
+            unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
+            pane_focused: false,
+            _pane_focus: pane_focus,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
-            _blink: Self::spawn_blink(cx),
             _retry: Task::ready(()),
             retry_wake: async_channel::bounded(1).0,
             _settings: settings_subscription,
         }
     }
 
-    /// Performs one decided effect. Everything here needs `cx`; nothing here
-    /// decides anything.
-    fn apply(&mut self, effect: crate::terminal_events::Effect, cx: &mut Context<Self>) {
+    /// Performs one decided effect, returning whether it changed anything the
+    /// pane draws. Everything here needs `cx`; nothing here decides anything.
+    fn apply(&mut self, effect: crate::terminal_events::Effect, cx: &mut Context<Self>) -> bool {
         use crate::terminal_events::Effect;
         match effect {
-            Effect::Status(line) => self.status = Some(line),
+            Effect::Status(line) => {
+                self.status = Some(line);
+                true
+            }
             Effect::Title(title) => {
                 self.title = title.map(SharedString::from);
                 self.refresh_display_title(cx);
+                true
             }
-            Effect::HoldPaste(text) => self.pending_unsafe_paste = Some(text),
+            Effect::HoldPaste(text) => {
+                self.unsafe_paste.arm(text);
+                true
+            }
             Effect::HyperlinkResolved {
                 position,
                 request_id,
@@ -528,39 +613,122 @@ impl TerminalView {
                         cx.open_url(&uri);
                     }
                 }
-                if self.hover_request == Some((request_id, position)) {
-                    self.hover_request = None;
-                    if self.hovered_cell == Some(position) {
-                        if self
-                            .bundle
-                            .as_ref()
-                            .is_some_and(|bundle| bundle.generation == generation)
+                if self.hover_request != Some((request_id, position)) {
+                    return false;
+                }
+                self.hover_request = None;
+                let before = self.hovered_link.map(|(_, span)| span);
+                if self.hovered_cell == Some(position) {
+                    // The answer describes the row as it was asked about. While
+                    // that row is unchanged it still holds for the newest
+                    // snapshot, whatever generation the worker stamped it with.
+                    match self.bundle.as_ref().map(|bundle| bundle.generation) {
+                        Some(current)
+                            if current == generation || self.hover_basis_holds(position) =>
                         {
-                            self.hovered_link = span.map(|span| (generation, span));
-                        } else {
-                            self.request_hover_link(position);
+                            self.hovered_link = span.map(|span| (current, span));
                         }
+                        _ => self.request_hover_link(position),
                     }
-                    if let Some(cell) = self.hovered_cell.filter(|cell| *cell != position) {
-                        self.request_hover_link(cell);
-                    }
-                    cx.notify();
                 }
+                if let Some(cell) = self.hovered_cell.filter(|cell| *cell != position) {
+                    self.request_hover_link(cell);
+                }
+                self.hovered_link.map(|(_, span)| span) != before
             }
-            Effect::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-            Effect::DeliverHistory(history) => {
-                if let Some(link) = &self.observation {
-                    link.panes.deliver(link.pane, history);
-                }
+            // The worker accepted this while the pane had Pane Focus, but the
+            // event may have waited in the channel while focus moved. Only
+            // this thread knows whether the pane holds focus as it writes.
+            Effect::ChildClipboard(_) if !self.pane_focused => false,
+            Effect::ChildClipboard(text) | Effect::Clipboard(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                true
             }
-            // A pane in a bad state must not leave an observation request
-            // waiting out the deadline: the pane cannot answer, and this is why.
-            Effect::FailRequest(reason) => {
+            // Answers go to the observer that asked; nothing on screen
+            // changes, so neither asks for a frame.
+            Effect::DeliverHistory { ticket, snapshot } => {
                 if let Some(link) = &self.observation {
-                    link.panes.deliver_failure(link.pane, reason);
+                    link.panes.answer(link.pane, ticket, Ok(snapshot));
                 }
+                false
+            }
+            // A capture that failed answers the one request it belongs to,
+            // with the reason, rather than leaving it to wait out the deadline.
+            Effect::FailRequest { ticket, reason } => {
+                if let Some(link) = &self.observation {
+                    link.panes.answer(link.pane, ticket, Err(reason));
+                }
+                false
             }
         }
+    }
+
+    /// Watches both halves of Pane Focus.
+    ///
+    /// GPUI's focus events already treat an inactive window as holding no
+    /// focus, so focus-in and focus-out cover a switch between windows as well
+    /// as between panes. Activation is watched too, because focus events wait
+    /// for the next frame, and a pane whose window has gone to the background
+    /// should stop taking the clipboard now rather than then.
+    fn observe_pane_focus(
+        focus: &FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> [gpui::Subscription; 3] {
+        [
+            cx.on_focus_in(focus, window, |view, window, cx| {
+                view.refresh_pane_focus(window, cx)
+            }),
+            cx.on_focus_out(focus, window, |view, _, window, cx| {
+                view.refresh_pane_focus(window, cx)
+            }),
+            cx.observe_window_activation(window, |view, window, cx| {
+                view.refresh_pane_focus(window, cx)
+            }),
+        ]
+    }
+
+    /// Recomputes Pane Focus from the window, and reports a change.
+    ///
+    /// The terminal's handle *containing* the focus is enough: a Surface the
+    /// pane hosts is part of the pane, and a person typing into one is still
+    /// working here.
+    fn refresh_pane_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = window.is_window_active() && self.focus.contains_focused(window, cx);
+        if focused == self.pane_focused() {
+            return;
+        }
+        self.pane_focused = focused;
+        self.admit_focus(focused);
+        // A pane gaining focus starts its blink from visible, and one losing
+        // it shows a steady cursor from the next frame on.
+        self.blink_on = true;
+        if !focused {
+            // Leaving the pane is a decision too: a paste held here is not
+            // answered by a paste made after coming back.
+            self.drop_unsafe_paste(cx);
+        }
+        cx.notify();
+    }
+
+    /// Tells the worker the latest Pane Focus, or keeps it for the retry task
+    /// when the command queue is full. Losing it there would leave the child
+    /// allowed the clipboard, or deaf to focus reports, until the next change.
+    fn admit_focus(&mut self, focused: bool) {
+        self.pending_focus = None;
+        if focused == self.told_focus {
+            return;
+        }
+        if self.submit(TerminalCommand::Focus(focused)) {
+            self.told_focus = focused;
+        } else if !self.admission_closed {
+            self.pending_focus = Some(focused);
+        }
+    }
+
+    /// Whether this pane has Pane Focus.
+    pub(crate) fn pane_focused(&self) -> bool {
+        self.pane_focused
     }
 
     /// Hands over the worker so the window can wait for it off the GPUI thread.
@@ -568,6 +736,7 @@ impl TerminalView {
         self.admission_closed = true;
         self.pending_settings = None;
         self.pending_resize = None;
+        self.pending_focus = None;
         let _ = self.retry_wake.force_send(());
         // Retained view handles must not keep a closed pane reachable by commands.
         if let Some(link) = self.observation.take() {
@@ -627,6 +796,7 @@ impl TerminalView {
                         {
                             view.pending_settings = None;
                             view.pending_resize = None;
+                            view.pending_focus = None;
                             return None;
                         }
                         if let Some(settings) = view.pending_settings.take() {
@@ -635,7 +805,14 @@ impl TerminalView {
                         if let Some(size) = view.pending_resize {
                             view.admit_resize(size);
                         }
-                        Some(view.pending_settings.is_some() || view.pending_resize.is_some())
+                        if let Some(focused) = view.pending_focus {
+                            view.admit_focus(focused);
+                        }
+                        Some(
+                            view.pending_settings.is_some()
+                                || view.pending_resize.is_some()
+                                || view.pending_focus.is_some(),
+                        )
                     });
                     match pending {
                         Ok(Some(true)) => {}
@@ -743,6 +920,10 @@ impl sprite_pane::Pane for TerminalView {
 
     fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle_focus(window, cx);
+    }
+
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        self.clock_tick(cx);
     }
 
     fn title(&self) -> Option<SharedString> {

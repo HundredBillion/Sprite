@@ -52,7 +52,7 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 /// cannot stall the window's endpoint — but unbounded threads would simply
 /// move the denial of service rather than remove it, so past this many the
 /// endpoint drops new connections without reading them.
-const MAX_CONNECTIONS: usize = 16;
+pub(crate) const MAX_CONNECTIONS: usize = 16;
 
 pub use crate::local_socket::ObservationKey;
 #[cfg(test)]

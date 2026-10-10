@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use sprite_app::{
     Failure, FailureKind, HistoryLines, PaneAddress, PaneId, PaneReport, PaneSource, Pending, Rect,
-    Report, TabId, collect_panes, render_schema,
+    Report, TabId, Withdraw, collect_panes, render_schema,
 };
 use sprite_term::{
     CursorSnapshot, HistorySnapshot, PaneRow, PromptKind, ScreenKind, ValidTerminalSize, Viewport,
@@ -107,7 +107,11 @@ impl PaneSource for Panes {
         } else {
             let _ = sender.send(Ok(Arc::clone(&self.snapshot)));
         }
-        Ok(Pending { address, answer })
+        Ok(Pending {
+            address,
+            answer,
+            withdraw: Withdraw::default(),
+        })
     }
 }
 

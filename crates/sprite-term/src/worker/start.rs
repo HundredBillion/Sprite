@@ -87,39 +87,11 @@ pub(super) fn initialize(
         return Err(SessionError::new("on_bell", error));
     }
 
-    let registered_title = terminal.on_title_changed({
-        let notices = Rc::clone(&notices);
-        move |terminal: &Terminal<'_, '_>| {
-            let title = terminal
-                .title()
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            notices
-                .borrow_mut()
-                .events
-                .push(TerminalEvent::TitleChanged(title));
-        }
-    });
-    if let Err(error) = registered_title {
+    if let Err(error) = register_title(&mut terminal, Rc::clone(&notices)) {
         return Err(SessionError::new("on_title_changed", error));
     }
 
-    let registered_pwd = terminal.on_pwd_changed({
-        let notices = Rc::clone(&notices);
-        move |terminal: &Terminal<'_, '_>| {
-            let pwd = terminal
-                .pwd()
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            notices
-                .borrow_mut()
-                .events
-                .push(TerminalEvent::WorkingDirectoryChanged(pwd));
-        }
-    });
-    if let Err(error) = registered_pwd {
+    if let Err(error) = register_pwd(&mut terminal, Rc::clone(&notices)) {
         return Err(SessionError::new("on_pwd_changed", error));
     }
 
@@ -183,6 +155,7 @@ pub(super) fn initialize(
         projector,
         encoder,
         mouse_encoder,
+        selection_anchor: None,
         terminal,
     };
     Ok(Initialized {
@@ -370,20 +343,77 @@ fn configure_child_environment(
     }
 }
 
+/// Opens a PTY pair, one open at a time per process, retrying a transient failure.
+///
+/// Concurrent `openpty` calls on macOS can transiently fail with errno -6, the
+/// kernel's "redo the open" code leaking to user space. The lock keeps sessions
+/// in this process from racing each other; the retry covers opens racing in
+/// other processes. Only `openpty` runs under the lock.
+fn open_pty(size: PtySize) -> Result<portable_pty::PtyPair, SessionError> {
+    static OPEN_PTY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    retrying_transient_failures(
+        || {
+            let _one_at_a_time = OPEN_PTY
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            native_pty_system().openpty(size)
+        },
+        thread::sleep,
+    )
+}
+
+/// Calls `open` until it succeeds, fails for good, or runs out of attempts,
+/// pausing with `pause` between attempts.
+///
+/// The lock does nothing against opens in other processes, which is all a
+/// runner that gives each test its own process has, so the retry has to
+/// outlast another process's open by itself. The pause doubles from 2 ms, so
+/// eight attempts wait at most about a quarter of a second in all.
+fn retrying_transient_failures<T, E: std::fmt::Debug + std::fmt::Display>(
+    mut open: impl FnMut() -> Result<T, E>,
+    mut pause: impl FnMut(std::time::Duration),
+) -> Result<T, SessionError> {
+    const ATTEMPTS: u32 = 8;
+    const FIRST_PAUSE: std::time::Duration = std::time::Duration::from_millis(2);
+
+    let mut attempt = 1;
+    loop {
+        match open() {
+            Ok(opened) => return Ok(opened),
+            Err(error)
+                if attempt < ATTEMPTS && is_transient_openpty_failure(&format!("{error:?}")) =>
+            {
+                pause(FIRST_PAUSE * 2u32.pow(attempt - 1));
+                attempt += 1;
+            }
+            Err(error) => return Err(SessionError::new("open_pty", error)),
+        }
+    }
+}
+
+/// Whether an `openpty` failure is the transient errno -6.
+///
+/// The text is matched because the pinned portable-pty flattens the errno into
+/// a string: 0.9.0 (see Cargo.lock) reports a failed `openpty` with
+/// `bail!("failed to openpty: {:?}", io::Error::last_os_error())`, whose text
+/// holds `Os { code: -6, ...`. A portable-pty upgrade that words this
+/// differently stops the match silently, so the upgrade has to recheck it.
+fn is_transient_openpty_failure(error: &str) -> bool {
+    error.contains("Os { code: -6,")
+}
+
 pub(super) fn start(
     config: &SessionConfig,
     commands: &SyncSender<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
 ) -> Result<Started, SessionError> {
     let size = config.size;
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: size.rows(),
-            cols: size.cols(),
-            pixel_width: size.pixel_width(),
-            pixel_height: size.pixel_height(),
-        })
-        .map_err(|error| SessionError::new("open_pty", error))?;
+    let pair = open_pty(PtySize {
+        rows: size.rows(),
+        cols: size.cols(),
+        pixel_width: size.pixel_width(),
+        pixel_height: size.pixel_height(),
+    })?;
 
     let mut command = CommandBuilder::new(&config.program);
     for argument in &config.args {
@@ -454,6 +484,66 @@ fn spawn_child_waiter(
 
 #[cfg(test)]
 mod tests {
+    fn openpty_error(errno: i32) -> String {
+        format!(
+            "failed to openpty: {:?}",
+            std::io::Error::from_raw_os_error(errno)
+        )
+    }
+
+    #[test]
+    fn only_errno_minus_six_is_a_transient_openpty_failure() {
+        assert!(super::is_transient_openpty_failure(&openpty_error(-6)));
+        assert!(!super::is_transient_openpty_failure(&openpty_error(24)));
+    }
+
+    /// A run of transient failures is ridden out over eight attempts, each
+    /// pause longer than the last; an eighth failure, or any failure that is
+    /// not transient, is reported.
+    #[test]
+    fn transient_openpty_failures_are_retried_eight_times_with_growing_pauses() {
+        let open_after = |failures: usize| {
+            let (mut calls, mut pauses) = (0, Vec::new());
+            let opened = super::retrying_transient_failures(
+                || {
+                    calls += 1;
+                    if calls <= failures {
+                        Err(openpty_error(-6))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |pause| pauses.push(pause),
+            );
+            (opened.is_ok(), calls, pauses)
+        };
+        let (opened, calls, pauses) = open_after(7);
+        assert!(opened, "seven transient failures are ridden out");
+        assert_eq!((calls, pauses.len()), (8, 7));
+        assert!(
+            pauses.windows(2).all(|pair| pair[0] < pair[1]),
+            "{pauses:?}"
+        );
+        assert!(
+            pauses.iter().sum::<std::time::Duration>() < std::time::Duration::from_secs(1),
+            "{pauses:?}"
+        );
+        let (opened, calls, _) = open_after(8);
+        assert!(!opened);
+        assert_eq!(calls, 8);
+
+        let mut calls = 0;
+        let opened = super::retrying_transient_failures(
+            || {
+                calls += 1;
+                Err::<(), _>(openpty_error(24))
+            },
+            |_| {},
+        );
+        assert!(opened.is_err());
+        assert_eq!(calls, 1, "a lasting failure is not retried");
+    }
+
     #[test]
     fn child_environment_disables_inherited_no_color() {
         let mut command = portable_pty::CommandBuilder::new("sh");

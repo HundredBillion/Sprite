@@ -63,10 +63,13 @@ pub(crate) enum Step {
 }
 
 /// A closed shape to fill, for the characters that are not rectangles.
+///
+/// Every such shape here is four steps — an arc's two curves and two joins, a
+/// diagonal's four edges — so they are held inline rather than allocated.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Outline {
     pub start: Point,
-    pub steps: Vec<Step>,
+    pub steps: [Step; 4],
 }
 
 impl Outline {
@@ -370,8 +373,10 @@ pub(crate) fn box_rects(
     // a terminal actually draws them.
     let horizontal_weight = arms.left.or(arms.right);
     let vertical_weight = arms.up.or(arms.down);
-    let h_lines = stroke_lines(mid_y, horizontal_weight, strokes);
-    let v_lines = stroke_lines(mid_x, vertical_weight, strokes);
+    let h_strokes = stroke_lines(mid_y, horizontal_weight, strokes);
+    let v_strokes = stroke_lines(mid_x, vertical_weight, strokes);
+    let h_lines = h_strokes.as_slice();
+    let v_lines = v_strokes.as_slice();
 
     // A double line opens at an intersection with another double line, which
     // is what leaves the square in the middle of a double cross. A light or
@@ -404,10 +409,10 @@ pub(crate) fn box_rects(
             // Opened in the middle: each end is its own piece, and only where
             // there is an arm to carry it.
             if arms.left.is_some() {
-                emit((cell.left, top, v_lines_far(&v_lines, true), bottom));
+                emit((cell.left, top, v_lines_far(v_lines, true), bottom));
             }
             if arms.right.is_some() {
-                emit((v_lines_far(&v_lines, false), top, cell.right, bottom));
+                emit((v_lines_far(v_lines, false), top, cell.right, bottom));
             }
         } else if arms.left.is_some() || arms.right.is_some() {
             let left = if arms.left.is_some() {
@@ -439,10 +444,10 @@ pub(crate) fn box_rects(
 
         if break_v(arms.left) && outer || break_v(arms.right) && !outer {
             if arms.up.is_some() {
-                emit((left, cell.top, right, h_lines_far(&h_lines, true)));
+                emit((left, cell.top, right, h_lines_far(h_lines, true)));
             }
             if arms.down.is_some() {
-                emit((left, h_lines_far(&h_lines, false), right, cell.bottom));
+                emit((left, h_lines_far(h_lines, false), right, cell.bottom));
             }
         } else if arms.up.is_some() || arms.down.is_some() {
             let top = if arms.up.is_some() { cell.top } else { turn_up };
@@ -475,27 +480,49 @@ fn h_lines_far(lines: &[(f32, f32)], leading: bool) -> f32 {
     }
 }
 
+/// The strokes of one axis, held inline: none, one, or a double pair.
+///
+/// No axis of a box character has more than two strokes, so a fixed pair with
+/// a length covers every case without an allocation per cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct StrokeLines {
+    spans: [(f32, f32); 2],
+    len: usize,
+}
+
+impl StrokeLines {
+    fn as_slice(&self) -> &[(f32, f32)] {
+        &self.spans[..self.len]
+    }
+}
+
 /// The span each stroke of one axis occupies, centred on `centre`.
 ///
 /// One stroke for a light or heavy arm, two for a double, and none where the
 /// axis has no arm at all.
-fn stroke_lines(centre: f32, weight: Option<Weight>, strokes: Strokes) -> Vec<(f32, f32)> {
+fn stroke_lines(centre: f32, weight: Option<Weight>, strokes: Strokes) -> StrokeLines {
     match weight {
-        None => Vec::new(),
+        None => StrokeLines::default(),
         Some(Weight::Double) => {
             let half = strokes.light / 2.0;
             let offset = strokes.light;
-            vec![
-                (centre - offset - half, centre - offset + half),
-                (centre + offset - half, centre + offset + half),
-            ]
+            StrokeLines {
+                spans: [
+                    (centre - offset - half, centre - offset + half),
+                    (centre + offset - half, centre + offset + half),
+                ],
+                len: 2,
+            }
         }
         Some(other) => {
             let half = match other {
                 Weight::Heavy => strokes.heavy,
                 _ => strokes.light,
             } / 2.0;
-            vec![(centre - half, centre + half)]
+            StrokeLines {
+                spans: [(centre - half, centre + half), (0.0, 0.0)],
+                len: 1,
+            }
         }
     }
 }
@@ -529,7 +556,7 @@ pub(crate) fn box_outlines(
 
             emit(Outline {
                 start: (x_edge, mid_y + y_out),
-                steps: vec![
+                steps: [
                     Step::Curve {
                         ctrl: (mid_x + x_out, mid_y + y_out),
                         to: (mid_x + x_out, y_edge),
@@ -569,7 +596,7 @@ pub(crate) fn box_outlines(
 fn diagonal(from: Point, to: Point, half: f32) -> Outline {
     Outline {
         start: (from.0 - half, from.1),
-        steps: vec![
+        steps: [
             Step::Line((to.0 - half, to.1)),
             Step::Line((to.0 + half, to.1)),
             Step::Line((from.0 + half, from.1)),
@@ -962,6 +989,28 @@ mod tests {
             collect('\u{2571}', c, strokes()).is_empty(),
             "a diagonal has no rectangles"
         );
+    }
+
+    /// Drawing a box character asks the allocator for nothing: a character's
+    /// strokes and outlines fit in fixed arrays, so a screen of box drawing is
+    /// not thousands of small allocations a frame.
+    #[test]
+    fn drawing_box_characters_allocates_nothing() {
+        let (c, s) = (cell(), strokes());
+        let glyphs: Vec<BoxGlyph> = (0x2500u32..=0x257F)
+            .filter_map(char::from_u32)
+            .filter_map(box_glyph)
+            .collect();
+        assert!(glyphs.len() > 100, "the whole Box Drawing block is covered");
+        let mut emitted = 0usize;
+        let ((), allocations, bytes) = crate::surface_performance::measure(|| {
+            for glyph in &glyphs {
+                box_rects(glyph, c, s, |_| emitted += 1);
+                box_outlines(glyph, c, s, |outline| emitted += outline.steps.len());
+            }
+        });
+        assert!(emitted > glyphs.len(), "every character drew something");
+        assert_eq!((allocations, bytes), (0, 0));
     }
 }
 

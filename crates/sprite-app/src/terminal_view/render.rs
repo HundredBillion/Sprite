@@ -4,7 +4,8 @@
 //! textures to the grid's corner.
 
 use super::input::{
-    Drag, LinkClickBehavior, application_shortcut, dropped_paths_text, link_click_behavior,
+    Drag, LinkClickBehavior, Shortcut, application_shortcut, dropped_paths_text,
+    link_click_behavior,
 };
 use super::surfaces::{Body, SurfaceLayers};
 use super::*;
@@ -29,9 +30,6 @@ use crate::input::gpui_key_event;
 use crate::tokens::TokenRegistry;
 
 const STATUS: u32 = 0xf0a0a0;
-
-/// Half a blink. The rate every terminal has used since the VT100.
-pub(super) const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 
 /// One placement's element: the image, cropped to its source rectangle and
 /// scaled to the size the terminal computed.
@@ -83,34 +81,39 @@ fn placeholder_element(
     cell: &super::placeholder::ImageCell<'_>,
     texture: Arc<gpui::RenderImage>,
     image: &sprite_term::ImagePixels,
+    grid_origin: gpui::Point<Pixels>,
     cell_width: Pixels,
     cell_height: Pixels,
+    scale: f32,
 ) -> Option<gpui::Div> {
     let placement = cell.placement;
     if cell.image_column >= placement.columns || cell.image_row >= placement.rows {
         return None;
     }
-    let width = f32::from(cell_width);
-    let height = f32::from(cell_height);
     let fit = super::placeholder::fit_image(
         image.width,
         image.height,
-        placement.columns as f32 * width,
-        placement.rows as f32 * height,
+        placement.columns as f32 * f32::from(cell_width),
+        placement.rows as f32 * f32::from(cell_height),
     )?;
+    // Whole device pixels throughout, on the grid the cells are painted on:
+    // taffy then has nothing to round, and a tile can neither leave a seam
+    // against its neighbour nor sit half a pixel off its cell.
+    let tile =
+        super::placeholder::tile_geometry(cell, &fit, grid_origin, cell_width, cell_height, scale);
     Some(
         div()
             .absolute()
-            .left(px(f32::from(cell.column) * width))
-            .top(px(cell.row as f32 * height))
-            .w(cell_width)
-            .h(cell_height)
+            .left(tile.left)
+            .top(tile.top)
+            .w(tile.width)
+            .h(tile.height)
             .overflow_hidden()
             .child(
                 img(ImageSource::Render(texture))
                     .absolute()
-                    .left(px(fit.left - cell.image_column as f32 * width))
-                    .top(px(fit.top - cell.image_row as f32 * height))
+                    .left(tile.image_left)
+                    .top(tile.image_top)
                     .w(px(fit.width))
                     .h(px(fit.height)),
             ),
@@ -118,11 +121,15 @@ fn placeholder_element(
 }
 
 impl TerminalView {
-    /// One half-blink. Returns the pane to a visible cursor when nothing is
-    /// blinking, so a program that stops the blink cannot leave the cursor
-    /// hidden.
-    pub(super) fn tick_blink(&mut self, cx: &mut Context<Self>) {
-        // The existing wake also discovers silent foreground programs with no OSC title.
+    /// One beat of the window's clock.
+    ///
+    /// Every pane refreshes its title on every beat — a program that starts
+    /// without output gives no other sign — but only the pane with Pane Focus
+    /// blinks, so a window of many panes repaints one of them, not all. A pane
+    /// without Pane Focus, or with nothing blinking, holds its cursor visible,
+    /// so neither losing focus nor a program stopping the blink can leave the
+    /// cursor hidden.
+    pub(super) fn clock_tick(&mut self, cx: &mut Context<Self>) {
         self.refresh_display_title(cx);
         let terminal_blinks = self
             .bundle
@@ -135,7 +142,7 @@ impl TerminalView {
             Body::Grid { grid, .. } => grid.cursor_blinks(),
             Body::Elements { .. } | Body::List { .. } => false,
         });
-        if !(terminal_blinks || grid_blinks) {
+        if !(self.pane_focused() && (terminal_blinks || grid_blinks)) {
             if !self.blink_on {
                 self.blink_on = true;
                 cx.notify();
@@ -153,8 +160,10 @@ impl TerminalView {
     pub(super) fn image_layers(
         &self,
         rows: &[std::sync::Arc<Vec<PositionedCell>>],
+        grid_origin: gpui::Point<Pixels>,
         cell_width: Pixels,
         cell_height: Pixels,
+        scale: f32,
     ) -> [Vec<gpui::Div>; 3] {
         let mut layers = [Vec::new(), Vec::new(), Vec::new()];
         let Some(frame) = self.bundle.as_ref().and_then(|b| b.graphics.as_ref()) else {
@@ -198,9 +207,15 @@ impl TerminalView {
             let Some(texture) = self.textures.get(image.id, image.generation) else {
                 continue;
             };
-            if let Some(element) =
-                placeholder_element(&cell, texture, image.as_ref(), cell_width, cell_height)
-            {
+            if let Some(element) = placeholder_element(
+                &cell,
+                texture,
+                image.as_ref(),
+                grid_origin,
+                cell_width,
+                cell_height,
+                scale,
+            ) {
                 layers[1].push(element);
             }
         }
@@ -305,14 +320,25 @@ impl Render for TerminalView {
 
         // Images first, because whether any belong below the text decides how
         // the rows themselves are drawn.
-        let [below_background, below_text, above_text] =
-            self.image_layers(&rows, cell_width, cell_height);
+        // Placeholder tiles snap against the grid's corner in the window, as
+        // the painter snaps cells. Layout has not run yet, so that is where
+        // the last frame put it; before the first frame, the pane's own
+        // offset stands in.
+        let grid_origin = self.content_origin.unwrap_or(origin);
+        let [below_background, below_text, above_text] = self.image_layers(
+            &rows,
+            grid_origin,
+            cell_width,
+            cell_height,
+            window.scale_factor(),
+        );
         // The split costs an extra pass over the cells, so it is taken only
         // when something actually needs to sit between them. The Kitty default
         // is above the text, so the common case never pays for it.
         let split = !below_background.is_empty() || !below_text.is_empty();
 
-        let (background_grid, text_grid) = GridPaint::prepare(snapshot, rows, &metrics, split);
+        let (background_grid, text_grid) =
+            GridPaint::prepare(snapshot, rows, &metrics, split, &self.shape_cache);
 
         // With nothing hosted, the frame must cost what it cost before
         // Surfaces existed: no registry clone, no layer construction.
@@ -428,6 +454,20 @@ impl Render for TerminalView {
             .text_size(metrics.cells.font_size())
             .line_height(metrics.cells.height())
             .track_focus(&self.focus)
+            // Deliberate input withdraws a held paste: any key but the paste
+            // that would answer it, and any button press. Capture phase, so a
+            // hosted Surface that handles the event itself cannot hide it from
+            // the pane. Pointer motion, wheel turns and modifier changes are
+            // not decisions and leave the question standing; GPUI reports a
+            // modifier on its own as a modifiers change, never as a key down.
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
+                if application_shortcut(&event.keystroke) != Some(Shortcut::Paste) {
+                    view.drop_unsafe_paste(cx);
+                }
+            }))
+            .capture_any_mouse_down(cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                view.drop_unsafe_paste(cx);
+            }))
             .on_drop(cx.listener(|view, paths: &ExternalPaths, _window, _cx| {
                 let text = dropped_paths_text(paths.paths());
                 if !text.is_empty() {
@@ -448,7 +488,7 @@ impl Render for TerminalView {
                 // what they do not claim reaches the terminal, so a binding can
                 // never also be typed into the child.
                 if let Some(shortcut) = application_shortcut(&event.keystroke) {
-                    view.perform(shortcut, cx);
+                    view.perform(shortcut, event.is_held, cx);
                     return;
                 }
 
@@ -492,14 +532,15 @@ impl Render for TerminalView {
                         Some(event.button),
                         event.modifiers,
                     ) {
-                        // The press drops whatever was selected and remembers
-                        // where a drag would start from. It selects nothing
-                        // itself — see `Drag::moved`.
+                        // The press drops whatever was selected and pins where
+                        // a drag would start from to the content under it, so
+                        // output that scrolls before the drag cannot move the
+                        // start. It selects nothing itself — see `Drag::moved`.
                         view.drag = Some(Drag {
                             anchor: cell,
                             moved: false,
                         });
-                        view.send(TerminalCommand::ClearSelection);
+                        view.send(TerminalCommand::BeginSelection { anchor: cell });
                     }
                 }),
             )

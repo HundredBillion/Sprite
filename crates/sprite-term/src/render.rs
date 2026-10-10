@@ -91,10 +91,15 @@ pub struct CellStyle {
 }
 
 /// UTF-8 cell text: empty and single-scalar cells need no heap allocation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Every text has exactly one stored form: empty and single-scalar text is
+/// always inline with its unused bytes zeroed, and longer text is always
+/// shared. That is what lets the derived equality and hash compare the stored
+/// form and still agree with comparing the text.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CellText(CellTextStorage);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 enum CellTextStorage {
     Inline { bytes: [u8; 4], len: u8 },
     Shared(Arc<str>),
@@ -121,6 +126,20 @@ impl From<&str> for CellText {
             Self(CellTextStorage::Inline { bytes, len })
         } else {
             Self(CellTextStorage::Shared(Arc::from(text)))
+        }
+    }
+}
+
+/// Shares the given allocation for longer text instead of copying it, so a
+/// caller that already holds the text in an `Arc` pays nothing more.
+impl From<Arc<str>> for CellText {
+    fn from(text: Arc<str>) -> Self {
+        let mut chars = text.chars();
+        chars.next();
+        if chars.next().is_none() {
+            Self::from(&*text)
+        } else {
+            Self(CellTextStorage::Shared(text))
         }
     }
 }
@@ -246,6 +265,27 @@ mod cell_text_tests {
                 panic!("shared grapheme")
             };
             assert!(Arc::ptr_eq(&a, &b));
+        }
+    }
+
+    #[test]
+    fn text_from_an_arc_has_the_same_stored_form_and_shares_longer_text() {
+        use std::hash::{BuildHasher, RandomState};
+        let hasher = RandomState::new();
+        for text in ["", "a", "界", "\u{f115}", "e\u{301}", "👩‍💻"] {
+            let shared: Arc<str> = Arc::from(text);
+            let from_arc = CellText::from(Arc::clone(&shared));
+            let from_str = CellText::from(text);
+            assert_eq!(from_arc, from_str, "{text:?}");
+            assert_eq!(
+                hasher.hash_one(&from_arc),
+                hasher.hash_one(&from_str),
+                "{text:?}"
+            );
+            match from_arc.0 {
+                CellTextStorage::Inline { .. } => assert!(text.chars().count() <= 1),
+                CellTextStorage::Shared(kept) => assert!(Arc::ptr_eq(&kept, &shared)),
+            }
         }
     }
 }

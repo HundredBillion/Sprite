@@ -77,8 +77,9 @@ fn open_window(args: WindowArgs) {
     // Read before the window exists, so a session never starts under one set of
     // settings and is then told about another.
     let (settings, complaints) = match &args.config {
-        // Explicit, so it wins over discovery.
-        Some(path) => Settings::load_from(path),
+        // Explicit, so it wins over discovery — and must be there: a named
+        // file that cannot be read is said rather than silently replaced.
+        Some(path) => Settings::load_explicit(path),
         None => Settings::load(),
     };
     for complaint in complaints.0 {

@@ -54,6 +54,31 @@ pub struct PaneAddress {
 pub struct Pending {
     pub address: PaneAddress,
     pub answer: Receiver<Result<Arc<HistorySnapshot>, String>>,
+    /// Runs when this is dropped, so a request whose caller has stopped
+    /// waiting, answered or not, leaves nothing behind in its source.
+    pub withdraw: Withdraw,
+}
+
+/// Takes a request back when its caller stops waiting for it.
+///
+/// Runs once, when the [`Pending`] it belongs to is dropped: after an answer,
+/// after a failure, or when the request's deadline has passed. A source that
+/// keeps nothing per request leaves it empty.
+#[derive(Default)]
+pub struct Withdraw(Option<Box<dyn FnOnce() + Send>>);
+
+impl Withdraw {
+    pub fn new(withdraw: impl FnOnce() + Send + 'static) -> Self {
+        Self(Some(Box::new(withdraw)))
+    }
+}
+
+impl Drop for Withdraw {
+    fn drop(&mut self) {
+        if let Some(withdraw) = self.0.take() {
+            withdraw();
+        }
+    }
 }
 
 /// The window's panes, as the broker is allowed to see them.
@@ -374,6 +399,8 @@ mod tests {
         /// disconnecting, which would be a different failure.
         held: Mutex<Vec<Sender<Answer>>>,
         asked: Mutex<Vec<PaneId>>,
+        /// Every pane whose request has been withdrawn, in the order it was.
+        withdrawn: Arc<Mutex<Vec<PaneId>>>,
     }
 
     impl FakeWindow {
@@ -398,6 +425,7 @@ mod tests {
                 behaviour: HashMap::new(),
                 held: Mutex::default(),
                 asked: Mutex::default(),
+                withdrawn: Arc::default(),
             }
         }
 
@@ -439,7 +467,14 @@ mod tests {
                     let _ = sender.send(Ok(snapshot("default")));
                 }
             }
-            Ok(Pending { address, answer })
+            let withdrawn = Arc::clone(&self.withdrawn);
+            Ok(Pending {
+                address,
+                answer,
+                withdraw: Withdraw::new(move || {
+                    withdrawn.lock().expect("lock").push(pane);
+                }),
+            })
         }
     }
 
@@ -728,5 +763,24 @@ mod tests {
         assert!(report.complete);
         assert!(report.failures.is_empty());
         assert_eq!(report.panes.len(), 3);
+    }
+
+    /// A pane that misses the deadline has its request withdrawn when the
+    /// collection ends, so a source keeps nothing for an answer nobody will
+    /// read. Answered requests are withdrawn the same way, harmlessly.
+    #[test]
+    fn every_request_is_withdrawn_once_the_collection_is_over() {
+        let window = FakeWindow::new(&[(0, 0), (0, 1)]).with(1, Behaviour::Stalls);
+        let report =
+            collect(&query("panes snapshot --window"), &window, TEST_DEADLINE).expect("allowed");
+        assert!(!report.complete, "the stalled pane timed out");
+
+        let mut withdrawn = window.withdrawn.lock().expect("lock").clone();
+        withdrawn.sort();
+        assert_eq!(
+            withdrawn,
+            vec![PaneId(0), PaneId(1)],
+            "the timed-out request is taken back, not left registered"
+        );
     }
 }

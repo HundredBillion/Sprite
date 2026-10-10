@@ -14,6 +14,7 @@ use sprite_app::{Failure, PaneAddress, PaneReport, Report, render_schema};
 use sprite_app::{PaneId, Rect, TabId};
 use sprite_term::{
     HistoryLines, HistorySnapshot, SessionConfig, TerminalCommand, TerminalEvent, TerminalSession,
+    Ticket,
 };
 
 /// A byte that is easy to spot and unlikely to occur by chance.
@@ -96,15 +97,20 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
     let mut snapshot = None;
     while Instant::now() < deadline && snapshot.is_none() {
         session
-            .send(TerminalCommand::CaptureHistory(HistoryLines::new(500)))
+            .send(TerminalCommand::CaptureHistory {
+                ticket: Ticket::new(0),
+                lines: HistoryLines::new(500),
+            })
             .expect("request history");
         while let Ok(event) = events.next_blocking() {
             match event {
-                TerminalEvent::History(history) if !history.placements.is_empty() => {
+                TerminalEvent::History {
+                    snapshot: history, ..
+                } if !history.placements.is_empty() => {
                     snapshot = Some((*history).clone());
                     break;
                 }
-                TerminalEvent::History(_) => break,
+                TerminalEvent::History { .. } => break,
                 _ => {}
             }
         }

@@ -135,12 +135,15 @@ impl Workspace {
 /// pointer shoved past the floor and brought back puts the boundary under the
 /// pointer again instead of leaving it offset by however far it was shoved.
 pub(super) fn divider_ratio(origin: f32, extent: f32, pointer: f32, floor: f32) -> f32 {
-    // A split with no room, or too little to honour the floor on both sides,
-    // has no position that obeys the rule. Even is the least surprising of the
-    // answers that break it.
-    if extent <= 0.0 || extent < floor * 2.0 {
+    // A split with no room has no position at all; even is the only answer.
+    if extent <= 0.0 {
         return 0.5;
     }
+    // Each side keeps the full floor, or a quarter of the split when that is
+    // smaller. A step in the rule at some size would pin splits just above it
+    // while letting those just below move, so the floor shrinks smoothly
+    // instead and no split is ever stuck.
+    let floor = floor.min(extent / 4.0);
     let low = floor / extent;
     ((pointer - origin) / extent).clamp(low, 1.0 - low)
 }
@@ -483,18 +486,18 @@ mod tests {
             width: 0.5,
             height: 0.75,
         };
-        // Horizontal extent is 400, so the floor sits at 120 / 400 = 0.3 —
+        // Horizontal extent is 800, so the floor sits at 120 / 800 = 0.15 —
         // exactly where this divider already is.
         let divider = crate::pane_tree::Divider {
             pane: PaneId(0),
             direction: Direction::Left,
             orientation: Orientation::Horizontal,
-            ratio: DIVIDER_FLOOR_PX / (area.width * 800.0),
+            ratio: DIVIDER_FLOOR_PX / (area.width * 1600.0),
             area,
         };
-        let ratio = nudged_ratio(&divider, 800.0, 400.0, Direction::Left);
+        let ratio = nudged_ratio(&divider, 1600.0, 400.0, Direction::Left);
         assert!(
-            (ratio - 0.3).abs() < 1e-6,
+            (ratio - 0.15).abs() < 1e-6,
             "another step left must not cross the floor"
         );
     }
@@ -511,9 +514,9 @@ mod tests {
     }
     #[test]
     fn neither_side_may_be_driven_below_the_floor() {
-        // 120 of 400 is 0.3, and 1 - 0.3 on the other end.
-        assert!((divider_ratio(0.0, 400.0, -500.0, 120.0) - 0.3).abs() < 1e-6);
-        assert!((divider_ratio(0.0, 400.0, 900.0, 120.0) - 0.7).abs() < 1e-6);
+        // 120 of 800 is 0.15, and 1 - 0.15 on the other end.
+        assert!((divider_ratio(0.0, 800.0, -500.0, 120.0) - 0.15).abs() < 1e-6);
+        assert!((divider_ratio(0.0, 800.0, 1900.0, 120.0) - 0.85).abs() < 1e-6);
     }
     /// The reason the drag is absolute rather than accumulated: shoving the
     /// pointer past the floor and bringing it back must put the boundary under
@@ -521,18 +524,11 @@ mod tests {
     #[test]
     fn a_boundary_pushed_past_the_floor_comes_straight_back() {
         let floor = 120.0;
-        assert!((divider_ratio(0.0, 400.0, -500.0, floor) - 0.3).abs() < 1e-6);
+        assert!((divider_ratio(0.0, 800.0, -500.0, floor) - 0.15).abs() < 1e-6);
         // Back inside the legal range, the boundary is under the pointer again.
         // An implementation that accumulated the overshoot would answer with
         // the 500 px it was shoved by still subtracted.
-        assert!((divider_ratio(0.0, 400.0, 240.0, floor) - 0.6).abs() < 1e-6);
-    }
-    #[test]
-    fn a_split_too_small_for_two_floors_stays_even() {
-        // 200 px cannot give both sides 120, so no position satisfies the rule
-        // and the boundary sits in the middle rather than at one extreme.
-        assert!((divider_ratio(0.0, 200.0, 10.0, 120.0) - 0.5).abs() < 1e-6);
-        assert!((divider_ratio(0.0, 0.0, 10.0, 120.0) - 0.5).abs() < 1e-6);
+        assert!((divider_ratio(0.0, 800.0, 480.0, floor) - 0.6).abs() < 1e-6);
     }
     #[test]
     fn the_floor_is_the_one_the_product_promises() {
@@ -715,5 +711,97 @@ mod tests {
 
         let upright = place(Orientation::Vertical, Direction::Down);
         assert!((upright.along(pointer) - 450.0).abs() < 1e-4);
+    }
+    /// The floor is the smaller of the full floor and a quarter of the split,
+    /// so each side keeps at least a quarter and no split is pinned.
+    #[test]
+    fn a_small_split_moves_within_its_middle_half() {
+        // 200 px: the floor is 50, a quarter of the split.
+        assert!((divider_ratio(0.0, 200.0, 10.0, 120.0) - 0.25).abs() < 1e-6);
+        assert!((divider_ratio(0.0, 200.0, 190.0, 120.0) - 0.75).abs() < 1e-6);
+        // Inside that range the boundary is under the pointer.
+        assert!((divider_ratio(0.0, 200.0, 80.0, 120.0) - 0.4).abs() < 1e-6);
+        // No room at all still has nowhere to go but even.
+        assert!((divider_ratio(0.0, 0.0, 10.0, 120.0) - 0.5).abs() < 1e-6);
+    }
+    /// Travel is the distance between the two ends of the boundary's range.
+    fn travel(extent: f32) -> f32 {
+        let low = divider_ratio(0.0, extent, f32::MIN / 2.0, 120.0);
+        let high = divider_ratio(0.0, extent, f32::MAX / 2.0, 120.0);
+        (high - low) * extent
+    }
+    #[test]
+    fn travel_has_no_cliff_where_the_old_rule_changed() {
+        for (extent, expected) in [
+            (200.0, 100.0),
+            (239.0, 119.5),
+            (240.0, 120.0),
+            (260.0, 130.0),
+            (300.0, 150.0),
+            (480.0, 240.0),
+            (800.0, 560.0),
+        ] {
+            assert!(
+                (travel(extent) - expected).abs() < 1e-3,
+                "{extent}: {}",
+                travel(extent)
+            );
+        }
+    }
+    #[test]
+    fn a_bigger_split_never_travels_less() {
+        let mut last = 0.0;
+        for extent in 100..=1000 {
+            let now = travel(extent as f32);
+            assert!(now >= last - 1e-3, "{extent}: {now} < {last}");
+            last = now;
+        }
+    }
+    #[test]
+    fn a_drag_moves_a_split_smaller_than_two_floors() {
+        // A 200 px split, grabbed on its line at 100.
+        let placed = divider_placements(
+            &[crate::pane_tree::Divider {
+                pane: PaneId(0),
+                direction: Direction::Right,
+                orientation: Orientation::Horizontal,
+                ratio: 0.5,
+                area: crate::pane_tree::Rect::FULL,
+            }],
+            200.0,
+            600.0,
+            0.0,
+        )[0];
+        let drag = DividerDrag::begin(placed, 100.0);
+        assert!(
+            (drag.ratio_for(60.0) - 0.3).abs() < 1e-4,
+            "the boundary follows the pointer"
+        );
+        assert!(
+            (drag.ratio_for(-100.0) - 0.25).abs() < 1e-4,
+            "and stops a quarter in"
+        );
+        assert!((drag.ratio_for(400.0) - 0.75).abs() < 1e-4);
+    }
+    #[test]
+    fn a_nudge_moves_a_split_smaller_than_two_floors() {
+        // A quarter of an 800 px container is a 200 px split, so one 20 px
+        // step is 0.1 of it.
+        let divider = |ratio| crate::pane_tree::Divider {
+            pane: PaneId(0),
+            direction: Direction::Left,
+            orientation: Orientation::Horizontal,
+            ratio,
+            area: crate::pane_tree::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.25,
+                height: 1.0,
+            },
+        };
+        let moved = nudged_ratio(&divider(0.5), 800.0, 400.0, Direction::Left);
+        assert!((moved - 0.4).abs() < 1e-6, "a nudge moves it");
+        let held = nudged_ratio(&divider(0.25), 800.0, 400.0, Direction::Left);
+        assert!((held - 0.25).abs() < 1e-6, "and stops a quarter in");
     }
 }

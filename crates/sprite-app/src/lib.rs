@@ -8,6 +8,7 @@ mod block_elements;
 mod box_drawing;
 mod cli;
 mod config;
+mod confirmation;
 mod graphics_cache;
 mod grid;
 mod grid_paint;
@@ -23,13 +24,17 @@ mod terminal_events;
 mod terminal_view;
 #[cfg(test)]
 mod test_blocking_wait;
+#[cfg(test)]
+mod test_child;
+#[cfg(test)]
+mod test_event_pressure;
 mod tokens;
 mod workspace;
 
 pub use cli::{Invocation, SurfaceOpenArgs, TokenRegisterArgs, USAGE, WindowArgs, parse_arguments};
 pub use config::Settings;
 pub use observation::broker::{
-    Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report,
+    Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report, Withdraw,
     collect as collect_panes, parse as parse_request,
 };
 pub use observation::client::{run_config_print, run_config_reload, run_snapshot};

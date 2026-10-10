@@ -25,16 +25,14 @@ use crate::surface::channel::{
 use crate::surface::description::{self, BodyKind, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
 use crate::surface::list::ListOp;
+use crate::surface::render::ElementBody;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
 
 /// What a Surface draws: an element tree replaced whole on `update`, or a
 /// grid mutated by operations.
 pub(super) enum Body {
-    Elements {
-        description: Description,
-        images: crate::surface::render::ElementImageCache,
-    },
+    Elements(ElementBody),
     Grid {
         grid: Box<GridSurface>,
         /// The description's root element, kept for the `bg` and `color` it
@@ -42,6 +40,8 @@ pub(super) enum Body {
         /// element root's box does. A grid root refuses `style` and `border`,
         /// so those never arrive here.
         root: Element,
+        /// The grid's shaped glyphs, kept between frames as the terminal's are.
+        shapes: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
     },
     /// The renderer replaces this model later without changing the wire mutation seam.
     List {
@@ -59,6 +59,7 @@ impl Body {
             Element::Grid { size, .. } => Body::Grid {
                 grid: Box::new(GridSurface::new(size.cols, size.rows)),
                 root,
+                shapes: Default::default(),
             },
             Element::VirtualList { config } => {
                 let config = config.as_ref().clone();
@@ -72,16 +73,13 @@ impl Body {
             | Element::List { .. }
             | Element::Text { .. }
             | Element::Button { .. }
-            | Element::Image { .. } => Body::Elements {
-                description: Description { root },
-                images: Default::default(),
-            },
+            | Element::Image { .. } => Body::Elements(ElementBody::new(id, Description { root })),
         }
     }
 
     fn kind(&self) -> BodyKind {
         match self {
-            Self::Elements { .. } => BodyKind::Elements,
+            Self::Elements(_) => BodyKind::Elements,
             Self::Grid { .. } => BodyKind::Grid,
             Self::List { .. } => BodyKind::List,
         }
@@ -109,12 +107,7 @@ impl Body {
                 *root = replacement;
                 view.update(cx, |view, cx| view.reconfigure(config, cx));
             }
-            (body @ Self::Elements { .. }, root) => {
-                *body = Self::Elements {
-                    description: Description { root },
-                    images: Default::default(),
-                };
-            }
+            (Self::Elements(elements), root) => elements.replace(Description { root }),
             _ => {
                 return Err(Refusal::Malformed(
                     "an update must preserve the Surface body kind".to_owned(),
@@ -842,10 +835,11 @@ impl TerminalView {
     }
 
     /// Removes a Surface and returns its space to the grid. Always answers
-    /// `closed`: a write to a connection that is already gone simply fails
-    /// (and, per `SurfaceConnection::send`, marks it dead), and a client that
-    /// only half-closed its write side — it is done sending, but is still
-    /// reading — still hears `closed` the way its code expects.
+    /// `closed`: on a connection that is already dead the line is simply
+    /// dropped, and a client that only half-closed its write side — it is
+    /// done sending, but is still reading — still hears `closed` the way its
+    /// code expects, because the connection's writer sends everything queued
+    /// before it stops.
     pub(crate) fn close_surface(
         &mut self,
         id: SurfaceId,
@@ -1116,19 +1110,11 @@ impl TerminalView {
             surface.told = Some(told);
         }
         let body = match &mut surface.body {
-            Body::Elements {
-                description,
-                images,
-            } => crate::surface::render::render(
-                description,
-                surface.id,
-                registry,
-                &surface.connection,
-                Some(cx.entity()),
-                images,
-            ),
-            Body::Grid { grid, .. } => {
-                crate::surface::render::render_grid(grid, highlights, metrics)
+            Body::Elements(elements) => {
+                elements.render(registry, &surface.connection, Some(cx.entity()))
+            }
+            Body::Grid { grid, shapes, .. } => {
+                crate::surface::render::render_grid(grid, highlights, metrics, shapes)
             }
             Body::List { view, .. } => {
                 let focused = focused == Some(&surface.focus);
@@ -1641,7 +1627,12 @@ mod tests {
         });
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
-        let document = |color| serde_json::json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":format!("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>")}});
+        let svg = |color: &str| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>"
+            )
+        };
+        let document = |color: &str| serde_json::json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":svg(color)}});
         host.update_in(cx, |view, window, cx| {
             view.open_surface(
                 SurfaceId(2),
@@ -1659,65 +1650,143 @@ mod tests {
         let (first, again) = host.update(cx, |view, _| {
             let surface = view.surfaces.fill.as_mut().unwrap();
             let connection = surface.connection.clone();
-            let Body::Elements {
-                description,
-                images,
-            } = &mut surface.body
-            else {
+            let Body::Elements(elements) = &mut surface.body else {
                 panic!("expected elements")
             };
-            let _ = crate::surface::render::render(
-                description,
-                SurfaceId(2),
-                &TokenRegistry::new(&settings.colors),
-                &connection,
-                None,
-                images,
-            );
-            let first = images.image_id(0).unwrap();
-            let _ = crate::surface::render::render(
-                description,
-                SurfaceId(2),
-                &TokenRegistry::new(&settings.colors),
-                &connection,
-                None,
-                images,
-            );
-            (first, images.image_id(0).unwrap())
+            let registry = TokenRegistry::new(&settings.colors);
+            let _ = elements.render(&registry, &connection, None);
+            let first = elements.images().image_for(&svg("blue")).unwrap().id;
+            let _ = elements.render(&registry, &connection, None);
+            (first, elements.images().image_for(&svg("blue")).unwrap().id)
         });
         assert_eq!(first, again);
         host.update(cx, |view, cx| {
             view.update_surface(SurfaceId(2), document("red"), cx);
-            let Body::Elements { images, .. } = &view.surfaces.fill.as_ref().unwrap().body else {
+            let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
                 panic!("expected elements")
             };
-            assert!(images.image_id(0).is_none());
+            let images = elements.images();
+            assert!(
+                images.image_for(&svg("blue")).is_none(),
+                "blue is no longer drawn, so its decode was released"
+            );
         });
         let replacement = host.update(cx, |view, _| {
             let surface = view.surfaces.fill.as_mut().unwrap();
             let connection = surface.connection.clone();
-            let Body::Elements {
-                description,
-                images,
-            } = &mut surface.body
-            else {
+            let Body::Elements(elements) = &mut surface.body else {
                 panic!("expected elements")
             };
-            let _ = crate::surface::render::render(
-                description,
-                SurfaceId(2),
-                &TokenRegistry::new(&settings.colors),
-                &connection,
-                None,
-                images,
-            );
-            images.image_id(0).unwrap()
+            let _ = elements.render(&TokenRegistry::new(&settings.colors), &connection, None);
+            elements.images().image_for(&svg("red")).unwrap().id
         });
         assert_ne!(first, replacement);
         host.update_in(cx, |view, window, cx| {
             view.close_surface(SurfaceId(2), window, cx)
         });
         assert!(host.read_with(cx, |view, _| view.surfaces.fill.is_none()));
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn an_update_keeps_the_decode_of_an_unchanged_svg_and_decodes_a_changed_one_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let svg = |color: &str| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>"
+            )
+        };
+        let document = |first: &str, second: &str| {
+            serde_json::json!({"version":1,"root":{"kind":"box","children":[
+                {"kind":"image","style":"w_4 h_4","svg":svg(first)},
+                {"kind":"image","style":"w_4 h_4","svg":svg(second)}
+            ]}})
+        };
+        let id = SurfaceId(3);
+        host.update_in(cx, |view, window, cx| {
+            view.open_surface(
+                id,
+                Open {
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None },
+                    focus: false,
+                    description: document("blue", "green"),
+                },
+                connection,
+                window,
+                cx,
+            )
+            .unwrap();
+        });
+        let registry = TokenRegistry::new(&settings.colors);
+        // Builds the Surface's elements as a frame does, then reports how many
+        // SVGs its cache has decoded in all and what it holds for each colour.
+        let frame = |view: &mut TerminalView, colors: &[&str]| {
+            let surface = view.surfaces.fill.as_mut().unwrap();
+            let connection = surface.connection.clone();
+            let Body::Elements(elements) = &mut surface.body else {
+                panic!("expected elements")
+            };
+            let _ = elements.render(&registry, &connection, None);
+            let images = elements.images();
+            (
+                images.decodes(),
+                colors
+                    .iter()
+                    .map(|color| images.image_for(&svg(color)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let (decodes, first) = host.update(cx, |view, _| frame(view, &["blue", "green"]));
+        assert_eq!(decodes, 2);
+        let blue = first[0].clone().expect("blue decoded");
+        let green = first[1].clone().expect("green decoded");
+
+        host.update(cx, |view, cx| {
+            view.update_surface(id, document("blue", "green"), cx)
+        });
+        let (decodes, again) = host.update(cx, |view, _| frame(view, &["blue", "green"]));
+        assert_eq!(decodes, 2, "an identical update decoded its SVGs again");
+        assert!(std::sync::Arc::ptr_eq(&blue, again[0].as_ref().unwrap()));
+        assert!(std::sync::Arc::ptr_eq(&green, again[1].as_ref().unwrap()));
+
+        host.update(cx, |view, cx| {
+            view.update_surface(id, document("blue", "red"), cx)
+        });
+        let (decodes, changed) = host.update(cx, |view, _| frame(view, &["blue", "green", "red"]));
+        assert_eq!(decodes, 3, "only the changed SVG is decoded");
+        assert!(std::sync::Arc::ptr_eq(&blue, changed[0].as_ref().unwrap()));
+        assert!(
+            changed[1].is_none(),
+            "green is no longer drawn, so its pixels are released"
+        );
+        assert!(changed[2].is_some());
+        host.update(cx, |view, _| {
+            let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
+                panic!("expected elements")
+            };
+            let images = elements.images();
+            assert_eq!(
+                images.retained_bytes(),
+                2 * 4 * 4 * 4,
+                "the budget counts only the images the description draws"
+            );
+        });
         cx.update(|window, _| window.remove_window());
         drop(host);
     }
@@ -1731,15 +1800,28 @@ mod tests {
         cx.update(|window, cx| handle.surface_request(request, window, cx));
     }
 
+    /// The program's end of a test Surface's socket, with a handle on the
+    /// window's end: events are written by the connection's writer thread,
+    /// so a read first waits for it to put everything already sent on the
+    /// wire.
+    struct Peer {
+        stream: std::os::unix::net::UnixStream,
+        connection: SurfaceConnection,
+    }
+
     fn open_request(
         host: &Entity<TerminalView>,
         cx: &mut gpui::VisualTestContext,
         id: SurfaceId,
         open: Open,
-    ) -> (Result<(), Refusal>, std::os::unix::net::UnixStream) {
-        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    ) -> (Result<(), Refusal>, Peer) {
+        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         peer.set_nonblocking(true).unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
+        let mut peer = Peer {
+            stream: peer,
+            connection: connection.clone(),
+        };
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         dispatch(
             host,
@@ -1749,7 +1831,7 @@ mod tests {
                 id,
                 open,
                 connection: connection.clone(),
-                reply,
+                reply: reply.into(),
             },
         );
         let answer = receiver.try_recv().unwrap();
@@ -1781,10 +1863,11 @@ mod tests {
         });
     }
 
-    fn events(peer: &mut std::os::unix::net::UnixStream) -> Vec<serde_json::Value> {
+    fn events(peer: &mut Peer) -> Vec<serde_json::Value> {
         use std::io::Read;
+        peer.connection.settle();
         let mut wire = String::new();
-        if let Err(error) = peer.read_to_string(&mut wire) {
+        if let Err(error) = peer.stream.read_to_string(&mut wire) {
             assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         }
         wire.lines()
@@ -2019,15 +2102,22 @@ mod tests {
         );
         assert_eq!(answer, Ok(()));
         host.update(cx, |host, _| {
-            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0),px(0.0)));
+            host.surfaces.fill.as_mut().unwrap().origin = Some(gpui::point(px(0.0), px(0.0)));
             let started = std::time::Instant::now();
-            host.report_grid_wheel(SurfaceId(989), &ScrollWheelEvent {position:gpui::point(px(1.0),px(1.0)),delta:gpui::ScrollDelta::Lines(gpui::point(0.0,1_000_000_000.0)),..Default::default()});
+            host.report_grid_wheel(
+                SurfaceId(989),
+                &ScrollWheelEvent {
+                    position: gpui::point(px(1.0), px(1.0)),
+                    delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 1_000_000_000.0)),
+                    ..Default::default()
+                },
+            );
             let elapsed = started.elapsed();
-            let (dead, buffer, queued) = host.surfaces.fill.as_ref().unwrap().connection.test_buffer_state();
-            println!("huge wheel: elapsed={elapsed:?} buffer_capacity={buffer} queued_capacity={queued} dead={dead}");
-            assert!(dead);
-            assert!(buffer <= crate::surface::channel::EVENT_BUFFER_BYTES);
-            assert!(queued <= crate::surface::channel::EVENT_BUFFER_BYTES);
+            let connection = &host.surfaces.fill.as_ref().unwrap().connection;
+            let (dead, pending) = (connection.is_dead(), connection.pending_bytes());
+            println!("huge wheel: elapsed={elapsed:?} pending={pending} dead={dead}");
+            assert!(dead, "a billion wheel events cannot fit the pending bound");
+            assert_eq!(pending, 0, "a dead connection holds nothing");
             assert!(elapsed < std::time::Duration::from_secs(5));
         });
         cx.update(|window, _| window.remove_window());
@@ -2107,6 +2197,178 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_row_inserted_above_between_press_and_release_does_not_take_the_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn list_clicks(peer: &mut Peer) -> Vec<serde_json::Value> {
+            events(peer)
+                .into_iter()
+                .filter(|event| event["type"] == "list_click")
+                .collect()
+        }
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        let id = SurfaceId(986);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(fixture["description"].clone()),
+        );
+        assert_eq!(answer, Ok(()));
+        let rows = |revision: u64, keys: &[&str]| {
+            crate::surface::list::parse_op(&serde_json::json!({
+                "type": "list_rows", "revision": revision, "selected": null,
+                "rows": keys
+                    .iter()
+                    .map(|key| serde_json::json!({"id": key, "text": key, "indent": 0, "guides": []}))
+                    .collect::<Vec<_>>(),
+            }))
+            .unwrap()
+        };
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::List {
+                id,
+                pane,
+                op: rows(1, &["a", "b", "c"]),
+            },
+        );
+        // The first frame measures the list's viewport; the second lays its
+        // rows out inside it.
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let viewport = host.read_with(cx, |host, cx| {
+            let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("list")
+            };
+            view.read(cx)
+                .viewport_bounds()
+                .expect("the list was laid out")
+        });
+        // Rows start at the viewport's top while the list is unscrolled: this
+        // is the middle of the second row, "b".
+        let row_height = fixture["description"]["root"]["row_height"]
+            .as_f64()
+            .unwrap() as f32;
+        let on_b = gpui::point(
+            viewport.origin.x + px(40.0),
+            viewport.origin.y + px(row_height * 1.5),
+        );
+        list_clicks(&mut peer);
+
+        // With nothing in between, a press and release on b is a click on
+        // b: the harness does deliver row clicks.
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let control = list_clicks(&mut peer);
+        assert_eq!(control.len(), 1, "{control:?}");
+        assert_eq!(control[0]["id"], "b");
+
+        // A row arrives above b between press and release, so the pointer
+        // now rests on the newcomer. The press belonged to b; the release
+        // must not become a click on another row.
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::List {
+                id,
+                pane,
+                op: rows(2, &["a", "new", "b", "c"]),
+            },
+        );
+        draw_test_window(cx);
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let moved = list_clicks(&mut peer);
+        assert!(
+            moved.iter().all(|click| click["id"] == "b"),
+            "a press on b was released as {moved:?}"
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    /// The same guarantee for an element Surface's clickable elements: a
+    /// press on one is never released as a click on whatever the update put
+    /// under the pointer in its place.
+    #[gpui::test]
+    fn an_element_inserted_between_press_and_release_does_not_take_the_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn clicks(peer: &mut Peer) -> Vec<serde_json::Value> {
+            events(peer)
+                .into_iter()
+                .filter(|event| event["type"] == "event")
+                .collect()
+        }
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(987);
+        let pane = crate::pane_tree::PaneId(1);
+        // Side by side, each taking an equal share of the width.
+        let row = |names: &[&str]| {
+            serde_json::json!({"version": 1, "root": {
+                "kind": "box", "style": "flex flex_row size_full",
+                "children": names
+                    .iter()
+                    .map(|name| serde_json::json!({
+                        "kind": "box", "style": "flex_1 h_full", "text": name, "on_click": name,
+                    }))
+                    .collect::<Vec<_>>(),
+            }})
+        };
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(row(&["a", "b"])));
+        assert_eq!(answer, Ok(()));
+        draw_test_window(cx);
+        // Three fifths across: on b while there are two, and on the newcomer
+        // once a third arrives between them.
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let on_b = gpui::point(viewport.width * 0.6, viewport.height * 0.5);
+        clicks(&mut peer);
+
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let control = clicks(&mut peer);
+        assert_eq!(control.len(), 1, "{control:?}");
+        assert_eq!(control[0]["name"], "b");
+
+        cx.simulate_mouse_down(on_b, MouseButton::Left, gpui::Modifiers::default());
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Update {
+                id,
+                pane,
+                description: row(&["a", "new", "b"]),
+            },
+        );
+        draw_test_window(cx);
+        cx.simulate_mouse_up(on_b, MouseButton::Left, gpui::Modifiers::default());
+        let moved = clicks(&mut peer);
+        assert!(
+            moved.iter().all(|click| click["name"] == "b"),
+            "a press on b was released as {moved:?}"
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
     fn element_update_refuses_grid_and_preserves_text(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -2130,11 +2392,10 @@ mod tests {
         );
         assert_eq!(events(&mut peer)[0]["type"], "refused");
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "before"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "before"));
         });
         dispatch(
             &host,
@@ -2147,11 +2408,10 @@ mod tests {
         );
         assert!(events(&mut peer).is_empty());
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "after"));
         });
     }
 
@@ -2184,7 +2444,7 @@ mod tests {
                 pane,
                 owner_pid: std::process::id(),
                 return_target: ReturnTarget::Terminal,
-                reply,
+                reply: reply.into(),
             },
         );
         assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
@@ -2212,11 +2472,10 @@ mod tests {
             },
         );
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "after"));
         });
         dispatch(
             &host,
@@ -2229,11 +2488,10 @@ mod tests {
         );
         assert_eq!(events(&mut peer)[0]["type"], "refused");
         host.read_with(cx, |host, _| {
-            let Body::Elements { description, .. } = &host.surfaces.fill.as_ref().unwrap().body
-            else {
+            let Body::Elements(elements) = &host.surfaces.fill.as_ref().unwrap().body else {
                 panic!("element Surface")
             };
-            assert!(matches!(&description.root, Element::Text { text, .. } if text == "after"));
+            assert!(matches!(&elements.description().root, Element::Text { text, .. } if text == "after"));
         });
         dispatch(
             &host,
@@ -2265,7 +2523,7 @@ mod tests {
             SurfaceRequest::FocusPane {
                 pane,
                 target: FocusTarget::Terminal,
-                reply,
+                reply: reply.into(),
             },
         );
         assert_eq!(receiver.try_recv().unwrap(), Ok(()));
@@ -2421,7 +2679,7 @@ mod tests {
                     pane,
                     owner_pid: pid,
                     return_target: ReturnTarget::Terminal,
-                    reply,
+                    reply: reply.into(),
                 },
             );
             let answer = receiver.try_recv().unwrap();
@@ -2480,7 +2738,7 @@ mod tests {
                 pane,
                 owner_pid,
                 return_target: ReturnTarget::Terminal,
-                reply,
+                reply: reply.into(),
             },
         );
         assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));

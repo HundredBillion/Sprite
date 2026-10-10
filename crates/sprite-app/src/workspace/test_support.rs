@@ -110,3 +110,22 @@ pub(super) fn plain(key: &str, key_char: Option<&str>) -> Keystroke {
         key_char: key_char.map(str::to_owned),
     }
 }
+
+/// The terminal view occupying `pane`, for tests that look inside it.
+pub(super) fn terminal_view(
+    workspace: &gpui::Entity<super::Workspace>,
+    pane: crate::pane_tree::PaneId,
+    cx: &mut gpui::VisualTestContext,
+) -> gpui::Entity<crate::terminal_view::TerminalView> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .tabs
+            .all_panes()
+            .into_iter()
+            .find(|(_, id, _)| *id == pane)
+            .map(|(_, _, handle)| handle.view())
+            .expect("the pane is in the window")
+            .downcast::<crate::terminal_view::TerminalView>()
+            .unwrap_or_else(|_| panic!("a terminal pane"))
+    })
+}

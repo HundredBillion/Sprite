@@ -578,7 +578,16 @@ fn cursor_snapshot(
         },
         Some(position) => CursorSnapshot {
             row: position.y,
-            column: position.x,
+            // On a wide character's second column the cursor belongs to the
+            // character, as Ghostty's own renderer has it. The painter draws a
+            // cursor over the cell whose column it names, and a wide cell
+            // spans both of its columns, so naming the lead column draws the
+            // cursor two cells wide.
+            column: if position.at_wide_tail {
+                position.x.saturating_sub(1)
+            } else {
+                position.x
+            },
             visible,
             blinking,
             style,
@@ -977,5 +986,24 @@ mod sharing_tests {
                 }
             }
         }
+    }
+
+    /// libghostty lets the cursor sit on the second column of a wide
+    /// character. No drawable cell starts there, so reported as-is the cursor
+    /// matched nothing and vanished; it belongs to the character itself, and
+    /// the painter then draws it across both of that cell's columns.
+    #[test]
+    fn a_cursor_on_a_wide_tail_reports_the_lead_column() {
+        let (mut projector, mut terminal, size) = fixture();
+        terminal.vt_write("\x1b[3;1H界\x1b[3;2H".as_bytes());
+        let bundle = capture(&mut projector, &terminal, size, false);
+        assert_eq!(bundle.render.rows[2].cells[0].width, crate::CellWidth::Wide);
+        assert_eq!(
+            bundle.render.rows[2].cells[1].width,
+            crate::CellWidth::SpacerTail
+        );
+        let cursor = bundle.render.cursor;
+        assert!(cursor.visible);
+        assert_eq!((cursor.row, cursor.column), (2, 0));
     }
 }

@@ -18,7 +18,24 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::failed("link recovery".into(), ".SystemUIFont".into(), window, cx)
     });
-    let sprite_term::Spawned { session, mut events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; printf '\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30".into()])).unwrap();
+    // The release line can arrive before `stty -echo` runs and be echoed, so
+    // the link is written from the top-left corner where the test looks for it.
+    let sprite_term::Spawned {
+        session,
+        mut events,
+        mut snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            crate::test_event_pressure::pressure_script(
+                "printf '\\033[H\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30",
+            )
+            .into(),
+        ],
+    ))
+    .unwrap();
+    crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
     let position = sprite_term::CellPosition { row: 0, column: 0 };
@@ -63,10 +80,16 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
             }
         }
     });
-    loop {
-        if matches!(events_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), sprite_term::TerminalEvent::TitleChanged(Some(title)) if title == "TITLE99")
-        {
-            break;
+    // Every write of the burst has been delivered once a hundred have arrived.
+    let mut writes = 0;
+    while writes < 100 {
+        if matches!(
+            events_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            sprite_term::TerminalEvent::ClipboardWrite(_)
+        ) {
+            writes += 1;
         }
     }
     let bundle = loop {
@@ -132,7 +155,19 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::failed("reload revert".into(), ".SystemUIFont".into(), window, cx)
     });
-    let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+    let sprite_term::Spawned {
+        session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            crate::test_event_pressure::pressure_script("sleep 30").into(),
+        ],
+    ))
+    .unwrap();
+    crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
     let image = sprite_term::ImagePixels {
@@ -211,7 +246,7 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
                 cx,
             )
         });
-        let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), "stty -echo; i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done".into()]);
+        let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), crate::test_event_pressure::pressure_script("printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done").into()]);
         let defaults = theme::session_defaults(&settings);
         config.colors = defaults.colors;
         config.cursor = defaults.cursor;
@@ -220,6 +255,7 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
             mut events,
             mut snapshots,
         } = TerminalSession::spawn(config).unwrap();
+        crate::test_event_pressure::focus_and_release(&session.commands());
         crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
         let mut reloaded = settings.clone();
         let changed_color = Rgb {
@@ -260,7 +296,9 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
                 {
                     let _ = ready_tx.send(());
                 }
-                if let sprite_term::TerminalEvent::History(history) = event
+                if let sprite_term::TerminalEvent::History {
+                    snapshot: history, ..
+                } = event
                     && history_tx.send(history).is_err()
                 {
                     break;
@@ -320,7 +358,10 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
         });
         submit_probe(
             commands.clone(),
-            TerminalCommand::CaptureHistory(sprite_term::HistoryLines::new(0)),
+            TerminalCommand::CaptureHistory {
+                ticket: sprite_term::Ticket::new(0),
+                lines: sprite_term::HistoryLines::new(0),
+            },
         );
         let settled = history_rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -330,7 +371,10 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
         });
         submit_probe(
             commands,
-            TerminalCommand::CaptureHistory(sprite_term::HistoryLines::new(0)),
+            TerminalCommand::CaptureHistory {
+                ticket: sprite_term::Ticket::new(0),
+                lines: sprite_term::HistoryLines::new(0),
+            },
         );
         let unchanged = history_rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -361,11 +405,9 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
             cx,
         )
     });
-    let titles: String = (0..100)
-        .map(|index| format!("\x1b]2;TITLE{index}\x07"))
-        .collect();
+    let burst = crate::test_event_pressure::CLIPBOARD_WRITE.repeat(100);
     let script = format!(
-        "stty -echo; printf '%s' '{titles}'; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf '\\nPTY:%s\\n' \"$(stty size)\"; done"
+        "stty -echo; read _; printf '%s' '{burst}'; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf '\\nPTY:%s\\n' \"$(stty size)\"; done"
     );
     let sprite_term::Spawned {
         session,
@@ -376,6 +418,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
         vec!["-c".into(), script.into()],
     ))
     .unwrap();
+    crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     let initial = snapshots.next_blocking().unwrap();
     let allocated = gpui::size(px(800.0), px(480.0));
@@ -486,7 +529,19 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
             cx,
         )
     });
-    let sprite_term::Spawned { session, events, mut snapshots } = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+    let sprite_term::Spawned {
+        session,
+        events,
+        mut snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            crate::test_event_pressure::pressure_script("sleep 30").into(),
+        ],
+    ))
+    .unwrap();
+    crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
     snapshots.next_blocking().unwrap();
     let guard = std::thread::spawn(move || {

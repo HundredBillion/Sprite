@@ -86,6 +86,31 @@ fn main() {
     }
 }
 
+/// Why the shaping section has counts and no timings.
+const SHAPING_TIMING: &str = "not measured: GPUI shapes text only through a window's text \
+    system, and a headless process can open no window; counts come from the live shape \
+    cache with a stand-in for each shape";
+
+fn shaping_report() -> Value {
+    let mut shaping = serde_json::Map::new();
+    for split in [false, true] {
+        for scenario in Scenario::ALL {
+            // A fresh driver primed the way the allocation samples are, so each
+            // count describes that one transition.
+            let mut fixture = PaintBenchmark::new();
+            if scenario != Scenario::FirstFrame {
+                fixture.shaping(Scenario::FirstFrame, split);
+            }
+            let sample = fixture.shaping(scenario, split);
+            shaping.insert(
+                metric_name(scenario, split),
+                json!({"glyph_cells": sample.glyph_cells, "shape_calls": sample.shape_calls}),
+            );
+        }
+    }
+    Value::Object(shaping)
+}
+
 fn run() -> Result<(), String> {
     let options = Options::parse(std::env::args_os())?;
     let mut metrics = serde_json::Map::new();
@@ -95,13 +120,17 @@ fn run() -> Result<(), String> {
             metrics.insert(name, measure(scenario, split, options.samples));
         }
     }
-    let report = json!({
+    let mut report = json!({
         "schema": 1,
         "benchmark": "terminal_paint_preparation_and_decisions",
         "sample_count": options.samples,
         "fixture": {"columns": 200, "rows": 60},
         "metrics": metrics,
     });
+    if options.shaping {
+        report["shaping"] = shaping_report();
+        report["shaping_timing"] = json!(SHAPING_TIMING);
+    }
     if let Some(path) = options.check_budgets {
         let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         let budgets: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
@@ -264,6 +293,7 @@ struct Options {
     samples: usize,
     output: Option<PathBuf>,
     check_budgets: Option<PathBuf>,
+    shaping: bool,
 }
 
 impl Options {
@@ -272,6 +302,7 @@ impl Options {
             samples: 30,
             output: None,
             check_budgets: None,
+            shaping: false,
         };
         let mut arguments = arguments.skip(1);
         while let Some(argument) = arguments.next() {
@@ -294,6 +325,7 @@ impl Options {
                             .into(),
                     )
                 }
+                Some("--shaping") => result.shaping = true,
                 _ => return Err(format!("unknown argument: {}", argument.to_string_lossy())),
             }
         }

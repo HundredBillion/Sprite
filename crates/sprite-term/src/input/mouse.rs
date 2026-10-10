@@ -3,6 +3,8 @@ use crate::{
     CellPosition, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton, MouseEvent,
     SelectionMode, SessionError, ValidTerminalSize, WheelEvent,
 };
+use libghostty_vt::screen::{Screen, TrackedGridRef};
+use libghostty_vt::terminal::{Point, PointCoordinate};
 use libghostty_vt::{Terminal, key};
 const MAX_WHEEL_TURNS: u32 = 32;
 /// Who a wheel turn belongs to.
@@ -224,36 +226,92 @@ pub(crate) fn encode_mouse(
     Ok(Some(bytes))
 }
 
-/// Installs a selection described in viewport coordinates.
+/// A gesture's press pinned to the content under it, with the screen that was
+/// active when it was pinned: a pin belongs to that screen, so it means
+/// nothing once the other one is showing.
+pub(crate) struct PinnedAnchor {
+    tracked: TrackedGridRef,
+    screen: Screen,
+}
+
+/// Where a character-mode selection extends from.
+pub(crate) enum SelectionAnchor<'a> {
+    /// A viewport cell, resolved now. Used only when no press has been pinned.
+    Cell(CellPosition),
+    /// The content the latest press landed on, wherever output has moved it.
+    /// After a press, every selection extends from this until the next press or
+    /// a clear.
+    Tracked(&'a PinnedAnchor),
+}
+
+fn viewport_point(position: CellPosition) -> Point {
+    Point::Viewport(PointCoordinate {
+        x: position.column,
+        y: u32::from(position.row),
+    })
+}
+
+/// Pins a gesture's anchor to the content under a viewport cell, so it follows
+/// that content through scrolling, scrollback pruning and reflow.
+pub(crate) fn track_selection_anchor(
+    terminal: &Terminal<'_, '_>,
+    anchor: CellPosition,
+) -> Result<PinnedAnchor, SessionError> {
+    let screen = terminal
+        .active_screen()
+        .map_err(|error| SessionError::new("selection_anchor", error))?;
+    let tracked = terminal
+        .track_grid_ref(viewport_point(anchor))
+        .map_err(|error| SessionError::new("selection_anchor", error))?;
+    Ok(PinnedAnchor { tracked, screen })
+}
+
+/// Installs a selection whose head is a viewport cell.
 ///
 /// Word and line modes delegate to libghostty so Sprite agrees with Ghostty on
 /// what a word or a wrapped line is, rather than inventing its own boundaries.
+///
+/// Returns `false` when a tracked anchor has lost its content, or the other
+/// screen is now active; the selection is then cleared rather than re-anchored on whatever took its place.
 pub(crate) fn apply_selection(
     terminal: &Terminal<'_, '_>,
-    anchor: CellPosition,
+    anchor: SelectionAnchor<'_>,
     head: CellPosition,
     mode: SelectionMode,
     rectangle: bool,
-) -> Result<(), SessionError> {
+) -> Result<bool, SessionError> {
     use libghostty_vt::selection::{SelectLineOptions, SelectWordOptions, Selection};
-    use libghostty_vt::terminal::{Point, PointCoordinate};
-
-    let point = |position: CellPosition| {
-        Point::Viewport(PointCoordinate {
-            x: position.column,
-            y: u32::from(position.row),
-        })
-    };
 
     let head_ref = terminal
-        .grid_ref(point(head))
+        .grid_ref(viewport_point(head))
         .map_err(|error| SessionError::new("selection_grid_ref", error))?;
 
     let selection = match mode {
         SelectionMode::Character => {
-            let anchor_ref = terminal
-                .grid_ref(point(anchor))
-                .map_err(|error| SessionError::new("selection_grid_ref", error))?;
+            let anchor_ref = match anchor {
+                SelectionAnchor::Cell(position) => terminal
+                    .grid_ref(viewport_point(position))
+                    .map_err(|error| SessionError::new("selection_grid_ref", error))?,
+                SelectionAnchor::Tracked(pin) => {
+                    let active = terminal
+                        .active_screen()
+                        .map_err(|error| SessionError::new("selection_anchor", error))?;
+                    let pinned = if active == pin.screen {
+                        pin.tracked
+                            .snapshot(terminal)
+                            .map_err(|error| SessionError::new("selection_anchor", error))?
+                    } else {
+                        None
+                    };
+                    let Some(anchor_ref) = pinned else {
+                        terminal
+                            .set_selection(None)
+                            .map_err(|error| SessionError::new("clear_selection", error))?;
+                        return Ok(false);
+                    };
+                    anchor_ref
+                }
+            };
             Some(Selection::new(anchor_ref, head_ref, rectangle))
         }
         SelectionMode::Word => terminal
@@ -267,7 +325,7 @@ pub(crate) fn apply_selection(
     terminal
         .set_selection(selection.as_ref())
         .map_err(|error| SessionError::new("set_selection", error))?;
-    Ok(())
+    Ok(true)
 }
 
 /// The current selection as text, or empty when nothing is selected.

@@ -32,8 +32,8 @@ mod start;
 use crate::hyperlink::resolve_hyperlink;
 use crate::input::keys::{encode_focus, encode_key};
 use crate::input::mouse::{
-    WheelDestination, apply_selection, encode_mouse, encode_wheel, selection_text,
-    wheel_destination,
+    PinnedAnchor, SelectionAnchor, WheelDestination, apply_selection, encode_mouse, encode_wheel,
+    selection_text, track_selection_anchor, wheel_destination,
 };
 use crate::input::paste::{encode_paste, paste_is_safe_to_perform};
 use start::{apply_color_defaults, apply_cursor_defaults};
@@ -42,6 +42,36 @@ type Flow = ControlFlow<()>;
 /// The first refusal from the terminal's own reply callback, which cannot
 /// return an error of its own.
 type PtyWriteError = Rc<RefCell<Option<SessionError>>>;
+
+/// How much already-queued work one pass of the worker takes before it
+/// captures: sixteen messages, or sixteen KiB of output, whichever comes first.
+/// A burst then costs one snapshot rather than one per chunk, and a capture is
+/// still never postponed behind an unbounded queue.
+///
+/// The output bound is checked after a chunk is parsed, so a pass can parse
+/// just under one more chunk beyond it: at most about 32 KiB in all.
+const BATCH_MESSAGES: usize = 16;
+const BATCH_OUTPUT_BYTES: usize = 16 * 1024;
+
+/// What one pass has taken so far, measured against the bounds above.
+#[derive(Default)]
+struct Batch {
+    messages: usize,
+    output_bytes: usize,
+}
+
+impl Batch {
+    fn admit(&mut self, message: &Message) {
+        self.messages += 1;
+        if let Message::PtyOutput(chunk) = message {
+            self.output_bytes += chunk.as_bytes().len();
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.messages >= BATCH_MESSAGES || self.output_bytes >= BATCH_OUTPUT_BYTES
+    }
+}
 
 /// How the PTY pump stopped.
 pub(crate) enum PumpOutcome {
@@ -85,23 +115,39 @@ struct Started {
 }
 
 // Fields drop in declaration order, including on early return or unwind.
-// Projection scratch and both encoders must be released before terminal state.
+// Projection scratch, both encoders and the selection anchor must be released
+// before terminal state.
 struct Owned {
     projector: Projector<'static>,
     encoder: key::Encoder<'static>,
     mouse_encoder: libghostty_vt::mouse::Encoder<'static>,
+    /// The content the current selection gesture's press landed on, until the
+    /// next gesture or `ClearSelection`.
+    selection_anchor: Option<PinnedAnchor>,
     terminal: Terminal<'static, 'static>,
 }
 
+/// What the parser raised and the worker has not yet published.
+///
+/// A title, a working directory and the bell each keep only their latest
+/// state until publication: a program that retitles itself on every prompt or
+/// progress tick would otherwise spend the event budget on names nobody sees.
 #[derive(Default)]
 struct Notices {
     bell_pending: bool,
-    events: Vec<TerminalEvent>,
+    title: Option<Option<String>>,
+    working_directory: Option<Option<String>>,
 }
 
 impl Notices {
     fn take(&mut self) -> Vec<TerminalEvent> {
-        let mut events = std::mem::take(&mut self.events);
+        let mut events = Vec::new();
+        if let Some(title) = self.title.take() {
+            events.push(TerminalEvent::TitleChanged(title));
+        }
+        if let Some(directory) = self.working_directory.take() {
+            events.push(TerminalEvent::WorkingDirectoryChanged(directory));
+        }
         if std::mem::take(&mut self.bell_pending) {
             events.push(TerminalEvent::Bell);
         }
@@ -118,6 +164,37 @@ fn register_bell(
             notices.borrow_mut().bell_pending = true;
         })
         .map(|_| ())
+}
+
+fn register_title(
+    terminal: &mut Terminal<'static, 'static>,
+    notices: Rc<RefCell<Notices>>,
+) -> Result<(), libghostty_vt::Error> {
+    terminal
+        .on_title_changed(move |terminal: &Terminal<'_, '_>| {
+            notices.borrow_mut().title = Some(reported(terminal.title()));
+        })
+        .map(|_| ())
+}
+
+fn register_pwd(
+    terminal: &mut Terminal<'static, 'static>,
+    notices: Rc<RefCell<Notices>>,
+) -> Result<(), libghostty_vt::Error> {
+    terminal
+        .on_pwd_changed(move |terminal: &Terminal<'_, '_>| {
+            notices.borrow_mut().working_directory = Some(reported(terminal.pwd()));
+        })
+        .map(|_| ())
+}
+
+/// What a title or directory change reports: the new value, or `None` when
+/// the program cleared it or it could not be read.
+fn reported<E>(value: Result<&str, E>) -> Option<String> {
+    value
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 struct Pending {
@@ -138,6 +215,9 @@ struct Runtime {
     inbox: Receiver<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
     shutdown: Arc<AtomicBool>,
+    /// Detached when the session closes, so its duplicate of the master
+    /// closes with the worker's own.
+    foreground: Arc<crate::ForegroundWatch>,
     exit_status: Option<Result<ExitStatus, String>>,
     pump_stopped: bool,
     fatal: Option<SessionError>,
@@ -190,6 +270,7 @@ pub(crate) fn run(
         inbox,
         events,
         shutdown,
+        foreground,
         exit_status: None,
         pump_stopped: true,
         fatal: None,
@@ -254,13 +335,74 @@ pub(crate) fn run(
 }
 
 impl Session {
-    fn handle(&mut self, message: Message) -> Flow {
+    /// Handles one message, then whatever was already queued behind it, and
+    /// captures once for the whole pass.
+    ///
+    /// A pass takes only what is already waiting — it never waits for more —
+    /// and stops at `BATCH_MESSAGES` messages or `BATCH_OUTPUT_BYTES` of output.
+    fn handle(&mut self, first: Message) -> Flow {
+        let mut batch = Batch::default();
+        let mut next = Some(first);
+        while let Some(message) = next.take() {
+            batch.admit(&message);
+            // What earlier output in this pass raised is published before
+            // anything else is handled, so a command's own event never
+            // overtakes the notices that preceded it.
+            if !matches!(message, Message::PtyOutput(_)) && self.publish_notices().is_break() {
+                // Nothing more is delivered, but a helper's report already
+                // taken from the queue is still recorded: each helper reports
+                // once, and closing waits for both reports.
+                if matches!(message, Message::PumpStopped(_) | Message::ChildExited(_)) {
+                    let _ = self.apply(message);
+                }
+                return Stop(());
+            }
+            self.apply(message)?;
+            if batch.is_full() || self.runtime.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            next = self.runtime.inbox.try_recv().ok();
+        }
+        self.publish_notices()?;
+        self.capture()
+    }
+
+    /// Publishes, as one batch, everything parsing has raised since the last
+    /// publication: the first refused reply, the latest title and working
+    /// directory, at most one bell, and every accepted clipboard write.
+    fn publish_notices(&mut self) -> Flow {
+        let mut batch = Vec::new();
+        if let Some(error) = self.write_error.borrow_mut().take() {
+            batch.push(TerminalEvent::Error(error));
+        }
+        batch.extend(self.notices.borrow_mut().take());
+        batch.extend(
+            self.clipboard_pending
+                .borrow_mut()
+                .drain(..)
+                .map(TerminalEvent::ClipboardWrite),
+        );
+        // Nothing to say is not a publication: the mailbox lock and the
+        // receiver's wake are spent only on something to deliver.
+        if batch.is_empty() {
+            return Continue(());
+        }
+        if self.runtime.events.publish(batch) {
+            Continue(())
+        } else {
+            Stop(())
+        }
+    }
+
+    /// Applies one message to the terminal. Capturing is the pass's business.
+    fn apply(&mut self, message: Message) -> Flow {
         let Self {
             owned:
                 Owned {
                     projector,
                     encoder,
                     mouse_encoder,
+                    selection_anchor,
                     terminal,
                 },
             runtime:
@@ -274,10 +416,7 @@ impl Session {
                 },
             input,
             commands,
-            write_error,
             focused,
-            clipboard_pending,
-            notices,
             pending,
             size,
             has_selection,
@@ -285,25 +424,11 @@ impl Session {
         } = self;
         match message {
             Message::PtyOutput(chunk) => {
-                // One chunk, one mutation batch, one generation.
+                // One chunk, one mutation, one generation. What the parser
+                // raised on the way is published when the pass ends.
                 terminal.vt_write(chunk.as_bytes());
                 pending.mutated();
                 drop(chunk);
-
-                let mut batch = Vec::new();
-                if let Some(error) = write_error.borrow_mut().take() {
-                    batch.push(TerminalEvent::Error(error));
-                }
-                batch.extend(notices.borrow_mut().take());
-                batch.extend(
-                    clipboard_pending
-                        .borrow_mut()
-                        .drain(..)
-                        .map(TerminalEvent::ClipboardWrite),
-                );
-                if !events.publish(batch) {
-                    return Stop(());
-                }
             }
             // Not a no-op: a wake. The snapshot slot holds one bundle
             // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
@@ -402,15 +527,41 @@ impl Session {
                         }
                     }
                 }
+                TerminalCommand::BeginSelection { anchor } => {
+                    // A new gesture: what was selected goes, and the press is
+                    // pinned to the content under it before later output can
+                    // move that content out from under the pointer.
+                    *selection_anchor = None;
+                    *has_selection = false;
+                    if let Err(error) = terminal
+                        .set_selection(None)
+                        .map_err(|error| SessionError::new("clear_selection", error))
+                    {
+                        emit(events, TerminalEvent::Error(error))?;
+                    }
+                    match track_selection_anchor(terminal, anchor) {
+                        Ok(tracked) => *selection_anchor = Some(tracked),
+                        // Reported; the gesture then extends from the cells its
+                        // `Select`s name, as a selection without a press does.
+                        Err(error) => emit(events, TerminalEvent::Error(error))?,
+                    }
+                    pending.mutated();
+                }
                 TerminalCommand::Select {
                     anchor,
                     head,
                     mode,
                     rectangle,
                 } => {
+                    let anchor = match selection_anchor.as_ref() {
+                        Some(tracked) => SelectionAnchor::Tracked(tracked),
+                        None => SelectionAnchor::Cell(anchor),
+                    };
                     match apply_selection(terminal, anchor, head, mode, rectangle) {
-                        Ok(()) => {
-                            *has_selection = true;
+                        // `false`: the anchored content was evicted, and the
+                        // selection was cleared rather than moved.
+                        Ok(installed) => {
+                            *has_selection = installed;
                             pending.mutated();
                         }
                         // A selection that cannot be resolved is reported, but
@@ -422,6 +573,7 @@ impl Session {
                     }
                 }
                 TerminalCommand::ClearSelection => {
+                    *selection_anchor = None;
                     *has_selection = false;
                     if let Err(error) = terminal
                         .set_selection(None)
@@ -561,10 +713,12 @@ impl Session {
                         emit(events, TerminalEvent::Error(error))?;
                     }
                 },
-                TerminalCommand::CaptureHistory(lines) => {
+                TerminalCommand::CaptureHistory { ticket, lines } => {
                     // Answered once, from this thread, against the same
                     // terminal the snapshots come from — so the rows returned
                     // belong to one generation rather than a moving target.
+                    // Both outcomes carry the ticket, so the answer can only
+                    // reach the request that asked.
                     let foreground = foreground_executable(master.as_ref());
                     match projector.capture_history(
                         pending.generation,
@@ -574,10 +728,16 @@ impl Session {
                         terminal,
                     ) {
                         Ok(history) => {
-                            emit(events, TerminalEvent::History(Arc::new(history)))?;
+                            emit(
+                                events,
+                                TerminalEvent::History {
+                                    ticket,
+                                    snapshot: Arc::new(history),
+                                },
+                            )?;
                         }
                         Err(error) => {
-                            emit(events, TerminalEvent::Error(error))?;
+                            emit(events, TerminalEvent::HistoryFailed { ticket, error })?;
                         }
                     }
                 }
@@ -609,7 +769,7 @@ impl Session {
             Message::Shutdown => return Stop(()),
         }
 
-        self.capture()
+        Continue(())
     }
 
     fn capture(&mut self) -> Flow {
@@ -654,10 +814,12 @@ impl Session {
             let Ok(message) = self.runtime.inbox.recv_timeout(remaining) else {
                 break;
             };
+            // One message at a time and published as it goes: this drain must
+            // not apply commands the way a pass would.
             if matches!(
                 message,
                 Message::PtyOutput(_) | Message::PumpStopped(_) | Message::ChildExited(_)
-            ) && self.handle(message).is_break()
+            ) && (self.apply(message).is_break() || self.publish_notices().is_break())
             {
                 break;
             }
@@ -816,3 +978,9 @@ mod closing_regressions {
         }
     }
 }
+
+#[cfg(test)]
+mod notice_tests;
+
+#[cfg(test)]
+mod coalescing_tests;

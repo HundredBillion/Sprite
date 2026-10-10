@@ -1,5 +1,10 @@
 use super::*;
 
+mod focus;
+mod history;
+mod paste;
+mod pressure;
+
 impl gpui::EventEmitter<()> for TerminalView {}
 
 fn wait_for_bundle(
@@ -13,6 +18,60 @@ fn wait_for_bundle(
         view.bundle.as_ref().is_some_and(|bundle| predicate(bundle))
     }));
     view.read_with(cx, |view, _| view.bundle.clone().unwrap())
+}
+
+/// Waits briefly for the view itself to reach a state. The worker's answers
+/// land through the event task, not as a snapshot, so `wait_for_bundle` cannot
+/// see them.
+fn wait_for_view(
+    view: &gpui::Entity<TerminalView>,
+    cx: &mut gpui::VisualTestContext,
+    predicate: impl Fn(&TerminalView) -> bool,
+) {
+    let executor = cx.executor();
+    executor.allow_parking();
+    executor.block_test(view.condition::<()>(cx, |view, _| predicate(view)));
+}
+
+fn redraw(cx: &mut gpui::VisualTestContext) {
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    cx.run_until_parked();
+}
+
+/// Gives the view the keyboard in an active window, and draws so that key and
+/// mouse events find it.
+fn focus_and_draw(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext) {
+    view.update_in(cx, |view, window, _| window.focus(&view.focus));
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    redraw(cx);
+}
+
+/// One beat of the window clock, delivered the way the workspace delivers it.
+fn clock_beat(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext) {
+    view.update(cx, |view, cx| view.clock_tick(cx));
+    cx.run_until_parked();
+}
+
+/// Delivers the worker's refusal of a multi-line paste exactly as the event
+/// task delivers it.
+fn hold_unsafe_paste(
+    view: &gpui::Entity<TerminalView>,
+    cx: &mut gpui::VisualTestContext,
+    text: &str,
+) {
+    view.update(cx, |view, cx| {
+        let decision = crate::terminal_events::decide(Ok(sprite_term::TerminalEvent::UnsafePaste(
+            text.to_owned(),
+        )));
+        for effect in decision.effects {
+            view.apply(effect, cx);
+        }
+        cx.notify();
+    });
 }
 
 #[gpui::test]
@@ -277,8 +336,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     }
     cx.run_until_parked();
     let queries = FOREGROUND_QUERIES.with(|count| count.get());
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     assert_eq!(
         FOREGROUND_QUERIES.with(|count| count.get()),
         queries,
@@ -306,8 +364,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         [Some("explicit"), Some("cat")]
     );
     let strings = TITLE_STRINGS.with(|count| count.get());
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     assert_eq!(
         TITLE_STRINGS.with(|count| count.get()),
         strings,
@@ -328,8 +385,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         );
         std::thread::yield_now();
     }
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     view.read_with(cx, |view, _| {
         assert!(view.title().is_none());
         assert!(view.close_warning().is_none());
@@ -351,19 +407,22 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         );
         std::thread::yield_now();
     }
-    cx.executor().advance_clock(BLINK_INTERVAL);
-    cx.run_until_parked();
+    clock_beat(&view, cx);
     view.read_with(cx, |view, _| {
         assert_eq!(view.title().unwrap().as_ref(), "cat")
     });
     assert_eq!(
         view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation),
         generation,
-        "the existing blink timer discovers a silent job without a new snapshot"
+        "the window clock discovers a silent job without a new snapshot"
     );
     assert_eq!(
         events.borrow().last().unwrap().as_ref().unwrap().as_ref(),
         "cat"
+    );
+    assert!(
+        !view.read_with(cx, |view, _| view.pane_focused()),
+        "the clock found that title for a pane without Pane Focus"
     );
 }
 
@@ -828,199 +887,33 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
     }
 }
 
-#[test]
-fn settings_callback_recovers_latest_values_after_real_event_pressure() {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "terminal_view::tests::settings_callback_pressure_child",
-            "--nocapture",
-        ])
-        .env("SPRITE_SETTINGS_PRESSURE_CHILD", "1")
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+/// Waits for the outstanding hover answer by polling, not by condition: an
+/// answer that changes nothing no longer notifies, and a notification-driven
+/// condition would never wake for it.
+fn settle_hover(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                status.success(),
-                "actual GPUI callback regression failed: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("actual GPUI settings callback or recovery stalled");
-        }
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
-    }
-}
-
-#[gpui::test]
-fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
-    if std::env::var_os("SPRITE_SETTINGS_PRESSURE_CHILD").is_none() {
-        return;
-    }
-    let settings = crate::config::Settings::default();
-    cx.set_global(crate::config::ActiveSettings(settings.clone()));
-    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-    let gate = std::env::temp_dir().join(format!(
-        "sprite-settings-pressure-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    // The title burst must fit one macOS PTY read (1 KiB) yet overflow the event mailbox;
-    // a split burst leaves the worker holding a second chunk and the command queue short of full.
-    let titles: String = (0..70).map(|i| format!("\x1b]2;burst-{i}\x07")).collect();
-    // ARMED proves the child waits at the gate, so a slow start cannot push the burst
-    // past the pause below.
-    let program = format!(
-        "printf ARMED; while [ ! -e '{}' ]; do sleep 0.005; done; printf '%s' '{titles}'; head -c 327680 /dev/zero; sleep 30",
-        gate.to_str().unwrap()
-    );
-    let (sender, _exits) = async_channel::unbounded();
-    let (view, cx) = cx.add_window_view(|window, cx| {
-        TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), program.into()]),
-            settings.clone(),
-            Vec::new(),
-            None,
-            PaneExit {
-                sender,
-                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
-            },
-            window,
-            cx,
-        )
-    });
-    let initial = wait_for_bundle(&view, cx, |bundle| {
-        bundle
-            .pane
-            .rows
-            .iter()
-            .any(|row| row.text.contains("ARMED"))
-    });
-    std::fs::write(&gate, b"go").unwrap();
-    crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
-    let mut changed = settings.clone();
-    changed.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
-    changed.cursor.blink = Some(false);
-    let desired_size = view.update_in(cx, |view, window, cx| {
-        let before = std::time::Instant::now();
-        view.apply_settings(&changed, window, cx);
-        assert!(
-            before.elapsed() < std::time::Duration::from_millis(200),
-            "actual settings callback blocked"
-        );
-        assert_eq!(
-            view.applied_settings.colors, changed.colors,
-            "the reserved command slot accepted colors"
-        );
-        assert_eq!(
-            view.applied_settings.cursor, settings.cursor,
-            "cursor refusal must not advance its cache"
-        );
-        assert!(
-            view.status
-                .as_ref()
-                .is_some_and(|s| s.contains("queue is full"))
-        );
-        assert!(view.pending_settings.is_some());
-        view.apply_settings(&settings, window, cx);
-        assert_eq!(
-            view.applied_settings.colors, changed.colors,
-            "refused revert must retain admitted color state"
-        );
-        let allocated = gpui::size(px(400.0), px(200.0));
-        view.set_allocated(allocated);
-        let desired_size = super::geometry::grid_size(
-            crate::grid::content_area(allocated, view.padding),
-            view.metrics.width(),
-            view.metrics.height(),
-            window.scale_factor(),
-        )
-        .unwrap();
-        view.synchronise_size(window);
-        assert_ne!(
-            view.size,
-            Some(desired_size),
-            "refused geometry cannot advance admission cache"
-        );
-        assert_eq!(view.pending_resize, Some(desired_size));
-        desired_size
-    });
-    cx.update(|window, cx| {
-        window.refresh();
-        window.draw(cx).clear();
-    });
-    assert!(
-        cx.debug_bounds("terminal-status").is_some(),
-        "the refused callback paints its status without another worker snapshot"
-    );
-    assert_eq!(
-        view.read_with(cx, |v, _| v.bundle.as_ref().unwrap().generation),
-        initial.generation
-    );
-    // Normal installed receivers resume; the view's sole retry task submits the latest values.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
-    loop {
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(5));
-        cx.executor().tick();
-        if view.read_with(cx, |v, _| {
-            v.pending_settings.is_none()
-                && v.pending_resize.is_none()
-                && v.bundle.as_ref().is_some_and(|b| {
-                    b.render.default_foreground == initial.render.default_foreground
-                        && b.render.size == desired_size
-                        && b.render.cursor.blinking == initial.render.cursor.blinking
-                })
-        }) {
-            break;
+        cx.run_until_parked();
+        if view.read_with(cx, |view, _| view.hover_request.is_none()) {
+            return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "latest worker state: {:?}",
-            view.read_with(cx, |v, _| (
-                v.pending_settings.is_some(),
-                v.pending_resize,
-                v.size,
-                v.status.clone(),
-                v.bundle.as_ref().map(|b| (
-                    b.render.size,
-                    b.render.default_foreground,
-                    b.render.cursor.blinking
-                ))
-            ))
+            "the hover answer did not arrive"
         );
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
+        std::thread::yield_now();
     }
-    view.update(cx, |view, _| {
-        view.begin_shutdown();
-    });
-    std::fs::remove_file(gate).unwrap();
 }
 
 #[gpui::test]
-fn natural_completion_retires_idle_admission_recovery(cx: &mut gpui::TestAppContext) {
+fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
+    let script = "stty -echo; printf '\\033]8;;https://example.com\\007LINK\\033]8;;\\007\\r\\nREADY\\r\\n'; IFS= read -r go; i=0; while [ $i -lt 5 ]; do printf '\\033[3;1Hrow%s' $i; sleep 0.05; i=$((i+1)); done; printf '\\033[4;1HQUIET'; IFS= read -r go; printf '\\033[1;10HCHANGED'; sleep 30";
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "sleep .05; exit 7".into(),
-            ]),
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
             settings,
             Vec::new(),
             None,
@@ -1032,87 +925,117 @@ fn natural_completion_retires_idle_admission_recovery(cx: &mut gpui::TestAppCont
             cx,
         )
     });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(50));
-        cx.executor().tick();
-        if view.read_with(cx, |v, _| v.retry_wake.is_closed()) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "ended session left admission recovery alive"
-        );
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
-    }
-    view.read_with(cx, |v, _| {
-        assert!(matches!(v.session, SessionState::Ended(_)));
-        assert!(v.pending_settings.is_none());
-        assert!(v.pending_resize.is_none());
-    });
-    if let Some(cleanup) = view.update(cx, |v, _| v.begin_shutdown()) {
-        cleanup.wait().unwrap();
-    }
-}
+    let requests = || HOVER_LINK_REQUESTS.with(|count| count.get());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("READY"))
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        // The first frame fits the grid to the window, and that resize
+        // redraws every row; it has to land before the hover is taken.
+        let sized = view.read_with(cx, |view, _| view.size);
+        wait_for_bundle(&view, cx, |bundle| {
+            sized.is_none_or(|size| bundle.render.size == size)
+        });
+        let (on_link, plain, beside) = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let width = view.metrics.width();
+            let height = view.metrics.height();
+            (
+                gpui::point(origin.x + width * 0.5, origin.y + height * 0.5),
+                gpui::point(origin.x + width * 30.5, origin.y + height * 10.5),
+                gpui::point(origin.x + width * 31.5, origin.y + height * 10.5),
+            )
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        cx.simulate_mouse_move(on_link, None, gpui::Modifiers::default());
+        executor.block_test(view.condition::<()>(cx, |view, _| {
+            view.hovered_link.is_some() && view.hover_request.is_none()
+        }));
+        let before = requests();
+        let generation = view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation);
 
-#[gpui::test]
-fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAppContext) {
-    let settings = crate::config::Settings::default();
-    cx.set_global(crate::config::ActiveSettings(settings.clone()));
-    let (sender, _exits) = async_channel::unbounded();
-    // One write: separate small writes exhaust the output permits while the UI is paused,
-    // and macOS PTYs then block the child before it can exit.
-    let titles: String = (0..150).map(|i| format!("\x1b]2;title{i}\x07")).collect();
-    let script = format!("sleep .3; printf '%s' '{titles}'; exit 7");
-    let (view, cx) = cx.add_window_view(|window, cx| {
-        TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
-            settings.clone(),
-            Vec::new(),
-            None,
-            PaneExit {
-                sender,
-                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
-            },
-            window,
-            cx,
-        )
-    });
-    wait_for_bundle(&view, cx, |_| true);
-    // Keep installed UI receivers paused until the natural mailbox deadline ends the worker.
-    crate::test_blocking_wait::pause(std::time::Duration::from_millis(2600));
-    let mut latest = settings;
-    latest.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
-    view.update_in(cx, |v, w, cx| {
-        assert!(matches!(v.session, SessionState::Running(_)));
-        v.apply_settings(&latest, w, cx);
+        // Output on other rows: the snapshots arrive, the link under the
+        // pointer is not asked about again, and it stays drawn.
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+        });
+        let quiet = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("QUIET"))
+        });
         assert!(
-            v.admission_closed,
-            "disconnected admission must retire recovery"
+            quiet.generation > generation,
+            "output elsewhere produced snapshots"
         );
+        assert_eq!(
+            requests(),
+            before,
+            "snapshots that leave the hovered row alone must not re-request its link"
+        );
+        view.read_with(cx, |view, _| {
+            let (stamped, _) = view.hovered_link.expect("the link stays hovered");
+            assert_eq!(
+                stamped,
+                view.bundle.as_ref().unwrap().generation,
+                "the kept answer is restamped so the painter still draws it"
+            );
+        });
+
+        // Output on the hovered row: its link is asked about again.
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"GO\n".to_vec()))
+        });
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows[0].text.contains("CHANGED")
+        });
+        executor.block_test(view.condition::<()>(cx, |view, _| {
+            view.hover_request.is_none() && view.hovered_link.is_some()
+        }));
         assert!(
-            v.status
-                .as_ref()
-                .is_some_and(|s| s.contains("worker ended"))
+            requests() > before,
+            "a change to the hovered row re-requests its link"
         );
-        assert!(v.pending_settings.is_none());
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(50));
-        cx.executor().tick();
-        if view.read_with(cx, |v, _| v.retry_wake.is_closed()) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "disconnected recovery continued retrying"
+
+        // Two plain cells in turn: the second answer agrees with the first,
+        // so it must not repaint.
+        cx.simulate_mouse_move(plain, None, gpui::Modifiers::default());
+        settle_hover(&view, cx);
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = notified.clone();
+        let _observer =
+            cx.update(|_, cx| cx.observe(&view, move |_, _| counter.set(counter.get() + 1)));
+        let asked = requests();
+        cx.simulate_mouse_move(beside, None, gpui::Modifiers::default());
+        assert_eq!(
+            requests(),
+            asked + 1,
+            "moving to another cell asks about it"
         );
-    }
-    if let Some(cleanup) = view.update(cx, |v, _| v.begin_shutdown()) {
+        settle_hover(&view, cx);
+        assert_eq!(
+            notified.get(),
+            0,
+            "an answer that changes nothing must not repaint"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
         cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
     }
 }
 
@@ -1423,4 +1346,108 @@ fn gpui_default_client_forwards_key_fallback_through_element_bridge(cx: &mut gpu
         handler.replace_text_in_range(None, "a", window, cx);
     });
     client.read_with(cx, |client, _| assert_eq!(client.0, ["a", "a"]));
+}
+
+/// The centre of a viewport cell, in window coordinates.
+fn cell_center(
+    view: &gpui::Entity<TerminalView>,
+    cx: &mut gpui::VisualTestContext,
+    row: usize,
+    column: usize,
+) -> gpui::Point<gpui::Pixels> {
+    view.read_with(cx, |view, _| {
+        let origin = view.content_origin.unwrap_or(view.origin);
+        gpui::point(
+            origin.x + view.metrics.width() * (column as f32 + 0.5),
+            origin.y + view.metrics.height() * (row as f32 + 0.5),
+        )
+    })
+}
+
+#[gpui::test]
+fn a_drag_extends_from_the_pressed_content_after_output_scrolls(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
+        Some(vec!["/bin/sh".into(), "-c".into(), "stty -echo; seq 1 300; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; printf '\\nafter-1\\nafter-2\\nafter-3'; sleep 30".into()]),
+        settings, Vec::new(), None,
+        PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+    ));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let row_of = |bundle: &SnapshotBundle, text: &str| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .position(|row| row.text.trim_end() == text)
+        };
+        let before = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.trim_end() == "READY")
+        });
+        let pressed_row = row_of(&before, "ANCHOR-TEXT").expect("the anchor line is on screen");
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let press = cell_center(&view, cx, pressed_row, 0);
+        cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::default());
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"go\n".to_vec()))
+        });
+        let after = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.trim_end() == "after-3")
+        });
+        let moved_row = row_of(&after, "ANCHOR-TEXT").expect("the anchor line is still on screen");
+        assert!(
+            moved_row < pressed_row,
+            "output scrolled the anchor line up"
+        );
+        let release = cell_center(&view, cx, moved_row, 10);
+        cx.simulate_mouse_move(release, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::default());
+        let bundle = wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .render
+                .rows
+                .iter()
+                .any(|row| row.cells.iter().any(|cell| cell.selected))
+        });
+        let selected_rows: Vec<usize> = bundle
+            .render
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.cells.iter().any(|cell| cell.selected))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            selected_rows,
+            vec![moved_row],
+            "only the pressed line is selected"
+        );
+        let selected: String = bundle.render.rows[moved_row]
+            .cells
+            .iter()
+            .filter(|cell| cell.selected)
+            .map(|cell| cell.text.as_str())
+            .collect();
+        assert_eq!(selected, "ANCHOR-TEXT");
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

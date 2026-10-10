@@ -94,23 +94,29 @@ fn surface_allocation_probe() {
             sprite_term::Rgb { r: 0, g: 0, b: 0 },
         ),
         blink_on: true,
+        focused: true,
     };
     let (mut grid, a, b) = measure(|| GridSurface::new(200, 60));
     println!(
         "grid cell_bytes={} create allocations={a} bytes={b}",
         std::mem::size_of::<Cell>()
     );
-    let (_, a, b) = measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics));
+    let shapes = std::rc::Rc::default();
+    let (_, a, b) =
+        measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics, &shapes));
     println!("grid first render allocations={a} bytes={b}");
-    let (_, a, b) = measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics));
+    let (_, a, b) =
+        measure(|| render::render_grid(&mut grid, &Highlights::default(), &metrics, &shapes));
     println!("grid idle render allocations={a} bytes={b}");
     assert!(a <= 1 && b <= 1_024);
     let op = parse_ops(&json!({"type":"rows","rows":[{"row":30,"cells":[["👩‍💻",2]]}]})).unwrap();
     let (_, a, b) = measure(|| {
         grid.apply_all(op).unwrap();
-        render::render_grid(&mut grid, &Highlights::default(), &metrics)
+        render::render_grid(&mut grid, &Highlights::default(), &metrics, &shapes)
     });
     println!("grid one-row update/render allocations={a} bytes={b}");
+    // Interning the changed cell's text allocates once: the lookup key and the
+    // laid-out cell share the same string.
     assert!(a <= 8 && b <= 12_000);
     let rows = (0..100_000)
         .map(|i| json!({"id":format!("r{i}"),"text":"shared row text","indent":0,"guides":[]}))

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use gpui::SharedString;
-use sprite_term::{HistorySnapshot, SessionError, TerminalEvent};
+use sprite_term::{HistorySnapshot, SessionError, TerminalEvent, Ticket};
 
 /// One thing an event asks the view to do.
 #[derive(Debug, PartialEq, Eq)]
@@ -19,9 +19,21 @@ pub(crate) enum Effect {
         uri: Option<String>,
         span: Option<sprite_term::HyperlinkSpan>,
     },
+    /// The child asked, through OSC 52, to write the clipboard. Honoured only
+    /// while its pane still has Pane Focus when the view writes it.
+    ChildClipboard(String),
+    /// The person copied their selection; theirs to write whatever has focus.
     Clipboard(String),
-    DeliverHistory(Arc<HistorySnapshot>),
-    FailRequest(String),
+    /// One request's capture, for the request holding `ticket`.
+    DeliverHistory {
+        ticket: Ticket,
+        snapshot: Arc<HistorySnapshot>,
+    },
+    /// One request's capture failed, and why.
+    FailRequest {
+        ticket: Ticket,
+        reason: String,
+    },
 }
 
 /// What one event implies, whether the stream is finished, and whether its pane closes.
@@ -47,11 +59,15 @@ fn describe_exit(exit: &sprite_term::ChildExit) -> String {
     }
 }
 
+/// How the status line begins while a paste is held for confirmation, so the
+/// view can clear that line, and only that line, when the hold is dropped.
+pub(crate) const PASTE_HELD_NOTICE: &str = "[paste held:";
+
 /// One event in, the effects it implies out.
 ///
 /// Pure on purpose. Every arm of the view's old event loop only *wrote* view
 /// state, never read it, so there is nothing to own here — which is what lets
-/// all thirteen arms be tested without a GPUI `Window`.
+/// all fourteen arms be tested without a GPUI `Window`.
 pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
     let mut effects = Vec::new();
     let mut stop = false;
@@ -91,32 +107,47 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
             effects.push(Effect::HoldPaste(text));
             effects.push(Effect::Status(
                 format!(
-                    "[paste held: {lines} lines would run as commands — \
+                    "{PASTE_HELD_NOTICE} {lines} lines would run as commands — \
                      repeat the paste shortcut to paste anyway]"
                 )
                 .into(),
             ));
         }
 
-        // Belongs to whoever asked for it. The view forwards because it is the
-        // single consumer of this session's events, and arrival order is what
-        // lets the registry pair answers with waiters.
-        Ok(TerminalEvent::History(history)) => {
-            effects.push(Effect::DeliverHistory(history));
+        // Belongs to whoever holds the ticket. The view forwards because it is
+        // the single consumer of this session's events; the ticket, not the
+        // order answers arrive in, decides who receives it.
+        Ok(TerminalEvent::History { ticket, snapshot }) => {
+            effects.push(Effect::DeliverHistory { ticket, snapshot });
         }
 
-        // Terminal Core already applied the OSC 52 policy for one and the
-        // person asked for the other; neither needs a policy here.
-        Ok(TerminalEvent::ClipboardWrite(text)) | Ok(TerminalEvent::SelectionCopied(text)) => {
+        // A capture that failed answers its own request with the reason,
+        // rather than leaving it to wait out the observation deadline.
+        Ok(TerminalEvent::HistoryFailed { ticket, error }) => {
+            effects.push(Effect::FailRequest {
+                ticket,
+                reason: error.to_string(),
+            });
+        }
+
+        // Terminal Core applied the OSC 52 policy when the child asked, but
+        // focus can move before the write lands, so the view checks Pane Focus
+        // again. The person asked for their own copy, which needs no policy.
+        Ok(TerminalEvent::ClipboardWrite(text)) => {
+            if !text.is_empty() {
+                effects.push(Effect::ChildClipboard(text));
+            }
+        }
+        Ok(TerminalEvent::SelectionCopied(text)) => {
             if !text.is_empty() {
                 effects.push(Effect::Clipboard(text));
             }
         }
 
+        // Reported, and nothing more. A general error names no request, so it
+        // cannot answer one: a selection or key failure that arrives while an
+        // observer waits must leave that observer waiting for its own answer.
         Ok(TerminalEvent::Error(error)) => {
-            // The waiter first: a pane in a bad state must not leave an
-            // observation request waiting out the deadline.
-            effects.push(Effect::FailRequest(error.to_string()));
             effects.push(Effect::Status(error.to_string().into()));
         }
 
@@ -141,7 +172,7 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sprite_term::CellPosition;
 
@@ -233,11 +264,13 @@ mod tests {
         assert!(effects(TerminalEvent::SelectionCopied(String::new())).is_empty());
     }
 
+    /// The child's OSC 52 write and the person's own copy stay distinct, so
+    /// the view can hold the child's to Pane Focus and never the person's.
     #[test]
-    fn clipboard_writes_carry_their_text() {
+    fn clipboard_writes_carry_their_text_and_who_asked() {
         assert!(matches!(
             effects(TerminalEvent::ClipboardWrite("copied".to_owned())).as_slice(),
-            [Effect::Clipboard(text)] if text == "copied"
+            [Effect::ChildClipboard(text)] if text == "copied"
         ));
         assert!(matches!(
             effects(TerminalEvent::SelectionCopied("selected".to_owned())).as_slice(),
@@ -245,20 +278,37 @@ mod tests {
         ));
     }
 
-    /// A pane that fails must say so, not leave a requester waiting out the
-    /// observation deadline.
+    /// A general error names no request, so it can only be reported. Failing
+    /// a waiter with it would hand one request the answer to nothing.
     #[test]
-    fn an_error_both_reports_and_fails_the_waiter() {
-        let raised = effects(TerminalEvent::Error(error("read", "broke")));
-        assert_eq!(raised.len(), 2);
-        // The reason, not just the fact: this string is what the waiter gets
-        // back in place of an observation timeout, so an empty one would leave
-        // the requester no better off than the deadline it replaced.
-        assert!(
-            matches!(&raised[0], Effect::FailRequest(reason) if reason.contains("broke")),
-            "the waiter is told why, not just that it failed"
+    fn an_error_is_reported_and_answers_no_request() {
+        let raised = effects(TerminalEvent::Error(error("select", "broke")));
+        assert_eq!(
+            raised.len(),
+            1,
+            "a status line and nothing else: {raised:?}"
         );
-        assert!(matches!(raised[1], Effect::Status(_)));
+        assert!(
+            matches!(&raised[0], Effect::Status(line) if line.contains("broke")),
+            "the reason is still shown"
+        );
+    }
+
+    /// A capture that failed answers its own request, with the reason, rather
+    /// than leaving it to wait out the observation deadline.
+    #[test]
+    fn a_failed_capture_fails_only_its_own_request() {
+        let ticket = sprite_term::Ticket::new(9);
+        assert_eq!(
+            effects(TerminalEvent::HistoryFailed {
+                ticket,
+                error: error("capture_history", "broke"),
+            }),
+            vec![Effect::FailRequest {
+                ticket,
+                reason: "capture_history: broke".to_owned(),
+            }]
+        );
     }
 
     /// A session error is a report, not an ending. Stopping the pump here would
@@ -304,11 +354,17 @@ mod tests {
     }
 
     #[test]
-    fn a_history_answer_is_forwarded_whole() {
+    fn a_history_answer_is_forwarded_whole_with_its_ticket() {
         let captured = snapshot();
+        let ticket = sprite_term::Ticket::new(4);
         assert!(matches!(
-            effects(TerminalEvent::History(Arc::clone(&captured))).as_slice(),
-            [Effect::DeliverHistory(delivered)] if delivered == &captured
+            effects(TerminalEvent::History {
+                ticket,
+                snapshot: Arc::clone(&captured),
+            })
+            .as_slice(),
+            [Effect::DeliverHistory { ticket: delivered_ticket, snapshot: delivered }]
+                if *delivered_ticket == ticket && delivered == &captured
         ));
     }
 
@@ -346,7 +402,7 @@ mod tests {
         }
     }
 
-    fn snapshot() -> Arc<HistorySnapshot> {
+    pub(crate) fn snapshot() -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 1,
             size: sprite_term::ValidTerminalSize::DEFAULT,

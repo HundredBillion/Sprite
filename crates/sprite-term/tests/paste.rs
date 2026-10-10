@@ -178,6 +178,35 @@ fn focus_is_reported_only_when_the_child_asks() {
     );
 }
 
+/// Losing focus is reported as well, as CSI O, once the child has asked.
+#[test]
+fn focus_loss_is_reported_after_focus_gain() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&hex_reader("printf '\\033[?1004h';", 6));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    session
+        .send(TerminalCommand::Focus(true))
+        .expect("report focus in");
+    session
+        .send(TerminalCommand::Focus(false))
+        .expect("report focus out");
+
+    let bundle = snapshots.wait_for("both reports", |b| {
+        pane_text(b).contains("1b 5b 49 1b 5b 4f")
+    });
+    assert!(
+        pane_text(&bundle).contains("1b 5b 49 1b 5b 4f"),
+        "CSI I then CSI O"
+    );
+}
+
 /// An unbracketed paste containing a newline would execute on arrival, because
 /// the line discipline turns Sprite's carriage return back into one. Such a
 /// paste is withheld and reported, not performed.
@@ -319,4 +348,34 @@ fn confirmed_paste_returns_to_live_output() {
 #[test]
 fn withheld_paste_keeps_the_history_viewport() {
     paste_from_history(TerminalCommand::Paste("z\n".into()), false);
+}
+
+/// A bracketed paste of the largest text a paste may carry is queued whole.
+///
+/// The input backlog must leave room for the brackets around the largest
+/// admitted paste; otherwise that paste is refused with a claim that the
+/// program stopped reading, when it never had the chance.
+#[test]
+fn a_bracketed_paste_of_the_largest_allowed_text_is_accepted() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("stty -echo; printf '\\033[?2004h'; printf 'READY\\n'; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
+
+    // The clipboard bound, which `Paste` admission itself enforces.
+    let largest = "x".repeat(1024 * 1024);
+    session
+        .send(TerminalCommand::Paste(largest))
+        .expect("a paste at the clipboard bound is admitted");
+
+    let refused = events.try_next_error();
+    assert!(
+        refused.is_none(),
+        "the input backlog refused it: {refused:?}"
+    );
 }

@@ -9,7 +9,7 @@
 //! stays `Default` here and is filled by the painter, exactly as a terminal
 //! cell is, so the two paths cannot drift apart.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -23,6 +23,20 @@ use crate::surface::Refusal;
 /// misbehaving program cannot ask for a gigabyte of cells.
 pub const MAX_COLS: u16 = 1024;
 pub const MAX_ROWS: u16 = 1024;
+/// How many highlight ids and group names one grid keeps. An editor's
+/// adapter forwards ids as the editor allocates them and never retires one,
+/// so these are generous: a refusal mid-session would leave that grid's
+/// highlighting wrong for the rest of it.
+pub const MAX_HIGHLIGHT_IDS: usize = 262_144;
+pub const MAX_GROUP_NAMES: usize = 262_144;
+
+#[cfg(test)]
+thread_local! {
+    /// Stored group entries a relink found and moved. Every stored name a
+    /// relink reads must be counted here, so a test can tell work that
+    /// grows with the message from work that grows with the grid.
+    static RELINKED_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// What a highlight id means: Neovim's `hl_attr_define`, with colours as
 /// `#rrggbb` because that is how every colour on this channel is written.
@@ -386,8 +400,7 @@ pub struct Cell {
 
 #[derive(Clone, Debug, PartialEq)]
 struct TextEntry {
-    text: Arc<str>,
-    paint: sprite_term::CellText,
+    text: sprite_term::CellText,
     references: usize,
 }
 
@@ -406,10 +419,11 @@ impl TextPool {
             return id;
         }
         let id = self.free.pop().unwrap_or(self.entries.len() as u32);
+        // Longer text shares the lookup key's allocation, so interning
+        // allocates once whatever the text.
         let text: Arc<str> = text.into();
         let entry = TextEntry {
-            paint: text.as_ref().into(),
-            text: text.clone(),
+            text: Arc::clone(&text).into(),
             references: 1,
         };
         self.ids.insert(text, id);
@@ -429,14 +443,14 @@ impl TextPool {
         let entry = self.entries[id as usize].as_mut().unwrap();
         entry.references -= 1;
         if entry.references == 0 {
-            self.ids.remove(entry.text.as_ref());
+            self.ids.remove(entry.text.as_str());
             self.entries[id as usize] = None;
             self.free.push(id);
         }
     }
 
     fn text(&self, id: u32) -> &sprite_term::CellText {
-        &self.entries[id as usize].as_ref().unwrap().paint
+        &self.entries[id as usize].as_ref().unwrap().text
     }
 }
 
@@ -450,12 +464,20 @@ pub struct GridSurface {
     dirty: Vec<bool>,
     theme: Option<Highlights>,
     attrs: HashMap<u32, Attrs>,
-    /// Every group name an id has been given, in the order they arrived.
+    /// Every group name an id has been given, in the order they arrived,
+    /// keyed by an arrival stamp so one name can leave its id without the
+    /// others moving.
     ///
     /// One id commonly stands for several names — an editor maps `Comment`,
     /// `@comment`, and `@comment.lua` to the same attrs — so keeping only the
     /// last would let one name shadow a theme entry written for another.
-    groups: HashMap<u32, Vec<String>>,
+    groups: HashMap<u32, BTreeMap<u64, String>>,
+    /// Where each group name sits now: its id and its stamp under that id.
+    /// A relink finds the one entry it moves here, instead of searching
+    /// every id's names.
+    group_of: HashMap<String, (u32, u64)>,
+    /// The stamp the next group name to arrive is given.
+    next_group_stamp: u64,
     defaults: Defaults,
     cursor: Cursor,
     /// The rows as the painter wants them, rebuilt only when something
@@ -480,6 +502,8 @@ impl GridSurface {
             theme: None,
             attrs: HashMap::new(),
             groups: HashMap::new(),
+            group_of: HashMap::new(),
+            next_group_stamp: 0,
             defaults: Defaults::default(),
             cursor: Cursor::default(),
             laid_out: vec![empty_row; usize::from(rows)].into(),
@@ -563,25 +587,44 @@ impl GridSurface {
                 }
             }
             Op::Highlights { define, groups } => {
+                // Checked before anything below runs, so an operation over a
+                // cap changes nothing at all.
+                self.highlights_fit(&define, &groups)?;
                 let mut changed = false;
                 for (id, attrs) in define {
                     changed |= self.attrs.get(&id) != Some(&attrs);
                     self.attrs.insert(id, attrs);
                 }
                 for (name, id) in groups {
-                    changed |= self.groups.get(&id).and_then(|names| names.last()) != Some(&name);
-                    // A relink moves the name: an editor that now maps `Comment`
-                    // to another attr id no longer means the old one by it.
-                    for names in self.groups.values_mut() {
-                        names.retain(|known| known != &name);
+                    changed |= self
+                        .groups
+                        .get(&id)
+                        .and_then(|names| names.last_key_value())
+                        .map(|(_, last)| last)
+                        != Some(&name);
+                    let stamp = self.next_group_stamp;
+                    self.next_group_stamp += 1;
+                    // A relink moves the name: an editor that now maps
+                    // `Comment` to another attr id no longer means the old one
+                    // by it. The index says where the name was, so a relink
+                    // costs the same however many names the grid holds.
+                    if let Some((old_id, old_stamp)) =
+                        self.group_of.insert(name.clone(), (id, stamp))
+                        && let Some(names) = self.groups.get_mut(&old_id)
+                    {
+                        #[cfg(test)]
+                        RELINKED_ENTRIES.with(|count| count.set(count.get() + 1));
+                        names.remove(&old_stamp);
+                        // An id the relink emptied is dropped rather than kept
+                        // with no names: `style_for` would look it up and find
+                        // nothing to apply, and the entry would outlive the
+                        // only reason it existed.
+                        if names.is_empty() {
+                            self.groups.remove(&old_id);
+                        }
                     }
-                    self.groups.entry(id).or_default().push(name);
+                    self.groups.entry(id).or_default().insert(stamp, name);
                 }
-                // An id the last relink emptied is dropped rather than kept
-                // with no names: `style_for` would look it up and find nothing
-                // to apply, and the entry would outlive the only reason it
-                // existed.
-                self.groups.retain(|_, names| !names.is_empty());
                 if changed {
                     self.invalidate();
                 }
@@ -705,6 +748,37 @@ impl GridSurface {
         Ok(())
     }
 
+    /// Refuses one highlights operation that would grow the grid past either
+    /// cap. Ids and names are never forgotten, so a grid at its caps can still
+    /// redefine and relink what it has, but not add to it.
+    fn highlights_fit(
+        &self,
+        define: &[(u32, Attrs)],
+        groups: &[(String, u32)],
+    ) -> Result<(), Refusal> {
+        let new_ids: HashSet<u32> = define
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !self.attrs.contains_key(id))
+            .collect();
+        let new_names: HashSet<&str> = groups
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !self.group_of.contains_key(*name))
+            .collect();
+        if self.attrs.len() + new_ids.len() > MAX_HIGHLIGHT_IDS {
+            return Err(malformed(format!(
+                "a grid defines at most {MAX_HIGHLIGHT_IDS} highlight ids"
+            )));
+        }
+        if self.group_of.len() + new_names.len() > MAX_GROUP_NAMES {
+            return Err(malformed(format!(
+                "a grid names at most {MAX_GROUP_NAMES} highlight groups"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn invalidate(&mut self) {
         self.dirty.fill(true);
     }
@@ -757,7 +831,7 @@ impl GridSurface {
         // message that order is the JSON object's key order; across messages it
         // is the order the messages arrived.
         if let Some(names) = self.groups.get(&hl) {
-            for style in names.iter().filter_map(|name| theme.get(name)) {
+            for style in names.values().filter_map(|name| theme.get(name)) {
                 apply_theme(&mut attrs, style);
             }
         }
@@ -861,7 +935,7 @@ mod tests {
         for (id, entry) in grid.texts.entries.iter().enumerate() {
             assert_eq!(entry.as_ref().map_or(0, |entry| entry.references), refs[id]);
             if let Some(entry) = entry {
-                assert_eq!(grid.texts.ids.get(entry.text.as_ref()), Some(&(id as u32)));
+                assert_eq!(grid.texts.ids.get(entry.text.as_str()), Some(&(id as u32)));
             }
         }
         assert!(grid.texts.entries.len() <= usize::from(grid.cols) * usize::from(grid.rows) + 2);
@@ -1334,6 +1408,183 @@ mod tests {
                 b: 0
             })
         );
+    }
+
+    /// The name index and the per-id lists describe the same thing: every
+    /// name sits under exactly one id, at the stamp the index says, and no
+    /// id is kept with no names.
+    fn check_groups(grid: &GridSurface) {
+        let mut seen = 0;
+        for (id, names) in &grid.groups {
+            assert!(!names.is_empty(), "id {id} is kept with no names");
+            for (stamp, name) in names {
+                assert_eq!(
+                    grid.group_of.get(name),
+                    Some(&(*id, *stamp)),
+                    "{name} sits under id {id} but the index disagrees"
+                );
+                seen += 1;
+            }
+        }
+        assert_eq!(
+            seen,
+            grid.group_of.len(),
+            "the index names a group no id holds"
+        );
+    }
+
+    #[test]
+    fn the_name_index_follows_every_relink_and_a_moved_name_leaves_its_old_id() {
+        let mut grid = GridSurface::new(1, 1);
+        let names = |grid: &GridSurface, id: u32| -> Vec<String> {
+            grid.groups[&id].values().cloned().collect()
+        };
+        grid.apply_all(ops(json!({ "type": "highlights",
+            "define": { "1": {}, "2": {} },
+            "groups": { "Comment": 1, "@comment": 1, "String": 2 } })))
+            .expect("applies");
+        check_groups(&grid);
+        assert_eq!(names(&grid, 1), ["Comment", "@comment"]);
+
+        grid.apply_all(ops(
+            json!({ "type": "highlights", "groups": { "Comment": 2 } }),
+        ))
+        .expect("applies");
+        check_groups(&grid);
+        assert_eq!(names(&grid, 1), ["@comment"], "Comment left id 1");
+        assert_eq!(names(&grid, 2), ["String", "Comment"]);
+
+        // Naming an id it already has moves the name last, so it layers over
+        // the others exactly as a fresh name would.
+        grid.apply_all(ops(
+            json!({ "type": "highlights", "groups": { "String": 2 } }),
+        ))
+        .expect("applies");
+        check_groups(&grid);
+        assert_eq!(names(&grid, 2), ["Comment", "String"]);
+
+        grid.apply_all(ops(
+            json!({ "type": "highlights", "groups": { "@comment": 2 } }),
+        ))
+        .expect("applies");
+        check_groups(&grid);
+        assert_eq!(
+            grid.group_ids(),
+            vec![2],
+            "id 1 kept no names, so it is not kept"
+        );
+    }
+
+    #[test]
+    fn a_relink_touches_one_stored_entry_however_many_the_grid_holds() {
+        let mut grid = GridSurface::new(1, 1);
+        let names = |offset: u32| -> Vec<(String, u32)> {
+            (0..50_000u32)
+                .map(|n| (format!("group-{n}"), n + offset))
+                .collect()
+        };
+        grid.apply(Op::Highlights {
+            define: Vec::new(),
+            groups: names(1),
+        })
+        .expect("applies");
+        RELINKED_ENTRIES.with(|count| count.set(0));
+        grid.apply(Op::Highlights {
+            define: Vec::new(),
+            groups: names(2),
+        })
+        .expect("applies");
+        assert_eq!(
+            RELINKED_ENTRIES.with(|count| count.get()),
+            50_000,
+            "each relink should touch only the entry it moves"
+        );
+        check_groups(&grid);
+        assert_eq!(grid.group_ids().len(), 50_000);
+    }
+
+    #[test]
+    fn a_highlights_operation_past_either_cap_is_refused_before_it_changes_anything() {
+        let mut grid = GridSurface::new(2, 1);
+        grid.apply(Op::Highlights {
+            define: (1..=MAX_HIGHLIGHT_IDS as u32)
+                .map(|id| (id, Attrs::default()))
+                .collect(),
+            groups: Vec::new(),
+        })
+        .expect("exactly the id cap fits");
+        grid.apply(Op::Highlights {
+            define: Vec::new(),
+            groups: (0..MAX_GROUP_NAMES).map(|n| (format!("g{n}"), 1)).collect(),
+        })
+        .expect("exactly the name cap fits");
+
+        // On its own, an over-cap operation changes nothing, and a bare
+        // operation's refusal carries no prefix.
+        let before = grid.clone();
+        for message in [
+            json!({ "type": "highlights", "define": { "1": { "bold": true }, "262145": {} } }),
+            json!({ "type": "highlights", "define": { "1": { "bold": true } },
+                    "groups": { "g0": 2, "OneMore": 1 } }),
+        ] {
+            let refusal = grid
+                .apply_all(ops(message.clone()))
+                .expect_err("over a cap");
+            assert!(
+                matches!(&refusal, Refusal::Malformed(why) if !why.starts_with("op ")),
+                "{message} was refused as {refusal:?}"
+            );
+            assert!(grid == before, "{message} changed the grid");
+        }
+
+        // Inside a batch it is refused like any other bad operation: the
+        // operations before it stand, it changes nothing itself — not even
+        // the id it would have redefined — and the reason names it.
+        let refusal = grid
+            .apply_all(ops(json!({ "type": "batch", "ops": [
+                { "type": "rows", "rows": [{ "row": 0, "cells": [["x", 1]] }] },
+                { "type": "highlights", "define": { "1": { "bold": true }, "262145": {} } }
+            ] })))
+            .expect_err("op 1 is over the id cap");
+        assert!(
+            refusal.reason().starts_with("malformed: op 1: "),
+            "{}",
+            refusal.reason()
+        );
+        assert_eq!(
+            grid.texts.text(grid.cells[0][0].text).as_str(),
+            "x",
+            "op 0 stood"
+        );
+        assert!(
+            grid.attrs == before.attrs,
+            "the over-cap operation redefined an id"
+        );
+
+        let refusal = grid
+            .apply_all(ops(json!({ "type": "batch", "ops": [
+                { "type": "cursor", "row": 0, "col": 1 },
+                { "type": "highlights", "groups": { "g0": 2, "OneMore": 1 } }
+            ] })))
+            .expect_err("op 1 is over the name cap");
+        assert!(
+            refusal.reason().starts_with("malformed: op 1: "),
+            "{}",
+            refusal.reason()
+        );
+        assert_eq!(grid.cursor.col, 1, "op 0 stood");
+        assert!(
+            grid.groups == before.groups && grid.group_of == before.group_of,
+            "the over-cap operation relinked a name"
+        );
+        check_groups(&grid);
+
+        // At the caps, redefining an id and relinking a name grow nothing,
+        // so they still apply.
+        grid.apply_all(ops(json!({ "type": "highlights",
+            "define": { "1": { "bold": true } }, "groups": { "g0": 2 } })))
+            .expect("no growth");
+        check_groups(&grid);
     }
 
     #[test]

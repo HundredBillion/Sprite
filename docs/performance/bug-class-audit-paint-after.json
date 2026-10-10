@@ -1,0 +1,214 @@
+{
+  "schema": 1,
+  "benchmark": "terminal_paint_preparation_and_decisions",
+  "sample_count": 30,
+  "fixture": {
+    "columns": 200,
+    "rows": 60
+  },
+  "metrics": {
+    "whole_first_frame": {
+      "samples": 30,
+      "transition": "fresh_driver_without_priming",
+      "timing": {
+        "unit": "ms",
+        "median": 0.323083,
+        "p95": 0.404375
+      },
+      "allocations": {
+        "median": 122,
+        "p95": 122,
+        "max": 122,
+        "budget": 135
+      },
+      "bytes": {
+        "median": 579376,
+        "p95": 579376,
+        "max": 579376,
+        "budget": 637314
+      }
+    },
+    "whole_same_generation_blink": {
+      "samples": 30,
+      "transition": "primed_generation_1_cursor_on_to_off",
+      "timing": {
+        "unit": "ms",
+        "median": 0.29525,
+        "p95": 0.326792
+      },
+      "allocations": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      },
+      "bytes": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      }
+    },
+    "whole_hover": {
+      "samples": 30,
+      "transition": "primed_generation_1_hover_off_to_on",
+      "timing": {
+        "unit": "ms",
+        "median": 0.282708,
+        "p95": 0.29741700000000004
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    },
+    "whole_one_row_change": {
+      "samples": 30,
+      "transition": "primed_generation_1_to_2_one_changed_row",
+      "timing": {
+        "unit": "ms",
+        "median": 0.291917,
+        "p95": 0.294875
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    },
+    "split_first_frame": {
+      "samples": 30,
+      "transition": "fresh_driver_without_priming",
+      "timing": {
+        "unit": "ms",
+        "median": 0.472667,
+        "p95": 0.508416
+      },
+      "allocations": {
+        "median": 122,
+        "p95": 122,
+        "max": 122,
+        "budget": 135
+      },
+      "bytes": {
+        "median": 579376,
+        "p95": 579376,
+        "max": 579376,
+        "budget": 637314
+      }
+    },
+    "split_same_generation_blink": {
+      "samples": 30,
+      "transition": "primed_generation_1_cursor_on_to_off",
+      "timing": {
+        "unit": "ms",
+        "median": 0.43225,
+        "p95": 0.484375
+      },
+      "allocations": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      },
+      "bytes": {
+        "median": 0,
+        "p95": 0,
+        "max": 0,
+        "budget": 0
+      }
+    },
+    "split_hover": {
+      "samples": 30,
+      "transition": "primed_generation_1_hover_off_to_on",
+      "timing": {
+        "unit": "ms",
+        "median": 0.45466700000000004,
+        "p95": 0.5008750000000001
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    },
+    "split_one_row_change": {
+      "samples": 30,
+      "transition": "primed_generation_1_to_2_one_changed_row",
+      "timing": {
+        "unit": "ms",
+        "median": 0.450791,
+        "p95": 0.520959
+      },
+      "allocations": {
+        "median": 3,
+        "p95": 3,
+        "max": 3,
+        "budget": 4
+      },
+      "bytes": {
+        "median": 10136,
+        "p95": 10136,
+        "max": 10136,
+        "budget": 11150
+      }
+    }
+  },
+  "shaping": {
+    "whole_first_frame": {
+      "glyph_cells": 6600,
+      "shape_calls": 2335
+    },
+    "whole_same_generation_blink": {
+      "glyph_cells": 6600,
+      "shape_calls": 0
+    },
+    "whole_hover": {
+      "glyph_cells": 6600,
+      "shape_calls": 6
+    },
+    "whole_one_row_change": {
+      "glyph_cells": 6601,
+      "shape_calls": 1
+    },
+    "split_first_frame": {
+      "glyph_cells": 6600,
+      "shape_calls": 2335
+    },
+    "split_same_generation_blink": {
+      "glyph_cells": 6600,
+      "shape_calls": 0
+    },
+    "split_hover": {
+      "glyph_cells": 6600,
+      "shape_calls": 6
+    },
+    "split_one_row_change": {
+      "glyph_cells": 6601,
+      "shape_calls": 1
+    }
+  },
+  "shaping_timing": "not measured: GPUI shapes text only through a window's text system, and a headless process can open no window; counts come from the live shape cache with a stand-in for each shape"
+}
