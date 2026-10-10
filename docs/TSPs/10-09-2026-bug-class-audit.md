@@ -10187,6 +10187,8 @@ Three test-then-implement cycles: (A) `PositionedCell.text` becomes a `SharedStr
 
 #### Cycle A — cell text is a `SharedString` made at layout
 
+> **Superseded (2026-10-09, after the whole-branch review):** `PositionedCell.text` stays `sprite_term::CellText`, `ShapeKey` is keyed by `CellText`, and the `SharedString` is built only inside the shape-cache miss closure; `PRINTABLE_ASCII`, `shared_text` and this cycle's tests were removed (see PRD R-R1).
+
 - [ ] **Step 1: Write the failing test** — append to `mod tests` in `crates/sprite-app/src/grid.rs` (after `an_empty_row_lays_out_to_nothing`, before the module's closing `}` at line 362). It reuses that module's existing `cell(text, width)` and `row(cells)` helpers (lines 249-263) and the test-only counting allocator `crate::surface_performance::measure` (`crates/sprite-app/src/surface_performance.rs:72`).
 
 ```rust

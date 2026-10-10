@@ -136,8 +136,9 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
   of shared shapes capped at 4,096 entries (a GPUI `ShapedLine` is about 3 KB,
   so one per cell would cost tens of MB per pane). A cell reshapes only when its drawn
   foreground differs from the cached one. The cache is invalidated by any change
-  of font family, font size, theme or scale factor. `PositionedCell.text` is a
-  `SharedString` created at row layout.
+  of font family, font size, theme or scale factor. A laid-out cell keeps its
+  compact `CellText`; the text system's `SharedString` is built only when a
+  shape is built, on a shape-cache miss.
 - R-R2 One 530 ms clock per Sprite Window replaces the per-pane timers. Each
   tick, every pane refreshes its Pane Title discovery and notifies only if the
   title changed; only the pane with Pane Focus toggles its blink phase and
@@ -241,6 +242,9 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 
 ## Grilling decisions (2026-10-09)
 
+- 2026-10-09: R-R1 revised after whole-branch review — the text-system string
+  is built on a shape-cache miss rather than at row layout, removing a
+  per-non-ASCII-cell allocation.
 - BCA-21 revised to a smooth floor after review found the piecewise rule
   pinned 240–280 px splits (2026-10-09).
 - Cleanup threads: one short-lived thread per pane cleanup, not one serial
