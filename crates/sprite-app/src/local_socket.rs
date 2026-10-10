@@ -256,15 +256,13 @@ impl LocalSocket {
                         }
                         let stream = match listener.accept() {
                             Ok((stream, _)) => stream,
-                            Err(error) => match after_accept_error(&error) {
-                                AfterAcceptError::Poll => continue,
-                                AfterAcceptError::Rest => {
-                                    if rest(&cancelled, &running) {
-                                        break;
-                                    }
-                                    continue;
+                            Err(error) if !rests_after(&error) => continue,
+                            Err(_) => {
+                                if rest(&cancelled, &running) {
+                                    break;
                                 }
-                            },
+                                continue;
+                            }
                         };
                         // BSD-derived systems hand the listener's O_NONBLOCK to accepted
                         // sockets; the handshake and handlers rely on blocking reads
@@ -388,30 +386,22 @@ impl Drop for LocalSocket {
     }
 }
 
-/// What the listener does after `accept` fails.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AfterAcceptError {
-    /// Nothing was waiting after all, or a signal interrupted the call: wait
-    /// in `poll` as usual.
-    Poll,
-    /// Anything else: rest, then try again. `poll` would report the same
-    /// waiting connection at once, so going straight back would spin.
-    Rest,
-}
-
-/// Classifies a failed `accept`. No failure ends the listener; only closing
-/// the socket does.
+/// Whether the listener rests before trying again after `accept` fails. No
+/// failure ends the listener; only closing the socket does.
 ///
+/// Nothing waiting after all, or a signal interrupting the call, goes straight
+/// back to `poll`. Anything else rests first, because `poll` would report the
+/// same waiting connection at once and going straight back would spin.
 /// Running out of descriptors (`EMFILE`, `ENFILE`), buffers (`ENOBUFS`) or
 /// memory (`ENOMEM`), and a peer that hung up mid-accept (`ECONNABORTED`), all
 /// pass, so the listener waits them out. An unexpected error is treated the
 /// same way rather than ending the loop: a listener that stops silently leaves
 /// a socket that accepts connections nobody will ever serve.
-fn after_accept_error(error: &io::Error) -> AfterAcceptError {
-    match error.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => AfterAcceptError::Poll,
-        _ => AfterAcceptError::Rest,
-    }
+fn rests_after(error: &io::Error) -> bool {
+    !matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
 }
 
 /// Rests for [`ACCEPT_REST_MS`], waking early if the socket is closed.
@@ -1245,11 +1235,14 @@ mod tests {
         assert!(woken < Duration::from_millis(60), "{woken:?}");
     }
 
-    /// No failed `accept` ends the listener. Only "nothing was waiting" and an
-    /// interrupted call go straight back to `poll`; everything else rests
-    /// first, because `poll` would report the same waiting connection at once.
+    /// Only "nothing was waiting" and an interrupted call go straight back to
+    /// `poll`; every other failed `accept` rests first. Checked here as well as
+    /// by the exhaustion test, because on macOS a failed accept drops the
+    /// waiting connection, so that test cannot see a listener that skips the
+    /// rest and spins, and no test can make the other failures happen.
     #[test]
-    fn no_accept_failure_ends_the_listener() {
+    fn only_a_spurious_or_interrupted_accept_skips_the_rest() {
+        let rests = |errno: Errno| rests_after(&io::Error::from_raw_os_error(errno as i32));
         for errno in [
             Errno::EMFILE,
             Errno::ENFILE,
@@ -1259,18 +1252,8 @@ mod tests {
             Errno::EBADF,
             Errno::EINVAL,
         ] {
-            assert_eq!(
-                after_accept_error(&io::Error::from_raw_os_error(errno as i32)),
-                AfterAcceptError::Rest,
-                "{errno}"
-            );
+            assert!(rests(errno), "{errno}");
         }
-        for errno in [Errno::EAGAIN, Errno::EINTR] {
-            assert_eq!(
-                after_accept_error(&io::Error::from_raw_os_error(errno as i32)),
-                AfterAcceptError::Poll,
-                "{errno}"
-            );
-        }
+        assert!(!rests(Errno::EAGAIN) && !rests(Errno::EINTR));
     }
 }
