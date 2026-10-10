@@ -717,7 +717,7 @@ fn shaping_happens_only_for_cells_whose_drawn_text_changed(cx: &mut gpui::TestAp
     let shapeable = probe.update(cx, |probe, _| {
         crate::grid::lay_out_row(&probe.snapshot.rows[30])
             .iter()
-            .filter(|cell| reaches_text_system(&cell.text))
+            .filter(|cell| glyph_kind(cell) == GlyphKind::Text)
             .count()
     });
     let one_row = frame(cx);

@@ -65,8 +65,8 @@ use sprite_term::{
     UnderlineStyle,
 };
 
-use crate::block_elements::{block_fill, fill_rects};
-use crate::box_drawing::{self, box_glyph, box_outlines, box_rects};
+use crate::block_elements::{BlockFill, block_fill, fill_rects};
+use crate::box_drawing::{self, BoxGlyph, box_glyph, box_outlines, box_rects};
 use crate::grid::PositionedCell;
 use crate::grid::{Col, Row, Snapped, column_edge, row_edge};
 
@@ -475,7 +475,7 @@ impl GridPaint {
             for (column, (cell, drawn)) in
                 cells.iter().zip(self.resolve_row(row, cells)).enumerate()
             {
-                if !reaches_text_system(&cell.text) {
+                if glyph_kind(cell) != GlyphKind::Text {
                     continue;
                 }
                 glyphs += 1;
@@ -874,18 +874,43 @@ fn blank_glyph(text: &str) -> bool {
     text.is_empty() || text.chars().all(char::is_whitespace) || text.starts_with('\u{10eeee}')
 }
 
-/// Whether a cell's text goes to the text system, rather than being skipped
-/// as blank or drawn as block or box geometry. `paint_glyph` makes the same
-/// decision in the same order.
-pub(crate) fn reaches_text_system(text: &str) -> bool {
-    if blank_glyph(text) {
-        return false;
+/// How a cell's text is drawn. Painting and the shaping bench both branch on
+/// this one decision, so they cannot disagree about which cells reach the
+/// text system.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GlyphKind {
+    /// No ink. Shaping a blank costs the same as shaping a letter, and most
+    /// of a terminal is blank.
+    Blank,
+    /// A block element, drawn as geometry against the cell's own snapped
+    /// edges, never shaped: a glyph's ink is as wide as the font's advance,
+    /// which is not the snapped cell width, so a run of shaped blocks is
+    /// beaded with seams. See `block_elements`.
+    Block(BlockFill),
+    /// Box drawing is geometry for the same reason, and additionally has to
+    /// be drawn on whole device pixels to stay one pixel thick. See
+    /// `box_drawing`.
+    Box(BoxGlyph),
+    /// Everything else goes to the text system.
+    Text,
+}
+
+pub(crate) fn glyph_kind(cell: &PositionedCell) -> GlyphKind {
+    if blank_glyph(&cell.text) {
+        return GlyphKind::Blank;
     }
-    let mut chars = text.chars();
-    match (chars.next(), chars.next()) {
-        (Some(ch), None) => block_fill(ch).is_none() && box_glyph(ch).is_none(),
-        _ => true,
+    let mut chars = cell.text.chars();
+    // A cell carrying a combining mark on top of a block or a rule is left to
+    // the font, which is the only half of the pair that can place the mark.
+    if let (Some(ch), None) = (chars.next(), chars.next()) {
+        if let Some(fill) = block_fill(ch) {
+            return GlyphKind::Block(fill);
+        }
+        if let Some(glyph) = box_glyph(ch) {
+            return GlyphKind::Box(glyph);
+        }
     }
+    GlyphKind::Text
 }
 
 impl GridPaint {
@@ -900,27 +925,14 @@ impl GridPaint {
         cx: &mut App,
     ) {
         let cell = &target.cells[target.column];
-        // A cell holding nothing but blanks has no ink, and shaping one costs
-        // the same as shaping a letter. Most of a terminal is blank.
-        if blank_glyph(&cell.text) {
-            return;
+        match glyph_kind(cell) {
+            GlyphKind::Blank => return,
+            GlyphKind::Block(shape) => {
+                return self.paint_block(shape, drawn, bounds, scale, window);
+            }
+            GlyphKind::Box(glyph) => return self.paint_box(glyph, drawn, bounds, scale, window),
+            GlyphKind::Text => {}
         }
-
-        // A block element is drawn as geometry against the cell's own snapped
-        // edges, never shaped: a glyph's ink is as wide as the font's advance,
-        // which is not the snapped cell width, so a run of shaped blocks is
-        // beaded with seams. See `block_elements`.
-        if self.paint_block(cell, drawn, bounds, scale, window) {
-            return;
-        }
-
-        // Box drawing is geometry for the same reason, and additionally has to
-        // be drawn on whole device pixels to stay one pixel thick. See
-        // `box_drawing`.
-        if self.paint_box(cell, drawn, bounds, scale, window) {
-            return;
-        }
-        debug_assert!(reaches_text_system(&cell.text));
 
         // Shaped once for the colour it is drawn in and kept with its row: a
         // frame that changes nothing about this cell reuses the shape, so an
@@ -1035,26 +1047,15 @@ impl GridPaint {
         });
     }
 
-    /// Fills a Block Elements character as rectangles, returning whether it
-    /// drew: anything outside that range is still the font's to draw.
+    /// Fills a Block Elements character as rectangles.
     fn paint_block(
         &self,
-        cell: &PositionedCell,
+        shape: BlockFill,
         drawn: &Drawn,
         bounds: CellBounds,
         scale: f32,
         window: &mut Window,
-    ) -> bool {
-        let mut chars = cell.text.chars();
-        // A cell carrying a combining mark on top of a block is left to the
-        // font, which is the only half of the pair that can place the mark.
-        let (Some(ch), None) = (chars.next(), chars.next()) else {
-            return false;
-        };
-        let Some(shape) = block_fill(ch) else {
-            return false;
-        };
-
+    ) {
         // The shades are a proportion of ink rather than a smaller area of it,
         // so coverage rides on the alpha channel of the cell's own foreground.
         let color = Rgba {
@@ -1075,26 +1076,17 @@ impl GridPaint {
                 color,
             ));
         }
-        true
     }
 
-    /// Fills a Box Drawing character from its arms, returning whether it drew.
+    /// Fills a Box Drawing character from its arms.
     fn paint_box(
         &self,
-        cell: &PositionedCell,
+        glyph: BoxGlyph,
         drawn: &Drawn,
         bounds: CellBounds,
         scale: f32,
         window: &mut Window,
-    ) -> bool {
-        let mut chars = cell.text.chars();
-        let (Some(ch), None) = (chars.next(), chars.next()) else {
-            return false;
-        };
-        let Some(glyph) = box_glyph(ch) else {
-            return false;
-        };
-
+    ) {
         let area = box_drawing::Cell::new(bounds.left, bounds.top, bounds.right, bounds.bottom);
         let strokes = stroke_widths(self.cell_width, self.cell_height, scale);
         let color = drawn.foreground;
@@ -1125,7 +1117,6 @@ impl GridPaint {
             }
             window.paint_path(path, color);
         });
-        true
     }
 
     /// Draws the mark a non-block cursor leaves on the cell it sits on.
