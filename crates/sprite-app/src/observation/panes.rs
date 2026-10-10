@@ -167,22 +167,19 @@ impl WindowPanes {
         }
     }
 
-    /// Hands one pane's answer to the request holding `ticket`.
+    /// Hands one pane's answer, its history or why the capture failed, to the
+    /// request holding `ticket`, and to no other.
     ///
     /// Called from the view, which is the single consumer of a session's
     /// events. An answer whose ticket nobody holds is dropped: its request has
     /// already given up, and handing it to anyone else would answer a question
     /// they did not ask.
-    pub fn deliver(&self, pane: PaneId, ticket: Ticket, snapshot: Arc<HistorySnapshot>) {
-        self.answer(pane, ticket, Ok(snapshot));
-    }
-
-    /// Reports that one request's capture failed, to that request only.
-    pub fn deliver_failure(&self, pane: PaneId, ticket: Ticket, reason: String) {
-        self.answer(pane, ticket, Err(reason));
-    }
-
-    fn answer(&self, pane: PaneId, ticket: Ticket, answer: Answer) {
+    pub fn answer(
+        &self,
+        pane: PaneId,
+        ticket: Ticket,
+        answer: Result<Arc<HistorySnapshot>, String>,
+    ) {
         let mut entries = self
             .entries
             .lock()
@@ -421,10 +418,10 @@ mod tests {
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
             .expect("asked");
-        panes.deliver(
+        panes.answer(
             PaneId(0),
             only_ticket(&panes, PaneId(0)),
-            snapshot("answer"),
+            Ok(snapshot("answer")),
         );
 
         let answer = pending
@@ -445,10 +442,10 @@ mod tests {
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
             .expect("asked");
-        panes.deliver_failure(
+        panes.answer(
             PaneId(0),
             only_ticket(&panes, PaneId(0)),
-            "the child exited".to_owned(),
+            Err("the child exited".to_owned()),
         );
 
         let answer = pending
@@ -480,8 +477,8 @@ mod tests {
         assert_eq!(tickets.len(), 2, "two requests, two tickets");
 
         // Newest first: arrival order must not decide who receives what.
-        panes.deliver(PaneId(0), tickets[1], snapshot("second"));
-        panes.deliver(PaneId(0), tickets[0], snapshot("first"));
+        panes.answer(PaneId(0), tickets[1], Ok(snapshot("second")));
+        panes.answer(PaneId(0), tickets[0], Ok(snapshot("first")));
 
         let answer = |pending: &Pending| {
             pending
@@ -508,7 +505,7 @@ mod tests {
             .expect("asked");
         let tickets = waiting(&panes, PaneId(0));
 
-        panes.deliver_failure(PaneId(0), tickets[1], "capture failed".to_owned());
+        panes.answer(PaneId(0), tickets[1], Err("capture failed".to_owned()));
 
         assert!(
             first.answer.try_recv().is_err(),
@@ -564,16 +561,16 @@ mod tests {
             .expect("asked again");
 
         // The worker's answer to the request that gave up arrives now.
-        panes.deliver(PaneId(0), late, snapshot("late"));
+        panes.answer(PaneId(0), late, Ok(snapshot("late")));
         assert!(
             current.answer.try_recv().is_err(),
             "a late answer is dropped, not given to the next request"
         );
 
-        panes.deliver(
+        panes.answer(
             PaneId(0),
             only_ticket(&panes, PaneId(0)),
-            snapshot("current"),
+            Ok(snapshot("current")),
         );
         assert_eq!(
             text(
@@ -657,7 +654,7 @@ mod tests {
 
         // No request outstanding: this must not panic, grow a map, or be
         // handed to the next caller as a stale answer.
-        panes.deliver(PaneId(0), Ticket::new(u64::MAX), snapshot("stale"));
+        panes.answer(PaneId(0), Ticket::new(u64::MAX), Ok(snapshot("stale")));
 
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())

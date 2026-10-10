@@ -648,7 +648,7 @@ impl TerminalView {
             // changes, so neither asks for a frame.
             Effect::DeliverHistory { ticket, snapshot } => {
                 if let Some(link) = &self.observation {
-                    link.panes.deliver(link.pane, ticket, snapshot);
+                    link.panes.answer(link.pane, ticket, Ok(snapshot));
                 }
                 false
             }
@@ -656,7 +656,7 @@ impl TerminalView {
             // with the reason, rather than leaving it to wait out the deadline.
             Effect::FailRequest { ticket, reason } => {
                 if let Some(link) = &self.observation {
-                    link.panes.deliver_failure(link.pane, ticket, reason);
+                    link.panes.answer(link.pane, ticket, Err(reason));
                 }
                 false
             }
