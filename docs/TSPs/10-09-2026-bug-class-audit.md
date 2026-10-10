@@ -12728,6 +12728,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 #### Cycle C — BCA-21: small splits can still move
 
+> **Superseded (2026-10-09, after review):** the code, test names and test values in Steps 1–3 below are the first, piecewise draft (`extent < floor * 2.0`, with "splits of 240 px or more behave exactly as before"). That draft pinned 240–280 px splits. What landed is the smooth floor this paragraph describes, `floor.min(extent / 4.0)`: splits of 480 px and wider are unchanged, the 400 px divider tests moved to 800 px, and `a_split_smaller_than_two_floors_moves_within_its_middle_half` became `a_small_split_moves_within_its_middle_half`, joined by `travel_has_no_cliff_where_the_old_rule_changed` and `a_bigger_split_never_travels_less` (the drag and nudge tests kept their names). See drafter note a1 and the PRD's BCA-21 row.
+
 `divider_ratio` (divider.rs:137-146) returns 0.5 for any split with `extent < floor * 2`, so a split under 240 px cannot move at all. The fix is a smooth floor: `min(120 px, extent / 4)`, so a split's travel grows with its size and no split is pinned; splits of 480 px and wider are unchanged. Both the drag (`DividerDrag::ratio_for`, line 313) and the nudge (`nudged_ratio`, line 155) go through `divider_ratio`, so this one change fixes both.
 
 All existing divider tests stay unchanged except `a_split_too_small_for_two_floors_stays_even` (lines 530-536). That test asserts the defect, so the new tests replace it.
