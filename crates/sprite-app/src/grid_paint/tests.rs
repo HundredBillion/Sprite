@@ -747,6 +747,54 @@ fn shaping_happens_only_for_cells_whose_drawn_text_changed(cx: &mut gpui::TestAp
     );
 }
 
+/// Hidden text has no ink to draw. In the text half of a split pass its
+/// ground is not painted and an image may lie beneath, so even a glyph inked
+/// in that ground's colour would show; it is drawn as a blank instead, which
+/// also keeps it away from the text system.
+#[test]
+fn a_hidden_cell_is_drawn_as_a_blank_whatever_it_holds() {
+    assert_eq!(glyph_kind(&one_cell_row(|_| {})[0]), GlyphKind::Text);
+    for text in ["a", "\u{2588}", "\u{2500}", "e\u{301}"] {
+        let row = one_cell_row(|cell| {
+            cell.text = text.into();
+            cell.style.invisible = true;
+        });
+        assert_eq!(glyph_kind(&row[0]), GlyphKind::Blank, "{text:?}");
+    }
+    // Its decorations would show the same way, an underline with a colour
+    // of its own most of all.
+    let mut style = decorated(UnderlineStyle::Single, true);
+    style.underline_color = SnapshotColor::Rgb(unpack(0xff0000));
+    style.invisible = true;
+    let drawn = painter(RowPass::Text).draw(&positioned(style), None);
+    assert!(drawn.underline.is_none() && drawn.strikethrough.is_none());
+}
+
+/// A screen of hidden text asks the text system for nothing.
+#[gpui::test]
+fn a_frame_of_hidden_text_shapes_nothing(cx: &mut gpui::TestAppContext) {
+    let mut snapshot = crate::paint_benchmark::fixture();
+    for row in &mut snapshot.rows {
+        for cell in &mut Arc::make_mut(row).cells {
+            cell.style.invisible = true;
+        }
+    }
+    let (probe, cx) = cx.add_window_view(|_, _| ShapeProbe {
+        snapshot,
+        layout: Default::default(),
+        shapes: Default::default(),
+        blink_on: true,
+        font_size: px(14.0),
+    });
+    probe.update(cx, |probe, _| probe.shapes = Rc::default());
+    SHAPED_CELLS.with(|count| count.set(0));
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    assert_eq!(SHAPED_CELLS.with(|count| count.get()), 0);
+}
+
 /// One plain cell reading `a`, with `change` applied, in a row of its own.
 fn one_cell_row(change: impl FnOnce(&mut PositionedCell)) -> Arc<Vec<PositionedCell>> {
     let mut cell = PositionedCell {

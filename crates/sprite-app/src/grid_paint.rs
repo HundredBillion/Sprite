@@ -601,8 +601,9 @@ impl GridPaint {
 
         let foreground = if cell.style.invisible {
             // Hidden text keeps the ground it is shown on, a selection
-            // included, so selecting hidden text still shows the selection,
-            // and inks its glyph in that same colour so none of it shows.
+            // included, so selecting hidden text still shows the selection.
+            // None of it is drawn — its glyph is a blank and it has no
+            // decorations — and its ink is that same ground besides.
             ground
         } else {
             let ink = if inverted { background } else { foreground };
@@ -617,13 +618,20 @@ impl GridPaint {
                 ink
             }
         };
-        let (underline, strikethrough) = decorations(
-            &cell.style,
-            foreground,
-            self.default_fg,
-            self.palette.as_deref(),
-            self.cell_height,
-        );
+        // Hidden text has no decorations either: in the text half of a split
+        // its ground is not painted, so a line in that colour would show over
+        // an image, and an underline may have a colour of its own.
+        let (underline, strikethrough) = if cell.style.invisible {
+            (None, None)
+        } else {
+            decorations(
+                &cell.style,
+                foreground,
+                self.default_fg,
+                self.palette.as_deref(),
+                self.cell_height,
+            )
+        };
         Drawn {
             background: fill,
             foreground,
@@ -879,8 +887,11 @@ fn blank_glyph(text: &str) -> bool {
 /// text system.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum GlyphKind {
-    /// No ink. Shaping a blank costs the same as shaping a letter, and most
-    /// of a terminal is blank.
+    /// No ink: blank text, and hidden text whatever it holds. Shaping a
+    /// blank costs the same as shaping a letter, and most of a terminal is
+    /// blank. Hidden text is not inked even in its own ground's colour,
+    /// because the text half of a split paints no ground and an image may
+    /// lie beneath.
     Blank,
     /// A block element, drawn as geometry against the cell's own snapped
     /// edges, never shaped: a glyph's ink is as wide as the font's advance,
@@ -896,7 +907,7 @@ pub(crate) enum GlyphKind {
 }
 
 pub(crate) fn glyph_kind(cell: &PositionedCell) -> GlyphKind {
-    if blank_glyph(&cell.text) {
+    if cell.style.invisible || blank_glyph(&cell.text) {
         return GlyphKind::Blank;
     }
     let mut chars = cell.text.chars();
