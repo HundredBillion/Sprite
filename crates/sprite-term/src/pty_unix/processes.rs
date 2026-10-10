@@ -16,6 +16,9 @@ pub(crate) struct SessionProcesses {
     leader_birth: Option<u64>,
     own_group: i32,
     retired: bool,
+    /// The groups the latest step's signal has reached, so a step retried
+    /// after a partial attempt reaches only the ones it missed.
+    reached: Option<(GroupSignal, HashSet<i32>)>,
 }
 
 impl SessionProcesses {
@@ -36,6 +39,7 @@ impl SessionProcesses {
             leader_birth: leader.map(|p| p.birth),
             own_group: getpgrp().as_raw(),
             retired: false,
+            reached: None,
         })
     }
 
@@ -77,17 +81,26 @@ impl SessionProcesses {
     /// Signals every owned group a fresh scan finds, after rereading each
     /// member's identity.
     ///
+    /// A hangup or TERM reaches each group once: when an attempt was
+    /// partial and the same step is tried again, the groups it already
+    /// reached are passed over, because a program that reloads on HUP would
+    /// otherwise reload on every pass. KILL is sent to every group on every
+    /// attempt, as escalation repeats it until the scope is empty.
+    ///
     /// Returns whether the attempt was complete. `false` means the scan, or a
     /// member's reread, could not finish, so someone who should have received
     /// this signal may not have; escalation must not count it as delivered.
     pub(crate) fn signal(&mut self, signal: &GroupSignal) -> bool {
         let members = self.members();
-        self.signal_members(members, read_process, |group| signal_group(group, signal))
+        self.signal_members(signal, members, read_process, |group| {
+            signal_group(group, signal)
+        })
     }
 
     /// The decision half of `signal`, free of the platform's process table.
     fn signal_members(
-        &self,
+        &mut self,
+        signal: &GroupSignal,
         members: Result<Vec<Process>, ()>,
         mut reread: impl FnMut(i32) -> Result<Option<Process>, ()>,
         mut send: impl FnMut(i32),
@@ -95,7 +108,10 @@ impl SessionProcesses {
         let Ok(members) = members else {
             return false;
         };
-        let mut signalled = HashSet::new();
+        let mut signalled = match self.reached.take() {
+            Some((step, reached)) if step == *signal && step != GroupSignal::Kill => reached,
+            _ => HashSet::new(),
+        };
         let mut unreadable = HashSet::new();
         for member in members {
             if signalled.contains(&member.group) {
@@ -114,7 +130,9 @@ impl SessionProcesses {
                 }
             }
         }
-        unreadable.iter().all(|group| signalled.contains(group))
+        let complete = unreadable.iter().all(|group| signalled.contains(group));
+        self.reached = Some((*signal, signalled));
+        complete
     }
 
     pub(crate) fn is_alive(&mut self) -> bool {
@@ -353,6 +371,7 @@ mod tests {
             leader_birth: Some(1),
             own_group: 7,
             retired: false,
+            reached: None,
         };
         let member = Process {
             pid: 43,
@@ -405,6 +424,7 @@ mod tests {
             leader_birth: Some(1),
             own_group: 7,
             retired: false,
+            reached: None,
         };
         let member = Process {
             pid: 43,
@@ -479,11 +499,12 @@ mod tests {
 
     #[test]
     fn a_signal_attempt_skips_vanished_members_and_reports_unreached_ones() {
-        let scope = SessionProcesses {
+        let mut scope = SessionProcesses {
             session: 42,
             leader_birth: Some(1),
             own_group: 7,
             retired: false,
+            reached: None,
         };
         let gone = Process {
             pid: 43,
@@ -510,6 +531,7 @@ mod tests {
         let mut sent = Vec::new();
         assert!(
             scope.signal_members(
+                &GroupSignal::Kill,
                 Ok(vec![gone, present]),
                 |pid| Ok((pid == present.pid).then_some(present)),
                 |group| sent.push(group),
@@ -519,12 +541,18 @@ mod tests {
         assert_eq!(sent, vec![44]);
 
         let mut sent = Vec::new();
-        assert!(!scope.signal_members(Err(()), |_| unreachable!(), |group| sent.push(group)));
+        assert!(!scope.signal_members(
+            &GroupSignal::Kill,
+            Err(()),
+            |_| unreachable!(),
+            |group| sent.push(group)
+        ));
         assert!(sent.is_empty(), "an incomplete scan signals nobody");
 
         let mut sent = Vec::new();
         assert!(
             !scope.signal_members(
+                &GroupSignal::Kill,
                 Ok(vec![gone, present]),
                 |pid| if pid == gone.pid {
                     Err(())
@@ -544,6 +572,7 @@ mod tests {
         let mut sent = Vec::new();
         assert!(
             scope.signal_members(
+                &GroupSignal::Kill,
                 Ok(vec![sibling, present]),
                 |pid| if pid == sibling.pid {
                     Err(())
@@ -555,6 +584,73 @@ mod tests {
             "an unreadable member whose group was signalled through another was reached"
         );
         assert_eq!(sent, vec![44]);
+    }
+    /// A step retried after a partial attempt reaches only the groups it
+    /// missed: a program that reloads on HUP must not be told to reload on
+    /// every pass. The next step starts afresh, and KILL repeats until the
+    /// scope is empty.
+    #[test]
+    fn a_retried_step_signals_only_the_groups_it_has_not_reached() {
+        let mut scope = SessionProcesses {
+            session: 42,
+            leader_birth: Some(1),
+            own_group: 7,
+            retired: false,
+            reached: None,
+        };
+        let first = Process {
+            pid: 43,
+            group: 43,
+            session: 42,
+            birth: 2,
+            live: true,
+        };
+        let second = Process {
+            pid: 44,
+            group: 44,
+            session: 42,
+            birth: 3,
+            live: true,
+        };
+        let readable = |pid| Ok(Some(if pid == first.pid { first } else { second }));
+        let attempt = |scope: &mut SessionProcesses, signal, second_readable: bool| {
+            let mut sent = Vec::new();
+            let complete = scope.signal_members(
+                &signal,
+                Ok(vec![first, second]),
+                |pid| {
+                    if pid == second.pid && !second_readable {
+                        Err(())
+                    } else {
+                        readable(pid)
+                    }
+                },
+                |group| sent.push(group),
+            );
+            (complete, sent)
+        };
+
+        assert_eq!(
+            attempt(&mut scope, GroupSignal::Hangup, false),
+            (false, vec![43])
+        );
+        assert_eq!(
+            attempt(&mut scope, GroupSignal::Hangup, true),
+            (true, vec![44]),
+            "the group already hung up is not hung up again"
+        );
+        assert_eq!(
+            attempt(&mut scope, GroupSignal::Terminate, true),
+            (true, vec![43, 44])
+        );
+        assert_eq!(
+            attempt(&mut scope, GroupSignal::Kill, true),
+            (true, vec![43, 44])
+        );
+        assert_eq!(
+            attempt(&mut scope, GroupSignal::Kill, true),
+            (true, vec![43, 44])
+        );
     }
     #[test]
     fn changed_leader_identity_retires_scope_and_unknown_identity_stays_pending() {
@@ -570,6 +666,7 @@ mod tests {
             leader_birth: None,
             own_group: 7,
             retired: false,
+            reached: None,
         };
         assert!(scope.select(Ok(vec![leader])).is_err());
         assert!(!scope.retired);

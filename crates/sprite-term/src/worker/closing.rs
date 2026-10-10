@@ -24,7 +24,8 @@ const CLOSING_SLICE: Duration = Duration::from_millis(50);
 /// honoured a politer request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Escalation {
-    /// The single hangup has not reached the session yet.
+    /// The hangup has not reached every group of the session yet. Each
+    /// group is hung up once, however many attempts that takes.
     Hangup,
     /// The hangup was attempted; TERM is owed two seconds after a request.
     Terminate,
