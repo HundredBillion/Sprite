@@ -2,12 +2,10 @@ use super::*;
 
 /// An error that belongs to no request must not answer one.
 ///
-/// History answers used to be paired with waiting requests by arrival order,
-/// and every error failed the oldest waiter. A selection that could not be
-/// resolved, made while two observers waited, therefore failed the second
-/// observer with the selection's error and threw its real answer away. Each
-/// request now carries a ticket, so the error reaches only the status line
-/// and each observer receives the answer to its own question.
+/// A selection that cannot be resolved, made while two observers wait, raises
+/// an error that names neither of them. Each request carries a ticket, so the
+/// error reaches only the status line and each observer receives the answer
+/// to its own question, neither failed by the error nor given the other's.
 #[gpui::test]
 fn an_unrelated_error_neither_fails_nor_shifts_waiting_history_requests(
     cx: &mut gpui::TestAppContext,

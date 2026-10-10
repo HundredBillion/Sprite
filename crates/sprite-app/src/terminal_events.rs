@@ -279,9 +279,7 @@ pub(crate) mod tests {
     }
 
     /// A general error names no request, so it can only be reported. Failing
-    /// a waiter with it would hand one request the answer to nothing, and,
-    /// while answers were paired by arrival order, shift every later answer
-    /// onto the wrong request.
+    /// a waiter with it would hand one request the answer to nothing.
     #[test]
     fn an_error_is_reported_and_answers_no_request() {
         let raised = effects(TerminalEvent::Error(error("select", "broke")));
