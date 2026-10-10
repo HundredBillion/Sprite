@@ -318,23 +318,16 @@ mod tests {
         if std::env::var_os("SPRITE_OBSERVATION_RELOAD_TEST_CHILD").is_none() {
             let directory = std::env::temp_dir().join(format!("sp-r-{:x}", std::process::id()));
             std::fs::create_dir_all(&directory).unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "workspace::reload::tests::reload_reconciles_observation_endpoint_and_revokes_old_credentials", "--nocapture"])
-                .env("SPRITE_OBSERVATION_RELOAD_TEST_CHILD", "1")
-                .env("XDG_RUNTIME_DIR", &directory)
-                .env("TMPDIR", &directory)
-                .output().unwrap();
+            crate::test_child::run_child_test(
+                "workspace::reload::tests::reload_reconciles_observation_endpoint_and_revokes_old_credentials",
+                &[
+                    ("SPRITE_OBSERVATION_RELOAD_TEST_CHILD", "1".as_ref()),
+                    ("XDG_RUNTIME_DIR", directory.as_os_str()),
+                    ("TMPDIR", directory.as_os_str()),
+                ],
+                "the reload subprocess",
+            );
             std::fs::remove_dir_all(directory).unwrap();
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-                "reload subprocess must run its exact test"
-            );
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
             return;
         }
         use std::io::{Read, Write};
@@ -727,26 +720,16 @@ mod tests {
         if std::env::var_os("SPRITE_OBSERVATION_EXISTING_PANES_TEST_CHILD").is_none() {
             let directory = std::env::temp_dir().join(format!("sp-e-{:x}", std::process::id()));
             std::fs::create_dir_all(&directory).unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "workspace::reload::tests::panes_opened_while_observation_was_off_are_observable_once_reload_turns_it_on", "--nocapture"])
-                .env("SPRITE_OBSERVATION_EXISTING_PANES_TEST_CHILD", "1")
-                .env("XDG_RUNTIME_DIR", &directory)
-                .env("TMPDIR", &directory)
-                .output()
-                .unwrap();
+            crate::test_child::run_child_test(
+                "workspace::reload::tests::panes_opened_while_observation_was_off_are_observable_once_reload_turns_it_on",
+                &[
+                    ("SPRITE_OBSERVATION_EXISTING_PANES_TEST_CHILD", "1".as_ref()),
+                    ("XDG_RUNTIME_DIR", directory.as_os_str()),
+                    ("TMPDIR", directory.as_os_str()),
+                ],
+                "the existing-panes subprocess",
+            );
             std::fs::remove_dir_all(directory).unwrap();
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-                "the subprocess must run and pass its exact test\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
             return;
         }
         use std::io::{Read, Write};

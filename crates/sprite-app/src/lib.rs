@@ -25,6 +25,8 @@ mod terminal_view;
 #[cfg(test)]
 mod test_blocking_wait;
 #[cfg(test)]
+mod test_child;
+#[cfg(test)]
 mod test_event_pressure;
 mod tokens;
 mod workspace;

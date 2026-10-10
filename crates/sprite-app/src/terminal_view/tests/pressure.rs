@@ -2,35 +2,11 @@ use super::*;
 
 #[test]
 fn settings_callback_recovers_latest_values_after_real_event_pressure() {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "terminal_view::tests::pressure::settings_callback_pressure_child",
-            "--nocapture",
-        ])
-        .env("SPRITE_SETTINGS_PRESSURE_CHILD", "1")
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                status.success(),
-                "actual GPUI callback regression failed: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("actual GPUI settings callback or recovery stalled");
-        }
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
-    }
+    crate::test_child::run_child_test(
+        "terminal_view::tests::pressure::settings_callback_pressure_child",
+        &[("SPRITE_SETTINGS_PRESSURE_CHILD", "1".as_ref())],
+        "the GPUI settings callback and its recovery",
+    );
 }
 
 #[gpui::test]
@@ -189,35 +165,11 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
 
 #[test]
 fn focus_refused_under_a_full_queue_is_delivered_once_admission_recovers() {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "terminal_view::tests::pressure::focus_admission_pressure_child",
-            "--nocapture",
-        ])
-        .env("SPRITE_FOCUS_PRESSURE_CHILD", "1")
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                status.success(),
-                "focus admission regression failed: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("focus admission recovery stalled");
-        }
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
-    }
+    crate::test_child::run_child_test(
+        "terminal_view::tests::pressure::focus_admission_pressure_child",
+        &[("SPRITE_FOCUS_PRESSURE_CHILD", "1".as_ref())],
+        "focus admission recovery",
+    );
 }
 
 /// Runs only inside `focus_refused_under_a_full_queue_is_delivered_once_admission_recovers`.
