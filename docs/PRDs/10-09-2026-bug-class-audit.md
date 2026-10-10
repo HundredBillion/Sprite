@@ -102,7 +102,9 @@ reach programs.
   A `Focus` refused by a full queue is retained as the latest desired value
   and resubmitted when admission recovers (Command Admission), never dropped.
 - R-C4.2 The same state drives OSC 52 policy, focus reporting, cursor blinking
-  (focused only, R-R2) and a hollow, steady cursor in unfocused panes.
+  (focused only, R-R2) and a hollow, steady cursor in unfocused panes. The
+  view also drops a child's OSC 52 clipboard write that lands after the pane
+  lost Pane Focus; the user's own copy is not gated.
 
 ### C5. Untrusted plugin input makes the UI thread block or do unbounded work (BCA-03, BCA-09, BCA-18)
 
@@ -184,7 +186,7 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 | BCA-12 | Faint (SGR 2) is recorded but never drawn. | Faint foreground draws at 50% alpha (Ghostty's default `faint-opacity`). |
 | BCA-13 | Cursor on a wide character's tail column matches no cell and disappears. | The snapshot maps `at_wide_tail` to the lead column; the cursor is drawn over the wide cell, which already spans two columns. |
 | BCA-14 | Hover link re-requested on every snapshot; every reply notifies. | Request only when the hovered cell or that row's content changes; notify only when the result changes. |
-| BCA-17 | Virtual-list rows keyed by index; press and release can hit different rows. | Row element ids derive from the row key. |
+| BCA-17 | Virtual-list rows keyed by index; press and release can hit different rows. | Row element ids derive from the row key. Element-Surface click ids follow the event name the element sends, numbered among elements sending the same name, not its tree position. |
 | BCA-19 | Config reload resets font zoom and reports a font change. | Zoom is held separately from `settings.font.size`; reload diffs file values and keeps zoom. |
 | BCA-20 | An unreadable explicit `--config` silently uses defaults. | An explicit path that cannot be read prints the same complaint reload uses to stderr, then continues with defaults. Discovery of an absent default file stays silent. |
 | BCA-21 | Splits smaller than twice the floor snap to 0.5 and cannot move. | The floor is `min(120 px, extent / 4)`, so a split's travel grows with its size and no split is pinned; splits of 480 px and wider are unchanged. |
@@ -193,7 +195,7 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 | BCA-25 | PNG scratch buffer grows to the largest image and never shrinks. | The scratch buffer is released after each decode. |
 | BCA-26 | Selection anchor is re-resolved in viewport space on each drag event, so it drifts while output scrolls. | The press that starts a selection gesture is marked as the start; the worker keeps the anchor as a libghostty `TrackedGridRef` for the rest of the gesture, so it follows its content through scrolling and scrollback eviction. If the anchored content is evicted, the selection is cleared rather than re-anchored elsewhere. The gesture starts with a new `BeginSelection { anchor }` command sent on press. Known gap: with zero scrollback libghostty rotates rows instead of evicting a page, so loss is never reported and the anchor can move to the next line. |
 | BCA-27 | On Darwin a member dying mid-scan aborts the scan, yet escalation advances, consuming TERM and the single HUP. | A vanished member is skipped; escalation advances only after a signal was actually attempted. |
-| BCA-28 | Invisible attribute applied before selection inversion; selected hidden text shows no highlight. | Selected hidden cells show the selection background; glyphs stay hidden. |
+| BCA-28 | Invisible attribute applied before selection inversion; selected hidden text shows no highlight. | Selected hidden cells show the selection background; glyphs stay hidden. Hidden cells carry no decorations and are never shaped. |
 | BCA-30 | Kitty placeholder tiles are fractionally positioned layout nodes and can seam. | Tiles snap to the same device-pixel grid as cells. |
 
 ## Pane cleanup off the shared executor (BCA-32)
@@ -230,9 +232,12 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
   the record says timing was not measured; no speed-up is claimed without it.
   (Established while planning: GPUI's text systems are crate-private and the
   test platform's is a no-op, so shaping is counted, not timed.) Paint
-  allocation budgets are re-frozen by the documented 30-sample procedure,
-  because layout now allocates once per non-ASCII cell while paint stops
-  allocating per glyph per frame.
+  allocation budgets are re-frozen on the final code by the documented
+  30-sample procedure. A laid-out cell keeps its compact text and the text
+  system's string is built only on a shape-cache miss, so the measured
+  preparation allocates as it did before this work while paint stops
+  allocating per glyph per frame. The re-freeze replaces budgets raised for
+  an earlier draft that built the string at layout.
 - Before the PR: `cargo test --workspace --locked --offline`, all-target
   `clippy -D warnings`, `cargo fmt --check`. Native macOS desktop behaviour that
   CI cannot run is listed as unexecuted, not claimed.
@@ -242,6 +247,10 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 
 ## Grilling decisions (2026-10-09)
 
+- 2026-10-09: after the final review, the app drops a child's OSC 52 write
+  that lands after Pane Focus is lost (R-C4.2), hidden cells carry no
+  decorations and are never shaped (BCA-28), and element-Surface click ids
+  follow the event name rather than tree position (BCA-17).
 - 2026-10-09: R-R1 revised after whole-branch review — the text-system string
   is built on a shape-cache miss rather than at row layout, removing a
   per-non-ASCII-cell allocation.
