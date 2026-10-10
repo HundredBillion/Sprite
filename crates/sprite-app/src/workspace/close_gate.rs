@@ -143,8 +143,8 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
-        if !self.may_close(CloseScope::Pane, cx) {
+    pub(super) fn close_focused_pane(&mut self, is_held: bool, cx: &mut Context<Self>) {
+        if !self.may_close(CloseScope::Pane, is_held, cx) {
             return;
         }
         let Some(view) = self.tabs.close_focused_pane() else {
@@ -167,8 +167,8 @@ impl Workspace {
             cx.notify();
         }
     }
-    pub(super) fn close_active_tab(&mut self, cx: &mut Context<Self>) {
-        if !self.may_close(CloseScope::Tab, cx) {
+    pub(super) fn close_active_tab(&mut self, is_held: bool, cx: &mut Context<Self>) {
+        if !self.may_close(CloseScope::Tab, is_held, cx) {
             return;
         }
         let Some(tab) = self.tabs.active_tab() else {
@@ -188,7 +188,8 @@ impl Workspace {
     /// Public because the close handler lives in the `sprite` binary rather
     /// than in this library. `CloseScope` stays private.
     pub fn confirm_close(&mut self, cx: &mut Context<Self>) -> bool {
-        self.may_close(CloseScope::Window, cx)
+        // A click is never held.
+        self.may_close(CloseScope::Window, false, cx)
     }
     /// Keeps the native window alive until pane cleanup has finished.
     pub fn close_window(&mut self, cx: &mut Context<Self>) -> bool {
@@ -199,8 +200,8 @@ impl Workspace {
     }
 
     /// Applies the same confirmation and cleanup to the platform quit shortcut.
-    pub(super) fn quit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.may_close(CloseScope::Quit, cx) {
+    pub(super) fn quit(&mut self, is_held: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.may_close(CloseScope::Quit, is_held, cx) {
             self.shutdown_and_quit(cx);
         }
     }
@@ -211,15 +212,21 @@ impl Workspace {
     /// ceremony; one running a program asks, and the same gesture again
     /// answers. A pane whose state cannot be determined closes too — a question
     /// nobody can ever resolve is one people learn to dismiss unread.
-    pub(super) fn may_close(&mut self, scope: CloseScope, cx: &mut Context<Self>) -> bool {
+    pub(super) fn may_close(
+        &mut self,
+        scope: CloseScope,
+        is_held: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.stopping {
             return false;
         }
-        // Every caller is a fresh gesture: `key_down` drops a held key's
-        // repeats for every action that does not repeat, and a click is never
-        // held.
+        // `key_down` already drops a held key's repeats for the close
+        // actions, which do not repeat. The flag still comes through, so the
+        // rule that a held key never answers lives in `Confirmation` alone
+        // rather than in every route a close can arrive by.
         let confirmed = match &mut self.mode {
-            Mode::ConfirmingClose(pending) => pending.confirmation.answer(&scope, false),
+            Mode::ConfirmingClose(pending) => pending.confirmation.answer(&scope, is_held),
             _ => false,
         };
         let running = if confirmed {
@@ -611,9 +618,9 @@ mod tests {
     fn last_pane_waits_for_prior_and_final_cleanup_before_quit(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         let (completed, gates) = gated_panes(&workspace, cx);
-        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
         assert!(completed.lock().unwrap().is_empty());
-        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
         assert_eq!(
             QUIT_REQUESTS.with(|requests| requests.get()),
             0,
@@ -639,7 +646,7 @@ mod tests {
     ) {
         let (workspace, cx) = test_workspace(cx);
         let (completed, gates) = gated_panes(&workspace, cx);
-        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
         assert!(
             !workspace.update(cx, |workspace, cx| workspace.close_window(cx)),
             "native close released the last window before cleanup"
@@ -662,14 +669,18 @@ mod tests {
     ) {
         let (workspace, cx) = test_workspace(cx);
         let (completed, gates) = gated_panes(&workspace, cx);
-        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
-        workspace.update_in(cx, |workspace, window, cx| workspace.quit(window, cx));
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.quit(false, window, cx)
+        });
         assert_eq!(
             cx.windows().len(),
             1,
             "shortcut removed the last window before cleanup"
         );
-        workspace.update_in(cx, |workspace, window, cx| workspace.quit(window, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.quit(false, window, cx)
+        });
         cx.run_until_parked();
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
         release(&workspace, cx, &gates, 1);
@@ -684,7 +695,7 @@ mod tests {
     fn waiting_for_shutdown_refuses_new_tabs_and_splits(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         let (_completed, gates) = gated_panes(&workspace, cx);
-        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
         workspace.update(cx, |workspace, cx| workspace.close_window(cx));
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_tab(window, cx);
@@ -738,7 +749,7 @@ mod tests {
     fn completed_removed_cleanup_is_pruned_before_shutdown(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         let (completed, gates) = gated_panes(&workspace, cx);
-        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+        workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
         release(&workspace, cx, &gates, 0);
         assert_eq!(*completed.lock().unwrap(), vec![PaneId(0)]);
         let cleanups = workspace.update(cx, |workspace, cx| workspace.begin_shutdown(cx));

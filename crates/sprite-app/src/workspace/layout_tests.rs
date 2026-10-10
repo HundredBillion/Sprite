@@ -109,7 +109,7 @@ fn layout_mutations_publish_only_changed_observation_geometry(cx: &mut gpui::Tes
         workspace.close_exited_pane(background.0, background.1, cx)
     });
     assert_eq!(publications(&workspace, cx), 8);
-    workspace.update(cx, |workspace, cx| workspace.close_active_tab(cx));
+    workspace.update(cx, |workspace, cx| workspace.close_active_tab(false, cx));
     assert_eq!(publications(&workspace, cx), 9);
     workspace.read_with(cx, |workspace, _| {
         assert_eq!(workspace.placements.len(), 1);
@@ -125,7 +125,7 @@ fn layout_mutations_publish_only_changed_observation_geometry(cx: &mut gpui::Tes
         9,
         "reenabling retains the current registry layout"
     );
-    workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+    workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
     assert_eq!(publications(&workspace, cx), 10);
     workspace.read_with(cx, |workspace, _| {
         assert!(workspace.placements.is_empty());

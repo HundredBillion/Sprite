@@ -253,13 +253,13 @@ impl Workspace {
             WorkspaceAction::SplitDown => {
                 self.split(Orientation::Vertical, window, cx);
             }
-            WorkspaceAction::ClosePane => self.close_focused_pane(cx),
+            WorkspaceAction::ClosePane => self.close_focused_pane(event.is_held, cx),
             WorkspaceAction::FontLarger => self.adjust_font(1.0, cx),
             WorkspaceAction::FontSmaller => self.adjust_font(-1.0, cx),
             WorkspaceAction::FontReset => self.reset_font(cx),
             WorkspaceAction::NewTab => self.open_tab(window, cx),
-            WorkspaceAction::CloseTab => self.close_active_tab(cx),
-            WorkspaceAction::Quit => self.quit(window, cx),
+            WorkspaceAction::CloseTab => self.close_active_tab(event.is_held, cx),
+            WorkspaceAction::Quit => self.quit(event.is_held, window, cx),
             WorkspaceAction::RenameTab => self.begin_rename(cx),
             WorkspaceAction::NextTab => self.switch_tab(true, cx),
             WorkspaceAction::PreviousTab => self.switch_tab(false, cx),
@@ -320,6 +320,33 @@ mod tests {
         cx.simulate_event(KeyDownEvent {
             keystroke,
             is_held: true,
+        });
+    }
+
+    /// A held repeat that reaches a close never answers its question,
+    /// whatever route it arrives by: the auto-repeat is the first press
+    /// still going, not a second decision.
+    #[gpui::test]
+    fn a_held_repeat_reaching_a_close_does_not_confirm_it(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        busy_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                !workspace.may_close(CloseScope::Pane, false, cx),
+                "a busy pane asks first"
+            );
+            assert!(
+                !workspace.may_close(CloseScope::Pane, true, cx),
+                "a held repeat does not answer"
+            );
+            assert!(
+                matches!(workspace.mode, Mode::ConfirmingClose(_)),
+                "the question is still asked"
+            );
+            assert!(
+                workspace.may_close(CloseScope::Pane, false, cx),
+                "a fresh press answers it"
+            );
         });
     }
 
@@ -584,7 +611,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-shift-q");
         draw_workspace(cx);
         cx.update(|window, _| assert!(second_tab.is_focused(window)));
-        workspace.update(cx, |workspace, cx| workspace.close_active_tab(cx));
+        workspace.update(cx, |workspace, cx| workspace.close_active_tab(false, cx));
         draw_workspace(cx);
         workspace.read_with(cx, |workspace, _| {
             assert!(workspace.tabs.active().is_none());
@@ -666,13 +693,13 @@ mod tests {
             workspace.begin_divider_drag(placed, 400.0, cx);
             assert!(matches!(workspace.mode, Mode::DraggingDivider(_)));
             assert!(workspace.mode.renaming().is_none());
-            assert!(!workspace.may_close(CloseScope::Pane, cx));
+            assert!(!workspace.may_close(CloseScope::Pane, false, cx));
             assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
             assert!(workspace.mode.divider_drag().is_none());
-            assert!(!workspace.may_close(CloseScope::Tab, cx));
-            assert!(workspace.may_close(CloseScope::Tab, cx));
+            assert!(!workspace.may_close(CloseScope::Tab, false, cx));
+            assert!(workspace.may_close(CloseScope::Tab, false, cx));
             assert!(matches!(workspace.mode, Mode::Idle));
-            assert!(!workspace.may_close(CloseScope::Pane, cx));
+            assert!(!workspace.may_close(CloseScope::Pane, false, cx));
         });
         draw_workspace(cx);
         cx.simulate_keystrokes("escape");
@@ -692,7 +719,7 @@ mod tests {
         workspace.update(cx, |workspace, cx| {
             workspace.focus_pane(PaneId(0), cx);
             assert!(matches!(workspace.mode, Mode::Idle));
-            assert!(!workspace.may_close(CloseScope::Pane, cx));
+            assert!(!workspace.may_close(CloseScope::Pane, false, cx));
             workspace.dismiss_pending_close(cx);
         });
         cx.simulate_keystrokes("ctrl-shift-w ctrl-shift-w");
