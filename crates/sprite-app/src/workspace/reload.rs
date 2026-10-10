@@ -121,6 +121,20 @@ pub(crate) struct ReloadRequest {
     pub(crate) reply_connection: Option<crate::local_socket::ReplyConnection>,
 }
 
+/// The channel that reload and print requests cross to the GPUI thread on.
+///
+/// It has room for a request from every connection the observation endpoint
+/// serves at once, so handing a request over never blocks: `relay` starts its
+/// bounded wait only after the hand-over, and an endpoint thread waiting for
+/// room in front of a wedged GPUI thread would wait, and hold its slot,
+/// forever.
+pub(crate) fn reload_channel() -> (
+    async_channel::Sender<ReloadRequest>,
+    async_channel::Receiver<ReloadRequest>,
+) {
+    async_channel::bounded(crate::observation::endpoint::MAX_CONNECTIONS)
+}
+
 /// How much longer an asker waits once the window has claimed its request.
 ///
 /// Bounded, because a wedged GPUI thread must not pin an endpoint thread and
@@ -645,6 +659,40 @@ mod tests {
             "{waited:?}"
         );
         assert!(waited < std::time::Duration::from_secs(2), "{waited:?}");
+    }
+
+    /// A wedged window holds up no endpoint thread before that thread's own
+    /// wait has started: every connection the endpoint serves at once can
+    /// hand its request over, and each then gives up within its patience.
+    #[test]
+    fn every_endpoint_connection_hands_its_request_over_while_the_window_is_wedged() {
+        use crate::observation::endpoint::MAX_CONNECTIONS;
+        let (sender, _wedged) = reload_channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        for _ in 0..MAX_CONNECTIONS {
+            let (sender, done) = (sender.clone(), done.clone());
+            std::thread::spawn(move || {
+                let answer = relay(
+                    &sender,
+                    Patience {
+                        answer: std::time::Duration::from_millis(20),
+                        after_claim: std::time::Duration::from_secs(5),
+                    },
+                    |reply| ReloadRequest {
+                        what: ConfigVerb::Print,
+                        reply,
+                        reply_connection: None,
+                    },
+                );
+                let _ = done.send(matches!(answer, Err(RelayError::Timeout)));
+            });
+        }
+        for _ in 0..MAX_CONNECTIONS {
+            let timed_out = finished
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("an asker is still waiting to hand its request over");
+            assert!(timed_out, "nothing answered, so nothing was applied");
+        }
     }
 
     /// Abandoning and claiming exclude each other: a request the asker gave

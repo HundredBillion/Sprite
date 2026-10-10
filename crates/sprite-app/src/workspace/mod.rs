@@ -207,7 +207,7 @@ impl Workspace {
         // The endpoint's threads are not the GPUI thread, and a reload has to
         // touch views. So a request crosses back on a channel and is answered
         // from here, with the endpoint thread waiting on a reply of its own.
-        let (reload_tx, reload_rx) = async_channel::bounded::<ReloadRequest>(1);
+        let (reload_tx, reload_rx) = reload_channel();
         let endpoint = settings
             .pane_observation
             .enabled
