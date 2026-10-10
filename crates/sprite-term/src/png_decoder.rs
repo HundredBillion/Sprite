@@ -103,11 +103,10 @@ impl DecodePng for PngDecoder {
         }
 
         // The buffer must come from libghostty's allocator: it takes ownership
-        // and frees it with the same allocator.
-        let pixels = usize::try_from(info.width)
-            .ok()?
-            .checked_mul(usize::try_from(info.height).ok()?)?;
-        let mut bytes = Bytes::new_with_alloc(alloc, pixels.checked_mul(4)?).ok()?;
+        // and frees it with the same allocator. It holds the four bytes a
+        // pixel already checked against the limit; a frame that does not fill
+        // exactly that many pixels is refused by `widen_to_rgba`.
+        let mut bytes = Bytes::new_with_alloc(alloc, stored).ok()?;
         if !widen_to_rgba(info.color_type, &decoded[..produced], &mut bytes) {
             return None;
         }
