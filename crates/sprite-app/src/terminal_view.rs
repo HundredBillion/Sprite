@@ -79,9 +79,10 @@ pub struct TerminalView {
     fallback_colors: (Rgb, Rgb),
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<sprite_term::ValidTerminalSize>,
-    /// How this pane is reached by observation. `None` for a pane whose
-    /// session never started, for one built outside a window, and once the
-    /// pane has begun shutting down.
+    /// How this pane is reached by observation. Every pane a window opens
+    /// has one; it is `None` for a pane whose session never started, once
+    /// the pane has begun shutting down, and in tests that build a view
+    /// without a window's registry.
     observation: Option<crate::observation::panes::PaneLink>,
     /// What programs have asked this pane to draw beside or over its grid.
     surfaces: SurfaceHost<HostedSurface>,
@@ -643,11 +644,13 @@ impl TerminalView {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 true
             }
+            // Answers go to the observer that asked; nothing on screen
+            // changes, so neither asks for a frame.
             Effect::DeliverHistory { ticket, snapshot } => {
                 if let Some(link) = &self.observation {
                     link.panes.deliver(link.pane, ticket, snapshot);
                 }
-                true
+                false
             }
             // A capture that failed answers the one request it belongs to,
             // with the reason, rather than leaving it to wait out the deadline.
@@ -655,7 +658,7 @@ impl TerminalView {
                 if let Some(link) = &self.observation {
                     link.panes.deliver_failure(link.pane, ticket, reason);
                 }
-                true
+                false
             }
         }
     }

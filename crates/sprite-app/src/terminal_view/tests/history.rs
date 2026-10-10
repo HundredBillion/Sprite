@@ -171,3 +171,28 @@ fn a_capture_waiting_on_a_session_that_ends_fails_at_once(cx: &mut gpui::TestApp
     );
     drop(stand_in);
 }
+
+/// Answering an observer, or telling it the capture failed, changes nothing
+/// on screen, so neither asks for a frame.
+#[gpui::test]
+fn answering_an_observer_asks_for_no_repaint(cx: &mut gpui::TestAppContext) {
+    use crate::terminal_events::Effect;
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+    });
+    view.update(cx, |view, cx| {
+        let delivered = Effect::DeliverHistory {
+            ticket: sprite_term::Ticket::new(1),
+            snapshot: crate::terminal_events::tests::snapshot(),
+        };
+        assert!(!view.apply(delivered, cx), "an answer repaints nothing");
+        let failed = Effect::FailRequest {
+            ticket: sprite_term::Ticket::new(2),
+            reason: "capture failed".to_owned(),
+        };
+        assert!(!view.apply(failed, cx), "a failure repaints nothing");
+    });
+}

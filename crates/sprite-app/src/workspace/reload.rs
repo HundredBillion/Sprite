@@ -222,7 +222,10 @@ impl<Answer> Relayed<Answer> {
     }
 }
 
-/// A reply nobody has claimed or abandoned yet, for a request built by hand.
+/// A reply nobody has claimed or abandoned yet, for a request a test builds
+/// by hand. Only tests may: a reply made this way has no asker that could
+/// abandon it, so production requests always come from `relay`.
+#[cfg(test)]
 impl<Answer> From<std::sync::mpsc::SyncSender<Answer>> for Relayed<Answer> {
     fn from(reply: std::sync::mpsc::SyncSender<Answer>) -> Self {
         Self::waiting(reply).0

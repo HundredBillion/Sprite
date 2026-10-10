@@ -172,7 +172,7 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sprite_term::CellPosition;
 
@@ -404,7 +404,7 @@ mod tests {
         }
     }
 
-    fn snapshot() -> Arc<HistorySnapshot> {
+    pub(crate) fn snapshot() -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 1,
             size: sprite_term::ValidTerminalSize::DEFAULT,
