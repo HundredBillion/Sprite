@@ -400,8 +400,7 @@ pub struct Cell {
 
 #[derive(Clone, Debug, PartialEq)]
 struct TextEntry {
-    text: Arc<str>,
-    paint: gpui::SharedString,
+    text: sprite_term::CellText,
     references: usize,
 }
 
@@ -420,10 +419,11 @@ impl TextPool {
             return id;
         }
         let id = self.free.pop().unwrap_or(self.entries.len() as u32);
+        // Longer text shares the lookup key's allocation, so interning
+        // allocates once whatever the text.
         let text: Arc<str> = text.into();
         let entry = TextEntry {
-            paint: gpui::SharedString::new(Arc::clone(&text)),
-            text: text.clone(),
+            text: Arc::clone(&text).into(),
             references: 1,
         };
         self.ids.insert(text, id);
@@ -443,14 +443,14 @@ impl TextPool {
         let entry = self.entries[id as usize].as_mut().unwrap();
         entry.references -= 1;
         if entry.references == 0 {
-            self.ids.remove(entry.text.as_ref());
+            self.ids.remove(entry.text.as_str());
             self.entries[id as usize] = None;
             self.free.push(id);
         }
     }
 
-    fn text(&self, id: u32) -> &gpui::SharedString {
-        &self.entries[id as usize].as_ref().unwrap().paint
+    fn text(&self, id: u32) -> &sprite_term::CellText {
+        &self.entries[id as usize].as_ref().unwrap().text
     }
 }
 
@@ -935,7 +935,7 @@ mod tests {
         for (id, entry) in grid.texts.entries.iter().enumerate() {
             assert_eq!(entry.as_ref().map_or(0, |entry| entry.references), refs[id]);
             if let Some(entry) = entry {
-                assert_eq!(grid.texts.ids.get(entry.text.as_ref()), Some(&(id as u32)));
+                assert_eq!(grid.texts.ids.get(entry.text.as_str()), Some(&(id as u32)));
             }
         }
         assert!(grid.texts.entries.len() <= usize::from(grid.cols) * usize::from(grid.rows) + 2);

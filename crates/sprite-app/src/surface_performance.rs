@@ -115,12 +115,9 @@ fn surface_allocation_probe() {
         render::render_grid(&mut grid, &Highlights::default(), &metrics, &shapes)
     });
     println!("grid one-row update/render allocations={a} bytes={b}");
-    // Each laid-out cell carries its paint-ready text, which is 8 bytes wider
-    // than the terminal's compact cell text, so the relaid 200-cell row's
-    // buffer is 1,600 bytes larger. Interning the changed cell's text now
-    // shares one string between lookup and paint instead of copying it twice,
-    // which is one allocation fewer.
-    assert!(a <= 8 && b <= 13_000);
+    // Interning the changed cell's text allocates once: the lookup key and the
+    // laid-out cell share the same string.
+    assert!(a <= 8 && b <= 12_000);
     let rows = (0..100_000)
         .map(|i| json!({"id":format!("r{i}"),"text":"shared row text","indent":0,"guides":[]}))
         .collect::<Vec<_>>();

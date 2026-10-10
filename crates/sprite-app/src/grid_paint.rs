@@ -61,7 +61,8 @@ use gpui::{
     rgb,
 };
 use sprite_term::{
-    CellStyle, CursorSnapshot, CursorStyle, RenderSnapshot, Rgb, SnapshotColor, UnderlineStyle,
+    CellStyle, CellText, CursorSnapshot, CursorStyle, RenderSnapshot, Rgb, SnapshotColor,
+    UnderlineStyle,
 };
 
 use crate::block_elements::{block_fill, fill_rects};
@@ -113,7 +114,7 @@ pub(crate) struct ShapeContext {
 /// Everything that makes two cells shape to the same line.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ShapeKey {
-    text: SharedString,
+    text: CellText,
     bold: bool,
     italic: bool,
     /// A hovered link is drawn a pixel larger.
@@ -945,9 +946,15 @@ impl GridPaint {
                 } else {
                     self.font_size
                 };
-                window
-                    .text_system()
-                    .shape_line(cell.text.clone(), font_size, &[run], None)
+                // The text system takes its own string type. Making it here,
+                // only when the pool has no shape for this cell, keeps the copy
+                // off the layout and frame paths.
+                window.text_system().shape_line(
+                    SharedString::new(cell.text.as_str()),
+                    font_size,
+                    &[run],
+                    None,
+                )
             },
         );
 
@@ -1307,6 +1314,36 @@ mod tests {
             let (fresh, _) = PaintBenchmark::new().prepare(Scenario::FirstFrame, split);
             assert_eq!(first.rows, fresh.rows);
             assert_eq!(first.cursor, fresh.cursor);
+        }
+    }
+
+    /// Preparing a frame copies no cell text: a laid-out cell keeps the
+    /// terminal's compact text, and the text system's string is made only
+    /// when a shape is. A quarter of the benchmark fixture's cells are
+    /// non-ASCII, and none of them may cost an allocation, so a frame costs
+    /// only the rows it lays out: each row's vector and handle, plus the
+    /// frame's row list.
+    #[test]
+    fn preparing_a_frame_allocates_nothing_per_cell_text() {
+        use crate::paint_benchmark::{PaintBenchmark, Scenario};
+        use crate::surface_performance::measure;
+
+        for split in [false, true] {
+            let mut fresh = PaintBenchmark::new();
+            let ((), first, _) = measure(|| fresh.run(Scenario::FirstFrame, split));
+            assert!(
+                first <= 122,
+                "first frame (split {split}) allocated {first} times"
+            );
+            for scenario in [Scenario::Hover, Scenario::OneRowChange] {
+                let mut benchmark = PaintBenchmark::new();
+                benchmark.run(Scenario::FirstFrame, split);
+                let ((), allocations, _) = measure(|| benchmark.run(scenario, split));
+                assert!(
+                    allocations <= 3,
+                    "{scenario:?} (split {split}) allocated {allocations} times for one row"
+                );
+            }
         }
     }
 
