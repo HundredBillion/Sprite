@@ -1,16 +1,34 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static TITLE_MEMBERSHIP_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static PLACEMENT_MATCH_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static TITLE_SUBSCRIPTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Workspace {
     pub(super) fn refresh_titles(&mut self, cx: &mut Context<Self>) {
         let all = self.tabs.all_panes();
+        let ids: std::collections::HashSet<_> = all
+            .iter()
+            .map(|(_, _, pane)| {
+                #[cfg(test)]
+                TITLE_MEMBERSHIP_WORK.with(|count| count.set(count.get() + 1));
+                pane.view().entity_id()
+            })
+            .collect();
         self.pane_titles.retain(|id, _| {
-            all.iter()
-                .any(|(_, _, pane)| pane.view().entity_id() == *id)
+            #[cfg(test)]
+            TITLE_MEMBERSHIP_WORK.with(|count| count.set(count.get() + 1));
+            ids.contains(id)
         });
         for (_, _, pane) in all {
             let id = pane.view().entity_id();
             self.pane_titles.entry(id).or_insert_with(|| {
                 let workspace = cx.weak_entity();
+                #[cfg(test)]
+                TITLE_SUBSCRIPTIONS.with(|count| count.set(count.get() + 1));
                 let subscription = pane.subscribe_title(
                     cx,
                     Box::new(move |event, cx| {

@@ -59,3 +59,7 @@ pub use surface::channel::{
 
 #[cfg(test)]
 mod surface_performance;
+
+#[cfg(any(test, feature = "startup-benchmark"))]
+#[doc(hidden)]
+pub mod startup_benchmark;

@@ -49,3 +49,11 @@ gpui = { workspace = true, features = ["font-kit"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+
+[features]
+startup-benchmark = []
+
+[[bin]]
+name = "sprite-startup-bench"
+path = "src/bin/sprite-startup-bench.rs"
+required-features = ["startup-benchmark"]

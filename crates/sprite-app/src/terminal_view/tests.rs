@@ -2,6 +2,8 @@ use super::*;
 
 mod focus;
 mod history;
+mod no_paint;
+mod paint;
 mod paste;
 mod pressure;
 

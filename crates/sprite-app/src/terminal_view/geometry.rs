@@ -165,6 +165,36 @@ mod tests {
         size(px(width), px(height))
     }
 
+    #[gpui::test]
+    fn absent_or_unusable_initial_allocation_keeps_a_valid_spawn_grid(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for allocated in [None, Some(content(0.0, 0.0)), Some(content(1.0, 1.0))] {
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                let (sender, _receiver) = async_channel::unbounded();
+                TerminalView::new_allocated(
+                    Some(vec!["/bin/sh".into(), "-c".into(), "read release".into()]),
+                    crate::config::Settings::default(),
+                    Vec::new(),
+                    None,
+                    PaneExit {
+                        sender,
+                        identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                    },
+                    allocated,
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |view, _| {
+                let size = view.spawn_size.expect("valid fallback starts a session");
+                assert_eq!((size.rows(), size.cols()), (24, 80));
+                assert!(size.cell_width_px() > 0 && size.cell_height_px() > 0);
+                view.begin_shutdown().unwrap().wait().unwrap();
+            });
+        }
+    }
+
     #[test]
     fn the_grid_divides_logical_bounds_and_rounds_down() {
         // 800/8 = 100 columns exactly; 604/16 = 37.75 rows, truncated to 37.

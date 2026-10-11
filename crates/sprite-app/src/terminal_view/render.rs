@@ -291,6 +291,9 @@ impl Render for TerminalView {
         self.close_invalid_owned_surfaces(window, cx);
         self.synchronise_size(window);
 
+        #[cfg(any(test, feature = "startup-benchmark"))]
+        let paint_probe =
+            crate::startup_benchmark::capture(cx.entity_id(), self.bundle.as_deref(), cx);
         let snapshot = self.bundle.as_ref().map(|bundle| bundle.render.as_ref());
         let rows = prepare_rows(&mut self.layout_cache, snapshot, self.hovered_link);
         // The one place the pane's cell, font and colours are read for a frame:
@@ -427,6 +430,8 @@ impl Render for TerminalView {
                     });
                 },
                 move |bounds, (), window, cx| {
+                    #[cfg(any(test, feature = "startup-benchmark"))]
+                    crate::startup_benchmark::painted(paint_probe, window, cx);
                     window.handle_input(
                         &focus_for_input,
                         ElementInputHandler::new(bounds, entity_for_input),

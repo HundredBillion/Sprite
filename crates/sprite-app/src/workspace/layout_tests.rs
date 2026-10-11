@@ -342,3 +342,138 @@ fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
         }
     }
 }
+
+struct CountedPane {
+    focus: FocusHandle,
+    allocations: Vec<Size<Pixels>>,
+}
+impl Focusable for CountedPane {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+impl Render for CountedPane {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+impl gpui::EventEmitter<sprite_pane::TitleChanged> for CountedPane {}
+impl sprite_pane::Pane for CountedPane {
+    type Request = SurfaceRequest;
+    fn title(&self) -> Option<SharedString> {
+        None
+    }
+    fn set_allocated(&mut self, size: Size<Pixels>) {
+        self.allocations.push(size);
+    }
+    fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
+        None
+    }
+    fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
+        None
+    }
+}
+
+fn reconciliation_counts(cx: &mut gpui::TestAppContext) -> Vec<(usize, usize, usize)> {
+    let mut results = Vec::new();
+    for count in [4, 8, 16] {
+        let (workspace, cx) = test_workspace(cx);
+        let mut entities = Vec::new();
+        workspace.update(cx, |workspace, cx| {
+            let mut make = |_, _| {
+                let pane = cx.new(|cx| CountedPane {
+                    focus: cx.focus_handle(),
+                    allocations: Vec::new(),
+                });
+                entities.push(pane.clone());
+                Rc::new(pane) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            };
+            workspace.tabs = Tabs::new(&mut make);
+            for _ in 1..count {
+                workspace.tabs.split(Orientation::Horizontal, &mut make);
+            }
+            workspace.tabs.open(&mut make);
+            for _ in 1..count {
+                workspace.tabs.split(Orientation::Vertical, &mut make);
+            }
+            workspace.refresh_layout(cx);
+        });
+        let subscriptions = TITLE_SUBSCRIPTIONS.with(|work| work.get());
+        let order = workspace.read_with(cx, |workspace, _| {
+            workspace.placements.iter().map(|p| p.0).collect::<Vec<_>>()
+        });
+        TITLE_MEMBERSHIP_WORK.with(|work| work.set(0));
+        PLACEMENT_MATCH_WORK.with(|work| work.set(0));
+        workspace.update(cx, |workspace, cx| workspace.refresh_layout(cx));
+        let title_work = TITLE_MEMBERSHIP_WORK.with(|work| work.get());
+        let placement_work = PLACEMENT_MATCH_WORK.with(|work| work.get());
+        eprintln!(
+            "panes per tab={count}, title membership work={title_work}, placement match work={placement_work}"
+        );
+        results.push((count, title_work, placement_work));
+        assert_eq!(TITLE_SUBSCRIPTIONS.with(|work| work.get()), subscriptions);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.pane_titles.len(), count * 2);
+            assert_eq!(
+                workspace.placements.iter().map(|p| p.0).collect::<Vec<_>>(),
+                order
+            );
+        });
+        for (index, entity) in entities.iter().enumerate() {
+            entity.read_with(cx, |pane, _| {
+                assert_eq!(pane.allocations.len(), usize::from(index >= count))
+            });
+        }
+        entities[0].update(cx, |_, cx| {
+            cx.emit(sprite_pane::TitleChanged(Some("background".into())))
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.pane_titles[&entities[0].entity_id()]
+                    .title
+                    .as_ref()
+                    .map(|title| title.as_ref()),
+                Some("background")
+            );
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.viewport.width += px(100.0);
+            workspace.refresh_layout(cx);
+        });
+        for entity in entities.iter().skip(count) {
+            entity.read_with(cx, |pane, _| assert_eq!(pane.allocations.len(), 2));
+        }
+        let removed = entities.last().unwrap().entity_id();
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs.close_focused_pane();
+            workspace.refresh_layout(cx);
+            assert!(!workspace.pane_titles.contains_key(&removed));
+            assert_eq!(workspace.pane_titles.len(), count * 2 - 1);
+        });
+        assert_eq!(TITLE_SUBSCRIPTIONS.with(|work| work.get()), subscriptions);
+    }
+    results
+}
+
+#[gpui::test]
+fn title_membership_reconciliation_scales_linearly(cx: &mut gpui::TestAppContext) {
+    let results = reconciliation_counts(cx);
+    assert!(
+        results
+            .iter()
+            .all(|(panes, titles, _)| *titles <= 4 * panes),
+        "{results:?}"
+    );
+}
+
+#[gpui::test]
+fn placement_matching_scales_linearly(cx: &mut gpui::TestAppContext) {
+    let results = reconciliation_counts(cx);
+    assert!(
+        results
+            .iter()
+            .all(|(panes, _, placements)| *placements <= 2 * panes),
+        "{results:?}"
+    );
+}
