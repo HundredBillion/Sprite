@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use sprite_term::{CommandSender, HistoryLines, HistorySnapshot, TerminalCommand, Ticket};
+use sprite_term::{CommandSender, HistoryLines, HistoryRequest, HistorySnapshot, Ticket};
 
 use crate::observation::broker::{PaneAddress, PaneSource, Pending, Withdraw};
 
@@ -49,7 +49,13 @@ struct Entry {
     /// Keyed rather than queued: an answer carries the ticket of the request
     /// it answers, so it can reach only that request. Arrival order, which
     /// any unrelated event emitted in between would shift, plays no part.
-    waiting: HashMap<Ticket, std::sync::mpsc::Sender<Answer>>,
+    waiting: HashMap<Ticket, Waiter>,
+}
+
+struct Waiter {
+    answer: std::sync::mpsc::Sender<Answer>,
+    // Removing a waiter cancels work even if its caller still holds Pending.
+    _request: HistoryRequest,
 }
 
 /// Where a pane sits in the window, as the schema reports it.
@@ -145,7 +151,9 @@ impl WindowPanes {
             .unwrap_or_else(|error| error.into_inner());
         if let Some(entry) = entries.remove(&pane) {
             for waiter in entry.waiting.into_values() {
-                let _ = waiter.send(Err("the pane closed before it answered".to_owned()));
+                let _ = waiter
+                    .answer
+                    .send(Err("the pane closed before it answered".to_owned()));
             }
         }
     }
@@ -162,7 +170,7 @@ impl WindowPanes {
             .unwrap_or_else(|error| error.into_inner());
         if let Some(entry) = entries.get_mut(&pane) {
             for (_, waiter) in entry.waiting.drain() {
-                let _ = waiter.send(Err(reason.clone()));
+                let _ = waiter.answer.send(Err(reason.clone()));
             }
         }
     }
@@ -187,7 +195,7 @@ impl WindowPanes {
         if let Some(entry) = entries.get_mut(&pane)
             && let Some(waiter) = entry.waiting.remove(&ticket)
         {
-            let _ = waiter.send(answer);
+            let _ = waiter.answer.send(answer);
         }
     }
 }
@@ -235,9 +243,6 @@ impl PaneSource for WindowPanes {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         );
         let (sender, answer) = std::sync::mpsc::channel();
-        // Recorded before the command is sent, so an answer cannot arrive
-        // before there is anyone recorded to receive it.
-        entry.waiting.insert(ticket, sender);
         let address = PaneAddress {
             tab: entry.tab,
             tab_order: entry.placement.tab_order,
@@ -245,13 +250,18 @@ impl PaneSource for WindowPanes {
             rect: entry.placement.rect,
             focused: entry.placement.focused,
         };
-        if let Err(error) = entry
+        let request = entry
             .commands
-            .try_send(TerminalCommand::CaptureHistory { ticket, lines })
-        {
-            entry.waiting.remove(&ticket);
-            return Err(error.to_string());
-        }
+            .request_history(ticket, lines)
+            .map_err(|error| error.to_string())?;
+        // The registry lock prevents delivery before this waiter is recorded.
+        entry.waiting.insert(
+            ticket,
+            Waiter {
+                answer: sender,
+                _request: request,
+            },
+        );
         // A caller that stops waiting takes its ticket back, so the registry
         // holds nothing for a request nobody will read. Weak, so an
         // outstanding request does not keep a closed window's registry alive.
@@ -276,7 +286,8 @@ mod tests {
     use super::*;
     use crate::observation::endpoint::Endpoint;
     use sprite_term::{
-        PaneRow, PromptKind, ScreenKind, SessionConfig, Spawned, TerminalEvent, TerminalSession,
+        PaneRow, PromptKind, ScreenKind, SessionConfig, Spawned, TerminalCommand, TerminalEvent,
+        TerminalSession,
     };
     use std::time::Duration;
 
@@ -345,6 +356,144 @@ mod tests {
 
     fn text(answer: Answer) -> String {
         answer.expect("a snapshot").rows[0].text.to_string()
+    }
+
+    #[test]
+    fn live_worker_history_reaches_its_waiter_and_receiver_drop_cleans_up() {
+        let panes = WindowPanes::new();
+        let mut spawned = session();
+        panes.register(PaneId(0), TabId(0), spawned.session.commands());
+        for drop_receiver in [false, true] {
+            let pending = panes.begin(PaneId(0), HistoryLines::default()).unwrap();
+            let ticket = only_ticket(&panes, PaneId(0));
+            let TerminalEvent::History {
+                ticket: received,
+                snapshot,
+            } = spawned.events.next_blocking().unwrap()
+            else {
+                panic!("expected the worker's history answer");
+            };
+            assert_eq!(received, ticket);
+            let Pending {
+                answer, withdraw, ..
+            } = pending;
+            if drop_receiver {
+                drop(answer);
+                panes.answer(PaneId(0), received, Ok(snapshot));
+            } else {
+                panes.answer(PaneId(0), received, Ok(Arc::clone(&snapshot)));
+                assert!(Arc::ptr_eq(
+                    &answer
+                        .recv_timeout(Duration::from_secs(1))
+                        .unwrap()
+                        .unwrap(),
+                    &snapshot
+                ));
+            }
+            assert!(waiting(&panes, PaneId(0)).is_empty());
+            drop(withdraw);
+        }
+        spawned
+            .session
+            .begin_shutdown()
+            .unwrap()
+            .unwrap()
+            .wait()
+            .unwrap();
+    }
+
+    #[test]
+    fn abandoned_observation_skips_queued_worker_history() {
+        let mut failures = Vec::new();
+        for reason in ["withdraw", "forget", "fail_all", "window_drop"] {
+            let mut spawned = session();
+            let commands = spawned.session.commands();
+            // Fill lossless delivery before the observed request can reach capture.
+            for ticket in (u64::MAX - 33)..u64::MAX {
+                commands
+                    .send(TerminalCommand::CaptureHistory {
+                        ticket: Ticket::new(ticket),
+                        lines: HistoryLines::default(),
+                    })
+                    .unwrap();
+            }
+            let panes = WindowPanes::new();
+            panes.register(PaneId(0), TabId(0), commands.clone());
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let pending = loop {
+                match panes.begin(PaneId(0), HistoryLines::default()) {
+                    Ok(pending) => break pending,
+                    Err(error)
+                        if error.contains("queue is full")
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::yield_now()
+                    }
+                    Err(error) => panic!("history admission: {error}"),
+                }
+            };
+            let abandoned = only_ticket(&panes, PaneId(0));
+            let mut pending = Some(pending);
+            match reason {
+                "withdraw" => {
+                    drop(pending.take());
+                }
+                "forget" => panes.forget(PaneId(0)),
+                "fail_all" => panes.fail_all(PaneId(0), "session ended".into()),
+                "window_drop" => {}
+                _ => unreachable!(),
+            }
+            let panes = if reason == "window_drop" {
+                drop(panes);
+                None
+            } else {
+                Some(panes)
+            };
+            commands
+                .send(TerminalCommand::CaptureHistory {
+                    ticket: Ticket::new(u64::MAX),
+                    lines: HistoryLines::default(),
+                })
+                .unwrap();
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut tickets = Vec::new();
+                while let Ok(event) = spawned.events.next_blocking() {
+                    if let TerminalEvent::History { ticket, .. } = event {
+                        tickets.push(ticket);
+                        if ticket == Ticket::new(u64::MAX) {
+                            break;
+                        }
+                    }
+                }
+                spawned
+                    .session
+                    .begin_shutdown()
+                    .unwrap()
+                    .unwrap()
+                    .wait()
+                    .unwrap();
+                let _ = done.send(tickets);
+            });
+            let tickets = result.recv_timeout(Duration::from_secs(10)).unwrap();
+            if tickets.contains(&abandoned) {
+                failures.push(reason);
+            }
+            assert_eq!(
+                tickets
+                    .iter()
+                    .filter(|ticket| **ticket != abandoned)
+                    .count(),
+                34,
+                "legacy requests remain lossless"
+            );
+            drop(pending);
+            drop(panes);
+        }
+        assert!(
+            failures.is_empty(),
+            "abandoned ticket published after: {failures:?}"
+        );
     }
 
     #[test]

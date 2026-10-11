@@ -94,6 +94,16 @@ fn pump_failure(outcome: PumpOutcome) -> Option<SessionError> {
 /// share one queue so their order is defined.
 pub(crate) enum Message {
     Command(TerminalCommand),
+    HistoryRequest {
+        ticket: crate::Ticket,
+        lines: crate::HistoryLines,
+        cancelled: Arc<AtomicBool>,
+    },
+    #[cfg(test)]
+    HistoryGate {
+        reached: std::sync::mpsc::Sender<usize>,
+        resume: Receiver<()>,
+    },
     /// One chunk of PTY output, carrying one output permit.
     PtyOutput(crate::pty_unix::OutputChunk),
     /// The consumer took a snapshot and is ready for the next one.
@@ -396,6 +406,19 @@ impl Session {
 
     /// Applies one message to the terminal. Capturing is the pass's business.
     fn apply(&mut self, message: Message) -> Flow {
+        let message = match message {
+            Message::HistoryRequest {
+                ticket,
+                lines,
+                cancelled,
+            } => {
+                if cancelled.load(Ordering::SeqCst) {
+                    return Continue(());
+                }
+                Message::Command(TerminalCommand::CaptureHistory { ticket, lines })
+            }
+            other => other,
+        };
         let Self {
             owned:
                 Owned {
@@ -423,6 +446,14 @@ impl Session {
             ..
         } = self;
         match message {
+            Message::HistoryRequest { .. } => {
+                unreachable!("history request normalized before dispatch")
+            }
+            #[cfg(test)]
+            Message::HistoryGate { reached, resume } => {
+                let _ = reached.send(HISTORY_TRAVERSALS.get());
+                let _ = resume.recv_timeout(std::time::Duration::from_secs(10));
+            }
             Message::PtyOutput(chunk) => {
                 // One chunk, one mutation, one generation. What the parser
                 // raised on the way is published when the pass ends.
@@ -719,6 +750,8 @@ impl Session {
                     // belong to one generation rather than a moving target.
                     // Both outcomes carry the ticket, so the answer can only
                     // reach the request that asked.
+                    #[cfg(test)]
+                    HISTORY_TRAVERSALS.set(HISTORY_TRAVERSALS.get() + 1);
                     let foreground = foreground_executable(master.as_ref());
                     match projector.capture_history(
                         pending.generation,
@@ -984,3 +1017,8 @@ mod notice_tests;
 
 #[cfg(test)]
 mod coalescing_tests;
+
+#[cfg(test)]
+thread_local! {
+    static HISTORY_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}

@@ -7,8 +7,8 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::net::Shutdown;
 use std::os::fd::AsFd;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
+use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -211,7 +211,6 @@ impl LocalSocket {
             .mode(0o700)
             .create(&directory)?;
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-        sweep_dead_sockets(&directory);
         let mut name = ObservationKey::generate()?.to_hex();
         name.truncate(policy.filename_hex);
         let socket = directory.join(format!("{name}{}", policy.suffix));
@@ -232,12 +231,18 @@ impl LocalSocket {
                 let handler = Arc::new(handler);
                 move || {
                     let mut next_id = 0;
+                    let mut housekeeping = fs::read_dir(directory).ok();
                     loop {
                         let mut fds = [
                             PollFd::new(cancelled.as_fd(), PollFlags::POLLIN),
                             PollFd::new(listener.as_fd(), PollFlags::POLLIN),
                         ];
-                        match poll(&mut fds, PollTimeout::NONE) {
+                        let timeout = if housekeeping.is_some() {
+                            PollTimeout::ZERO
+                        } else {
+                            PollTimeout::NONE
+                        };
+                        match poll(&mut fds, timeout) {
                             Err(Errno::EINTR) => continue,
                             // A failing `poll` is waited out like a failing
                             // `accept`: only closing the socket ends the loop.
@@ -253,6 +258,17 @@ impl LocalSocket {
                             || !fds[0].revents().unwrap_or_else(PollFlags::empty).is_empty()
                         {
                             break;
+                        }
+                        // One entry per turn keeps accepts and cancellation ahead of cleanup.
+                        if let Some(entries) = housekeeping.as_mut() {
+                            match entries.next() {
+                                Some(Ok(entry)) => sweep_socket_entry(entry),
+                                Some(Err(_)) => {}
+                                None => housekeeping = None,
+                            }
+                        }
+                        if fds[1].revents().unwrap_or_else(PollFlags::empty).is_empty() {
+                            continue;
                         }
                         let stream = match listener.accept() {
                             Ok((stream, _)) => stream,
@@ -480,34 +496,44 @@ fn authenticate(
     Ok((reader, body.to_owned()))
 }
 
-/// Removes socket files in `directory` that nothing is listening on.
-///
-/// A socket with a live window behind it accepts a connection and is left
-/// alone; only one that refuses is removed. That is what makes this safe to run
-/// while other windows are open.
+/// Removes abandoned socket files without entering a live listener's accept queue.
+#[allow(dead_code)] // Retained for endpoint test fixtures; production sweeps incrementally.
 pub(crate) fn sweep_dead_sockets(directory: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "sock") {
-            continue;
-        }
-        // Connecting is the test, and a refusal is the strongest evidence
-        // available rather than proof: a listener that is gone refuses, but so
-        // does a live listener whose accept backlog is full — something a
-        // window that accepts and drops connections never lets happen in
-        // practice. A window that is alive accepts, and is not disturbed by a
-        // connection that is immediately dropped. Any other error — a machine
-        // out of descriptors, a path the socket layer cannot address — proves
-        // nothing, and a live window's socket is worth more than a tidy
-        // directory.
-        if let Err(error) = UnixStream::connect(&path)
-            && error.kind() == std::io::ErrorKind::ConnectionRefused
-        {
-            let _ = fs::remove_file(&path);
-        }
+        sweep_socket_entry(entry);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SWEPT_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn sweep_socket_entry(entry: fs::DirEntry) {
+    #[cfg(test)]
+    SWEPT_ENTRIES.with(|count| count.set(count.get() + 1));
+    let path = entry.path();
+    if path.extension().is_none_or(|extension| extension != "sock")
+        || !entry.file_type().is_ok_and(|kind| kind.is_socket())
+    {
+        return;
+    }
+    let Ok(probe) = UnixDatagram::unbound() else {
+        return;
+    };
+    if probe.set_nonblocking(true).is_err() {
+        return;
+    }
+    // A live stream socket rejects a datagram with EPROTOTYPE before checking its backlog.
+    // Stream probes can instead report ECONNREFUSED for a full live backlog on macOS.
+    // Any error other than a definite refusal leaves the path alone.
+    if let Err(error) = probe.connect(&path)
+        && error.kind() == io::ErrorKind::ConnectionRefused
+    {
+        let _ = fs::remove_file(&path);
     }
 }
 
@@ -600,6 +626,179 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    fn watchdog(test: &str, run: impl FnOnce(&Path)) {
+        const CHILD: &str = "SPRITE_SOCKET_HOUSEKEEPING_CHILD";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            run(Path::new(&directory));
+            return;
+        }
+        let scratch = Scratch::new();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&scratch.0)
+            .unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(CHILD, &scratch.0)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut expired = false;
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                expired = true;
+                child.kill().unwrap();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        println!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !expired,
+            "socket housekeeping exceeded the independent watchdog"
+        );
+        assert!(
+            output.status.success(),
+            "socket housekeeping subprocess failed"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    fn saturated_listener(path: &Path) -> (UnixListener, Vec<UnixStream>) {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        let listener = bind_private(path).unwrap();
+        // SAFETY: the listener owns a valid socket descriptor.
+        assert_eq!(unsafe { nix::libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let mut held = Vec::new();
+        for _ in 0..16 {
+            // SAFETY: socket returns a fresh descriptor, transferred once to UnixStream.
+            let fd = unsafe { nix::libc::socket(nix::libc::AF_UNIX, nix::libc::SOCK_STREAM, 0) };
+            assert!(fd >= 0);
+            let stream = unsafe { UnixStream::from_raw_fd(fd) };
+            stream.set_nonblocking(true).unwrap();
+            // SAFETY: zero is a valid initial sockaddr_un representation.
+            let mut address: nix::libc::sockaddr_un = unsafe { std::mem::zeroed() };
+            address.sun_family = nix::libc::AF_UNIX as _;
+            let bytes = path.as_os_str().as_bytes();
+            assert!(bytes.len() < address.sun_path.len());
+            for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+                *slot = *byte as _;
+            }
+            let length = std::mem::size_of_val(&address) as nix::libc::socklen_t;
+            #[cfg(target_os = "macos")]
+            {
+                address.sun_len = length as _;
+            }
+            // SAFETY: address is initialized and its supplied length matches its allocation.
+            let result = unsafe {
+                nix::libc::connect(
+                    fd,
+                    (&address as *const nix::libc::sockaddr_un).cast(),
+                    length,
+                )
+            };
+            if result != 0 {
+                let error = io::Error::last_os_error();
+                eprintln!(
+                    "saturated backlog on {} after {} connections: {error}",
+                    std::env::consts::OS,
+                    held.len()
+                );
+                assert!(
+                    matches!(error.raw_os_error(), Some(code) if code == nix::libc::ECONNREFUSED || code == nix::libc::EAGAIN || code == nix::libc::EINPROGRESS)
+                );
+                assert!(!held.is_empty());
+                return (listener, held);
+            }
+            held.push(stream);
+        }
+        panic!("private backlog did not saturate");
+    }
+
+    #[test]
+    fn housekeeping_preserves_a_saturated_live_listener() {
+        watchdog(
+            "local_socket::tests::housekeeping_preserves_a_saturated_live_listener",
+            |directory| {
+                let full = directory.join("full.sock");
+                let (_listener, _held) = saturated_listener(&full);
+                let live = directory.join("live.sock");
+                let _live = bind_private(&live).unwrap();
+                let stale = directory.join("stale.sock");
+                drop(bind_private(&stale).unwrap());
+                sweep_dead_sockets(directory);
+                assert!(full.exists(), "a full live backlog must never be unlinked");
+                assert!(live.exists(), "ordinary live listener must survive");
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while stale.exists() && Instant::now() < deadline {
+                    sweep_dead_sockets(directory);
+                    std::thread::yield_now();
+                }
+                assert!(!stale.exists(), "genuinely stale socket must be removed");
+            },
+        );
+    }
+
+    #[test]
+    fn opening_serves_requests_without_sweeping_on_the_calling_thread() {
+        watchdog(
+            "local_socket::tests::opening_serves_requests_without_sweeping_on_the_calling_thread",
+            |directory| {
+                let full = directory.join("full.sock");
+                let (_listener, _held) = saturated_listener(&full);
+                let stale = directory.join("stale.sock");
+                drop(bind_private(&stale).unwrap());
+                for index in 0..256 {
+                    fs::write(directory.join(format!("ordinary-{index}")), b"").unwrap();
+                }
+                SWEPT_ENTRIES.with(|count| count.set(0));
+                let (sent, received) = mpsc::channel();
+                let mut socket = LocalSocket::open_in(
+                    directory.to_owned(),
+                    Arc::new(ObservationKey::generate().unwrap()),
+                    POLICY,
+                    rejected,
+                    move |connection| {
+                        sent.send(connection.body).unwrap();
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    SWEPT_ENTRIES.with(|count| count.get()),
+                    0,
+                    "opening must not traverse the directory on the calling/UI thread"
+                );
+                let _client = authenticated_client(&socket);
+                assert_eq!(
+                    received.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    "reply"
+                );
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while stale.exists() && Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                assert!(
+                    !stale.exists(),
+                    "listener owner must eventually clean stale files"
+                );
+                assert!(
+                    full.exists(),
+                    "opening must preserve the saturated listener"
+                );
+                socket.close();
+                assert!(!socket.socket_path().exists());
+            },
+        );
     }
 
     #[test]

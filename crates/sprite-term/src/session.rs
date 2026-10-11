@@ -104,6 +104,33 @@ impl CommandSender {
         }
     }
 
+    /// Requests history without waiting for queue space; answers retain `ticket`.
+    pub fn request_history(
+        &self,
+        ticket: crate::Ticket,
+        lines: crate::HistoryLines,
+    ) -> Result<HistoryRequest, SessionError> {
+        self.validate(&TerminalCommand::CaptureHistory { ticket, lines })?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let request = HistoryRequest {
+            cancelled: Arc::clone(&cancelled),
+        };
+        match self.commands.try_send(worker::Message::HistoryRequest {
+            ticket,
+            lines,
+            cancelled,
+        }) {
+            Ok(()) => Ok(request),
+            Err(TrySendError::Full(_)) => Err(SessionError::new(
+                "send",
+                "the terminal command queue is full",
+            )),
+            Err(TrySendError::Disconnected(_)) => {
+                Err(SessionError::new("send", "the terminal worker ended"))
+            }
+        }
+    }
+
     fn validate(&self, command: &TerminalCommand) -> Result<(), SessionError> {
         validate(command)?;
         if self.shutdown.load(Ordering::SeqCst) {
@@ -113,6 +140,27 @@ impl CommandSender {
             ));
         }
         Ok(())
+    }
+}
+
+/// Keeps a queued history request live until its owner stops waiting.
+/// Cancellation does not interrupt a capture that has already started.
+#[derive(Debug)]
+#[must_use = "dropping the handle cancels queued history work"]
+pub struct HistoryRequest {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl HistoryRequest {
+    /// Cancels without needing space in the worker inbox.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for HistoryRequest {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -289,5 +337,209 @@ impl Drop for TerminalSession {
     /// `begin_shutdown` and `ShutdownHandle::wait`.
     fn drop(&mut self) {
         self.request_shutdown();
+    }
+}
+
+#[cfg(test)]
+mod history_cancellation_tests {
+    use super::*;
+    use crate::{HistoryLines, Ticket};
+    use std::time::Duration;
+
+    fn gate(sender: &CommandSender) -> (mpsc::Receiver<usize>, mpsc::Sender<()>) {
+        let (reached, counts) = mpsc::channel();
+        let (resume, release) = mpsc::channel();
+        sender
+            .commands
+            .send(worker::Message::HistoryGate {
+                reached,
+                resume: release,
+            })
+            .unwrap();
+        (counts, resume)
+    }
+
+    #[test]
+    fn abandoned_queued_history_skips_traversal_and_publication() {
+        let mut spawned = TerminalSession::spawn(SessionConfig::command(
+            "/bin/sh",
+            vec!["-c".into(), "exec sleep 30".into()],
+        ))
+        .unwrap();
+        assert!(matches!(
+            spawned.events.next_blocking().unwrap(),
+            TerminalEvent::Ready
+        ));
+        let commands = spawned.session.commands();
+        let (held, release) = gate(&commands);
+        assert_eq!(held.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        commands
+            .commands
+            .send(worker::Message::PtyOutput(
+                crate::pty_unix::OutputChunk::detached(b"history-marker"),
+            ))
+            .unwrap();
+        let abandoned = commands
+            .request_history(Ticket::new(1), HistoryLines::default())
+            .unwrap();
+        drop(abandoned);
+        let withdrawn = commands
+            .request_history(Ticket::new(3), HistoryLines::default())
+            .unwrap();
+        withdrawn.cancel();
+        let live = commands
+            .request_history(Ticket::new(2), HistoryLines::default())
+            .unwrap();
+        let (finished, resume) = gate(&commands);
+        release.send(()).unwrap();
+        let traversals = finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        resume.send(()).unwrap();
+        spawned
+            .session
+            .begin_shutdown()
+            .unwrap()
+            .unwrap()
+            .wait()
+            .unwrap();
+        let mut tickets = Vec::new();
+        while let Ok(event) = spawned.events.next_blocking() {
+            if let TerminalEvent::History { ticket, snapshot } = event {
+                assert_eq!(snapshot.size, crate::ValidTerminalSize::DEFAULT);
+                assert_eq!(snapshot.rows.len(), 24);
+                assert_eq!(snapshot.generation, 1);
+                assert_eq!(snapshot.rows[0].text.as_ref(), "history-marker");
+                tickets.push(ticket);
+            }
+        }
+        drop(live);
+        assert_eq!(
+            (traversals, tickets),
+            (1, vec![Ticket::new(2)]),
+            "abandoned history must do no foreground lookup/traversal or publication"
+        );
+    }
+
+    #[test]
+    fn history_refusal_and_cancellation_do_not_need_queue_space() {
+        let (commands, inbox) = mpsc::sync_channel(1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sender = CommandSender {
+            commands,
+            shutdown: Arc::clone(&shutdown),
+        };
+        let handle = sender
+            .request_history(Ticket::new(1), HistoryLines::default())
+            .unwrap();
+        let state = Arc::downgrade(&handle.cancelled);
+        assert!(
+            sender
+                .request_history(Ticket::new(2), HistoryLines::default())
+                .unwrap_err()
+                .to_string()
+                .contains("queue is full")
+        );
+        handle.cancel();
+        drop(handle);
+        let message = inbox.try_recv().unwrap();
+        match &message {
+            worker::Message::HistoryRequest { cancelled, .. } => {
+                assert!(cancelled.load(Ordering::SeqCst))
+            }
+            _ => panic!("expected history"),
+        }
+        drop(message);
+        assert!(
+            state.upgrade().is_none(),
+            "no registry retains cancellation state"
+        );
+        shutdown.store(true, Ordering::SeqCst);
+        assert!(
+            sender
+                .request_history(Ticket::new(3), HistoryLines::default())
+                .unwrap_err()
+                .to_string()
+                .contains("shutting down")
+        );
+        assert!(inbox.try_recv().is_err());
+        shutdown.store(false, Ordering::SeqCst);
+        drop(inbox);
+        assert!(
+            sender
+                .request_history(Ticket::new(4), HistoryLines::default())
+                .unwrap_err()
+                .to_string()
+                .contains("worker ended")
+        );
+    }
+
+    #[test]
+    fn history_completed_before_cancel_retains_its_ticket() {
+        let mut spawned = TerminalSession::spawn(SessionConfig::command(
+            "/bin/sh",
+            vec!["-c".into(), "exec sleep 30".into()],
+        ))
+        .unwrap();
+        assert!(matches!(
+            spawned.events.next_blocking().unwrap(),
+            TerminalEvent::Ready
+        ));
+        let commands = spawned.session.commands();
+        let completed = commands
+            .request_history(Ticket::new(41), HistoryLines::default())
+            .unwrap();
+        let (captured, resume) = gate(&commands);
+        assert_eq!(captured.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+        completed.cancel();
+        drop(completed);
+        let live = commands
+            .request_history(Ticket::new(42), HistoryLines::default())
+            .unwrap();
+        resume.send(()).unwrap();
+        for expected in [41, 42] {
+            assert!(
+                matches!(spawned.events.next_blocking().unwrap(), TerminalEvent::History { ticket, .. } if ticket == Ticket::new(expected))
+            );
+        }
+        drop(live);
+        spawned
+            .session
+            .begin_shutdown()
+            .unwrap()
+            .unwrap()
+            .wait()
+            .unwrap();
+    }
+
+    #[test]
+    fn history_event_receiver_drop_releases_worker_and_request_state() {
+        let mut spawned = TerminalSession::spawn(SessionConfig::command(
+            "/bin/sh",
+            vec!["-c".into(), "exec sleep 30".into()],
+        ))
+        .unwrap();
+        assert!(matches!(
+            spawned.events.next_blocking().unwrap(),
+            TerminalEvent::Ready
+        ));
+        let commands = spawned.session.commands();
+        let (held, release) = gate(&commands);
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
+        let request = commands
+            .request_history(Ticket::new(1), HistoryLines::default())
+            .unwrap();
+        let state = Arc::downgrade(&request.cancelled);
+        drop(spawned.events);
+        drop(request);
+        release.send(()).unwrap();
+        let shutdown = spawned.session.begin_shutdown().unwrap().unwrap();
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(shutdown.wait());
+        });
+        result
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert!(state.upgrade().is_none());
     }
 }
