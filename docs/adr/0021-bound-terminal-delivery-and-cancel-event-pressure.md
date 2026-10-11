@@ -80,3 +80,5 @@ PR52 has been reconciled with master `a303969`, including merged PR53 and PR54. 
 The remaining PR52 changes retain Surface CLI cancellation, configuration response validation, Surface description replacement checks, drawing decorations and link readiness. Its submission regression tests run against master’s admission/retry implementation. Pane cleanup ownership and the native-text provenance patch are retained.
 
 Merge verification: `TERM=dumb cargo test --workspace --locked --offline` passed **847 tests, 0 failed, 2 optional ignored**. Independent full resulting-PR review against master found no actionable runtime regression. Native desktop and Cocoa scheduling remain unexecuted.
+
+Amended (bug-class audit): notices are published per worker pass, not per parser chunk.

@@ -280,6 +280,7 @@ impl TerminalView {
             cells: self.metrics.clone(),
             defaults: self.default_colors(),
             blink_on: self.blink_on,
+            focused: self.pane_focused(),
         }
     }
 }
@@ -438,11 +439,20 @@ mod fallback_admission_tests {
         cx.set_global(crate::config::ActiveSettings(original.clone()));
         cx.set_global(crate::tokens::TokenRegistry::new(&original.colors));
         let (sender, _exits) = async_channel::unbounded();
-        let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), "i=0; while [ $i -lt 150 ]; do printf '\\033]2;title%s\\007' $i; i=$((i+1)); done; sleep 30".into()]),
-            original.clone(), Vec::new(), None,
-            PaneExit {sender,identity:(crate::tabs::TabId(1),crate::pane_tree::PaneId(1))}, window, cx,
-        ));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::new(
+                Some(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()]),
+                original.clone(),
+                Vec::new(),
+                None,
+                PaneExit {
+                    sender,
+                    identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                },
+                window,
+                cx,
+            )
+        });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let reverted = view.update_in(cx, |view, window, cx| {
                 assert!(view.bundle.is_none());
@@ -452,17 +462,26 @@ mod fallback_admission_tests {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
                 let mut full_since = None;
                 // Installed receivers stay paused while the real worker reaches sustained event pressure.
+                // Every accepted copy is one lossless event the paused UI does
+                // not take; past the mailbox's thirty-two the worker stalls and
+                // the queue stays full. A full queue only counts once the worker
+                // has certainly started taking from it.
+                let mut accepted = 0;
                 loop {
-                    if session
-                        .try_send(TerminalCommand::Capture)
-                        .is_err_and(|error| error.message.contains("queue is full"))
-                    {
-                        let since = full_since.get_or_insert_with(std::time::Instant::now);
-                        if since.elapsed() >= std::time::Duration::from_millis(100) {
-                            break;
+                    match session.try_send(TerminalCommand::CopySelection) {
+                        Ok(()) => {
+                            accepted += 1;
+                            full_since = None;
                         }
-                    } else {
-                        full_since = None;
+                        Err(error) if error.message.contains("queue is full") => {
+                            if accepted > 40 {
+                                let since = full_since.get_or_insert_with(std::time::Instant::now);
+                                if since.elapsed() >= std::time::Duration::from_millis(100) {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(error) => panic!("unexpected refusal: {error}"),
                     }
                     assert!(
                         std::time::Instant::now() < deadline,

@@ -13,7 +13,7 @@
 //! shell asks itself, and it needs nothing from the worker thread.
 
 use std::os::fd::{OwnedFd, RawFd};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::pty_unix;
 
@@ -65,10 +65,12 @@ struct Attached {
 /// A handle on the "what is running" question for one pane.
 ///
 /// Shared between the session and its worker: the worker attaches the PTY once
-/// it exists, and the application asks whenever it needs to know.
+/// it exists, the application asks whenever it needs to know, and the worker
+/// detaches it when the session ends.
 #[derive(Default)]
 pub struct ForegroundWatch {
-    attached: OnceLock<Attached>,
+    /// `None` until the worker attaches, and again once the session has ended.
+    attached: Mutex<Option<Attached>>,
 }
 
 impl ForegroundWatch {
@@ -84,15 +86,34 @@ impl ForegroundWatch {
         let Some(master) = pty_unix::duplicate(master_fd) else {
             return;
         };
-        let _ = self.attached.set(Attached {
-            master,
-            shell_group,
-        });
+        let mut attached = self.lock();
+        if attached.is_none() {
+            *attached = Some(Attached {
+                master,
+                shell_group,
+            });
+        }
+    }
+
+    /// Closes the private duplicate once the session has ended.
+    ///
+    /// Held any longer, it keeps the PTY master open after the worker has
+    /// closed its own, and a descendant still holding the terminal is never
+    /// told it hung up. Afterwards the pane answers `Unknown`, which is all an
+    /// ended session can honestly say.
+    pub(crate) fn detach(&self) {
+        let detached = self.lock().take();
+        drop(detached);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<Attached>> {
+        self.attached.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Asks the kernel what is in the foreground of this pane, right now.
     pub fn state(&self) -> ForegroundState {
-        let Some(attached) = self.attached.get() else {
+        let attached = self.lock();
+        let Some(attached) = attached.as_ref() else {
             return ForegroundState::Unknown;
         };
         let Some(group) = pty_unix::foreground_group(&attached.master) else {
@@ -112,7 +133,8 @@ impl ForegroundWatch {
 
     /// Returns the process group when `pid` owns this pane's foreground.
     pub fn owner_group(&self, pid: u32) -> Option<i32> {
-        let attached = self.attached.get()?;
+        let attached = self.lock();
+        let attached = attached.as_ref()?;
         let foreground = pty_unix::foreground_group(&attached.master)?;
         let candidate = pty_unix::process_group_of(pid)?;
         (foreground == candidate).then_some(candidate)
@@ -123,7 +145,7 @@ impl std::fmt::Debug for ForegroundWatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ForegroundWatch")
-            .field("attached", &self.attached.get().is_some())
+            .field("attached", &self.lock().is_some())
             .finish()
     }
 }
@@ -175,5 +197,28 @@ mod tests {
             Some("vim")
         );
         assert_eq!(ForegroundState::Idle.program(), None);
+    }
+
+    #[test]
+    fn detaching_closes_the_private_duplicate() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (master, mut peer) = UnixStream::pair().expect("socket pair");
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("read deadline");
+        let watch = ForegroundWatch::default();
+        watch.attach(master.as_raw_fd(), Some(1));
+        // The worker's own descriptor closes first, as it does at session end.
+        drop(master);
+        watch.detach();
+
+        let mut byte = [0_u8; 1];
+        let read = peer
+            .read(&mut byte)
+            .expect("the peer sees the close rather than waiting on an open duplicate");
+        assert_eq!(read, 0);
+        assert_eq!(watch.state(), ForegroundState::Unknown);
     }
 }

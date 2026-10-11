@@ -1,5 +1,5 @@
 use gpui::{Keystroke, Modifiers};
-pub(super) fn test_workspace(
+pub(crate) fn test_workspace(
     cx: &mut gpui::TestAppContext,
 ) -> (gpui::Entity<super::Workspace>, &mut gpui::VisualTestContext) {
     cx.add_window_view(|window, cx| {
@@ -15,7 +15,7 @@ pub(super) fn test_workspace(
     })
 }
 
-pub(super) fn draw_workspace(cx: &mut gpui::VisualTestContext) {
+pub(crate) fn draw_workspace(cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| {
         window.refresh();
         window.draw(cx).clear();
@@ -109,4 +109,23 @@ pub(super) fn plain(key: &str, key_char: Option<&str>) -> Keystroke {
         key: key.to_owned(),
         key_char: key_char.map(str::to_owned),
     }
+}
+
+/// The terminal view occupying `pane`, for tests that look inside it.
+pub(crate) fn terminal_view(
+    workspace: &gpui::Entity<super::Workspace>,
+    pane: crate::pane_tree::PaneId,
+    cx: &mut gpui::VisualTestContext,
+) -> gpui::Entity<crate::terminal_view::TerminalView> {
+    workspace.read_with(cx, |workspace, _| {
+        workspace
+            .tabs
+            .all_panes()
+            .into_iter()
+            .find(|(_, id, _)| *id == pane)
+            .map(|(_, _, handle)| handle.view())
+            .expect("the pane is in the window")
+            .downcast::<crate::terminal_view::TerminalView>()
+            .unwrap_or_else(|_| panic!("a terminal pane"))
+    })
 }

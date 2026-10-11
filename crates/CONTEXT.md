@@ -56,6 +56,13 @@ _Avoid_: frame number, render version
 One visible leaf in a tab's split layout that owns exactly one Terminal Session.
 _Avoid_: split (the action or layout relationship), terminal
 
+**Pane Focus**:
+Whether a Pane is where the person is typing: it holds keyboard focus in its
+Sprite Window and that window is the active one. Only a Pane with Pane Focus
+may write the clipboard on its child's request, has its child told focus
+arrived, and blinks its cursor; any other Pane's child is told focus left.
+_Avoid_: active pane (ambiguous with the active tab), selected pane
+
 **Pane Title**:
 What a Pane reports it is called: for a terminal Pane, the title its child set
 through the terminal, or else the name of the program in the foreground. Absent

@@ -55,7 +55,7 @@ impl SnapshotStream {
 
     /// Tells the worker the slot is free again, without ever blocking the
     /// consumer. A full queue already holds a mutation that will wake the
-    /// worker, and the worker rechecks for pending work after every message;
+    /// worker, and the worker rechecks for pending work after every pass;
     /// an idle worker has room for this request.
     fn request_capture(&self) {
         match self.requests.try_send(worker::Message::CaptureRequested) {

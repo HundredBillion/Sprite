@@ -58,6 +58,9 @@ pub(crate) struct PositionedCell {
     pub column: u16,
     /// How many columns it occupies: 1 for narrow, 2 for wide.
     pub columns: u16,
+    /// The terminal's compact text, which clones without allocating, so laying
+    /// out a row copies no text. The text system's own string is made only
+    /// when the shape cache has to shape this cell.
     pub text: sprite_term::CellText,
     pub style: CellStyle,
     pub selected: bool,
@@ -358,6 +361,31 @@ mod tests {
     #[test]
     fn an_empty_row_lays_out_to_nothing() {
         assert!(lay_out_row(&row(Vec::new())).is_empty());
+    }
+
+    /// A laid-out cell keeps the terminal's compact text, so laying out a row
+    /// costs the row's own vector whatever the text: wide, combined, box,
+    /// block and private-use cells copy nothing. The text system's own string
+    /// is made only when a shape is.
+    #[test]
+    fn laying_out_a_row_copies_no_cell_text() {
+        let mixed = row((0..200)
+            .map(|column| match column % 6 {
+                0 => cell("a", CellWidth::Narrow),
+                1 => cell("\u{2502}", CellWidth::Narrow),
+                2 => cell("\u{2588}", CellWidth::Narrow),
+                3 => cell("e\u{301}", CellWidth::Narrow),
+                4 => cell("\u{f115}", CellWidth::Narrow),
+                _ => cell(" ", CellWidth::Narrow),
+            })
+            .collect());
+        let (laid, allocations, _) = crate::surface_performance::measure(|| lay_out_row(&mixed));
+        assert_eq!(allocations, 1, "one vector for the row, nothing per cell");
+        assert_eq!(laid[0].text, "a");
+        assert_eq!(laid[1].text, "\u{2502}");
+        assert_eq!(laid[3].text, "e\u{301}");
+        assert_eq!(laid[4].text, "\u{f115}");
+        assert_eq!(laid[5].text, " ");
     }
 }
 

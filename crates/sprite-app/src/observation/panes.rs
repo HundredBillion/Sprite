@@ -6,17 +6,22 @@
 //! submitted and an answer collected, and nothing here hands out a session, a
 //! PTY, or a way to write to a child.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use sprite_term::{CommandSender, HistoryLines, HistorySnapshot, TerminalCommand};
+use sprite_term::{CommandSender, HistoryLines, HistorySnapshot, TerminalCommand, Ticket};
 
-use crate::observation::broker::{PaneAddress, PaneSource, Pending};
+use crate::observation::broker::{PaneAddress, PaneSource, Pending, Withdraw};
 
 /// What a pane sends back when it answers.
 type Answer = Result<Arc<HistorySnapshot>, String>;
 use crate::pane_tree::{PaneId, Rect};
 use crate::tabs::TabId;
+
+/// Every registered pane, shared with each outstanding request so that the
+/// request can withdraw itself.
+type Entries = Arc<Mutex<HashMap<PaneId, Entry>>>;
 
 /// What a pane needs in order to be observable.
 ///
@@ -38,13 +43,13 @@ struct Entry {
     /// on the GPUI thread, and a request must never have to wait for a frame.
     placement: Placement,
     commands: CommandSender,
-    /// Requests submitted and not yet answered, oldest first.
+    /// Requests submitted and not yet answered, by the ticket each was sent
+    /// with.
     ///
-    /// A queue rather than a single slot because two clients may ask the same
-    /// pane at once. The worker handles commands in order and answers each
-    /// exactly once, and the view forwards answers in the order they arrive, so
-    /// matching the oldest waiter to the next answer pairs them correctly.
-    waiting: VecDeque<std::sync::mpsc::Sender<Answer>>,
+    /// Keyed rather than queued: an answer carries the ticket of the request
+    /// it answers, so it can reach only that request. Arrival order, which
+    /// any unrelated event emitted in between would shift, plays no part.
+    waiting: HashMap<Ticket, std::sync::mpsc::Sender<Answer>>,
 }
 
 /// Where a pane sits in the window, as the schema reports it.
@@ -68,7 +73,12 @@ impl Default for Placement {
 /// Every pane in one window that observation may reach.
 #[derive(Default)]
 pub struct WindowPanes {
-    entries: Mutex<HashMap<PaneId, Entry>>,
+    /// Shared with each outstanding request's [`Withdraw`], so a caller that
+    /// stops waiting can take its own ticket back.
+    entries: Entries,
+    /// The next ticket to hand out. One counter for the whole window, so a
+    /// ticket names one request whichever pane it went to.
+    next_ticket: AtomicU64,
     #[cfg(test)]
     layout_publications: std::sync::atomic::AtomicUsize,
 }
@@ -92,7 +102,7 @@ impl WindowPanes {
                 // that has not been laid out yet still has to be answerable.
                 placement: Placement::default(),
                 commands,
-                waiting: VecDeque::new(),
+                waiting: HashMap::new(),
             },
         );
     }
@@ -133,40 +143,51 @@ impl WindowPanes {
             .entries
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(mut entry) = entries.remove(&pane) {
-            for waiter in entry.waiting.drain(..) {
+        if let Some(entry) = entries.remove(&pane) {
+            for waiter in entry.waiting.into_values() {
                 let _ = waiter.send(Err("the pane closed before it answered".to_owned()));
             }
         }
     }
 
-    /// Hands one pane's answer to whoever asked for it first.
+    /// Fails every request still waiting on a pane whose session has ended.
     ///
-    /// Called from the view, which is the single consumer of a session's
-    /// events. An answer nobody is waiting for is dropped: it belongs to a
-    /// request that has already given up.
-    pub fn deliver(&self, pane: PaneId, snapshot: Arc<HistorySnapshot>) {
+    /// An ended session answers nothing more, so its waiters learn why now
+    /// rather than at the deadline. The pane stays listed, because it is still
+    /// on screen; asking it again is refused when the request cannot be sent.
+    pub fn fail_all(&self, pane: PaneId, reason: String) {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(entry) = entries.get_mut(&pane)
-            && let Some(waiter) = entry.waiting.pop_front()
-        {
-            let _ = waiter.send(Ok(snapshot));
+        if let Some(entry) = entries.get_mut(&pane) {
+            for (_, waiter) in entry.waiting.drain() {
+                let _ = waiter.send(Err(reason.clone()));
+            }
         }
     }
 
-    /// Reports that a pane failed, to whoever asked for it first.
-    pub fn deliver_failure(&self, pane: PaneId, reason: String) {
+    /// Hands one pane's answer, its history or why the capture failed, to the
+    /// request holding `ticket`, and to no other.
+    ///
+    /// Called from the view, which is the single consumer of a session's
+    /// events. An answer whose ticket nobody holds is dropped: its request has
+    /// already given up, and handing it to anyone else would answer a question
+    /// they did not ask.
+    pub fn answer(
+        &self,
+        pane: PaneId,
+        ticket: Ticket,
+        answer: Result<Arc<HistorySnapshot>, String>,
+    ) {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(entry) = entries.get_mut(&pane)
-            && let Some(waiter) = entry.waiting.pop_front()
+            && let Some(waiter) = entry.waiting.remove(&ticket)
         {
-            let _ = waiter.send(Err(reason));
+            let _ = waiter.send(answer);
         }
     }
 }
@@ -209,10 +230,14 @@ impl PaneSource for WindowPanes {
             .get_mut(&pane)
             .ok_or_else(|| "the pane closed before it could be asked".to_owned())?;
 
+        let ticket = Ticket::new(
+            self.next_ticket
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
         let (sender, answer) = std::sync::mpsc::channel();
-        // Queued before the command is sent, so an answer cannot arrive before
-        // there is anyone recorded to receive it.
-        entry.waiting.push_back(sender);
+        // Recorded before the command is sent, so an answer cannot arrive
+        // before there is anyone recorded to receive it.
+        entry.waiting.insert(ticket, sender);
         let address = PaneAddress {
             tab: entry.tab,
             tab_order: entry.placement.tab_order,
@@ -222,12 +247,27 @@ impl PaneSource for WindowPanes {
         };
         if let Err(error) = entry
             .commands
-            .try_send(TerminalCommand::CaptureHistory(lines))
+            .try_send(TerminalCommand::CaptureHistory { ticket, lines })
         {
-            entry.waiting.pop_back();
+            entry.waiting.remove(&ticket);
             return Err(error.to_string());
         }
-        Ok(Pending { address, answer })
+        // A caller that stops waiting takes its ticket back, so the registry
+        // holds nothing for a request nobody will read. Weak, so an
+        // outstanding request does not keep a closed window's registry alive.
+        let registry = Arc::downgrade(&self.entries);
+        Ok(Pending {
+            address,
+            answer,
+            withdraw: Withdraw::new(move || {
+                if let Some(entries) = registry.upgrade() {
+                    let mut entries = entries.lock().unwrap_or_else(|error| error.into_inner());
+                    if let Some(entry) = entries.get_mut(&pane) {
+                        entry.waiting.remove(&ticket);
+                    }
+                }
+            }),
+        })
     }
 }
 
@@ -240,13 +280,13 @@ mod tests {
     };
     use std::time::Duration;
 
-    fn snapshot() -> Arc<HistorySnapshot> {
+    fn snapshot(text: &str) -> Arc<HistorySnapshot> {
         Arc::new(HistorySnapshot {
             generation: 1,
             size: sprite_term::ValidTerminalSize::DEFAULT,
             screen: ScreenKind::Primary,
             rows: vec![PaneRow {
-                text: "answer".into(),
+                text: text.into(),
                 wrapped: false,
                 prompt: PromptKind::None,
             }],
@@ -288,9 +328,36 @@ mod tests {
         spawned
     }
 
+    /// The tickets a pane is still waiting on, oldest first.
+    fn waiting(panes: &WindowPanes, pane: PaneId) -> Vec<Ticket> {
+        let entries = panes.entries.lock().unwrap();
+        let mut tickets: Vec<Ticket> = entries[&pane].waiting.keys().copied().collect();
+        tickets.sort_unstable();
+        tickets
+    }
+
+    /// The one ticket a pane is waiting on.
+    fn only_ticket(panes: &WindowPanes, pane: PaneId) -> Ticket {
+        let tickets = waiting(panes, pane);
+        assert_eq!(tickets.len(), 1, "exactly one request is outstanding");
+        tickets[0]
+    }
+
+    fn text(answer: Answer) -> String {
+        answer.expect("a snapshot").rows[0].text.to_string()
+    }
+
     #[test]
     fn saturated_observation_refuses_without_holding_the_ui_registry() {
-        let mut spawned = TerminalSession::spawn(SessionConfig::command("/bin/sh", vec!["-c".into(), "i=0; while [ $i -lt 100 ]; do printf '\\033]2;TITLE%s\\007' $i; i=$((i+1)); done; head -c 1048576 /dev/zero; sleep 30".into()])).unwrap();
+        let mut spawned = TerminalSession::spawn(SessionConfig::command(
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                crate::test_event_pressure::pressure_script("sleep 30").into(),
+            ],
+        ))
+        .unwrap();
+        crate::test_event_pressure::focus_and_release(&spawned.session.commands());
         crate::test_blocking_wait::pause(Duration::from_millis(300));
         spawned.snapshots.next_blocking().unwrap();
         let panes = WindowPanes::new();
@@ -358,16 +425,20 @@ mod tests {
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
             .expect("asked");
-        panes.deliver(PaneId(0), snapshot());
+        panes.answer(
+            PaneId(0),
+            only_ticket(&panes, PaneId(0)),
+            Ok(snapshot("answer")),
+        );
 
         let answer = pending
             .answer
             .recv_timeout(Duration::from_secs(1))
             .expect("an answer arrived");
-        assert_eq!(answer.expect("a snapshot").rows[0].text.as_ref(), "answer");
+        assert_eq!(text(answer), "answer");
     }
 
-    /// A session that errors must tell its waiter why, not leave it to time
+    /// A capture that fails must tell its waiter why, not leave it to time
     /// out and be reported for the wrong reason.
     #[test]
     fn a_failure_reaches_the_caller_that_asked_for_it() {
@@ -378,7 +449,11 @@ mod tests {
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
             .expect("asked");
-        panes.deliver_failure(PaneId(0), "the child exited".to_owned());
+        panes.answer(
+            PaneId(0),
+            only_ticket(&panes, PaneId(0)),
+            Err("the child exited".to_owned()),
+        );
 
         let answer = pending
             .answer
@@ -391,10 +466,10 @@ mod tests {
         );
     }
 
-    /// Two callers asking one pane at once must each get an answer, and must
-    /// not both be handed the same one while the other waits forever.
+    /// Two callers asking one pane at once each get the answer to their own
+    /// request, whatever order the answers arrive in.
     #[test]
-    fn concurrent_requests_for_one_pane_are_answered_in_order() {
+    fn concurrent_requests_for_one_pane_each_get_their_own_answer() {
         let panes = WindowPanes::new();
         let session = session();
         panes.register(PaneId(0), TabId(0), session.session.commands());
@@ -405,23 +480,113 @@ mod tests {
         let second = panes
             .begin(PaneId(0), HistoryLines::default())
             .expect("asked");
+        let tickets = waiting(&panes, PaneId(0));
+        assert_eq!(tickets.len(), 2, "two requests, two tickets");
 
-        panes.deliver(PaneId(0), snapshot());
-        panes.deliver(PaneId(0), snapshot());
+        // Newest first: arrival order must not decide who receives what.
+        panes.answer(PaneId(0), tickets[1], Ok(snapshot("second")));
+        panes.answer(PaneId(0), tickets[0], Ok(snapshot("first")));
 
-        assert!(
-            first
+        let answer = |pending: &Pending| {
+            pending
                 .answer
                 .recv_timeout(Duration::from_secs(1))
-                .expect("first answered")
-                .is_ok()
-        );
+                .expect("answered")
+        };
+        assert_eq!(text(answer(&first)), "first");
+        assert_eq!(text(answer(&second)), "second");
+    }
+
+    /// A failure names the request it belongs to and reaches no other.
+    #[test]
+    fn a_failure_reaches_only_the_request_it_belongs_to() {
+        let panes = WindowPanes::new();
+        let session = session();
+        panes.register(PaneId(0), TabId(0), session.session.commands());
+
+        let first = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+        let second = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+        let tickets = waiting(&panes, PaneId(0));
+
+        panes.answer(PaneId(0), tickets[1], Err("capture failed".to_owned()));
+
         assert!(
+            first.answer.try_recv().is_err(),
+            "the other request is still waiting for its own answer"
+        );
+        assert_eq!(
             second
                 .answer
                 .recv_timeout(Duration::from_secs(1))
-                .expect("second answered")
-                .is_ok()
+                .expect("answered")
+                .expect_err("failed"),
+            "capture failed"
+        );
+        assert_eq!(waiting(&panes, PaneId(0)), vec![tickets[0]]);
+    }
+
+    /// A caller that stops waiting, as one does when its deadline passes,
+    /// takes its ticket back: nothing is kept for a request nobody will read.
+    #[test]
+    fn a_request_that_stops_waiting_takes_its_ticket_back() {
+        let panes = WindowPanes::new();
+        let session = session();
+        panes.register(PaneId(0), TabId(0), session.session.commands());
+
+        let pending = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+        assert_eq!(waiting(&panes, PaneId(0)).len(), 1);
+
+        drop(pending);
+
+        assert!(
+            waiting(&panes, PaneId(0)).is_empty(),
+            "the request withdrew its own ticket"
+        );
+    }
+
+    /// The answer to a request that gave up must not be handed to the request
+    /// that came after it.
+    #[test]
+    fn an_answer_for_an_expired_ticket_reaches_nobody() {
+        let panes = WindowPanes::new();
+        let session = session();
+        panes.register(PaneId(0), TabId(0), session.session.commands());
+
+        let expired = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+        let late = only_ticket(&panes, PaneId(0));
+        drop(expired);
+        let current = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked again");
+
+        // The worker's answer to the request that gave up arrives now.
+        panes.answer(PaneId(0), late, Ok(snapshot("late")));
+        assert!(
+            current.answer.try_recv().is_err(),
+            "a late answer is dropped, not given to the next request"
+        );
+
+        panes.answer(
+            PaneId(0),
+            only_ticket(&panes, PaneId(0)),
+            Ok(snapshot("current")),
+        );
+        assert_eq!(
+            text(
+                current
+                    .answer
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("its own answer")
+            ),
+            "current"
         );
     }
 
@@ -473,14 +638,17 @@ mod tests {
         );
         session
             .session
-            .send(TerminalCommand::CaptureHistory(HistoryLines::default()))
+            .send(TerminalCommand::CaptureHistory {
+                ticket: Ticket::new(0),
+                lines: HistoryLines::default(),
+            })
             .expect("request a fresh answer after disabling observation");
         assert!(matches!(
             session
                 .events
                 .next_blocking()
                 .expect("worker still answers"),
-            TerminalEvent::History(_)
+            TerminalEvent::History { .. }
         ));
         assert_eq!(panes.panes().len(), 1, "and the pane is still a pane");
     }
@@ -491,9 +659,9 @@ mod tests {
         let session = session();
         panes.register(PaneId(0), TabId(0), session.session.commands());
 
-        // No request outstanding: this must not panic, grow a queue, or be
+        // No request outstanding: this must not panic, grow a map, or be
         // handed to the next caller as a stale answer.
-        panes.deliver(PaneId(0), snapshot());
+        panes.answer(PaneId(0), Ticket::new(u64::MAX), Ok(snapshot("stale")));
 
         let pending = panes
             .begin(PaneId(0), HistoryLines::default())
@@ -502,5 +670,38 @@ mod tests {
             pending.answer.try_recv().is_err(),
             "a later request does not receive an earlier abandoned answer"
         );
+    }
+
+    /// Every request waiting on a pane whose session ended is failed with the
+    /// reason, at once. The pane itself stays listed: it is still on screen.
+    #[test]
+    fn a_session_that_ends_fails_every_waiting_request_at_once() {
+        let panes = WindowPanes::new();
+        let session = session();
+        panes.register(PaneId(0), TabId(0), session.session.commands());
+        let first = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+        let second = panes
+            .begin(PaneId(0), HistoryLines::default())
+            .expect("asked");
+
+        panes.fail_all(
+            PaneId(0),
+            "the pane's session ended before it answered".to_owned(),
+        );
+
+        for pending in [first, second] {
+            assert_eq!(
+                pending
+                    .answer
+                    .try_recv()
+                    .expect("released at once")
+                    .expect_err("failed"),
+                "the pane's session ended before it answered"
+            );
+        }
+        assert!(waiting(&panes, PaneId(0)).is_empty());
+        assert_eq!(panes.panes().len(), 1, "the pane is still listed");
     }
 }

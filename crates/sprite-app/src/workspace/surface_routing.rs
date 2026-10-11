@@ -8,6 +8,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A connection that gave up waiting has already told its program the
+        // request failed; carrying it out now would make that untrue.
+        if !request.claim() {
+            return;
+        }
         if self.stopping {
             request.refuse_with(Refusal::Ineligible);
             return;
@@ -117,7 +122,7 @@ mod tests {
                         name: "demo.accent".into(),
                         default: crate::tokens::unpack(color),
                         description: "Accent".into(),
-                        reply,
+                        reply: reply.into(),
                     },
                     window,
                     cx,
@@ -157,6 +162,7 @@ mod tests {
     fn shutdown_refuses_queued_surface_open(cx: &mut gpui::TestAppContext) {
         use crate::surface::channel::{Open, SurfaceConnection};
         let (workspace, cx) = test_workspace(cx);
+        cx.background_executor.allow_parking();
         let pane = workspace.read_with(cx, |workspace, _| {
             workspace.tabs.active().unwrap().focus().unwrap()
         });
@@ -174,7 +180,7 @@ mod tests {
                 open: Open {
                     placement: crate::surface::channel::Placement::Fill { owner_pid: None }, focus: false,
                     description: serde_json::json!({"version":1,"root":{"kind":"text","text":"queued"}}),
-                }, connection: SurfaceConnection::new(&stream).unwrap(), reply,
+                }, connection: SurfaceConnection::new(&stream).unwrap(), reply: reply.into(),
             }, window, cx);
         });
         assert_eq!(receiver.try_recv().unwrap(), Err(Refusal::Ineligible));
@@ -196,7 +202,7 @@ mod tests {
                 id: crate::surface::SurfaceId(1), pane, open: Open {
                     placement: crate::surface::channel::Placement::Fill { owner_pid: None }, focus: true,
                     description: serde_json::json!({"version":1,"root":{"kind":"text","text":"Surface"}}),
-                }, connection: SurfaceConnection::new(&stream).unwrap(), reply,
+                }, connection: SurfaceConnection::new(&stream).unwrap(), reply: reply.into(),
             }, window, cx);
         });
         assert_eq!(receiver.try_recv().unwrap(), Ok(()));
@@ -257,7 +263,7 @@ mod tests {
                             description: serde_json::Value::Null,
                         },
                         connection: SurfaceConnection::new(&stream).unwrap(),
-                        reply,
+                        reply: reply.into(),
                     },
                     window,
                     cx,
@@ -270,7 +276,7 @@ mod tests {
                     SurfaceRequest::FocusPane {
                         pane,
                         target: FocusTarget::Terminal,
-                        reply,
+                        reply: reply.into(),
                     },
                     window,
                     cx,
@@ -284,7 +290,7 @@ mod tests {
                         pane,
                         owner_pid: std::process::id(),
                         return_target: ReturnTarget::Terminal,
-                        reply,
+                        reply: reply.into(),
                     },
                     window,
                     cx,
@@ -295,5 +301,42 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.cycle_surface_focus(window, cx)
         });
+    }
+
+    /// A connection that gave up has already told its program the request
+    /// failed, so the window must not carry it out afterwards.
+    #[gpui::test]
+    fn a_surface_request_its_connection_gave_up_on_is_not_applied(cx: &mut gpui::TestAppContext) {
+        use crate::surface::channel::SurfaceRequest;
+        let (workspace, cx) = test_workspace(cx);
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        let (reply, claim) = crate::workspace::Relayed::waiting(reply);
+        assert!(claim.abandon(), "the connection gives up first");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.serve_surface_request(
+                SurfaceRequest::RegisterToken {
+                    name: "demo.abandoned".into(),
+                    default: crate::tokens::unpack(0x12ab03),
+                    description: "Abandoned".into(),
+                    reply,
+                },
+                window,
+                cx,
+            );
+        });
+        cx.update(|_, cx| {
+            assert!(
+                !cx.global::<crate::tokens::TokenRegistry>()
+                    .is_known("demo.abandoned"),
+                "an abandoned registration must not take effect"
+            );
+        });
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            ),
+            "nobody is answered, because nobody is listening"
+        );
     }
 }

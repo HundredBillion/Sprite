@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use sprite_term::{
     HistoryLines, HistorySnapshot, ScreenKind, SessionConfig, TerminalCommand, TerminalEvent,
-    TerminalSession,
+    TerminalSession, Ticket,
 };
 
 use support::{EventPump, SnapshotPump, pane_text};
@@ -41,12 +41,24 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         match events.next() {
-            TerminalEvent::History(history) => return (*history).clone(),
-            TerminalEvent::Error(error) => panic!("history request failed: {error}"),
+            TerminalEvent::History { snapshot, .. } => return (*snapshot).clone(),
+            TerminalEvent::HistoryFailed { error, .. } => {
+                panic!("history request failed: {error}")
+            }
+            TerminalEvent::Error(error) => panic!("the session reported an error: {error}"),
             _ => {}
         }
     }
     panic!("watchdog: no history answer arrived");
+}
+
+/// One history request. These tests ask one question at a time, so every
+/// request can use the same ticket.
+fn capture(lines: HistoryLines) -> TerminalCommand {
+    TerminalCommand::CaptureHistory {
+        ticket: Ticket::new(0),
+        lines,
+    }
 }
 
 /// A shell that prints `count` numbered lines and then waits, so the scrollback
@@ -79,7 +91,7 @@ fn a_request_returns_the_active_screen_plus_the_lines_asked_for() {
     let (mut session, events, _snapshots) = counting_session(200);
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(50)))
+        .send(capture(HistoryLines::new(50)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -118,9 +130,7 @@ fn asking_for_more_history_than_exists_returns_what_exists() {
     let (mut session, events, _snapshots) = counting_session(60);
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(
-            HistoryLines::MAX,
-        )))
+        .send(capture(HistoryLines::new(HistoryLines::MAX)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -140,7 +150,7 @@ fn a_request_for_no_history_returns_only_the_active_screen() {
     let (mut session, events, _snapshots) = counting_session(60);
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(0)))
+        .send(capture(HistoryLines::new(0)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -203,9 +213,7 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
     assert_eq!(bundle.pane.screen, ScreenKind::Alternate);
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(
-            HistoryLines::MAX,
-        )))
+        .send(capture(HistoryLines::new(HistoryLines::MAX)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -258,9 +266,7 @@ fn unicode_whitespace_and_wrap_markers_survive() {
     snapshots.wait_for("the long line", |bundle| pane_text(bundle).contains("WWWW"));
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(
-            HistoryLines::MAX,
-        )))
+        .send(capture(HistoryLines::new(HistoryLines::MAX)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -313,7 +319,7 @@ fn history_runs_continuously_into_the_active_screen() {
     let (mut session, events, _snapshots) = counting_session(200);
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(8)))
+        .send(capture(HistoryLines::new(8)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -353,7 +359,7 @@ fn rows_are_not_padded_out_to_the_screen_width() {
     let (mut session, events, _snapshots) = counting_session(200);
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(8)))
+        .send(capture(HistoryLines::new(8)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -385,7 +391,7 @@ fn measure_maximum_request() {
     for lines in [0usize, 500, 5000] {
         let started = std::time::Instant::now();
         session
-            .send(TerminalCommand::CaptureHistory(HistoryLines::new(lines)))
+            .send(capture(HistoryLines::new(lines)))
             .expect("request history");
         let history = wait_for_history(&events);
         eprintln!(
@@ -407,7 +413,7 @@ fn a_history_answer_carries_the_metadata_the_schema_needs() {
     let (mut session, events, _snapshots) = counting_session(60);
 
     session
-        .send(TerminalCommand::CaptureHistory(HistoryLines::new(10)))
+        .send(capture(HistoryLines::new(10)))
         .expect("request history");
     let history = wait_for_history(&events);
 
@@ -461,7 +467,7 @@ fn a_small_scrollback_budget_holds_less_history() {
         });
 
         session
-            .send(TerminalCommand::CaptureHistory(HistoryLines::new(1)))
+            .send(capture(HistoryLines::new(1)))
             .expect("request history");
         wait_for_history(&events).available
     }
@@ -481,5 +487,39 @@ fn a_small_scrollback_budget_holds_less_history() {
     assert!(
         large > 4000,
         "the larger budget should hold nearly all five thousand lines, not {large}"
+    );
+}
+
+/// The ticket a request is sent with comes back on its answer, so a caller
+/// can match answers to requests without relying on their order.
+#[test]
+fn every_answer_carries_the_ticket_it_was_asked_with() {
+    let (mut session, events, _snapshots) = counting_session(20);
+    for (ticket, lines) in [(41, 2), (42, 5)] {
+        session
+            .send(TerminalCommand::CaptureHistory {
+                ticket: Ticket::new(ticket),
+                lines: HistoryLines::new(lines),
+            })
+            .expect("request history");
+    }
+
+    let mut answered = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while answered.len() < 2 && Instant::now() < deadline {
+        match events.next() {
+            TerminalEvent::History { ticket, snapshot } => {
+                answered.push((ticket.get(), snapshot.requested));
+            }
+            TerminalEvent::HistoryFailed { ticket, error } => {
+                panic!("request {} failed: {error}", ticket.get())
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        answered,
+        vec![(41, 2), (42, 5)],
+        "each answer names the request it answers"
     );
 }

@@ -1,8 +1,12 @@
 //! Draws a Surface Description: one GPUI element per described element,
-//! built fresh on every frame the way GPUI's own views are. Decoded SVGs stay
-//! with the description so redraws reuse them and an update releases them.
+//! built fresh on every frame the way GPUI's own views are. Decoded SVGs are
+//! kept by their SVG text, so updates that keep an SVG reuse its decode, and
+//! an update releases the ones it no longer draws. Redraws find each decode by
+//! its place in the tree, without touching the text.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
 use gpui::{
@@ -12,7 +16,7 @@ use gpui::{
 use sprite_term::Rgb;
 
 use crate::config::Highlights;
-use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass, pack};
+use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass, ShapeCache, pack};
 use crate::surface::SurfaceId;
 use crate::surface::channel::{SurfaceConnection, event_click};
 use crate::surface::description::{Description, Element};
@@ -21,37 +25,281 @@ use crate::surface::style;
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
+/// The decoded images of one element Surface, kept across frames and across
+/// updates for as long as its description draws them.
+///
+/// Keyed by the SVG text itself: the map hashes it to find an entry and then
+/// compares the stored text, so two different SVGs can never share a
+/// picture. Elements that draw the same SVG share one decode, and an update
+/// that keeps an SVG keeps its decode wherever in the tree it moved.
+///
+/// The text is looked up once per description. A description may carry
+/// megabytes of SVG, so each image's picture is then kept by its tree-order
+/// index and every later frame finds it there.
 #[derive(Default)]
 pub(crate) struct ElementImageCache {
-    images: BTreeMap<u64, Option<Arc<RenderImage>>>,
+    images: HashMap<Arc<str>, Option<Arc<RenderImage>>>,
+    /// What each image of the current description resolved to, by its index
+    /// in tree order: `None` until that image is first drawn, then the
+    /// picture, or `Some(None)` for one that failed or did not fit. Emptied by
+    /// `retain_drawn_by`, which `ElementBody::replace` calls with every new
+    /// description.
+    placed: Vec<Option<Option<Arc<RenderImage>>>>,
     retained_bytes: usize,
+    #[cfg(test)]
+    decodes: usize,
+    #[cfg(test)]
+    text_lookups: usize,
+}
+
+impl ElementImageCache {
+    /// The picture for the image at tree-order `index`, drawing `svg`. Only the
+    /// first frame of a description looks the text up; later frames take what
+    /// that lookup found.
+    fn picture(&mut self, index: u64, svg: &str) -> Option<Arc<RenderImage>> {
+        let index = index as usize;
+        if let Some(Some(picture)) = self.placed.get(index) {
+            return picture.clone();
+        }
+        let picture = self.lookup(svg);
+        if self.placed.len() <= index {
+            self.placed.resize(index + 1, None);
+        }
+        self.placed[index] = Some(picture.clone());
+        picture
+    }
+
+    /// The picture for one SVG, decoded only if no earlier frame or
+    /// description already did. A decode is bounded by what the Surface's
+    /// budget has left, so the pictures it holds never pass 64 MiB together.
+    fn lookup(&mut self, svg: &str) -> Option<Arc<RenderImage>> {
+        #[cfg(test)]
+        {
+            self.text_lookups += 1;
+        }
+        if let Some(picture) = self.images.get(svg) {
+            return picture.clone();
+        }
+        #[cfg(test)]
+        {
+            self.decodes += 1;
+        }
+        let available = MAX_SURFACE_IMAGE_BYTES - self.retained_bytes;
+        let picture = if available >= MAX_SVG_RASTER_BYTES {
+            render_svg(svg, None)
+        } else {
+            render_svg_with_budget(svg, None, available)
+        };
+        if let Some(picture) = &picture {
+            self.retained_bytes += picture.as_bytes(0).expect("raster frame").len();
+        }
+        self.images.insert(Arc::from(svg), picture.clone());
+        picture
+    }
+
+    /// Keeps the decodes `description` still draws and releases the rest, so
+    /// the budget counts only images on screen. A decode that failed or did
+    /// not fit is forgotten too: the next frame tries it again against
+    /// whatever the update freed.
+    fn retain_drawn_by(&mut self, description: &Description) {
+        self.placed.clear();
+        let mut drawn = HashSet::new();
+        drawn_images(&description.root, &mut drawn);
+        self.images
+            .retain(|svg, picture| picture.is_some() && drawn.contains(&**svg));
+        self.retained_bytes = self
+            .images
+            .values()
+            .flatten()
+            .map(|picture| picture.as_bytes(0).expect("raster frame").len())
+            .sum();
+    }
+}
+
+/// The SVG text of every image a description's tree draws.
+fn drawn_images<'a>(node: &'a Element, drawn: &mut HashSet<&'a str>) {
+    match node {
+        Element::Image { svg, .. } => {
+            drawn.insert(svg.as_str());
+        }
+        Element::Box { children, .. } | Element::List { children, .. } => {
+            for child in children {
+                drawn_images(child, drawn);
+            }
+        }
+        Element::Text { .. }
+        | Element::Button { .. }
+        | Element::Grid { .. }
+        | Element::VirtualList { .. } => {}
+    }
 }
 
 #[cfg(test)]
 impl ElementImageCache {
-    pub(crate) fn image_id(&self, index: u64) -> Option<gpui::ImageId> {
-        self.images.get(&index)?.as_ref().map(|image| image.id)
+    pub(crate) fn image_for(&self, svg: &str) -> Option<Arc<RenderImage>> {
+        self.images.get(svg).cloned().flatten()
+    }
+
+    /// The SVG texts the cache holds entries for, sorted.
+    pub(crate) fn cached_texts(&self) -> Vec<&str> {
+        let mut texts: Vec<&str> = self.images.keys().map(|svg| &**svg).collect();
+        texts.sort_unstable();
+        texts
+    }
+
+    pub(crate) fn decodes(&self) -> usize {
+        self.decodes
+    }
+
+    pub(crate) fn text_lookups(&self) -> usize {
+        self.text_lookups
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 }
 
-pub(crate) fn render(
+/// An element Surface's description, with what it derives from the tree: the
+/// decodes it draws and its clickable elements' ids. Both are kept by place in
+/// the tree, so they only change with the description: `replace` is the one way
+/// to give the body a new one.
+pub(crate) struct ElementBody {
+    surface: SurfaceId,
+    description: Description,
+    clicks: Vec<ElementId>,
+    images: ElementImageCache,
+}
+
+impl ElementBody {
+    pub(crate) fn new(surface: SurfaceId, description: Description) -> Self {
+        Self {
+            surface,
+            clicks: click_ids(&description.root, surface),
+            description,
+            images: ElementImageCache::default(),
+        }
+    }
+
+    /// Draws `description` from now on. Images it still draws keep their
+    /// decode; the rest are released, so the budget counts only what is on
+    /// screen.
+    pub(crate) fn replace(&mut self, description: Description) {
+        self.clicks = click_ids(&description.root, self.surface);
+        self.description = description;
+        self.images.retain_drawn_by(&self.description);
+    }
+
+    pub(crate) fn render(
+        &mut self,
+        registry: &TokenRegistry,
+        connection: &SurfaceConnection,
+        host: Option<Entity<TerminalView>>,
+    ) -> AnyElement {
+        render(
+            &self.description,
+            &self.clicks,
+            self.surface,
+            registry,
+            connection,
+            host,
+            &mut self.images,
+        )
+    }
+}
+
+#[cfg(test)]
+impl ElementBody {
+    pub(crate) fn description(&self) -> &Description {
+        &self.description
+    }
+
+    pub(crate) fn images(&self) -> &ElementImageCache {
+        &self.images
+    }
+}
+
+/// `clicks` holds the id of each clickable element in `description`, in tree
+/// order, as `click_ids` builds them.
+fn render(
     description: &Description,
+    clicks: &[ElementId],
     surface: SurfaceId,
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
     host: Option<Entity<TerminalView>>,
     images: &mut ElementImageCache,
 ) -> AnyElement {
-    let mut next = 0u64;
     element(
         &description.root,
         surface,
         registry,
         connection,
         &host,
-        &mut next,
+        &mut Walk {
+            next: 0,
+            clicks: clicks.iter(),
+        },
         images,
     )
+}
+
+/// What one walk of a description numbers as it goes.
+struct Walk<'a> {
+    /// The next element's place in tree order, by which an image finds its
+    /// decode.
+    next: u64,
+    /// The ids of the clickable elements not yet reached, in tree order.
+    clicks: std::slice::Iter<'a, ElementId>,
+}
+
+/// The GPUI id of each clickable element under `root`, in tree order.
+///
+/// Identified by the event it sends, not by its place in the tree. A press
+/// and its release are matched by id, so an update between them that moves
+/// another element under the pointer must not hand that element the press.
+/// Elements sending the same event are told apart by their order among
+/// themselves; mistaking one for another sends the same event either way.
+fn click_ids(root: &Element, surface: SurfaceId) -> Vec<ElementId> {
+    let mut ids = Vec::new();
+    let mut sent: HashMap<&str, u64> = HashMap::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let (on_click, children) = match node {
+            Element::Box {
+                on_click, children, ..
+            }
+            | Element::List {
+                on_click, children, ..
+            } => (on_click, children.as_slice()),
+            Element::Text { on_click, .. } | Element::Button { on_click, .. } => {
+                (on_click, &[][..])
+            }
+            Element::Image { .. } | Element::Grid { .. } | Element::VirtualList { .. } => {
+                continue;
+            }
+        };
+        if let Some(name) = on_click {
+            #[cfg(test)]
+            CLICK_IDS_BUILT.with(|built| built.set(built.get() + 1));
+            let occurrence = sent.entry(name.as_str()).or_default();
+            ids.push(ElementId::NamedInteger(
+                SharedString::from(format!("surface-{}-{name}", surface.0)),
+                *occurrence,
+            ));
+            *occurrence += 1;
+        }
+        // Reversed onto the stack so the first child is visited first.
+        pending.extend(children.iter().rev());
+    }
+    ids
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many clickable-element ids this thread has built, counted where
+    /// the id's name is formatted, so a test can see what a frame cost.
+    static CLICK_IDS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -137,6 +385,9 @@ pub(crate) struct GridMetrics {
     /// The pane's default foreground and background, for a grid that set none.
     pub defaults: (Rgb, Rgb),
     pub blink_on: bool,
+    /// Whether the pane has Pane Focus. A grid's cursor follows the terminal's
+    /// rule: outlined and steady without it.
+    pub focused: bool,
 }
 
 /// How many whole cells of this metric fit in a box of this size.
@@ -213,6 +464,7 @@ pub(crate) fn render_grid(
     grid: &mut GridSurface,
     highlights: &Highlights,
     metrics: &GridMetrics,
+    shapes: &Rc<RefCell<ShapeCache>>,
 ) -> AnyElement {
     let (default_fg, default_bg) = grid.default_colors(metrics.defaults);
     // A blinking cursor is absent for half of each blink, exactly as the
@@ -233,6 +485,8 @@ pub(crate) fn render_grid(
         cell_height: metrics.cells.height(),
         font_family: metrics.cells.family().clone(),
         font_size: metrics.cells.font_size(),
+        shapes: Rc::clone(shapes),
+        focused: metrics.focused,
     });
     let width = px(f32::from(metrics.cells.width()) * f32::from(grid.cols()));
     let height = px(f32::from(metrics.cells.height()) * f32::from(grid.rows()));
@@ -287,31 +541,17 @@ fn element(
     registry: &TokenRegistry,
     connection: &SurfaceConnection,
     host: &Option<Entity<TerminalView>>,
-    next: &mut u64,
+    walk: &mut Walk<'_>,
     images: &mut ElementImageCache,
 ) -> AnyElement {
-    // Numbered in tree order, so a clickable element's identity is stable for
-    // as long as the description keeps its shape.
-    let index = *next;
-    *next += 1;
+    let index = walk.next;
+    walk.next += 1;
 
     let (mut boxed, text, on_click, children) = match node {
         Element::Image { style, svg } => {
-            let picture = images.images.entry(index).or_insert_with(|| {
-                let available = MAX_SURFACE_IMAGE_BYTES - images.retained_bytes;
-                let picture = if available >= MAX_SVG_RASTER_BYTES {
-                    render_svg(svg, None)
-                } else {
-                    render_svg_with_budget(svg, None, available)
-                };
-                if let Some(picture) = &picture {
-                    images.retained_bytes += picture.as_bytes(0).expect("raster frame").len();
-                }
-                picture
-            });
-            return match picture {
+            return match images.picture(index, svg) {
                 Some(picture) => {
-                    style::apply_all(img(picture.clone()), &style.utilities).into_any_element()
+                    style::apply_all(img(picture), &style.utilities).into_any_element()
                 }
                 None => div().into_any_element(),
             };
@@ -342,6 +582,11 @@ fn element(
         ),
         Element::Grid { .. } | Element::VirtualList { .. } => return div().into_any_element(),
     };
+    // Taken before the children, which come after this element in tree order.
+    let click = on_click.as_ref().map(|name| {
+        let id = walk.clicks.next();
+        (name, id.expect("every clickable element has an id").clone())
+    });
     boxed = apply_described_style(boxed, node, registry);
     if let Some(text) = text {
         boxed = boxed.child(SharedString::from(text.to_owned()));
@@ -349,20 +594,17 @@ fn element(
     boxed = boxed.children(
         children
             .iter()
-            .map(|child| element(child, surface, registry, connection, host, next, images)),
+            .map(|child| element(child, surface, registry, connection, host, walk, images)),
     );
 
-    match on_click {
+    match click {
         None => boxed.into_any_element(),
-        Some(name) => {
+        Some((name, id)) => {
             let name = name.clone();
             let connection = connection.clone();
             let host = host.clone();
             boxed
-                .id(ElementId::NamedInteger(
-                    SharedString::from(format!("surface-{}", surface.0)),
-                    index,
-                ))
+                .id(id)
                 .on_click(move |_event, window, cx| {
                     let event = event_click(&name);
                     match &host {
@@ -421,9 +663,17 @@ mod tests {
         let (ours, _peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
-        let node = json!({"kind":"image","svg":"<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'/>"});
+        // Distinct texts: identical SVGs would share a single decode.
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'><desc>{n}</desc></svg>"
+            )
+        };
+        let nodes = (0..5)
+            .map(|n| json!({"kind":"image","svg":svg(n)}))
+            .collect::<Vec<_>>();
         let document = description::parse(
-            &json!({"version":1,"root":{"kind":"box","children":vec![node.clone();5]}}),
+            &json!({"version":1,"root":{"kind":"box","children":nodes}}),
             &registry,
         )
         .unwrap()
@@ -431,44 +681,211 @@ mod tests {
         let mut cache = ElementImageCache::default();
         let _ = render(
             &document,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
             None,
             &mut cache,
         );
-        let retained: usize = cache
-            .images
-            .values()
-            .flatten()
+        let retained: usize = (0..5)
+            .filter_map(|n| cache.image_for(&svg(n)))
             .map(|image| image.as_bytes(0).unwrap().len())
             .sum();
         assert_eq!(retained, 64 * 1024 * 1024);
-        assert!(cache.images[&5].is_none());
-        let first = cache.images[&1].as_ref().unwrap().id;
+        assert!(cache.image_for(&svg(4)).is_none());
+        let first = cache.image_for(&svg(0)).unwrap().id;
         let _ = render(
             &document,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
             None,
             &mut cache,
         );
-        assert_eq!(cache.images[&1].as_ref().unwrap().id, first);
-        assert!(cache.images[&5].is_none());
+        assert_eq!(cache.image_for(&svg(0)).unwrap().id, first);
+        assert!(cache.image_for(&svg(4)).is_none());
         cache = ElementImageCache::default();
-        let fresh = description::parse(&json!({"version":1,"root":node}), &registry)
-            .unwrap()
-            .description;
+        let fresh = description::parse(
+            &json!({"version":1,"root":{"kind":"image","svg":svg(4)}}),
+            &registry,
+        )
+        .unwrap()
+        .description;
         let _ = render(
             &fresh,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
             None,
             &mut cache,
         );
-        assert!(cache.images[&0].is_some());
+        assert!(cache.image_for(&svg(4)).is_some());
+    }
+
+    #[test]
+    fn retaining_a_new_description_releases_what_it_does_not_draw_and_retries_what_did_not_fit() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        // Each one is a distinct 16 MiB raster: four fill the 64 MiB budget.
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = |numbers: &[usize]| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"box","children":numbers
+                    .iter()
+                    .map(|n| json!({"kind":"image","svg":svg(*n)}))
+                    .collect::<Vec<_>>()}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let mut cache = ElementImageCache::default();
+        let _ = render(
+            &document(&[0, 1, 2, 3, 4]),
+            &[],
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        assert!(
+            cache.image_for(&svg(4)).is_none(),
+            "the fifth image is over the budget"
+        );
+        let kept = cache.image_for(&svg(1)).unwrap();
+        let decodes = cache.decodes();
+
+        let next = document(&[1, 4]);
+        cache.retain_drawn_by(&next);
+        assert_eq!(cache.retained_bytes(), 16 * 1024 * 1024);
+        assert!(cache.image_for(&svg(0)).is_none());
+        let _ = render(
+            &next,
+            &[],
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        // Entries hold the full SVG text and a lookup compares it, so the
+        // cache holds exactly the two texts drawn, each under its own text.
+        assert_eq!(cache.cached_texts(), [svg(1).as_str(), svg(4).as_str()]);
+        assert!(Arc::ptr_eq(&kept, &cache.image_for(&svg(1)).unwrap()));
+        assert!(
+            cache.image_for(&svg(4)).is_some(),
+            "the update freed room for it"
+        );
+        assert_eq!(cache.decodes(), decodes + 1);
+        assert_eq!(cache.retained_bytes(), 32 * 1024 * 1024);
+    }
+
+    /// A description may carry megabytes of SVG text. It is looked up by that
+    /// text once per description; every later frame finds each picture by its
+    /// place in the tree, so a repaint never hashes or compares the text.
+    #[test]
+    fn an_unchanged_description_never_looks_its_svg_text_up_again() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = |numbers: &[usize]| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"box","children":numbers
+                    .iter()
+                    .map(|n| json!({"kind":"box","children":[{"kind":"image","svg":svg(*n)}]}))
+                    .collect::<Vec<_>>()}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let frame = |description: &Description, cache: &mut ElementImageCache| {
+            let _ = render(
+                description,
+                &[],
+                SurfaceId(1),
+                &registry,
+                &connection,
+                None,
+                cache,
+            );
+        };
+        let mut cache = ElementImageCache::default();
+        let first = document(&[0, 1, 0]);
+        frame(&first, &mut cache);
+        assert_eq!(cache.text_lookups(), 3, "the first frame finds each image");
+        assert_eq!(cache.decodes(), 2, "the repeated SVG shares one decode");
+        let shown = cache.image_for(&svg(1)).unwrap();
+        for _ in 0..5 {
+            frame(&first, &mut cache);
+        }
+        assert_eq!(
+            cache.text_lookups(),
+            3,
+            "later frames find every picture by position"
+        );
+        assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
+
+        // An update is looked up afresh, once, and keeps the decodes it still
+        // draws wherever they moved in the tree.
+        let moved = document(&[1, 2]);
+        cache.retain_drawn_by(&moved);
+        frame(&moved, &mut cache);
+        frame(&moved, &mut cache);
+        assert_eq!(cache.text_lookups(), 5);
+        assert_eq!(cache.decodes(), 3, "only the new SVG is decoded");
+        assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
+    }
+
+    /// A clickable element's id names the event it sends, so building it
+    /// formats a string. That is done once per description, not per frame.
+    #[test]
+    fn an_unchanged_description_builds_its_click_ids_once() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let document = |names: &[&str]| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"box","children":names
+                    .iter()
+                    .map(|name| json!({"kind":"button","text":name,"on_click":name}))
+                    .collect::<Vec<_>>()}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let built = || CLICK_IDS_BUILT.with(|built| built.get());
+        let start = built();
+        let mut body = ElementBody::new(SurfaceId(1), document(&["a", "b", "a"]));
+        for _ in 0..6 {
+            let _ = body.render(&registry, &connection, None);
+        }
+        assert_eq!(
+            built() - start,
+            3,
+            "one id per clickable, built once for all six frames"
+        );
+
+        body.replace(document(&["b"]));
+        for _ in 0..3 {
+            let _ = body.render(&registry, &connection, None);
+        }
+        assert_eq!(built() - start, 4, "an update builds its own ids, once");
     }
 
     #[test]
@@ -489,9 +906,14 @@ mod tests {
         let (ours, _theirs) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
-        let document = |color| {
+        let svg = |color: &str| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>"
+            )
+        };
+        let document = |color: &str| {
             description::parse(
-                &json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":format!("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4' fill='{color}'/></svg>")}}),
+                &json!({"version":1,"root":{"kind":"image","style":"w_4 h_4","svg":svg(color)}}),
                 &registry,
             )
             .unwrap()
@@ -501,28 +923,38 @@ mod tests {
         let mut cache = ElementImageCache::default();
         let _ = render(
             &blue,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
             None,
             &mut cache,
         );
-        let first = cache.images[&0].as_ref().unwrap().clone();
+        let first = cache.image_for(&svg("blue")).unwrap();
         let _ = render(
             &blue,
+            &[],
             SurfaceId(1),
             &registry,
             &connection,
             None,
             &mut cache,
         );
-        assert!(Arc::ptr_eq(&first, cache.images[&0].as_ref().unwrap()));
+        assert!(Arc::ptr_eq(&first, &cache.image_for(&svg("blue")).unwrap()));
         let first_id = first.id;
         drop(first);
         let red = document("red");
         cache = ElementImageCache::default();
-        let _ = render(&red, SurfaceId(1), &registry, &connection, None, &mut cache);
-        let second = cache.images[&0].as_ref().unwrap();
+        let _ = render(
+            &red,
+            &[],
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut cache,
+        );
+        let second = cache.image_for(&svg("red")).unwrap();
         assert_eq!(&second.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
         assert_ne!(second.id, first_id);
     }
@@ -554,14 +986,8 @@ mod tests {
 
         // Building the element tree needs no window; that is the property
         // this test locks down, since every frame rebuilds it.
-        let _element = render(
-            &parsed.description,
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut ElementImageCache::default(),
-        );
+        let _element =
+            ElementBody::new(SurfaceId(1), parsed.description).render(&registry, &connection, None);
     }
 
     #[test]
@@ -615,6 +1041,7 @@ mod tests {
                 crate::tokens::unpack(0x101014),
             ),
             blink_on: true,
+            focused: true,
         };
 
         assert_eq!(
@@ -671,10 +1098,16 @@ mod tests {
                 crate::tokens::unpack(0x101014),
             ),
             blink_on: true,
+            focused: true,
         };
         // As for element Surfaces: the tree is rebuilt every frame and needs no
         // window to build; only painting does.
-        let _element = render_grid(&mut grid, &crate::config::Highlights::default(), &metrics);
+        let _element = render_grid(
+            &mut grid,
+            &crate::config::Highlights::default(),
+            &metrics,
+            &Rc::default(),
+        );
     }
 
     fn metrics(cell_width: f32, cell_height: f32) -> GridMetrics {
@@ -689,6 +1122,7 @@ mod tests {
                 },
             ),
             blink_on: true,
+            focused: true,
         }
     }
 

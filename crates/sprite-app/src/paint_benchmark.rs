@@ -1,5 +1,7 @@
 //! Headless access to the terminal's live row preparation and cell decisions.
-//! Window layout, image elements, font shaping and GPU submission are excluded.
+//! Window layout, image elements, glyph rasterisation and GPU submission are
+//! excluded. Shaping is counted through the live shape cache but not timed:
+//! GPUI shapes text only through a window, and none can be opened headless.
 
 use gpui::px;
 use sprite_term::{
@@ -36,10 +38,25 @@ impl Scenario {
     }
 }
 
+/// What one transition asks of the text system.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShapingSample {
+    /// Cells whose text reaches the text system: every one of them was shaped
+    /// on every frame before the shape cache existed.
+    pub glyph_cells: usize,
+    /// Of those, how many the shape cache had to shape.
+    pub shape_calls: usize,
+}
+
+/// The display scale shaping is counted at; any fixed value will do, since a
+/// sample never changes it.
+const BENCHMARK_SCALE: f32 = 2.0;
+
 pub struct PaintBenchmark {
     snapshot: RenderSnapshot,
     changed: RenderSnapshot,
     cache: crate::grid::LayoutCache,
+    shapes: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
 }
 
 impl Default for PaintBenchmark {
@@ -59,6 +76,7 @@ impl PaintBenchmark {
             snapshot,
             changed,
             cache: Default::default(),
+            shapes: Default::default(),
         }
     }
 
@@ -69,6 +87,18 @@ impl PaintBenchmark {
             text.benchmark_draw_decisions();
         }
         std::hint::black_box((background, text));
+    }
+
+    /// Counts, for one transition, the glyphs live painting hands to the text
+    /// system and how many of them the shape cache has to shape.
+    pub fn shaping(&mut self, scenario: Scenario, split: bool) -> ShapingSample {
+        let (background, text) = self.prepare(scenario, split);
+        let pass = text.as_ref().unwrap_or(&background);
+        let (glyph_cells, shape_calls) = pass.benchmark_shaping(BENCHMARK_SCALE);
+        ShapingSample {
+            glyph_cells,
+            shape_calls,
+        }
     }
 
     pub(crate) fn prepare(
@@ -103,6 +133,8 @@ impl PaintBenchmark {
                 cell_height: px(18.0),
                 font_family: "monospace".into(),
                 font_size: px(14.0),
+                shapes: std::rc::Rc::clone(&self.shapes),
+                focused: true,
             },
             split,
         )
@@ -240,5 +272,44 @@ mod tests {
             .filter_map(|(index, (before, after))| (before != after).then_some(index))
             .collect();
         assert_eq!(changed_rows, [30]);
+    }
+
+    /// Each transition, counted through the live shape cache. The fixture has
+    /// 110 cells per row that reach the text system (6,600 on screen); before
+    /// the cache every one of them was shaped on every frame.
+    #[test]
+    fn shaping_counts_follow_the_shape_cache_through_each_transition() {
+        for split in [false, true] {
+            let mut benchmark = PaintBenchmark::new();
+            let first = benchmark.shaping(Scenario::FirstFrame, split);
+            assert_eq!(first.glyph_cells, 6_600);
+            assert!(first.shape_calls > 0 && first.shape_calls <= first.glyph_cells);
+            assert_eq!(
+                benchmark.shaping(Scenario::FirstFrame, split),
+                ShapingSample {
+                    glyph_cells: 6_600,
+                    shape_calls: 0
+                },
+                "an unchanged frame shapes nothing"
+            );
+            let blink = benchmark.shaping(Scenario::SameGenerationBlink, split);
+            assert!(
+                blink.shape_calls <= 1,
+                "a blink shapes at most the cursor's cell"
+            );
+            let hover = benchmark.shaping(Scenario::Hover, split);
+            assert!(
+                (1..=110).contains(&hover.shape_calls),
+                "hover reshapes only within row 12: {}",
+                hover.shape_calls
+            );
+            let changed = benchmark.shaping(Scenario::OneRowChange, split);
+            assert_eq!(changed.glyph_cells, 6_601, "row 30 gained a glyph");
+            assert!(
+                (1..=111).contains(&changed.shape_calls),
+                "a one-row change reshapes only row 30: {}",
+                changed.shape_calls
+            );
+        }
     }
 }

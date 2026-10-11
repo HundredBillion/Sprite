@@ -307,30 +307,40 @@ fn input_to_snapshot_idle() -> Duration {
 /// The same keystroke, but while the child is flooding the terminal. The child
 /// stops its own producer on receipt, so the marker survives long enough to be
 /// observed rather than scrolling away.
+/// The shell stays alive until observation, excluding natural-exit drain time.
 fn input_to_snapshot_under_load() -> Duration {
+    measure_input_under_load(
+        "stty -echo; yes sprite-load-line & producer=$!; \
+         read line; kill $producer 2>/dev/null; wait $producer 2>/dev/null; \
+         printf '\\nMARK:%s\\n' \"$line\"; read done",
+        "MARK:Z",
+        SAMPLE_TIMEOUT,
+    )
+    .unwrap_or_else(|error| fatal(&error))
+}
+
+fn measure_input_under_load(
+    script: &str,
+    marker: &str,
+    timeout: Duration,
+) -> Result<Duration, String> {
     let sprite_term::Spawned {
         mut session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(shell(
-        "stty -echo; yes sprite-load-line & producer=$!; \
-         read line; kill $producer 2>/dev/null; printf '\\nMARK:%s\\n' \"$line\"",
-    ))
-    .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
-    let _events = await_ready(events);
-
-    // Only measure once the flood is genuinely under way.
-    let warmup = Instant::now();
-    wait_for_text(&mut snapshots, "sprite-load-line", warmup);
-
-    let started = Instant::now();
-    session
-        .send(TerminalCommand::Input(b"Z\n".to_vec()))
-        .unwrap_or_else(|error| fatal(&format!("send: {error}")));
-    let elapsed = wait_for_text(&mut snapshots, "MARK:Z", started);
-
+    } = TerminalSession::spawn(shell(script)).map_err(|error| format!("spawn: {error}"))?;
+    let result = (|| {
+        let _events = await_ready(events);
+        // Only measure once the flood is genuinely under way.
+        wait_for_text_until(&mut snapshots, "sprite-load-line", Instant::now(), timeout)?;
+        let started = Instant::now();
+        session
+            .send(TerminalCommand::Input(b"Z\n".to_vec()))
+            .map_err(|error| format!("send: {error}"))?;
+        wait_for_text_until(&mut snapshots, marker, started, timeout)
+    })();
     finish(session);
-    elapsed
+    result
 }
 
 /// Ten mebibytes of output, measured to the last snapshot the session emits.
@@ -568,21 +578,46 @@ fn wait_for_text(
     needle: &str,
     started: Instant,
 ) -> Duration {
-    let deadline = started + SAMPLE_TIMEOUT;
-    loop {
-        match snapshots.next_blocking() {
-            Ok(bundle) => {
-                let visible = bundle.pane.rows.iter().any(|row| row.text.contains(needle));
-                if visible {
-                    return started.elapsed();
-                }
-            }
-            Err(error) => fatal(&format!(
-                "snapshot stream ended waiting for {needle}: {error}"
-            )),
+    wait_for_text_until(snapshots, needle, started, SAMPLE_TIMEOUT)
+        .unwrap_or_else(|error| fatal(&error))
+}
+
+// The async stream lets a quiet child reach its deadline without a helper thread.
+fn receive_until<T>(future: impl std::future::Future<Output = T>, deadline: Instant) -> Option<T> {
+    struct WakeThread(std::thread::Thread);
+    impl std::task::Wake for WakeThread {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
         }
-        if Instant::now() > deadline {
-            fatal(&format!("timed out waiting for {needle}"));
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(WakeThread(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return Some(value);
+        }
+        std::thread::park_timeout(remaining);
+    }
+}
+
+fn wait_for_text_until(
+    snapshots: &mut sprite_term::SnapshotStream,
+    needle: &str,
+    started: Instant,
+    timeout: Duration,
+) -> Result<Duration, String> {
+    let deadline = started + timeout;
+    loop {
+        let bundle = receive_until(snapshots.next(), deadline)
+            .ok_or_else(|| format!("timed out waiting for {needle}"))?
+            .map_err(|error| format!("snapshot stream ended waiting for {needle}: {error}"))?;
+        if bundle.pane.rows.iter().any(|row| row.text.contains(needle)) {
+            return Ok(started.elapsed());
         }
     }
 }
@@ -623,4 +658,51 @@ fn isolated_capture(samples: usize) -> Vec<Measurement> {
         }
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use std::sync::mpsc;
+    use std::thread;
+
+    #[test]
+    fn missing_marker_times_out_and_reaps_the_live_shell() {
+        let pid_file =
+            std::env::temp_dir().join(format!("sprite-bench-missing-marker-{}.pid", process::id()));
+        let script = format!(
+            "stty -echo; echo $$ > '{}'; printf 'sprite-load-line\\n'; \
+             read line; printf 'WRONG\\n'; read done",
+            pid_file.display()
+        );
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = measure_input_under_load(&script, "MARK:Z", Duration::from_millis(500));
+            let _ = sender.send(result);
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(10));
+        let pid = Pid::from_raw(
+            fs::read_to_string(&pid_file)
+                .expect("shell started")
+                .trim()
+                .parse()
+                .expect("shell pid"),
+        );
+        if result.is_err() {
+            let _ = kill(pid, Signal::SIGKILL);
+        }
+        let _ = worker.join();
+        fs::remove_file(pid_file).expect("remove fixture pid");
+        assert_eq!(
+            result.expect("silent marker wait must finish"),
+            Err("timed out waiting for MARK:Z".to_owned())
+        );
+        assert_eq!(
+            kill(pid, None),
+            Err(nix::errno::Errno::ESRCH),
+            "timeout must finish session cleanup before returning"
+        );
+    }
 }

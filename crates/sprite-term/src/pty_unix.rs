@@ -6,7 +6,8 @@
 //!
 //! It carries both directions. Output is read under a permit scheme rather than
 //! queue capacity: the pump must hold one of sixteen tokens before it waits for
-//! readability, and dropping the resulting chunk returns its buffer and token.
+//! readability, fills that token's buffer with whatever is already waiting, and
+//! dropping the resulting chunk returns its buffer and token.
 //! At most sixteen 16 KiB chunks can therefore
 //! occupy the 17-slot worker queue, which structurally reserves the last slot
 //! for input and lifecycle work.
@@ -51,11 +52,18 @@ const READ_CHUNK_BYTES: usize = 16 * 1024;
 /// Sixteen outstanding output chunks, leaving one worker queue slot free.
 const OUTPUT_PERMITS: usize = 16;
 
+/// What bracketed paste adds around a paste: `ESC [ 200 ~` before it and
+/// `ESC [ 201 ~` after it.
+const BRACKETED_PASTE_OVERHEAD: usize = 12;
+
 /// Input waiting for the PTY to have room, beyond which more is refused and
-/// reported rather than held. Sixty-four maximal pastes: a program this far
-/// behind has stopped reading, and hoarding more for it would only hide that
-/// from the person typing.
-const INPUT_BACKLOG_BYTES: usize = 1024 * 1024;
+/// reported rather than held.
+///
+/// Exactly one largest admitted paste with its brackets: anything smaller and
+/// a paste the session already accepted would be refused as if the program had
+/// stopped reading. A program further behind than that has stopped reading,
+/// and hoarding more for it would only hide that from the person typing.
+const INPUT_BACKLOG_BYTES: usize = crate::max_clipboard_bytes() + BRACKETED_PASTE_OVERHEAD;
 
 /// The worker's handle on the pump thread.
 pub(crate) struct Pump {
@@ -73,6 +81,26 @@ pub(crate) struct OutputChunk {
 impl OutputChunk {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.permit.buffer.as_ref().expect("live permit")[..self.len]
+    }
+}
+
+#[cfg(test)]
+impl OutputChunk {
+    /// A chunk that belongs to no pump, so a test can queue output for a
+    /// worker directly. Dropping it returns its buffer nowhere and wakes no one.
+    pub(crate) fn detached(bytes: &[u8]) -> Self {
+        let (returned, _closed) = sync_channel(1);
+        let (wake, _peer) = UnixStream::pair().expect("wake pair");
+        Self {
+            permit: Permit {
+                buffer: Some(bytes.to_vec()),
+                pool: BufferPool {
+                    returned,
+                    wake: Arc::new(wake),
+                },
+            },
+            len: bytes.len(),
+        }
     }
 }
 
@@ -115,9 +143,9 @@ pub(crate) struct InputQueue {
 impl InputQueue {
     /// Queues `bytes` for the PTY, after everything queued before them.
     ///
-    /// Never blocks. Refused, with the reason, once a megabyte is already
-    /// waiting — see `INPUT_BACKLOG_BYTES` — and once the pump has stopped,
-    /// when there is nothing left to write to.
+    /// Never blocks. Refused, with the reason, once the backlog would exceed
+    /// `INPUT_BACKLOG_BYTES`, and once the pump has stopped, when there is
+    /// nothing left to write to.
     pub(crate) fn write(&self, bytes: Vec<u8>) -> Result<(), SessionError> {
         if bytes.is_empty() {
             return Ok(());
@@ -346,7 +374,7 @@ fn run(ends: Ends<'_>) -> PumpOutcome {
                 .buffer
                 .as_mut()
                 .expect("live permit");
-            match read_once(master.as_fd(), buffer) {
+            match read_available(master.as_fd(), buffer) {
                 // Another reader can consume readiness before this nonblocking read.
                 ReadResult::NotReady => {}
                 ReadResult::Eof => return PumpOutcome::Eof,
@@ -503,24 +531,39 @@ enum ReadResult {
     Failed(String),
 }
 
-fn read_once(master: BorrowedFd<'_>, buffer: &mut [u8]) -> ReadResult {
+/// Reads into one permit's buffer until the descriptor has nothing more to
+/// give right now, or the buffer is full.
+///
+/// A macOS PTY hands over at most a small slice of what is waiting per read,
+/// so one read per permit spent a permit — and a pass of the worker — on each
+/// slice. Reading until `EAGAIN` makes a permit carry what one buffer can hold.
+/// What has already been read is always delivered: if a later read in the same
+/// fill fails or reports the end, the next poll reports that on its own.
+fn read_available(master: BorrowedFd<'_>, buffer: &mut [u8]) -> ReadResult {
+    let mut filled = 0;
     loop {
-        match nix::unistd::read(master.as_raw_fd(), buffer) {
-            Ok(0) => return ReadResult::Eof,
-            Ok(count) => return ReadResult::Chunk(count),
+        match nix::unistd::read(master.as_raw_fd(), &mut buffer[filled..]) {
+            Ok(0) if filled == 0 => return ReadResult::Eof,
+            Ok(0) => return ReadResult::Chunk(filled),
+            Ok(count) => {
+                filled += count;
+                if filled == buffer.len() {
+                    return ReadResult::Chunk(filled);
+                }
+            }
             Err(Errno::EINTR) => continue,
+            Err(_) if filled > 0 => return ReadResult::Chunk(filled),
             Err(Errno::EAGAIN) => return ReadResult::NotReady,
             // Linux reports the closed slave this way rather than with a
             // zero-length read; it is an ordinary end of session, not a fault.
-            Err(Errno::EIO) => {
-                return ReadResult::Eof;
-            }
+            Err(Errno::EIO) => return ReadResult::Eof,
             Err(error) => return ReadResult::Failed(error.to_string()),
         }
     }
 }
 
 /// The bounded shutdown policy's escalation steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GroupSignal {
     Hangup,
     Terminate,
@@ -875,5 +918,29 @@ mod tests {
         ));
         read.expect("pump writes through its own descriptor");
         assert_eq!(&output, b"owned endpoint");
+    }
+
+    /// One permit carries everything already waiting, not one read's worth.
+    ///
+    /// A datagram socket returns one datagram per read, which is how a macOS
+    /// PTY behaves too: it hands over a small slice per read however much is
+    /// queued. Three datagrams sent before the pump starts must therefore
+    /// arrive as one chunk.
+    #[test]
+    fn one_permit_reads_everything_already_waiting() {
+        let (master, peer) = std::os::unix::net::UnixDatagram::pair().expect("datagram pair");
+        for part in [&b"first "[..], &b"second "[..], &b"third"[..]] {
+            peer.send(part).expect("queue output");
+        }
+        let (commands, inbox) = sync_channel(crate::WORKER_QUEUE_CAPACITY);
+        let mut pump = Pump::start(master.as_raw_fd(), commands).expect("pump");
+        let message = inbox.recv_timeout(Duration::from_secs(2)).expect("chunk");
+        // Disconnect before joining so a failing assertion cannot leave a full inbox.
+        drop(inbox);
+        pump.shutdown();
+        let Message::PtyOutput(chunk) = message else {
+            panic!("expected output");
+        };
+        assert_eq!(chunk.as_bytes(), b"first second third");
     }
 }

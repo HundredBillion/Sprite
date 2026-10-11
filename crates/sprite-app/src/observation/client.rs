@@ -163,7 +163,7 @@ pub fn run_config_print(
     let environment = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
 
     if let Some(path) = &args.path {
-        let (settings, complaints) = crate::config::Settings::load_from(path);
+        let (settings, complaints) = crate::config::Settings::load_explicit(path);
         for complaint in complaints.0 {
             let _ = writeln!(errors, "sprite: {complaint}");
         }

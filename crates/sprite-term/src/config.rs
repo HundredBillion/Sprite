@@ -13,8 +13,8 @@ pub fn default_scrollback_bytes() -> usize {
     DEFAULT_SCROLLBACK_BYTES
 }
 
-/// The OSC 52 size bound, in decoded bytes.
-pub(crate) fn max_clipboard_bytes() -> usize {
+/// The OSC 52 size bound, in decoded bytes, and the most text one paste may carry.
+pub(crate) const fn max_clipboard_bytes() -> usize {
     MAX_CLIPBOARD_BYTES
 }
 

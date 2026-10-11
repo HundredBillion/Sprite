@@ -67,6 +67,9 @@ pub struct ListModel {
     pub scroll: Option<ScrollAnchor>,
     pub reveal: Option<String>,
     pub active_guides: HashSet<String>,
+    /// Every guide id the current rows carry, gathered once per `list_rows`
+    /// so an `active_guides` patch checks its ids without walking the rows.
+    guide_ids: HashSet<String>,
     ids: HashMap<String, usize>,
     row_height: f32,
 }
@@ -82,6 +85,7 @@ impl Default for ListModel {
             scroll: None,
             reveal: None,
             active_guides: HashSet::new(),
+            guide_ids: HashSet::new(),
             ids: HashMap::new(),
             row_height: 128.0,
         }
@@ -167,13 +171,8 @@ impl ListModel {
         self.selected = selected;
         self.scroll = scroll;
         self.reveal = None;
-        let surviving: HashSet<&str> = self
-            .rows
-            .iter()
-            .flat_map(|row| row.guides.iter().filter_map(|guide| guide.id.as_deref()))
-            .collect();
-        self.active_guides
-            .retain(|id| surviving.contains(id.as_str()));
+        self.guide_ids = guide_ids(&self.rows);
+        self.active_guides.retain(|id| self.guide_ids.contains(id));
         Ok(())
     }
 
@@ -191,15 +190,7 @@ impl ListModel {
         let mut active_guides = self.active_guides.clone();
         if let Some(value) = patch.get("active_guides") {
             active_guides = parse_active_guides(value)?;
-            let available: HashSet<&str> = self
-                .rows
-                .iter()
-                .flat_map(|row| row.guides.iter().filter_map(|guide| guide.id.as_deref()))
-                .collect();
-            if active_guides
-                .iter()
-                .any(|id| !available.contains(id.as_str()))
-            {
+            if active_guides.iter().any(|id| !self.guide_ids.contains(id)) {
                 return Err(malformed("active guide does not exist"));
             }
         }
@@ -410,6 +401,19 @@ fn id_index(rows: &[ListRow]) -> Result<HashMap<String, usize>, Refusal> {
         }
     }
     Ok(ids)
+}
+
+#[cfg(test)]
+thread_local! { static GUIDE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// The distinct guide ids across `rows`: the one walk of every row's guides
+/// that a `list_rows` pays, kept so a state patch never repeats it.
+fn guide_ids(rows: &[ListRow]) -> HashSet<String> {
+    #[cfg(test)]
+    GUIDE_SCANS.with(|count| count.set(count.get() + 1));
+    rows.iter()
+        .flat_map(|row| row.guides.iter().filter_map(|guide| guide.id.clone()))
+        .collect()
 }
 
 fn preserved_anchor(
@@ -654,6 +658,47 @@ mod tests {
             )
             .unwrap();
         assert!(model.active_guides.is_empty());
+    }
+
+    #[test]
+    fn active_guides_are_checked_against_ids_gathered_once_per_rows() {
+        let rows = |revision: u64, guide: &str| {
+            serde_json::json!({"type":"list_rows","revision":revision,"selected":null,
+                "rows":(0..1_000).map(|i| serde_json::json!({"id":format!("r{i}"),"text":"row","indent":0,
+                    "guides":[{"offset":8,"id":format!("{guide}-{}", i % 10)}]})).collect::<Vec<_>>()})
+        };
+        let state = |revision: u64, ids: Value| {
+            parse_op(
+                &serde_json::json!({"type":"list_state","revision":revision,"active_guides":ids}),
+            )
+            .unwrap()
+        };
+        let mut model = ListModel::default();
+        GUIDE_SCANS.with(|count| count.set(0));
+        model.apply(parse_op(&rows(1, "old")).unwrap()).unwrap();
+        for _ in 0..100 {
+            model
+                .apply(state(1, serde_json::json!(["old-3", "old-7"])))
+                .unwrap();
+        }
+        assert_eq!(
+            GUIDE_SCANS.with(|count| count.get()),
+            1,
+            "an active_guides patch walked the rows again"
+        );
+
+        model.apply(parse_op(&rows(2, "new")).unwrap()).unwrap();
+        assert_eq!(GUIDE_SCANS.with(|count| count.get()), 2);
+        assert!(
+            model.active_guides.is_empty(),
+            "no old guide survived the rows"
+        );
+        assert!(
+            model.apply(state(2, serde_json::json!(["old-3"]))).is_err(),
+            "a guide of the replaced rows is no longer valid"
+        );
+        model.apply(state(2, serde_json::json!(["new-3"]))).unwrap();
+        assert_eq!(model.active_guides, HashSet::from(["new-3".to_owned()]));
     }
 
     #[test]

@@ -109,7 +109,7 @@ fn layout_mutations_publish_only_changed_observation_geometry(cx: &mut gpui::Tes
         workspace.close_exited_pane(background.0, background.1, cx)
     });
     assert_eq!(publications(&workspace, cx), 8);
-    workspace.update(cx, |workspace, cx| workspace.close_active_tab(cx));
+    workspace.update(cx, |workspace, cx| workspace.close_active_tab(false, cx));
     assert_eq!(publications(&workspace, cx), 9);
     workspace.read_with(cx, |workspace, _| {
         assert_eq!(workspace.placements.len(), 1);
@@ -125,7 +125,7 @@ fn layout_mutations_publish_only_changed_observation_geometry(cx: &mut gpui::Tes
         9,
         "reenabling retains the current registry layout"
     );
-    workspace.update(cx, |workspace, cx| workspace.close_focused_pane(cx));
+    workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
     assert_eq!(publications(&workspace, cx), 10);
     workspace.read_with(cx, |workspace, _| {
         assert!(workspace.placements.is_empty());
@@ -193,10 +193,10 @@ fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
             let before = cx.debug_bounds("workspace-panes").unwrap();
             let published = publications(&workspace, cx);
             workspace.update(cx, |workspace, cx| {
-                workspace.mode = Mode::ConfirmingClose(PendingClose {
-                    scope: CloseScope::Window,
-                    label: "busy — click close again to close this window, Esc to keep it".into(),
-                });
+                workspace.mode = Mode::ConfirmingClose(PendingClose::new(
+                    CloseScope::Window,
+                    "busy — click close again to close this window, Esc to keep it".into(),
+                ));
                 cx.notify();
             });
             draw_workspace(cx);
@@ -287,10 +287,10 @@ fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
             assert_eq!(publications(&workspace, cx), published + 1);
             let dismissed = cx.debug_bounds("workspace-panes").unwrap();
             workspace.update(cx, |workspace, cx| {
-                workspace.mode = Mode::ConfirmingClose(PendingClose {
-                    scope: CloseScope::Window,
-                    label: "busy ".repeat(100).into(),
-                });
+                workspace.mode = Mode::ConfirmingClose(PendingClose::new(
+                    CloseScope::Window,
+                    "busy ".repeat(100).into(),
+                ));
                 cx.notify();
             });
             draw_workspace(cx);

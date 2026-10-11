@@ -103,7 +103,17 @@ fn the_login_shell_carries_sprite_identity() {
         .expect("utf-8 path")
         .to_owned();
 
-    let config = SessionConfig::login_shell().expect("resolve a login shell");
+    // User startup files can delay input or rewrite the environment under test.
+    let (mut config, complaints) = SessionConfig::shell(&sprite_term::ShellPreference {
+        program: Some("/bin/bash".into()),
+        args: Some(args(&["--noprofile", "--norc", "-l"])),
+        ..Default::default()
+    })
+    .expect("configure a login shell");
+    assert!(complaints.is_empty(), "{complaints:?}");
+    config
+        .environment
+        .push(("INPUTRC".into(), "/dev/null".into()));
     let sprite_term::Spawned {
         mut session,
         events,
@@ -112,6 +122,16 @@ fn the_login_shell_carries_sprite_identity() {
     let events = EventPump::new(events);
     let snapshots = support::SnapshotPump::new(snapshots);
     events.expect_ready();
+
+    // Ready reports PTY startup; this reply proves a login shell is reading input.
+    session
+        .send(sprite_term::TerminalCommand::Input(
+            b"stty -echo; shopt -q login_shell && printf 'LOGIN''_READY\\n'\n".to_vec(),
+        ))
+        .expect("ask the login shell to announce readiness");
+    snapshots.wait_for("the login shell to read commands", |bundle| {
+        support::pane_text(bundle).contains("LOGIN_READY")
+    });
 
     // Every marker is written as two adjacent shell strings, so the command the
     // terminal echoes back can never be mistaken for the command's output.
@@ -146,10 +166,7 @@ fn the_login_shell_carries_sprite_identity() {
         "the child can look up the terminfo entry generated from the pinned \
          Ghostty source, got:\n{text}"
     );
-    // A login shell sources the user's profile, which may legitimately prepend
-    // its own PATH entries, so the exact first position is asserted against the
-    // pure builder in `shell::tests` instead. What must hold here is that the
-    // running executable's directory reached the child at all.
+    // The pure builder tests PATH ordering; this proves the child inherited it.
     assert!(
         text.contains("EXEDIR_OK"),
         "the executable directory reaches the child's PATH, got:\n{text}"
@@ -410,7 +427,9 @@ os._exit(7)
     .expect("spawn parent and retained-descriptor descendant");
     let events = EventPump::new(events);
     events.expect_ready();
-    match events.next() {
+    // Natural exit permits six seconds of output draining without another event.
+    // Allow scheduling overhead while still detecting a deadline renewed by output.
+    match events.next_with_timeout(std::time::Duration::from_secs(10)) {
         TerminalEvent::Exited(exit) => {
             assert_eq!(exit.code, Some(7));
             assert!(!exit.requested);
@@ -456,4 +475,87 @@ os._exit(7)
         .expect("exit published a snapshot");
     let text = support::pane_text(&final_snapshot);
     assert!(text.contains("FINAL_EXIT_TAIL"), "final snapshot: {text:?}");
+}
+
+/// Once a session has ended on its own, nothing Sprite holds keeps the PTY
+/// open: a descendant that ignored the hangup and still holds the terminal
+/// sees it close, even while the application keeps the ended session.
+#[test]
+fn an_ended_session_releases_the_terminal_to_a_lingering_descendant() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
+    let pid_file = std::env::temp_dir().join(format!("sprite-hangup-{unique}.pid"));
+    let hung_up = std::env::temp_dir().join(format!("sprite-hangup-{unique}.done"));
+    struct Descendant(std::path::PathBuf, std::path::PathBuf);
+    impl Drop for Descendant {
+        fn drop(&mut self) {
+            if let Ok(pid) = std::fs::read_to_string(&self.0) {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", pid.trim()])
+                    .status();
+            }
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(&self.1);
+        }
+    }
+    let _descendant = Descendant(pid_file.clone(), hung_up.clone());
+    // The descendant ignores SIGHUP and blocks reading the terminal; a read
+    // only returns once no master is left open, and then it says so in a file.
+    let script = r#"import os, signal, sys
+r, w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    os.write(w, b'ready')
+    os.close(w)
+    try:
+        while os.read(0, 1):
+            pass
+    except OSError:
+        pass
+    with open(sys.argv[2], 'w') as f:
+        f.write('hung up')
+    os._exit(0)
+os.close(w)
+os.read(r, 5)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(pid))
+os._exit(0)
+"#;
+    let sprite_term::Spawned {
+        session: _session,
+        events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(SessionConfig::command(
+        "python3",
+        vec![
+            "-c".into(),
+            script.into(),
+            pid_file.into_os_string(),
+            hung_up.clone().into_os_string(),
+        ],
+    ))
+    .expect("spawn parent and lingering descendant");
+    let events = EventPump::new(events);
+    events.expect_ready();
+    match events.next() {
+        TerminalEvent::Exited(exit) => assert!(!exit.requested),
+        other => panic!("expected natural Exited, got {other:?}"),
+    }
+    // `_session` is still alive here, as the application keeps an ended pane.
+    let deadline = std::time::Instant::now() + support::WATCHDOG;
+    while !hung_up.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the descendant still holds an open terminal after the session ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }

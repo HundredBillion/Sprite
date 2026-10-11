@@ -49,20 +49,24 @@
 //! grid on whole pixels. What it buys is that no edge in the pane is ever half
 //! covered.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, Font, FontFeatures, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Position, Rgba,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Position, Rgba, ShapedLine,
     SharedString, StrikethroughStyle, Style, TextRun, Window, fill, outline, point, px, relative,
     rgb,
 };
 use sprite_term::{
-    CellStyle, CursorSnapshot, CursorStyle, RenderSnapshot, Rgb, SnapshotColor, UnderlineStyle,
+    CellStyle, CellText, CursorSnapshot, CursorStyle, RenderSnapshot, Rgb, SnapshotColor,
+    UnderlineStyle,
 };
 
-use crate::block_elements::{block_fill, fill_rects};
-use crate::box_drawing::{self, box_glyph, box_outlines, box_rects};
+use crate::block_elements::{BlockFill, block_fill, fill_rects};
+use crate::box_drawing::{self, BoxGlyph, box_glyph, box_outlines, box_rects};
 use crate::grid::PositionedCell;
 use crate::grid::{Col, Row, Snapped, column_edge, row_edge};
 
@@ -71,6 +75,152 @@ use crate::grid::{Col, Row, Snapped, column_edge, row_edge};
 /// A fraction rather than a constant, because a cursor two logical pixels wide
 /// is a bold stripe at size 8 and nearly invisible at size 48.
 pub(crate) const CURSOR_STROKE: f32 = 0.12;
+
+#[cfg(test)]
+thread_local! {
+    /// How many cells this thread has asked the text system to shape. Counted
+    /// beside the one grid `shape_line` call, so a test can see what a frame
+    /// actually cost.
+    pub(crate) static SHAPED_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The most distinct shapes a pane's shared pool keeps for reuse.
+///
+/// A shaped line carries room for thirty-two decoration runs inline, a few
+/// kilobytes per line, so one shape is shared by every cell that would shape
+/// identically. A screen of ordinary text needs a few hundred; when the pool
+/// fills it is emptied and starts again.
+///
+/// This caps only the pool. Each row also keeps the shape of every glyph cell
+/// it painted, which the visible grid bounds rather than this constant: output
+/// that gives every cell its own truecolour leaves one shape per glyph cell,
+/// tens of megabytes for a 200x60 pane, until those rows change.
+const MAX_DISTINCT_SHAPES: usize = 4096;
+
+/// What every cached shape depends on besides the cell itself.
+///
+/// A change to any of it changes how every glyph is shaped or coloured, so the
+/// whole cache goes rather than being checked cell by cell.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ShapeContext {
+    pub family: SharedString,
+    pub font_size: Pixels,
+    pub scale: f32,
+    pub default_fg: Rgb,
+    pub default_bg: Rgb,
+    pub palette: Option<Arc<[Rgb; 256]>>,
+}
+
+/// Everything that makes two cells shape to the same line.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ShapeKey {
+    text: CellText,
+    bold: bool,
+    italic: bool,
+    /// A hovered link is drawn a pixel larger.
+    enlarged: bool,
+    /// The drawn colour, bit for bit: the text system bakes it into the line.
+    color: [u32; 4],
+}
+
+fn color_bits(color: Rgba) -> [u32; 4] {
+    [
+        color.r.to_bits(),
+        color.g.to_bits(),
+        color.b.to_bits(),
+        color.a.to_bits(),
+    ]
+}
+
+/// One cell's slot: the colour it was shaped in, and the shape.
+type ShapedSlot = Option<(Rgba, Arc<ShapedLine>)>;
+
+/// The shapes of one laid-out row.
+#[derive(Default)]
+struct ShapedRow {
+    /// The row these shapes belong to. The layout cache hands back the same
+    /// allocation while a row is unchanged, so a different one means the row
+    /// was rebuilt and its shapes start again.
+    source: Option<Arc<Vec<PositionedCell>>>,
+    cells: Vec<ShapedSlot>,
+}
+
+/// Shaped glyphs kept between frames, filled lazily as cells are painted.
+///
+/// Sits beside the layout cache: rows the layout reuses keep their shapes, and
+/// a cell is shaped again only when the colour it is drawn in differs from the
+/// one it was shaped in. Shapes themselves are pooled, so a rebuilt row whose
+/// cells look as they did before finds them without asking the text system.
+#[derive(Default)]
+pub(crate) struct ShapeCache {
+    context: Option<ShapeContext>,
+    rows: Vec<ShapedRow>,
+    shapes: HashMap<ShapeKey, Arc<ShapedLine>>,
+}
+
+impl ShapeCache {
+    /// Starts a frame of `rows` rows drawn under `context`, dropping every
+    /// shape if the font, theme or scale changed since the last.
+    pub(crate) fn begin_frame(&mut self, context: ShapeContext, rows: usize) {
+        if self.context.as_ref() != Some(&context) {
+            self.context = Some(context);
+            self.rows.clear();
+            self.shapes.clear();
+        }
+        self.rows.truncate(rows);
+    }
+
+    /// The shape for cell `column` of row `row`, drawn in `color`, calling
+    /// `shape` only when neither the row nor the pool already holds it.
+    pub(crate) fn shaped(
+        &mut self,
+        row: usize,
+        cells: &Arc<Vec<PositionedCell>>,
+        column: usize,
+        color: Rgba,
+        shape: impl FnOnce() -> ShapedLine,
+    ) -> Arc<ShapedLine> {
+        if self.rows.len() <= row {
+            self.rows.resize_with(row + 1, ShapedRow::default);
+        }
+        let slots = &mut self.rows[row];
+        if !slots
+            .source
+            .as_ref()
+            .is_some_and(|source| Arc::ptr_eq(source, cells))
+        {
+            slots.source = Some(Arc::clone(cells));
+            slots.cells.clear();
+            slots.cells.resize(cells.len(), None);
+        }
+        if let Some((drawn, line)) = &slots.cells[column]
+            && *drawn == color
+        {
+            return Arc::clone(line);
+        }
+        let cell = &cells[column];
+        let key = ShapeKey {
+            text: cell.text.clone(),
+            bold: cell.style.bold,
+            italic: cell.style.italic,
+            enlarged: cell.hovered_link,
+            color: color_bits(color),
+        };
+        let line = match self.shapes.get(&key) {
+            Some(line) => Arc::clone(line),
+            None => {
+                if self.shapes.len() >= MAX_DISTINCT_SHAPES {
+                    self.shapes.clear();
+                }
+                let line = Arc::new(shape());
+                self.shapes.insert(key, Arc::clone(&line));
+                line
+            }
+        };
+        slots.cells[column] = Some((color, Arc::clone(&line)));
+        line
+    }
+}
 
 /// Which part of a row a pass draws.
 ///
@@ -111,7 +261,15 @@ pub(crate) fn pack(color: Rgb) -> u32 {
     (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
 }
 
-/// A cell's drawn colours, honouring inverse and invisible.
+/// How strongly faint (SGR 2) text is inked: Ghostty's default
+/// `faint-opacity`.
+const FAINT_OPACITY: f32 = 0.5;
+
+/// A cell's foreground and background, honouring reverse video.
+///
+/// Hidden and faint text are drawing decisions rather than colours: both
+/// depend on whether the cell is selected or under the cursor, so `draw`
+/// applies them once it knows.
 pub(crate) fn cell_colors(
     style: &CellStyle,
     default_fg: Rgb,
@@ -122,9 +280,6 @@ pub(crate) fn cell_colors(
     let mut background = resolve(style.background, default_bg, palette);
     if style.inverse {
         std::mem::swap(&mut foreground, &mut background);
-    }
-    if style.invisible {
-        foreground = background;
     }
     (foreground, background)
 }
@@ -203,6 +358,7 @@ pub(crate) struct GridPaint {
     cell_height: Pixels,
     font_family: SharedString,
     font_size: Pixels,
+    shapes: Rc<RefCell<ShapeCache>>,
 }
 
 /// Everything one row pass needs to paint itself.
@@ -222,6 +378,10 @@ pub(crate) struct GridPaintSpec {
     pub cell_height: Pixels,
     pub font_family: SharedString,
     pub font_size: Pixels,
+    pub shapes: Rc<RefCell<ShapeCache>>,
+    /// Whether the pane has Pane Focus. Without it a block cursor is drawn as
+    /// its outline.
+    pub focused: bool,
 }
 
 impl GridPaint {
@@ -230,6 +390,7 @@ impl GridPaint {
         rows: crate::grid::PositionedRows,
         metrics: &crate::surface::render::GridMetrics,
         split: bool,
+        shapes: &Rc<RefCell<ShapeCache>>,
     ) -> (Self, Option<Self>) {
         let cursor = snapshot
             .map(|snapshot| snapshot.cursor)
@@ -249,6 +410,8 @@ impl GridPaint {
                 cell_height: metrics.cells.height(),
                 font_family: metrics.cells.family(),
                 font_size: metrics.cells.font_size(),
+                shapes: Rc::clone(shapes),
+                focused: metrics.focused,
             },
             split,
         )
@@ -261,6 +424,7 @@ impl GridPaint {
                 pass: RowPass::Background,
                 palette: spec.palette.clone(),
                 font_family: spec.font_family.clone(),
+                shapes: Rc::clone(&spec.shapes),
                 ..spec
             });
             spec.pass = RowPass::Text;
@@ -296,11 +460,51 @@ impl GridPaint {
         }
     }
 
+    /// Walks every glyph live painting would hand to the text system, through
+    /// the same shape cache, and returns how many there were and how many the
+    /// cache had to shape. Nothing is actually shaped: GPUI shapes only
+    /// through a window, so a default line stands in for each shape.
+    pub(crate) fn benchmark_shaping(&self, scale: f32) -> (usize, usize) {
+        if self.pass == RowPass::Background {
+            return (0, 0);
+        }
+        let mut shapes = self.shapes.borrow_mut();
+        shapes.begin_frame(self.shape_context(scale), self.rows.len());
+        let (mut glyphs, mut shaped) = (0, 0);
+        for (row, cells) in self.rows.iter().enumerate() {
+            for (column, (cell, drawn)) in
+                cells.iter().zip(self.resolve_row(row, cells)).enumerate()
+            {
+                if glyph_kind(cell) != GlyphKind::Text {
+                    continue;
+                }
+                glyphs += 1;
+                let line = shapes.shaped(row, cells, column, drawn.foreground, || {
+                    shaped += 1;
+                    ShapedLine::default()
+                });
+                std::hint::black_box(line);
+            }
+        }
+        (glyphs, shaped)
+    }
+
     pub(crate) fn new(spec: GridPaintSpec) -> Self {
+        // A pane without Pane Focus shows where its cursor is without
+        // competing with the one being typed into: a block becomes its
+        // outline, while a bar or an underline is already slight enough to
+        // keep its shape. The pane holds such a cursor's blink phase visible.
+        let cursor = spec.cursor.map(|cursor| match cursor.style {
+            CursorStyle::Block if !spec.focused => CursorSnapshot {
+                style: CursorStyle::BlockHollow,
+                ..cursor
+            },
+            _ => cursor,
+        });
         Self {
             rows: spec.rows,
             pass: spec.pass,
-            cursor: spec.cursor,
+            cursor,
             cursor_color: spec.cursor_color,
             default_fg: spec.default_fg,
             default_bg: spec.default_bg,
@@ -309,6 +513,19 @@ impl GridPaint {
             cell_height: spec.cell_height,
             font_family: spec.font_family,
             font_size: spec.font_size,
+            shapes: spec.shapes,
+        }
+    }
+
+    /// What the shapes this element paints depend on, at `scale`.
+    fn shape_context(&self, scale: f32) -> ShapeContext {
+        ShapeContext {
+            family: self.font_family.clone(),
+            font_size: self.font_size,
+            scale,
+            default_fg: self.default_fg,
+            default_bg: self.default_bg,
+            palette: self.palette.clone(),
         }
     }
 }
@@ -364,6 +581,12 @@ impl GridPaint {
             .cursor_color
             .map_or(foreground, |color| rgb(pack(color)));
 
+        // The colour the cell's ground is, whether or not this pass paints it.
+        let ground = match (is_block, inverted) {
+            (true, _) => cursor_paint,
+            (false, true) => foreground,
+            (false, false) => background,
+        };
         let fill = match self.pass {
             // The text half of a split draws no ground at all: the background
             // half already did, and an image may be sitting between them.
@@ -373,21 +596,42 @@ impl GridPaint {
             // with a background of its own still covers the image, which is
             // what an explicit background means.
             RowPass::Background if !painted => None,
-            _ => Some(match (is_block, inverted) {
-                (true, _) => cursor_paint,
-                (false, true) => foreground,
-                (false, false) => background,
-            }),
+            _ => Some(ground),
         };
 
-        let foreground = if inverted { background } else { foreground };
-        let (underline, strikethrough) = decorations(
-            &cell.style,
-            foreground,
-            self.default_fg,
-            self.palette.as_deref(),
-            self.cell_height,
-        );
+        let foreground = if cell.style.invisible {
+            // Hidden text keeps the ground it is shown on, a selection
+            // included, so selecting hidden text still shows the selection.
+            // None of it is drawn — its glyph is a blank and it has no
+            // decorations — and its ink is that same ground besides.
+            ground
+        } else {
+            let ink = if inverted { background } else { foreground };
+            if cell.style.faint {
+                // Faint dims the ink only. The ground stays opaque even where
+                // it is the foreground colour, as it is under a selection.
+                Rgba {
+                    a: ink.a * FAINT_OPACITY,
+                    ..ink
+                }
+            } else {
+                ink
+            }
+        };
+        // Hidden text has no decorations either: in the text half of a split
+        // its ground is not painted, so a line in that colour would show over
+        // an image, and an underline may have a colour of its own.
+        let (underline, strikethrough) = if cell.style.invisible {
+            (None, None)
+        } else {
+            decorations(
+                &cell.style,
+                foreground,
+                self.default_fg,
+                self.palette.as_deref(),
+                self.cell_height,
+            )
+        };
         Drawn {
             background: fill,
             foreground,
@@ -473,6 +717,17 @@ struct CellBounds {
     bottom: Snapped,
 }
 
+/// Which laid-out cell a glyph is, and the cache its shape is kept in.
+///
+/// One argument rather than four: the cache keys a shape by the row's
+/// allocation and the cell's place in it, and those travel together.
+struct GlyphTarget<'a> {
+    row: usize,
+    cells: &'a Arc<Vec<PositionedCell>>,
+    column: usize,
+    shapes: &'a mut ShapeCache,
+}
+
 impl Element for GridPaint {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -544,6 +799,11 @@ impl Element for GridPaint {
         let row_edge = |row: Row| row_edge(bounds.origin.y, self.cell_height, row, scale);
 
         let rows = Arc::clone(&self.rows);
+        let shapes = Rc::clone(&self.shapes);
+        let mut shapes = shapes.borrow_mut();
+        if self.pass != RowPass::Background {
+            shapes.begin_frame(self.shape_context(scale), rows.len());
+        }
         // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
             let top = row_edge(Row(index));
@@ -596,7 +856,7 @@ impl Element for GridPaint {
                 continue;
             }
 
-            for (cell, drawn) in cells.iter().zip(resolved.clone()) {
+            for (column, (cell, drawn)) in cells.iter().zip(resolved.clone()).enumerate() {
                 let span = cell.span();
                 let bounds = CellBounds {
                     left: edge(Col(span.start)),
@@ -604,7 +864,13 @@ impl Element for GridPaint {
                     top,
                     bottom,
                 };
-                self.paint_glyph(cell, &drawn, bounds, scale, window, cx);
+                let target = GlyphTarget {
+                    row: index,
+                    cells,
+                    column,
+                    shapes: &mut shapes,
+                };
+                self.paint_glyph(target, &drawn, bounds, scale, window, cx);
                 self.paint_decorations(cell, &drawn, bounds, window);
                 self.paint_cursor(&drawn, bounds, scale, window);
             }
@@ -616,55 +882,104 @@ fn blank_glyph(text: &str) -> bool {
     text.is_empty() || text.chars().all(char::is_whitespace) || text.starts_with('\u{10eeee}')
 }
 
+/// How a cell's text is drawn. Painting and the shaping bench both branch on
+/// this one decision, so they cannot disagree about which cells reach the
+/// text system.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GlyphKind {
+    /// No ink: blank text, and hidden text whatever it holds. Shaping a
+    /// blank costs the same as shaping a letter, and most of a terminal is
+    /// blank. Hidden text is not inked even in its own ground's colour,
+    /// because the text half of a split paints no ground and an image may
+    /// lie beneath.
+    Blank,
+    /// A block element, drawn as geometry against the cell's own snapped
+    /// edges, never shaped: a glyph's ink is as wide as the font's advance,
+    /// which is not the snapped cell width, so a run of shaped blocks is
+    /// beaded with seams. See `block_elements`.
+    Block(BlockFill),
+    /// Box drawing is geometry for the same reason, and additionally has to
+    /// be drawn on whole device pixels to stay one pixel thick. See
+    /// `box_drawing`.
+    Box(BoxGlyph),
+    /// Everything else goes to the text system.
+    Text,
+}
+
+pub(crate) fn glyph_kind(cell: &PositionedCell) -> GlyphKind {
+    if cell.style.invisible || blank_glyph(&cell.text) {
+        return GlyphKind::Blank;
+    }
+    let mut chars = cell.text.chars();
+    // A cell carrying a combining mark on top of a block or a rule is left to
+    // the font, which is the only half of the pair that can place the mark.
+    if let (Some(ch), None) = (chars.next(), chars.next()) {
+        if let Some(fill) = block_fill(ch) {
+            return GlyphKind::Block(fill);
+        }
+        if let Some(glyph) = box_glyph(ch) {
+            return GlyphKind::Box(glyph);
+        }
+    }
+    GlyphKind::Text
+}
+
 impl GridPaint {
     /// Draws one cell's text on its own pixel, clipped to its own column.
     fn paint_glyph(
         &self,
-        cell: &PositionedCell,
+        target: GlyphTarget<'_>,
         drawn: &Drawn,
         bounds: CellBounds,
         scale: f32,
         window: &mut Window,
         cx: &mut App,
     ) {
-        // A cell holding nothing but blanks has no ink, and shaping one costs
-        // the same as shaping a letter. Most of a terminal is blank.
-        if blank_glyph(&cell.text) {
-            return;
+        let cell = &target.cells[target.column];
+        match glyph_kind(cell) {
+            GlyphKind::Blank => return,
+            GlyphKind::Block(shape) => {
+                return self.paint_block(shape, drawn, bounds, scale, window);
+            }
+            GlyphKind::Box(glyph) => return self.paint_box(glyph, drawn, bounds, scale, window),
+            GlyphKind::Text => {}
         }
 
-        // A block element is drawn as geometry against the cell's own snapped
-        // edges, never shaped: a glyph's ink is as wide as the font's advance,
-        // which is not the snapped cell width, so a run of shaped blocks is
-        // beaded with seams. See `block_elements`.
-        if self.paint_block(cell, drawn, bounds, scale, window) {
-            return;
-        }
-
-        // Box drawing is geometry for the same reason, and additionally has to
-        // be drawn on whole device pixels to stay one pixel thick. See
-        // `box_drawing`.
-        if self.paint_box(cell, drawn, bounds, scale, window) {
-            return;
-        }
-
-        let text = SharedString::from(cell.text.as_str().to_owned());
-        let run = TextRun {
-            len: text.len(),
-            font: terminal_font(&self.font_family, cell.style.bold, cell.style.italic),
-            color: drawn.foreground.into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let font_size = if cell.hovered_link {
-            self.font_size + px(1.0)
-        } else {
-            self.font_size
-        };
-        let line = window
-            .text_system()
-            .shape_line(text, font_size, &[run], None);
+        // Shaped once for the colour it is drawn in and kept with its row: a
+        // frame that changes nothing about this cell reuses the shape, so an
+        // idle or blinking pane asks the text system for nothing.
+        let line = target.shapes.shaped(
+            target.row,
+            target.cells,
+            target.column,
+            drawn.foreground,
+            || {
+                #[cfg(test)]
+                SHAPED_CELLS.with(|count| count.set(count.get() + 1));
+                let run = TextRun {
+                    len: cell.text.len(),
+                    font: terminal_font(&self.font_family, cell.style.bold, cell.style.italic),
+                    color: drawn.foreground.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let font_size = if cell.hovered_link {
+                    self.font_size + px(1.0)
+                } else {
+                    self.font_size
+                };
+                // The text system takes its own string type. Making it here,
+                // only when the pool has no shape for this cell, keeps the copy
+                // off the layout and frame paths.
+                window.text_system().shape_line(
+                    SharedString::new(cell.text.as_str()),
+                    font_size,
+                    &[run],
+                    None,
+                )
+            },
+        );
 
         // The origin is the cell's snapped corner, the same one its background
         // and its neighbours use. The text system rasterises a glyph at one of
@@ -743,26 +1058,15 @@ impl GridPaint {
         });
     }
 
-    /// Fills a Block Elements character as rectangles, returning whether it
-    /// drew: anything outside that range is still the font's to draw.
+    /// Fills a Block Elements character as rectangles.
     fn paint_block(
         &self,
-        cell: &PositionedCell,
+        shape: BlockFill,
         drawn: &Drawn,
         bounds: CellBounds,
         scale: f32,
         window: &mut Window,
-    ) -> bool {
-        let mut chars = cell.text.chars();
-        // A cell carrying a combining mark on top of a block is left to the
-        // font, which is the only half of the pair that can place the mark.
-        let (Some(ch), None) = (chars.next(), chars.next()) else {
-            return false;
-        };
-        let Some(shape) = block_fill(ch) else {
-            return false;
-        };
-
+    ) {
         // The shades are a proportion of ink rather than a smaller area of it,
         // so coverage rides on the alpha channel of the cell's own foreground.
         let color = Rgba {
@@ -783,26 +1087,17 @@ impl GridPaint {
                 color,
             ));
         }
-        true
     }
 
-    /// Fills a Box Drawing character from its arms, returning whether it drew.
+    /// Fills a Box Drawing character from its arms.
     fn paint_box(
         &self,
-        cell: &PositionedCell,
+        glyph: BoxGlyph,
         drawn: &Drawn,
         bounds: CellBounds,
         scale: f32,
         window: &mut Window,
-    ) -> bool {
-        let mut chars = cell.text.chars();
-        let (Some(ch), None) = (chars.next(), chars.next()) else {
-            return false;
-        };
-        let Some(glyph) = box_glyph(ch) else {
-            return false;
-        };
-
+    ) {
         let area = box_drawing::Cell::new(bounds.left, bounds.top, bounds.right, bounds.bottom);
         let strokes = stroke_widths(self.cell_width, self.cell_height, scale);
         let color = drawn.foreground;
@@ -833,7 +1128,6 @@ impl GridPaint {
             }
             window.paint_path(path, color);
         });
-        true
     }
 
     /// Draws the mark a non-block cursor leaves on the cell it sits on.
@@ -904,560 +1198,4 @@ impl IntoElement for GridPaint {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tokens::unpack;
-
-    #[test]
-    fn benchmark_samples_prepare_real_blink_hover_and_one_row_transitions() {
-        use crate::paint_benchmark::{PaintBenchmark, Scenario};
-
-        for split in [false, true] {
-            let mut benchmark = PaintBenchmark::new();
-            let (first, first_text) = benchmark.prepare(Scenario::FirstFrame, split);
-            assert!(first.cursor.is_some());
-            assert_eq!(first_text.is_some(), split);
-            let (blink, _) = benchmark.prepare(Scenario::SameGenerationBlink, split);
-            assert!(blink.cursor.is_none());
-            assert_eq!(first.rows, blink.rows);
-            assert!(Arc::ptr_eq(&first.rows, &blink.rows));
-            assert!(Arc::ptr_eq(
-                first.palette.as_ref().unwrap(),
-                blink.palette.as_ref().unwrap()
-            ));
-            if let Some(text) = &first_text {
-                assert!(Arc::ptr_eq(&first.rows, &text.rows));
-            }
-            let (hover, _) = benchmark.prepare(Scenario::Hover, split);
-            assert!(!Arc::ptr_eq(&first.rows[12], &hover.rows[12]));
-            assert!(
-                first
-                    .rows
-                    .iter()
-                    .zip(hover.rows.iter())
-                    .enumerate()
-                    .all(|(index, (before, after))| index == 12 || Arc::ptr_eq(before, after))
-            );
-            assert!(hover.rows[12].iter().any(|cell| cell.hovered_link));
-            assert!(
-                hover
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| *index != 12)
-                    .all(|(_, row)| row.iter().all(|cell| !cell.hovered_link))
-            );
-            let (unhover, _) = benchmark.prepare(Scenario::FirstFrame, split);
-            assert_eq!(first.rows, unhover.rows);
-            let (changed, _) = benchmark.prepare(Scenario::OneRowChange, split);
-            let changed_rows: Vec<_> = first
-                .rows
-                .iter()
-                .zip(changed.rows.iter())
-                .enumerate()
-                .filter_map(|(index, (before, after))| (before != after).then_some(index))
-                .collect();
-            assert_eq!(changed_rows, [30]);
-            assert!(
-                unhover
-                    .rows
-                    .iter()
-                    .zip(changed.rows.iter())
-                    .enumerate()
-                    .all(|(index, (before, after))| Arc::ptr_eq(before, after) == (index != 30))
-            );
-            assert_eq!(changed.rows[30][10].text, "Z");
-            let (fresh, _) = PaintBenchmark::new().prepare(Scenario::FirstFrame, split);
-            assert_eq!(first.rows, fresh.rows);
-            assert_eq!(first.cursor, fresh.cursor);
-        }
-    }
-
-    #[test]
-    fn image_placeholders_leave_no_glyph_under_transparent_pixels() {
-        assert!(blank_glyph("\u{10eeee}\u{0305}\u{030d}"));
-        assert!(blank_glyph(" "));
-        assert!(!blank_glyph("file.lua"));
-    }
-
-    #[test]
-    fn snapping_lands_on_whole_device_pixels() {
-        // The case from the bug: a 8.4px cell on a 2x display.
-        for column in 0..40 {
-            let edge = snap(px(12.7 + column as f32 * 8.4), 2.0);
-            let device = f32::from(edge) * 2.0;
-            assert!(
-                (device - device.round()).abs() < 1e-3,
-                "column {column} landed at {device} device pixels"
-            );
-        }
-    }
-
-    #[test]
-    fn snapped_cells_tile_without_a_gap() {
-        // The property the old per-cell layout lost: laid end to end, the cells
-        // cover every pixel from the first edge to the last, with none counted
-        // twice and none left out. Walking the row cell by cell must arrive
-        // where measuring the whole row at once does.
-        let edge = |column: u32| snap(px(12.7 + column as f32 * 8.4), 2.0);
-        let mut walked = edge(0);
-        for column in 0..109u32 {
-            let right = edge(column + 1);
-            assert_eq!(
-                walked,
-                edge(column),
-                "column {column} did not start where its neighbour ended"
-            );
-            walked = right;
-        }
-        assert_eq!(walked, edge(109));
-    }
-
-    #[test]
-    fn snapping_never_collapses_a_cell() {
-        // A cell at least one device pixel wide keeps at least one device
-        // pixel: a snapped grid must not swallow a column.
-        for column in 0..200u32 {
-            let left = snap(px(12.7 + column as f32 * 8.4), 2.0);
-            let right = snap(px(12.7 + (column + 1) as f32 * 8.4), 2.0);
-            assert!(right > left, "column {column} was snapped away");
-        }
-    }
-
-    #[test]
-    fn a_degenerate_scale_leaves_coordinates_alone() {
-        assert_eq!(snap(px(10.3), 0.0), px(10.3));
-        assert_eq!(snap(px(10.3), f32::NAN), px(10.3));
-    }
-
-    /// One eighth of a small cell is thinner than a device pixel, and snapping
-    /// both its edges to the same pixel would erase it. A block the terminal
-    /// asked for has to leave a mark, so the thinnest one is a single pixel
-    /// rather than nothing.
-    #[test]
-    fn a_block_thinner_than_a_device_pixel_still_leaves_a_mark() {
-        // An eighth of a 4px cell: 0.5 device pixels at scale 2.
-        let (left, right) = snapped_span(10.0, 10.25, 2.0);
-        assert!(right > left, "the block was snapped out of existence");
-        assert_eq!(right, px(10.5), "a vanishing block should take one pixel");
-    }
-
-    /// An empty span is empty on purpose and must not be inflated into a mark.
-    #[test]
-    fn an_empty_span_stays_empty() {
-        let (left, right) = snapped_span(10.0, 10.0, 2.0);
-        assert_eq!(left, right);
-    }
-
-    /// A light rule is weighed against the narrow side of the cell. Keying it
-    /// to the tall side instead draws every box on screen at twice the weight
-    /// of the text inside it.
-    #[test]
-    fn a_light_stroke_is_weighed_against_the_narrow_side_of_the_cell() {
-        // The 8.4 x 16.8 logical cell a 14pt JetBrains Mono gives, at 2x.
-        let strokes = stroke_widths(px(8.4), px(16.8), 2.0);
-        assert_eq!(
-            strokes.light * 2.0,
-            2.0,
-            "a light rule should be two device pixels here, not four"
-        );
-        assert_eq!(strokes.heavy, strokes.light * 2.0);
-    }
-
-    /// Every stroke lands on whole device pixels, and none of them vanishes at
-    /// a tiny cell or a degenerate scale.
-    #[test]
-    fn a_stroke_is_always_a_whole_number_of_device_pixels_and_never_zero() {
-        for (w, h, scale) in [
-            (8.4, 16.8, 2.0),
-            (6.0, 12.0, 1.0),
-            (3.0, 4.0, 1.0),
-            (0.5, 0.5, 1.0),
-            (8.4, 16.8, 0.0),
-        ] {
-            let strokes = stroke_widths(px(w), px(h), scale);
-            let device = if scale > 0.0 { scale } else { 1.0 };
-            let in_pixels = strokes.light * device;
-            assert!(in_pixels >= 1.0, "light vanished at {w}x{h}@{scale}");
-            assert!(
-                (in_pixels - in_pixels.round()).abs() < 1e-4,
-                "light was {in_pixels} device pixels at {w}x{h}@{scale}"
-            );
-        }
-    }
-
-    /// A style with no colour of its own and a cell style carrying every other
-    /// field at its quietest setting.
-    fn plain_style(
-        foreground: SnapshotColor,
-        background: SnapshotColor,
-        inverse: bool,
-    ) -> CellStyle {
-        CellStyle {
-            foreground,
-            background,
-            underline_color: SnapshotColor::Default,
-            bold: false,
-            italic: false,
-            faint: false,
-            blink: false,
-            inverse,
-            invisible: false,
-            strikethrough: false,
-            overline: false,
-            underline: UnderlineStyle::None,
-        }
-    }
-
-    /// Colour resolution is arithmetic, not painting: it needs no Window.
-    #[test]
-    fn a_cell_with_no_opinion_takes_the_defaults() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        let style = plain_style(SnapshotColor::Default, SnapshotColor::Default, false);
-        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
-        assert_eq!(foreground, rgb(pack(default_fg)));
-        assert_eq!(background, rgb(pack(default_bg)));
-    }
-
-    /// Reverse video swaps them, which is the one rule worth pinning.
-    #[test]
-    fn reverse_video_swaps_foreground_and_background() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        let style = plain_style(SnapshotColor::Default, SnapshotColor::Default, true);
-        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
-        assert_eq!(foreground, rgb(pack(default_bg)));
-        assert_eq!(background, rgb(pack(default_fg)));
-    }
-
-    /// An invisible cell must vanish into its background, not just match
-    /// itself: the foreground has to take on the background's colour, so a
-    /// bug that collapsed the pair the other way round (background eating
-    /// the foreground) would still leave text visible in the wrong shade.
-    #[test]
-    fn invisible_collapses_the_foreground_onto_the_background() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        let fg_color = Rgb {
-            r: 0x10,
-            g: 0x20,
-            b: 0x30,
-        };
-        let bg_color = Rgb {
-            r: 0x40,
-            g: 0x50,
-            b: 0x60,
-        };
-        let mut style = plain_style(
-            SnapshotColor::Rgb(fg_color),
-            SnapshotColor::Rgb(bg_color),
-            false,
-        );
-        style.invisible = true;
-        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
-        assert_eq!(foreground, background);
-        assert_eq!(
-            foreground,
-            rgb(pack(bg_color)),
-            "invisible should collapse toward the background, not the foreground"
-        );
-    }
-
-    /// A palette index is looked up in the supplied palette rather than
-    /// ignored: the chosen index's entry has to differ from both defaults, so
-    /// an implementation that fell back to a default (or read the wrong
-    /// slot) would be caught rather than accidentally matching by luck.
-    #[test]
-    fn a_palette_index_resolves_through_the_supplied_palette() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        // Every slot gets a distinct colour derived from its own index, so a
-        // lookup that landed on the wrong slot (off by one, or any other
-        // slot) would read back a different, and therefore wrong, colour.
-        let palette: [Rgb; 256] = std::array::from_fn(|i| Rgb {
-            r: i as u8,
-            g: i as u8,
-            b: i as u8,
-        });
-        let style = plain_style(SnapshotColor::Palette(42), SnapshotColor::Default, false);
-        let (foreground, _background) = cell_colors(&style, default_fg, default_bg, Some(&palette));
-        assert_eq!(
-            foreground,
-            rgb(pack(Rgb {
-                r: 42,
-                g: 42,
-                b: 42
-            }))
-        );
-    }
-
-    /// An explicit RGB colour is not a default and not a palette index: it
-    /// must reach the drawn cell unchanged.
-    #[test]
-    fn an_explicit_rgb_colour_passes_through_unchanged() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        let fg_color = Rgb {
-            r: 0x01,
-            g: 0x02,
-            b: 0x03,
-        };
-        let bg_color = Rgb {
-            r: 0xfd,
-            g: 0xfe,
-            b: 0xff,
-        };
-        let style = plain_style(
-            SnapshotColor::Rgb(fg_color),
-            SnapshotColor::Rgb(bg_color),
-            false,
-        );
-        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
-        assert_eq!(foreground, rgb(pack(fg_color)));
-        assert_eq!(background, rgb(pack(bg_color)));
-    }
-
-    /// Inverse and invisible both rewrite the same pair, and the order they
-    /// run in changes the answer: inverse swaps first, so an invisible cell
-    /// that is also reversed collapses onto its *original* foreground, not
-    /// its background. A version that ran invisible before inverse, or that
-    /// treated the two as independent, would land on the wrong colour here
-    /// even though each rule looks right in isolation.
-    #[test]
-    fn inverse_and_invisible_together_collapse_onto_the_original_foreground() {
-        let default_fg = Rgb {
-            r: 0xaa,
-            g: 0xbb,
-            b: 0xcc,
-        };
-        let default_bg = Rgb {
-            r: 0x11,
-            g: 0x22,
-            b: 0x33,
-        };
-        let fg_color = Rgb {
-            r: 0x10,
-            g: 0x20,
-            b: 0x30,
-        };
-        let bg_color = Rgb {
-            r: 0x40,
-            g: 0x50,
-            b: 0x60,
-        };
-        let mut style = plain_style(
-            SnapshotColor::Rgb(fg_color),
-            SnapshotColor::Rgb(bg_color),
-            true,
-        );
-        style.invisible = true;
-        let (foreground, background) = cell_colors(&style, default_fg, default_bg, None);
-        assert_eq!(foreground, background);
-        assert_eq!(
-            foreground,
-            rgb(pack(fg_color)),
-            "reversed and invisible together should settle on the pre-swap \
-             foreground, since invisible acts after the swap"
-        );
-    }
-
-    fn decorated(underline: UnderlineStyle, strikethrough: bool) -> CellStyle {
-        CellStyle {
-            underline,
-            strikethrough,
-            ..plain_style(SnapshotColor::Default, SnapshotColor::Default, false)
-        }
-    }
-
-    #[test]
-    fn drawing_prepares_decorations_for_whitespace_without_glyph_ink() {
-        let paint = GridPaint::new(GridPaintSpec {
-            rows: Arc::from([]),
-            pass: RowPass::Whole,
-            cursor: None,
-            cursor_color: None,
-            default_fg: unpack(0xffffff),
-            default_bg: unpack(0x112233),
-            palette: None,
-            cell_width: px(8.4),
-            cell_height: px(16.8),
-            font_family: ".SystemUIFont".into(),
-            font_size: px(14.0),
-        });
-        for text in ["", " ", "\t", "\u{3000}", "\u{10eeee}"] {
-            let mut cell = PositionedCell {
-                column: 0,
-                columns: 1,
-                text: text.into(),
-                style: decorated(UnderlineStyle::Single, true),
-                selected: false,
-                hovered_link: false,
-            };
-            assert!(blank_glyph(&cell.text));
-            let drawn = paint.draw(&cell, None);
-            assert!(
-                drawn.underline.is_some(),
-                "{text:?} must retain its underline"
-            );
-            assert!(drawn.strikethrough.is_some());
-            let block = CursorSnapshot {
-                row: 0,
-                column: 0,
-                visible: true,
-                blinking: false,
-                style: CursorStyle::Block,
-            };
-            let on_cursor = paint.draw(&cell, Some(block));
-            assert_eq!(
-                on_cursor.underline.unwrap().color,
-                Some(rgb(0x112233).into())
-            );
-            assert_eq!(
-                on_cursor.strikethrough.unwrap().color,
-                Some(rgb(0x112233).into())
-            );
-            cell.selected = true;
-            assert_eq!(
-                paint.draw(&cell, None).underline.unwrap().color,
-                Some(rgb(0x112233).into())
-            );
-            cell.style.underline_color = SnapshotColor::Rgb(unpack(0xff0000));
-            assert_eq!(
-                paint.draw(&cell, None).underline.unwrap().color,
-                Some(rgb(0xff0000).into())
-            );
-            cell.style = decorated(UnderlineStyle::None, false);
-            let drawn = paint.draw(&cell, None);
-            assert!(drawn.underline.is_none());
-            assert!(drawn.strikethrough.is_none());
-        }
-    }
-
-    #[test]
-    fn an_undecorated_cell_asks_for_no_underline_and_no_strikethrough() {
-        let style = decorated(UnderlineStyle::None, false);
-        let (underline, strikethrough) =
-            decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(16.0));
-        assert!(underline.is_none());
-        assert!(strikethrough.is_none());
-    }
-
-    #[test]
-    fn a_single_underline_is_straight_and_a_curly_one_is_wavy() {
-        let straight = decorations(
-            &decorated(UnderlineStyle::Single, false),
-            rgb(0xd8d8e0),
-            unpack(0xd8d8e0),
-            None,
-            px(16.0),
-        )
-        .0
-        .expect("an underline");
-        assert!(!straight.wavy);
-        let wavy = decorations(
-            &decorated(UnderlineStyle::Curly, false),
-            rgb(0xd8d8e0),
-            unpack(0xd8d8e0),
-            None,
-            px(16.0),
-        )
-        .0
-        .expect("an underline");
-        assert!(wavy.wavy);
-        // GPUI draws straight or wavy; the other kinds draw straight rather
-        // than not at all.
-        for kind in [
-            UnderlineStyle::Double,
-            UnderlineStyle::Dotted,
-            UnderlineStyle::Dashed,
-        ] {
-            let line = decorations(
-                &decorated(kind, false),
-                rgb(0xd8d8e0),
-                unpack(0xd8d8e0),
-                None,
-                px(16.0),
-            )
-            .0
-            .expect("an underline");
-            assert!(!line.wavy);
-        }
-    }
-
-    #[test]
-    fn an_underline_takes_the_cells_underline_colour_or_its_foreground() {
-        let mut style = decorated(UnderlineStyle::Single, false);
-        let plain = decorations(&style, rgb(0x123456), unpack(0xd8d8e0), None, px(16.0))
-            .0
-            .expect("an underline");
-        assert_eq!(plain.color, Some(rgb(0x123456).into()));
-
-        style.underline_color = SnapshotColor::Rgb(unpack(0xff0000));
-        let coloured = decorations(&style, rgb(0x123456), unpack(0xd8d8e0), None, px(16.0))
-            .0
-            .expect("an underline");
-        assert_eq!(coloured.color, Some(rgb(0xff0000).into()));
-    }
-
-    #[test]
-    fn strikethrough_alone_asks_for_no_underline() {
-        let style = decorated(UnderlineStyle::None, true);
-        let (underline, strikethrough) =
-            decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(16.0));
-        assert!(underline.is_none());
-        let strikethrough = strikethrough.expect("a strikethrough");
-        assert_eq!(strikethrough.thickness, px(1.0));
-    }
-
-    #[test]
-    fn decoration_thickness_scales_with_the_row_and_never_vanishes() {
-        let style = decorated(UnderlineStyle::Single, true);
-        let (underline, strikethrough) =
-            decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(48.0));
-        assert_eq!(underline.expect("underline").thickness, px(3.0));
-        assert_eq!(strikethrough.expect("strikethrough").thickness, px(3.0));
-        let (thin, _) = decorations(&style, rgb(0xd8d8e0), unpack(0xd8d8e0), None, px(8.0));
-        assert_eq!(thin.expect("underline").thickness, px(1.0));
-    }
-}
+mod tests;
