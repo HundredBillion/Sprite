@@ -606,8 +606,8 @@ impl GridSurface {
                     self.next_group_stamp += 1;
                     // A relink moves the name: an editor that now maps
                     // `Comment` to another attr id no longer means the old one
-                    // by it. The index says where the name was, so a relink
-                    // costs the same however many names the grid holds.
+                    // by it. The index locates the old entry without scanning other ids.
+                    // Ordered names within each affected id still cost logarithmic work.
                     if let Some((old_id, old_stamp)) =
                         self.group_of.insert(name.clone(), (id, stamp))
                         && let Some(names) = self.groups.get_mut(&old_id)

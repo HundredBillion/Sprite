@@ -72,7 +72,7 @@ pub(super) fn make_pane<'a>(
     move |tab, pane| {
         let environment = session_environment(services.endpoint, services.surfaces, tab, pane);
         let link = pane_link(services.panes, tab, pane);
-        Rc::new(cx.new(|cx| {
+        let view = cx.new(|cx| {
             TerminalView::new(
                 command,
                 settings,
@@ -85,7 +85,15 @@ pub(super) fn make_pane<'a>(
                 window,
                 cx,
             )
-        }))
+        });
+        cx.subscribe(
+            &view,
+            |workspace, _, _: &crate::terminal_view::NativeTextCommitted, cx| {
+                workspace.dismiss_pending_close(cx);
+            },
+        )
+        .detach();
+        Rc::new(view)
     }
 }
 

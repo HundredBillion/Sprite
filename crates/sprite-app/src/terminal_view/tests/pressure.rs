@@ -427,3 +427,165 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
         cleanup.wait().unwrap();
     }
 }
+
+#[test]
+fn a_refused_selection_press_cannot_extend_the_previous_gesture() {
+    crate::test_child::run_child_test(
+        "terminal_view::tests::pressure::selection_admission_pressure_child",
+        &[("SPRITE_SELECTION_PRESSURE_CHILD", "1".as_ref())],
+        "selection admission under event pressure",
+    );
+}
+
+#[gpui::test]
+fn selection_admission_pressure_child(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    if std::env::var_os("SPRITE_SELECTION_PRESSURE_CHILD").is_none() {
+        return;
+    }
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec![
+                "/bin/sh".into(), "-c".into(),
+                "stty -echo; printf 'OLD-ROW\\r\\nNEW-TEXT'; IFS= read -r go; printf '\\r\\nDRAINED'; sleep 30".into(),
+            ]),
+            settings, Vec::new(), None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window, cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("NEW-TEXT"))
+        });
+        focus_and_draw(&view, cx);
+        let old_start = cell_center(&view, cx, 0, 0);
+        let old_end = cell_center(&view, cx, 0, 6);
+        cx.simulate_mouse_down(old_start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(old_end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(old_end, MouseButton::Left, Modifiers::default());
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle.render.rows[0].cells.iter().any(|cell| cell.selected)
+        });
+        redraw(cx);
+        let new_start = cell_center(&view, cx, 1, 0);
+        let new_end = cell_center(&view, cx, 1, 7);
+        view.update(cx, |view, _| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut accepted = 0;
+            while accepted < 48 {
+                if view.submit(TerminalCommand::CopySelection) {
+                    accepted += 1;
+                } else {
+                    assert!(std::time::Instant::now() < deadline, "copy fixture stalled");
+                    crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
+                }
+            }
+            let mut refused = false;
+            for _ in 0..64 {
+                if !view.submit(TerminalCommand::CopySelection) {
+                    refused = true;
+                    break;
+                }
+            }
+            assert!(refused, "fixture must fill the real command queue");
+        });
+        cx.simulate_mouse_down(new_start, MouseButton::Left, Modifiers::default());
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.status
+                    .as_ref()
+                    .is_some_and(|status| status.contains("queue is full"))
+            );
+            assert!(
+                view.drag.is_none(),
+                "a refused press must not arm a drag with the previous worker anchor"
+            );
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            cx.run_until_parked();
+            if view.update(cx, |view, _| {
+                view.submit(TerminalCommand::Input(b"go\n".to_vec()))
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "command admission never recovered"
+            );
+            crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
+        }
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("DRAINED"))
+        });
+        cx.simulate_mouse_move(new_end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(new_end, MouseButton::Left, Modifiers::default());
+        // The cursor change proves the worker passed the refused gesture's motion.
+        view.update(cx, |view, _| {
+            assert!(
+                view.submit(TerminalCommand::SetCursor(sprite_term::CursorDefaults {
+                    style: Some(sprite_term::CursorStyle::Bar),
+                    blink: Some(false),
+                }))
+            );
+        });
+        let unchanged = wait_for_bundle(&view, cx, |bundle| {
+            bundle.render.cursor.style == sprite_term::CursorStyle::Bar
+        });
+        let old_text: String = unchanged.render.rows[0]
+            .cells
+            .iter()
+            .filter(|cell| cell.selected)
+            .map(|cell| cell.text.as_str())
+            .collect();
+        assert_eq!(old_text, "OLD-ROW");
+        assert!(
+            !unchanged.render.rows[1]
+                .cells
+                .iter()
+                .any(|cell| cell.selected),
+            "the refused gesture must not extend the previous selection"
+        );
+        cx.simulate_mouse_down(new_start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(new_end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(new_end, MouseButton::Left, Modifiers::default());
+        let selected = wait_for_bundle(&view, cx, |bundle| {
+            bundle.render.rows[1].cells.iter().any(|cell| cell.selected)
+        });
+        assert!(
+            !selected.render.rows[0]
+                .cells
+                .iter()
+                .any(|cell| cell.selected)
+        );
+        let text: String = selected.render.rows[1]
+            .cells
+            .iter()
+            .filter(|cell| cell.selected)
+            .map(|cell| cell.text.as_str())
+            .collect();
+        assert_eq!(text, "NEW-TEXT");
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

@@ -58,11 +58,15 @@ impl EventPump {
 
     /// The next event, or a panic describing which wait timed out.
     pub fn next(&self) -> TerminalEvent {
-        match self.receiver.recv_timeout(WATCHDOG) {
+        self.next_with_timeout(WATCHDOG)
+    }
+
+    pub fn next_with_timeout(&self, timeout: Duration) -> TerminalEvent {
+        match self.receiver.recv_timeout(timeout) {
             Ok(Ok(event)) => event,
             Ok(Err(error)) => panic!("event stream ended early: {error}"),
             Err(RecvTimeoutError::Timeout) => {
-                panic!("watchdog: no terminal event within {WATCHDOG:?}")
+                panic!("watchdog: no terminal event within {timeout:?}")
             }
             Err(RecvTimeoutError::Disconnected) => panic!("event pump thread died"),
         }

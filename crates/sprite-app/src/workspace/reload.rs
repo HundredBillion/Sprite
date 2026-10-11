@@ -123,11 +123,8 @@ pub(crate) struct ReloadRequest {
 
 /// The channel that reload and print requests cross to the GPUI thread on.
 ///
-/// It has room for a request from every connection the observation endpoint
-/// serves at once, so handing a request over never blocks: `relay` starts its
-/// bounded wait only after the hand-over, and an endpoint thread waiting for
-/// room in front of a wedged GPUI thread would wait, and hold its slot,
-/// forever.
+/// It has room for one wave of connections. Abandoned requests can remain
+/// queued after their connections end, so `relay` refuses admission when full.
 pub(crate) fn reload_channel() -> (
     async_channel::Sender<ReloadRequest>,
     async_channel::Receiver<ReloadRequest>,
@@ -267,8 +264,8 @@ impl Patience {
 pub(crate) enum RelayError {
     /// The window is gone; the request never reached it.
     Disconnected,
-    /// The window did not claim the request in time and now never will, so
-    /// nothing was applied.
+    /// Admission was refused or the window did not claim the request in
+    /// time and now never will, so nothing was applied.
     Timeout,
     /// The window claimed the request and has not answered within the extra
     /// wait. It may still be applying it, so nobody may say nothing changed.
@@ -289,9 +286,17 @@ pub(crate) fn relay<Request, Answer>(
 ) -> Result<Answer, RelayError> {
     let (reply, answer) = std::sync::mpsc::sync_channel(1);
     let (reply, claim) = Relayed::waiting(reply);
-    sender
-        .send_blocking(request(reply))
-        .map_err(|_| RelayError::Disconnected)?;
+    match sender.try_send(request(reply)) {
+        Ok(()) => {}
+        Err(async_channel::TrySendError::Full(_)) => {
+            claim.abandon();
+            return Err(RelayError::Timeout);
+        }
+        Err(async_channel::TrySendError::Closed(_)) => {
+            claim.abandon();
+            return Err(RelayError::Disconnected);
+        }
+    }
     // A reply dropped unanswered ends this wait early too; the claim, not the
     // channel, then decides what may be said.
     if let Ok(answer) = answer.recv_timeout(patience.answer) {
@@ -530,6 +535,49 @@ mod tests {
             .diff(&Settings::default())
             .describe(std::path::Path::new("/tmp/config.toml"), &[]);
         assert!(unchanged.contains("nothing changed"));
+    }
+
+    #[test]
+    fn abandoned_reload_wave_does_not_block_next_reload_or_print_admission() {
+        let (sender, requests) = reload_channel();
+        let patience = Patience {
+            answer: std::time::Duration::from_millis(1),
+            after_claim: std::time::Duration::from_millis(1),
+        };
+        for _ in 0..sender.capacity().unwrap() {
+            assert!(matches!(
+                relay(&sender, patience, |reply| ReloadRequest {
+                    what: ConfigVerb::Reload,
+                    reply,
+                    reply_connection: None,
+                }),
+                Err(RelayError::Timeout)
+            ));
+        }
+        for what in [ConfigVerb::Reload, ConfigVerb::Print] {
+            let sender = sender.clone();
+            let (done, finished) = std::sync::mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                let outcome = relay(&sender, patience, |reply| ReloadRequest {
+                    what,
+                    reply,
+                    reply_connection: None,
+                });
+                let _ = done.send(outcome);
+            });
+            let outcome = finished.recv_timeout(std::time::Duration::from_secs(2));
+            if outcome.is_err() {
+                requests.close();
+            }
+            caller.join().unwrap();
+            assert!(
+                matches!(outcome, Ok(Err(RelayError::Timeout))),
+                "admission must finish with the abandoned wave still queued: {outcome:?}"
+            );
+        }
+        while let Ok(request) = requests.try_recv() {
+            assert!(!request.reply.claim());
+        }
     }
 
     /// A reload the endpoint has given up on was reported as "nothing was

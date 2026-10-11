@@ -124,6 +124,10 @@ pub(super) fn link_click_behavior(modifiers: gpui::Modifiers) -> LinkClickBehavi
     }
 }
 
+pub(crate) struct NativeTextCommitted;
+
+impl gpui::EventEmitter<NativeTextCommitted> for TerminalView {}
+
 impl TerminalView {
     /// The cell under a window position, using the grid this view drew.
     ///
@@ -308,6 +312,7 @@ impl EntityInputHandler for TerminalView {
             // A committed composition is typing, and typing withdraws a held
             // paste just as a key press does.
             self.drop_unsafe_paste(cx);
+            cx.emit(NativeTextCommitted);
             if let Some(id) = self.focused_surface(window).map(|surface| surface.id())
                 && !self.accept_surface_input(id, window, cx)
             {
@@ -410,6 +415,44 @@ mod tests {
     };
     use gpui::{Keystroke, Modifiers};
     use std::path::Path;
+
+    #[gpui::test]
+    fn workspace_zoom_cancels_held_unsafe_paste(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::test_support::{draw_workspace, terminal_view, test_workspace};
+        let (workspace, cx) = test_workspace(cx);
+        let view = terminal_view(&workspace, crate::pane_tree::PaneId(0), cx);
+        draw_workspace(cx);
+        for shortcut in [
+            "ctrl-+",
+            "ctrl-_",
+            "ctrl-shift-0",
+            "ctrl-shift-left",
+            "ctrl-shift-space",
+            "ctrl-shift-r",
+        ] {
+            view.update(cx, |view, cx| {
+                let decision = crate::terminal_events::decide(Ok(
+                    sprite_term::TerminalEvent::UnsafePaste("one\ntwo".to_owned()),
+                ));
+                for effect in decision.effects {
+                    view.apply(effect, cx);
+                }
+                assert!(view.unsafe_paste.is_armed());
+            });
+            cx.simulate_keystrokes(shortcut);
+            view.read_with(cx, |view, _| {
+                assert!(
+                    !view.unsafe_paste.is_armed(),
+                    "{shortcut} left unsafe paste armed"
+                );
+                assert!(
+                    view.status
+                        .as_ref()
+                        .is_none_or(|status| !status.contains("paste held"))
+                );
+            });
+        }
+    }
 
     fn press(key: &str, modifiers: Modifiers) -> Keystroke {
         Keystroke {

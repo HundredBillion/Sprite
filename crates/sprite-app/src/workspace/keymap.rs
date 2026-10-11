@@ -207,6 +207,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let action = workspace_action(&event.keystroke);
+        if action.is_some()
+            && let Some(pane) = self.tabs.active().and_then(|tab| tab.focused())
+        {
+            pane.cancel_pending_input(cx);
+        }
         match &self.mode {
             Mode::Renaming(_) => {
                 self.rename_key(&event.keystroke, cx);

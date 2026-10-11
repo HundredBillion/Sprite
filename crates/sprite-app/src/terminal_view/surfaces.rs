@@ -888,6 +888,18 @@ impl TerminalView {
         cx.notify();
     }
 
+    pub(super) fn close_dead_surfaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dead = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.connection.is_dead())
+            .map(|surface| surface.id)
+            .collect::<Vec<_>>();
+        for id in dead {
+            self.close_surface(id, window, cx);
+        }
+    }
+
     pub(super) fn close_invalid_owned_surfaces(
         &mut self,
         window: &mut Window,
@@ -1873,6 +1885,70 @@ mod tests {
         wire.lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    #[gpui::test]
+    fn clock_reconciles_dead_surface_without_closed_message_or_render(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Open {
+                pane: crate::pane_tree::PaneId(1),
+                id: SurfaceId(994),
+                open: Open {
+                    placement: crate::surface::channel::Placement::Dock {
+                        side: crate::surface::channel::Side::Left,
+                        size: Default::default(),
+                        ownership: crate::surface::channel::Ownership::Unowned,
+                    },
+                    focus: true,
+                    description: serde_json::json!({"version":1,"root":{"kind":"text","text":"probe"}}),
+                },
+                connection: connection.clone(),
+                reply: reply.into(),
+            },
+        );
+        assert_eq!(answer.try_recv().unwrap(), Ok(()));
+        let allocated = gpui::size(px(800.0), px(600.0));
+        host.update_in(cx, |host, window, _| {
+            assert!(
+                host.surfaces
+                    .left
+                    .as_ref()
+                    .unwrap()
+                    .focus
+                    .is_focused(window)
+            );
+            assert!(host.dock_widths(allocated).0 > 0.0);
+        });
+        let line = "x".repeat(1023);
+        assert!(!connection.send_batch(std::iter::repeat_n(line.as_str(), 8192)));
+        assert!(connection.is_dead());
+        let pane: &dyn sprite_pane::PaneHandle<Request = SurfaceRequest> = &host;
+        cx.update(|_, cx| pane.tick(cx));
+        cx.run_until_parked();
+        host.update_in(cx, |host, window, _| {
+            assert!(
+                host.surfaces.is_empty(),
+                "the clock must remove dead Surfaces without rendering or Closed"
+            );
+            assert!(
+                host.focus.is_focused(window),
+                "cleanup must return focus to the terminal"
+            );
+            assert_eq!(host.dock_widths(allocated), (0.0, 0.0));
+        });
     }
 
     #[gpui::test]

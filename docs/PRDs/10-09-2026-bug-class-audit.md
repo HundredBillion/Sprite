@@ -25,8 +25,9 @@ repository split (`e69d28b`); BCA-09 dates from the first Surface socket
 - Work happens on `fix/bug-class-audit` in `.worktrees/bug-class-audit`; the
   original checkout stays unchanged. No release, version bump, publishing or
   external messages.
-- Every fix is test-first: the regression test fails against `a62247e` and
-  passes after the change. Tests cross the real failing seam (worker, socket,
+- Every fix is test-first: original regressions fail against `a62247e`;
+  follow-up regressions fail against the reviewed PR head before their fix.
+  Each regression passes after its change. Tests cross the real failing seam (worker, socket,
   GPUI view) rather than a mock of it, as earlier audits required.
 
 ## Bug classes and structural changes
@@ -62,6 +63,9 @@ while the request is still queued and later applies.
   to 10 s more for the window's real answer; if none arrives it replies "the
   window accepted this request and is still applying it". No timeout path ever
   says "nothing was changed" about a claimed request.
+- R-C2.3 Queue admission is nonblocking. If abandoned requests still fill the
+  queue, a later reload, print or Surface request is refused without applying
+  anything; it cannot wait outside the reply timeout.
 
 ### C3. A confirmation is answered by stale or accidental input (BCA-02, BCA-05, BCA-31)
 
@@ -86,8 +90,9 @@ text unbracketed without reading the clipboard.
 - R-C3.5 `WorkspaceAction::repeats()` is true only for focus movement, divider
   nudge and font zoom. All other workspace actions ignore `is_held` events
   (BCA-31: holding the split key makes one split).
-  Known limit: a key consumed by a workspace binding (e.g. font zoom) never
-  reaches the pane and so does not drop a held paste.
+  A key consumed by a workspace binding (e.g. font zoom) cancels the focused
+  pane's held input before propagation stops. Native text commits notify the
+  workspace directly, so close confirmation also cancels without a key event.
 
 ### C4. Pane state the application holds but never tells the terminal (BCA-01)
 
@@ -124,8 +129,9 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
   send what is queued (including `closed`) within the write timeout. Existing ordering (`opened` first,
   contiguous batches and gestures) is preserved because all writes share the
   one queue.
-- R-S2 Grid highlights keep a name → id reverse index so relinking one name is
-  O(1). A grid holds at most 262,144 defined attribute ids and 262,144 group
+- R-S2 Grid highlights keep a name → id reverse index so relinking one name
+  avoids scanning every stored name. Lookup is expected O(1), with O(log g)
+  ordered-map removal/insertion for the names attached to an affected id. A grid holds at most 262,144 defined attribute ids and 262,144 group
   names; a message that would exceed either is refused whole as `Malformed`
   and changes nothing.
 - R-S3 The set of guide ids is computed once per `apply_rows` and kept;
@@ -140,7 +146,10 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
   foreground differs from the cached one. The cache is invalidated by any change
   of font family, font size, theme or scale factor. A laid-out cell keeps its
   compact `CellText`; the text system's `SharedString` is built only when a
-  shape is built, on a shape-cache miss.
+  shape is built, on a shape-cache miss. The 4,096-entry limit bounds the
+  shared pool, not all retained shapes: visible row slots also own shapes.
+  Unique glyph/colour combinations can therefore retain one shape per visible
+  cell until those rows change; the bound is the visible grid, not 4,096 total.
 - R-R2 One 530 ms clock per Sprite Window replaces the per-pane timers. Each
   tick, every pane refreshes its Pane Title discovery and notifies only if the
   title changed; only the pane with Pane Focus toggles its blink phase and
@@ -193,8 +202,8 @@ Surface event writes are blocking `write_all` calls on the GPUI thread with a
 | BCA-22 | 1 MiB input backlog equals the 1 MiB paste limit; a near-limit bracketed paste always fails with a misleading error. | The backlog bound is derived as max clipboard bytes plus bracket overhead. |
 | BCA-24 | `ForegroundWatch` keeps a duplicate PTY master open after the session ends. | The duplicate closes when the session ends, so the slave hangs up. |
 | BCA-25 | PNG scratch buffer grows to the largest image and never shrinks. | The scratch buffer is released after each decode. |
-| BCA-26 | Selection anchor is re-resolved in viewport space on each drag event, so it drifts while output scrolls. | The press that starts a selection gesture is marked as the start; the worker keeps the anchor as a libghostty `TrackedGridRef` for the rest of the gesture, so it follows its content through scrolling and scrollback eviction. If the anchored content is evicted, the selection is cleared rather than re-anchored elsewhere. The gesture starts with a new `BeginSelection { anchor }` command sent on press. Known gap: with zero scrollback libghostty rotates rows instead of evicting a page, so loss is never reported and the anchor can move to the next line. |
-| BCA-27 | On Darwin a member dying mid-scan aborts the scan, yet escalation advances, consuming TERM and the single HUP. | A vanished member is skipped; escalation advances only after a signal was actually attempted. |
+| BCA-26 | Selection anchor is re-resolved in viewport space on each drag event, so it drifts while output scrolls. | The press that starts a selection gesture is marked as the start; the worker keeps the anchor as a libghostty `TrackedGridRef` for the rest of the gesture, so it follows its content through scrolling and scrollback eviction. If the anchored content is evicted, the selection is cleared rather than re-anchored elsewhere. The gesture starts only when its `BeginSelection { anchor }` press command is admitted; a refused press cannot arm a drag using an earlier gesture's pin. Known gap: with zero scrollback libghostty rotates rows instead of evicting a page, so loss is never reported and the anchor can move to the next line. |
+| BCA-27 | On Darwin a member dying mid-scan aborts the scan, yet escalation advances, consuming TERM and the single HUP. | A vanished member is skipped; escalation advances only after a signal was actually attempted. Natural close retries an incomplete HUP within its existing deadline, and later explicit cleanup retries any outstanding HUP while preserving already reached groups. |
 | BCA-28 | Invisible attribute applied before selection inversion; selected hidden text shows no highlight. | Selected hidden cells show the selection background; glyphs stay hidden. Hidden cells carry no decorations and are never shaped. |
 | BCA-30 | Kitty placeholder tiles are fractionally positioned layout nodes and can seam. | Tiles snap to the same device-pixel grid as cells. |
 

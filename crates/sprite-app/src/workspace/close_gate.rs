@@ -397,6 +397,49 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
+    #[gpui::test]
+    fn native_text_commit_without_key_cancels_pending_close(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext, ElementInputHandler, InputHandler};
+        let (workspace, cx) = test_workspace(cx);
+        let view = terminal_view(&workspace, PaneId(0), cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs.split(Orientation::Horizontal, |_, _| {
+                Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            });
+            workspace.refresh_layout(cx);
+            workspace.focus_pane(PaneId(0), cx);
+        });
+        draw_workspace(cx);
+        let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view);
+        for scope in [CloseScope::Tab, CloseScope::Window, CloseScope::Quit] {
+            workspace.update(cx, |workspace, cx| {
+                assert!(!workspace.may_close(scope, false, cx));
+                assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
+            });
+            cx.update(|window, cx| {
+                handler.replace_text_in_range(None, "", window, cx);
+                handler.replace_text_in_range_from_key(None, "a", window, cx);
+            });
+            workspace.read_with(cx, |workspace, _| {
+                assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
+            });
+            cx.update(|window, cx| handler.replace_text_in_range(None, "é", window, cx));
+            workspace.update(cx, |workspace, cx| {
+                assert!(
+                    matches!(workspace.mode, Mode::Idle),
+                    "native text left close armed"
+                );
+                assert!(
+                    !workspace.may_close(scope, false, cx),
+                    "a new close must ask again"
+                );
+                workspace.dismiss_pending_close(cx);
+            });
+        }
+    }
+
     #[test]
     fn consent_is_only_for_the_repeated_scope_and_idle_panes_need_none() {
         let busy = [Some("editor".to_owned()), None];

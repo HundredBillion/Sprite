@@ -62,15 +62,31 @@ fn escalate(
     processes: &mut pty_unix::SessionProcesses,
     escalation: Escalation,
     requested: Option<Duration>,
+    signal_processes: &mut impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
 ) -> Escalation {
     let Some(signal) = escalation.due(requested) else {
         return escalation;
     };
-    let attempted = processes.signal(&signal);
+    let attempted = signal_processes(processes, &signal);
     escalation.after(signal, attempted)
 }
 
 pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
+    close_with_signal(runtime, pty_unix::SessionProcesses::signal)
+}
+
+fn close_with_signal(
+    runtime: Runtime,
+    signal_processes: impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
+) -> Option<pty_unix::SessionProcesses> {
+    close_with_signal_since(runtime, signal_processes, Instant::now())
+}
+
+fn close_with_signal_since(
+    runtime: Runtime,
+    mut signal_processes: impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
+    closing_started: Instant,
+) -> Option<pty_unix::SessionProcesses> {
     let Runtime {
         started:
             Started {
@@ -95,8 +111,6 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
         pump.cancel();
     }
 
-    let closing_started = Instant::now();
-
     // The first pass below sends the hangup every well-behaved program
     // honours; escalation moves past a step only once it reached the members.
     let mut escalation = Escalation::Hangup;
@@ -120,16 +134,21 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
                 processes,
                 escalation,
                 requested_at.map(|since| since.elapsed()),
+                &mut signal_processes,
             );
         }
 
         let settled = exit_status.is_some() && pump_stopped;
-        // A requested shutdown is not finished while anything the pane started
-        // is still running; a natural exit only owes the single hangup above.
-        let descendants_gone = !requested
-            || processes
+        let hangup_pending = processes.is_some() && escalation == Escalation::Hangup;
+        // Natural exit retries an incomplete HUP before publishing its outcome.
+        // Explicit shutdown also waits for owned jobs to exit.
+        let descendants_gone = if requested {
+            processes
                 .as_mut()
-                .is_some_and(|processes| !processes.is_alive());
+                .is_none_or(|processes| !processes.is_alive())
+        } else {
+            !hangup_pending
+        };
         // A pane that was never asked to shut down still may not hang forever,
         // so an unrequested close keeps its own deadline from Closing.
         let exhausted = match requested_at {
@@ -150,6 +169,10 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
             }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) if !requested && hangup_pending => {
+                // Reports can settle before HUP succeeds; avoid spinning on a closed inbox.
+                std::thread::sleep(CLOSING_SLICE);
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -223,13 +246,32 @@ pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
     }
 }
 
-pub(crate) fn finish_shutdown(mut processes: pty_unix::SessionProcesses, requested_at: Instant) {
-    // The natural close already sent the session its hangup; what remains is
-    // TERM and KILL, each counted only once a scan has reached the members.
-    let mut escalation = Escalation::Terminate;
-    while processes.is_alive() {
+pub(crate) fn finish_shutdown(processes: pty_unix::SessionProcesses, requested_at: Instant) {
+    finish_shutdown_with(
+        processes,
+        requested_at,
+        pty_unix::SessionProcesses::signal,
+        pty_unix::SessionProcesses::is_alive,
+    );
+}
+
+fn finish_shutdown_with(
+    mut processes: pty_unix::SessionProcesses,
+    requested_at: Instant,
+    mut signal_processes: impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
+    mut is_alive: impl FnMut(&mut pty_unix::SessionProcesses) -> bool,
+) {
+    // Natural close may have retained an incomplete hangup attempt.
+    // SessionProcesses remembers reached groups, so retrying skips them.
+    let mut escalation = Escalation::Hangup;
+    while is_alive(&mut processes) {
         let waited = requested_at.elapsed();
-        escalation = escalate(&mut processes, escalation, Some(waited));
+        escalation = escalate(
+            &mut processes,
+            escalation,
+            Some(waited),
+            &mut signal_processes,
+        );
         if waited >= GIVE_UP_AFTER {
             break;
         }
@@ -256,6 +298,136 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settled_runtime() -> Runtime {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let (_, inbox) = std::sync::mpsc::sync_channel(1);
+        let (events, _) = crate::event_mailbox::bounded(0);
+        Runtime {
+            started: Started {
+                master: pair.master,
+                master_fd: -1,
+                process_group: None,
+                processes: pty_unix::SessionProcesses::capture(i32::MAX as u32),
+                waiter: std::thread::spawn(|| {}),
+            },
+            pump: None,
+            inbox,
+            events,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            foreground: Arc::new(crate::ForegroundWatch::default()),
+            exit_status: Some(Ok(ExitStatus::with_exit_code(0))),
+            pump_stopped: true,
+            fatal: None,
+        }
+    }
+
+    #[test]
+    fn natural_exit_retries_transient_hangup_before_publishing_outcome() {
+        let mut runtime = settled_runtime();
+        let (events, receiver) = crate::event_mailbox::bounded(0);
+        runtime.events = Arc::clone(&events);
+        let mut attempted = Vec::new();
+        let processes = close_with_signal(runtime, |_, signal| {
+            assert!(
+                events.producer_ready(),
+                "outcome must wait for the hangup retry"
+            );
+            attempted.push(*signal);
+            attempted.len() == 2
+        });
+        assert_eq!(
+            attempted,
+            vec![GroupSignal::Hangup, GroupSignal::Hangup],
+            "settled natural close must retry a transient failed hangup before returning"
+        );
+        assert!(processes.is_some());
+        assert!(matches!(
+            receiver.next_blocking(),
+            Ok(TerminalEvent::Exited(_))
+        ));
+    }
+
+    #[test]
+    fn natural_exit_preserves_failed_hangup_for_explicit_cleanup() {
+        let mut attempted = Vec::new();
+        let processes = close_with_signal_since(
+            settled_runtime(),
+            |_, signal| {
+                attempted.push(*signal);
+                assert_eq!(attempted.len(), 1, "exhausted natural close must return");
+                false
+            },
+            Instant::now() - GIVE_UP_AFTER,
+        )
+        .expect("natural exit retains cleanup ownership after a failed scan");
+        assert_eq!(attempted, vec![GroupSignal::Hangup]);
+        let mut alive = [true, false].into_iter();
+        finish_shutdown_with(
+            processes,
+            Instant::now(),
+            |_, signal| {
+                attempted.push(*signal);
+                true
+            },
+            |_| {
+                alive
+                    .next()
+                    .expect("cleanup must finish after the job exits")
+            },
+        );
+        assert_eq!(
+            attempted,
+            vec![GroupSignal::Hangup, GroupSignal::Hangup],
+            "explicit cleanup must retry the hangup the natural-exit scan could not deliver"
+        );
+    }
+
+    #[test]
+    fn settled_close_without_processes_does_not_wait_for_cleanup_deadline() {
+        for requested in [false, true] {
+            let mut runtime = settled_runtime();
+            runtime.started.processes = None;
+            runtime.shutdown.store(requested, Ordering::SeqCst);
+            let (sender, inbox) = std::sync::mpsc::sync_channel(1);
+            runtime.inbox = inbox;
+            let started = Instant::now();
+            assert!(close_with_signal(runtime, |_, _| panic!("no process scope")).is_none());
+            assert!(
+                started.elapsed() < GIVE_UP_AFTER,
+                "missing scope must not spend the budget"
+            );
+            drop(sender);
+        }
+    }
+
+    #[test]
+    fn retained_cleanup_gives_up_when_scans_keep_failing() {
+        let processes = close_with_signal_since(
+            settled_runtime(),
+            |_, _| false,
+            Instant::now() - GIVE_UP_AFTER,
+        )
+        .unwrap();
+        let mut attempted = Vec::new();
+        let mut checks = 0;
+        finish_shutdown_with(
+            processes,
+            Instant::now() - GIVE_UP_AFTER,
+            |_, signal| {
+                attempted.push(*signal);
+                false
+            },
+            |_| {
+                checks += 1;
+                assert_eq!(checks, 1, "an exhausted cleanup must not keep polling");
+                true
+            },
+        );
+        assert_eq!(attempted, vec![GroupSignal::Kill]);
+    }
 
     #[test]
     fn escalation_advances_only_past_a_signal_that_was_attempted() {

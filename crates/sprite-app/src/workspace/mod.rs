@@ -19,7 +19,7 @@ use pane_factory::*;
 mod clock;
 mod surface_routing;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub(crate) use reload::{Patience, RelayError, Relayed, ReloadRequest, relay};
 
 use gpui::prelude::*;

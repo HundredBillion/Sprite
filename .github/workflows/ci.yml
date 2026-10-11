@@ -30,7 +30,7 @@ jobs:
       - name: Install shell integration test dependencies
         run: sudo apt-get update && sudo apt-get install -y fish zsh
       - name: Test release, packaging and optional shell integration
-        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration -v
+        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration scripts.test_ci_policy -v
 
   arch:
     name: arch linux
@@ -145,17 +145,21 @@ jobs:
         run: |
           set -euo pipefail
           ! grep -rnE "unsafe impl.*(Send|Sync)|gpui[-_]ghostty|tty7|tokio|async_std|smol|crossbeam" \
-            --include='*.rs' --include='Cargo.toml' crates
+            --include='*.rs' --include='Cargo.toml' crates || exit 1
           # Dependence, not prose. The earlier form matched the word anywhere,
           # including in comments explaining why the application does not use
           # these — so the gate failed on the documentation of the rule it
           # exists to enforce.
           ! grep -rnE "^[[:space:]]*use[[:space:]]+(libghostty_vt|portable_pty)|(libghostty_vt|portable_pty)::" \
-            --include='*.rs' crates/sprite-app
-          ! grep -nE "^(libghostty-vt|portable-pty)[[:space:]]*=" crates/sprite-app/Cargo.toml
-          # Blocking coordination lives only in the cfg(test) helper; production stays event driven.
-          ! grep -rnE "thread::sleep|Timer::after|request_animation_frame" \
-            --include='*.rs' --exclude='test_blocking_wait.rs' crates/sprite-app
+            --include='*.rs' crates/sprite-app || exit 1
+          ! grep -nE "^(libghostty-vt|portable-pty)[[:space:]]*=" crates/sprite-app/Cargo.toml || exit 1
+          # UI code stays event driven. The socket listener's failed-poll
+          # fallback runs on its own thread; tests use the blocking helper.
+          ! grep -rnE "thread::sleep" \
+            --include='*.rs' --exclude='test_blocking_wait.rs' \
+            --exclude='local_socket.rs' crates/sprite-app || exit 1
+          ! grep -rnE "Timer::after|request_animation_frame" \
+            --include='*.rs' crates/sprite-app || exit 1
 
   macos:
     name: macos

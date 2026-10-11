@@ -444,7 +444,6 @@ impl SurfaceConnection {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn is_dead(&self) -> bool {
         self.handle
             .shared
@@ -871,15 +870,18 @@ fn serve_surface(
             refuse(&mut stream, NOT_ANSWERING);
             return;
         }
-        // The wire reason is the same either way. An abandoned `Open` is
-        // dropped unapplied, but one the window claimed may still place a
-        // Surface after this; telling the window this Surface is already gone
-        // covers both, so it never keeps one with a dead connection.
-        // `close_surface` ignores an unknown id.
-        Err(RelayError::Timeout | RelayError::Applying) => {
+        Err(RelayError::Timeout) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
-            let _ = requests.send_blocking(SurfaceRequest::Closed { id, pane });
+            return;
+        }
+        // The window clock removes dead connections even if its request queue
+        // is full. Closed is a prompt cleanup when there is room, not a reason
+        // to keep this connection thread and its slot waiting on the window.
+        Err(RelayError::Applying) => {
+            handle.abandon();
+            refuse(&mut stream, NO_ANSWER);
+            let _ = requests.try_send(SurfaceRequest::Closed { id, pane });
             return;
         }
     }
@@ -1164,6 +1166,108 @@ mod tests {
         assert!(!connection.send("x"));
         assert!(connection.is_dead());
         assert_eq!(connection.pending_bytes(), 0);
+    }
+
+    #[test]
+    fn a_claimed_surface_open_releases_its_server_when_cleanup_queue_is_full() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let handle = connection.clone();
+        let (requests, window) = async_channel::bounded(1);
+        let filler = requests.clone();
+        let (done, finished) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            serve_surface(
+                stream,
+                reader,
+                Ok(connection),
+                PaneId(1),
+                Open {
+                    placement: Placement::Overlay,
+                    focus: true,
+                    description: json!({}),
+                },
+                &requests,
+            );
+            let _ = done.send(());
+        });
+        let open = window.recv_blocking().unwrap();
+        assert!(open.claim());
+        filler
+            .try_send(SurfaceRequest::Close {
+                id: SurfaceId(99),
+                pane: PaneId(1),
+            })
+            .unwrap();
+        drop(open);
+        let outcome = finished.recv_timeout(Duration::from_secs(2));
+        if outcome.is_err() {
+            window.close();
+        }
+        caller.join().unwrap();
+        assert!(
+            outcome.is_ok(),
+            "claimed Open cleanup must not hold the server: {outcome:?}"
+        );
+        assert!(handle.is_dead());
+        assert_eq!(window.len(), 1);
+        let mut wire = String::new();
+        peer.read_to_string(&mut wire).unwrap();
+        let refusal: Value = serde_json::from_str(wire.trim()).unwrap();
+        assert_eq!(refusal["reason"], NO_ANSWER);
+    }
+
+    #[test]
+    fn a_surface_open_refused_admission_finishes_with_the_queue_still_full() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        let handle = connection.clone();
+        let (requests, window) = async_channel::bounded(1);
+        requests
+            .try_send(SurfaceRequest::Close {
+                id: SurfaceId(99),
+                pane: PaneId(1),
+            })
+            .unwrap();
+        let (done, finished) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            serve_surface(
+                stream,
+                reader,
+                Ok(connection),
+                PaneId(1),
+                Open {
+                    placement: Placement::Overlay,
+                    focus: false,
+                    description: json!({}),
+                },
+                &requests,
+            );
+            let _ = done.send(());
+        });
+        let outcome = finished.recv_timeout(Duration::from_secs(2));
+        if outcome.is_err() {
+            window.close();
+        }
+        caller.join().unwrap();
+        assert!(
+            outcome.is_ok(),
+            "refused Open must not block sending Closed: {outcome:?}"
+        );
+        assert!(handle.is_dead());
+        assert_eq!(
+            window.len(),
+            1,
+            "refused Open cannot create a Surface to clean up"
+        );
+        let mut wire = String::new();
+        peer.read_to_string(&mut wire).unwrap();
+        let refusal: Value = serde_json::from_str(wire.trim()).unwrap();
+        assert_eq!(refusal["reason"], NO_ANSWER);
     }
 
     /// A Surface the window cannot give a writer to is told so, rather than
@@ -1846,7 +1950,7 @@ mod tests {
                     }
                     received += count;
                     if !draining.load(Ordering::SeqCst) {
-                        std::thread::sleep(WRITE_TIMEOUT / 10);
+                        crate::test_blocking_wait::pause(WRITE_TIMEOUT / 10);
                     }
                 }
             }
@@ -1867,7 +1971,7 @@ mod tests {
                 1,
                 "a writer still draining gave up its connection slot"
             );
-            std::thread::sleep(WRITE_TIMEOUT / 20);
+            crate::test_blocking_wait::pause(WRITE_TIMEOUT / 20);
         }
         draining.store(true, Ordering::SeqCst);
         let received = reader.join().expect("reader");
@@ -1875,7 +1979,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         while endpoint.transport.live_connections() != 0 {
             assert!(Instant::now() < deadline, "the slot outlived its writer");
-            std::thread::sleep(Duration::from_millis(5));
+            crate::test_blocking_wait::pause(Duration::from_millis(5));
         }
     }
 
@@ -1945,34 +2049,27 @@ mod tests {
     }
 
     #[test]
-    fn a_window_that_never_answers_still_hears_the_surface_closed() {
+    fn a_window_that_claims_but_never_answers_still_hears_the_surface_closed() {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
         let (seen_tx, seen_rx) = mpsc::channel::<SurfaceRequest>();
         let _window = window(rx, move |request| {
+            assert!(request.claim());
             let stop = matches!(request, SurfaceRequest::Closed { .. });
             seen_tx.send(request).expect("seen");
             !stop
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
-        // `connect` sets a 5s read timeout; this test waits out the real
-        // `REPLY_TIMEOUT`, so give it more room than that.
-        reader
-            .get_ref()
-            .set_read_timeout(Some(REPLY_TIMEOUT + Duration::from_secs(5)))
-            .expect("timeout");
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
 
-        // Held alive until this test is done: dropping the `Open` request's
-        // `reply` here would disconnect the answer channel and make the
-        // connection thread's `recv_timeout` return at once, rather than let
-        // it actually wait out `REPLY_TIMEOUT` the way a slow window would.
         let open = seen_rx.recv().expect("open");
         let id = match &open {
             SurfaceRequest::Open { id, .. } => *id,
             other => panic!("unexpected {other:?}"),
         };
+        // Losing the reply after claiming is still Applying, never abandonment.
+        drop(open);
 
         let refused = line(&mut reader);
         assert_eq!(refused["type"], "refused");
@@ -1988,7 +2085,6 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-        drop(open);
     }
 
     #[test]

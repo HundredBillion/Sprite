@@ -32,6 +32,7 @@ use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FORE
 
 use geometry::physical;
 use input::Drag;
+pub(crate) use input::NativeTextCommitted;
 use surfaces::DockDrag;
 use surfaces::HostedSurface;
 pub(crate) use theme::CellMetrics;
@@ -86,6 +87,7 @@ pub struct TerminalView {
     observation: Option<crate::observation::panes::PaneLink>,
     /// What programs have asked this pane to draw beside or over its grid.
     surfaces: SurfaceHost<HostedSurface>,
+    surface_window: gpui::AnyWindowHandle,
     dock_drag: Option<DockDrag>,
     /// The pixels this pane has been given.
     ///
@@ -449,6 +451,7 @@ impl TerminalView {
             session: SessionState::Running(session),
             observation,
             surfaces: SurfaceHost::default(),
+            surface_window: window.window_handle(),
             dock_drag: None,
             metrics,
             // A setting that did nothing is shown rather than silently
@@ -535,6 +538,7 @@ impl TerminalView {
             // A view that never started a session has nothing to observe.
             observation: None,
             surfaces: SurfaceHost::default(),
+            surface_window: window.window_handle(),
             dock_drag: None,
             metrics: CellMetrics::measure(
                 window,
@@ -920,6 +924,10 @@ impl sprite_pane::Pane for TerminalView {
 
     fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle_focus(window, cx);
+    }
+
+    fn cancel_pending_input(&mut self, cx: &mut Context<Self>) {
+        self.drop_unsafe_paste(cx);
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {

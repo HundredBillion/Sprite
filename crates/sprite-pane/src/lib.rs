@@ -39,6 +39,9 @@ pub trait Pane: Render + Focusable + gpui::EventEmitter<TitleChanged> + 'static 
     /// Cycles focus among the pane's contents, when the pane supports it.
     fn cycle_surface_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
+    /// Withdraws input awaiting confirmation when the workspace consumes a gesture.
+    fn cancel_pending_input(&mut self, _cx: &mut Context<Self>) {}
+
     /// One beat of the window's clock, about twice a second, delivered to every
     /// pane in the window whether or not it is in front.
     ///
@@ -107,6 +110,8 @@ pub trait PaneHandle {
     fn surface_request(&self, request: Self::Request, window: &mut Window, cx: &mut App);
     /// See [`Pane::cycle_surface_focus`].
     fn cycle_surface_focus(&self, window: &mut Window, cx: &mut App);
+    /// See [`Pane::cancel_pending_input`].
+    fn cancel_pending_input(&self, cx: &mut App);
     /// See [`Pane::tick`].
     fn tick(&self, cx: &mut App);
     /// The pane as an element the workspace can place.
@@ -134,6 +139,10 @@ impl<V: Pane> PaneHandle for gpui::Entity<V> {
 
     fn cycle_surface_focus(&self, window: &mut Window, cx: &mut App) {
         self.update(cx, |pane, cx| pane.cycle_surface_focus(window, cx));
+    }
+
+    fn cancel_pending_input(&self, cx: &mut App) {
+        self.update(cx, |pane, cx| pane.cancel_pending_input(cx));
     }
 
     fn tick(&self, cx: &mut App) {

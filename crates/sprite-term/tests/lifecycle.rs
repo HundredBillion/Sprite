@@ -103,7 +103,17 @@ fn the_login_shell_carries_sprite_identity() {
         .expect("utf-8 path")
         .to_owned();
 
-    let config = SessionConfig::login_shell().expect("resolve a login shell");
+    // User startup files can delay input or rewrite the environment under test.
+    let (mut config, complaints) = SessionConfig::shell(&sprite_term::ShellPreference {
+        program: Some("/bin/bash".into()),
+        args: Some(args(&["--noprofile", "--norc", "-l"])),
+        ..Default::default()
+    })
+    .expect("configure a login shell");
+    assert!(complaints.is_empty(), "{complaints:?}");
+    config
+        .environment
+        .push(("INPUTRC".into(), "/dev/null".into()));
     let sprite_term::Spawned {
         mut session,
         events,
@@ -112,6 +122,16 @@ fn the_login_shell_carries_sprite_identity() {
     let events = EventPump::new(events);
     let snapshots = support::SnapshotPump::new(snapshots);
     events.expect_ready();
+
+    // Ready reports PTY startup; this reply proves a login shell is reading input.
+    session
+        .send(sprite_term::TerminalCommand::Input(
+            b"stty -echo; shopt -q login_shell && printf 'LOGIN''_READY\\n'\n".to_vec(),
+        ))
+        .expect("ask the login shell to announce readiness");
+    snapshots.wait_for("the login shell to read commands", |bundle| {
+        support::pane_text(bundle).contains("LOGIN_READY")
+    });
 
     // Every marker is written as two adjacent shell strings, so the command the
     // terminal echoes back can never be mistaken for the command's output.
@@ -146,10 +166,7 @@ fn the_login_shell_carries_sprite_identity() {
         "the child can look up the terminfo entry generated from the pinned \
          Ghostty source, got:\n{text}"
     );
-    // A login shell sources the user's profile, which may legitimately prepend
-    // its own PATH entries, so the exact first position is asserted against the
-    // pure builder in `shell::tests` instead. What must hold here is that the
-    // running executable's directory reached the child at all.
+    // The pure builder tests PATH ordering; this proves the child inherited it.
     assert!(
         text.contains("EXEDIR_OK"),
         "the executable directory reaches the child's PATH, got:\n{text}"
@@ -410,7 +427,9 @@ os._exit(7)
     .expect("spawn parent and retained-descriptor descendant");
     let events = EventPump::new(events);
     events.expect_ready();
-    match events.next() {
+    // Natural exit permits six seconds of output draining without another event.
+    // Allow scheduling overhead while still detecting a deadline renewed by output.
+    match events.next_with_timeout(std::time::Duration::from_secs(10)) {
         TerminalEvent::Exited(exit) => {
             assert_eq!(exit.code, Some(7));
             assert!(!exit.requested);

@@ -179,7 +179,7 @@ fn input_survives_sustained_output() {
     } = session(
         "stty -echo; yes sprite-flood-line & producer=$!; \
          read line; kill $producer 2>/dev/null; wait $producer 2>/dev/null; \
-         printf '\\nMARKER:%s\\n' \"$line\"",
+         printf '\\nMARKER:%s\\n' \"$line\"; read done",
     );
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
@@ -194,6 +194,7 @@ fn input_survives_sustained_output() {
         .send(TerminalCommand::Input(b"ping\n".to_vec()))
         .expect("input is accepted mid-flood");
 
+    // Keep the child alive so natural-exit draining cannot suppress marker snapshots.
     let bundle = snapshots.wait_for("the marker echoed back", |bundle| {
         pane_text(bundle).contains("MARKER:ping")
     });

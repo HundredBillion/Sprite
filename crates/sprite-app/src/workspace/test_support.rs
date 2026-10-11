@@ -1,5 +1,5 @@
 use gpui::{Keystroke, Modifiers};
-pub(super) fn test_workspace(
+pub(crate) fn test_workspace(
     cx: &mut gpui::TestAppContext,
 ) -> (gpui::Entity<super::Workspace>, &mut gpui::VisualTestContext) {
     cx.add_window_view(|window, cx| {
@@ -15,7 +15,7 @@ pub(super) fn test_workspace(
     })
 }
 
-pub(super) fn draw_workspace(cx: &mut gpui::VisualTestContext) {
+pub(crate) fn draw_workspace(cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| {
         window.refresh();
         window.draw(cx).clear();
@@ -112,7 +112,7 @@ pub(super) fn plain(key: &str, key_char: Option<&str>) -> Keystroke {
 }
 
 /// The terminal view occupying `pane`, for tests that look inside it.
-pub(super) fn terminal_view(
+pub(crate) fn terminal_view(
     workspace: &gpui::Entity<super::Workspace>,
     pane: crate::pane_tree::PaneId,
     cx: &mut gpui::VisualTestContext,

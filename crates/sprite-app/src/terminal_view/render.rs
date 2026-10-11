@@ -130,6 +130,20 @@ impl TerminalView {
     /// so neither losing focus nor a program stopping the blink can leave the
     /// cursor hidden.
     pub(super) fn clock_tick(&mut self, cx: &mut Context<Self>) {
+        if self
+            .surfaces
+            .iter()
+            .any(|surface| surface.connection().is_dead())
+        {
+            let view = cx.entity().downgrade();
+            let window = self.surface_window;
+            // Background panes also need cleanup, even when they never render.
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| {
+                    let _ = view.update(cx, |view, cx| view.close_dead_surfaces(window, cx));
+                });
+            });
+        }
         self.refresh_display_title(cx);
         let terminal_blinks = self
             .bundle
@@ -536,11 +550,13 @@ impl Render for TerminalView {
                         // a drag would start from to the content under it, so
                         // output that scrolls before the drag cannot move the
                         // start. It selects nothing itself — see `Drag::moved`.
-                        view.drag = Some(Drag {
-                            anchor: cell,
-                            moved: false,
-                        });
-                        view.send(TerminalCommand::BeginSelection { anchor: cell });
+                        // A refused press leaves the worker's previous anchor intact.
+                        view.drag = view
+                            .submit(TerminalCommand::BeginSelection { anchor: cell })
+                            .then_some(Drag {
+                                anchor: cell,
+                                moved: false,
+                            });
                     }
                 }),
             )
