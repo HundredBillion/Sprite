@@ -12,6 +12,11 @@ use sprite_term::Rgb;
 use crate::grid_paint::terminal_font;
 use crate::tokens::{DEFAULT_BACKGROUND as BACKGROUND, DEFAULT_FOREGROUND as FOREGROUND};
 
+#[cfg(test)]
+thread_local! {
+    static CELL_MEASUREMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CellMetrics {
     family: SharedString,
@@ -28,6 +33,8 @@ impl CellMetrics {
         size: f32,
         line_height: f32,
     ) -> Self {
+        #[cfg(test)]
+        CELL_MEASUREMENTS.set(CELL_MEASUREMENTS.get() + 1);
         let font_size = px(size);
         let width = measure_cell_width(window, &family, font_size);
         Self {
@@ -91,6 +98,39 @@ pub(super) fn unpack(value: u32) -> Rgb {
     }
 }
 
+#[derive(Default)]
+struct FontCatalog(Option<AvailableFonts>);
+
+struct AvailableFonts {
+    names: Vec<String>,
+    fallback: SharedString,
+}
+
+impl gpui::Global for FontCatalog {}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FontDiscoveryProbe {
+    pub(crate) enumerations: usize,
+    pub(crate) available: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+impl gpui::Global for FontDiscoveryProbe {}
+
+fn enumerate_fonts(window: &Window, _cx: &mut gpui::App) -> Vec<String> {
+    let available = window.text_system().all_font_names();
+    #[cfg(test)]
+    {
+        let probe = _cx.default_global::<FontDiscoveryProbe>();
+        probe.enumerations += 1;
+        if let Some(available) = &probe.available {
+            return available.clone();
+        }
+    }
+    available
+}
+
 /// The family to render with, and a complaint if the configured one was not
 /// usable.
 ///
@@ -100,13 +140,22 @@ pub(super) fn unpack(value: u32) -> Rgb {
 pub(super) fn chosen_family(
     window: &Window,
     configured: Option<&str>,
+    cx: &mut gpui::App,
 ) -> (SharedString, Vec<String>) {
-    let available = window.text_system().all_font_names();
+    if cx
+        .try_global::<FontCatalog>()
+        .is_none_or(|catalog| catalog.0.is_none())
+    {
+        let names = enumerate_fonts(window, cx);
+        let fallback = monospace_family(&names);
+        cx.set_global(FontCatalog(Some(AvailableFonts { names, fallback })));
+    }
+    let available = cx.global::<FontCatalog>().0.as_ref().unwrap();
     if let Some(wanted) = configured {
-        if available.iter().any(|name| name == wanted) {
+        if available.names.iter().any(|name| name == wanted) {
             return (wanted.to_owned().into(), Vec::new());
         }
-        let found = monospace_family(window);
+        let found = available.fallback.clone();
         return (
             found.clone(),
             vec![format!(
@@ -114,13 +163,11 @@ pub(super) fn chosen_family(
             )],
         );
     }
-    (monospace_family(window), Vec::new())
+    (available.fallback.clone(), Vec::new())
 }
 
 /// The first genuinely monospaced family the system offers.
-fn monospace_family(window: &Window) -> SharedString {
-    let available = window.text_system().all_font_names();
-
+fn monospace_family(available: &[String]) -> SharedString {
     for preferred in MONOSPACE_PREFERENCES {
         if available.iter().any(|name| name == preferred) {
             return preferred.into();
@@ -187,6 +234,20 @@ pub(super) fn session_defaults(settings: &crate::config::Settings) -> SessionDef
 }
 
 impl TerminalView {
+    pub(crate) fn invalidate_font_catalog(cx: &mut gpui::App) {
+        cx.default_global::<FontCatalog>().0 = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn font_discovery_probe(cx: &mut gpui::App) -> &mut FontDiscoveryProbe {
+        cx.default_global::<FontDiscoveryProbe>()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn font_test_metrics(&self) -> (CellMetrics, CellMetrics) {
+        (self.metrics.clone(), self.grid_metrics().cells)
+    }
+
     pub(super) fn default_colors(&self) -> (Rgb, Rgb) {
         match &self.bundle {
             Some(bundle) => (
@@ -214,8 +275,12 @@ impl TerminalView {
         let changes = self.applied_settings.diff(settings);
         // Each worker-facing field remembers its last accepted value so partial reloads can be reverted.
         let mut admitted = settings.clone();
-        if changes.has(LiveChange::Font) {
-            let (family, _) = chosen_family(window, settings.font.family.as_deref());
+        // Reload can change the available families without changing the preference.
+        let (family, _) = chosen_family(window, settings.font.family.as_deref(), cx);
+        let font_changed = family != self.metrics.family
+            || px(settings.font.size.get()) != self.metrics.font_size
+            || settings.font.line_height.get() != self.metrics.line_height;
+        if font_changed {
             self.metrics = CellMetrics::measure(
                 window,
                 family,
@@ -223,15 +288,12 @@ impl TerminalView {
                 settings.font.line_height.get(),
             );
         }
-        if changes.has(LiveChange::Font) || changes.has(LiveChange::Grid) {
+        if font_changed || changes.has(LiveChange::Grid) {
             self.padding = settings.grid.padding.get();
             self.size = None;
             self.synchronise_size(window);
         }
-        if changes.has(LiveChange::Font)
-            || changes.has(LiveChange::Highlights)
-            || changes.has(LiveChange::Colors)
-        {
+        if font_changed || changes.has(LiveChange::Highlights) || changes.has(LiveChange::Colors) {
             self.invalidate_grids();
         }
         let defaults = session_defaults(settings);
@@ -306,7 +368,7 @@ mod metric_tests {
             settings.font.size = crate::config::FontSize::new(21.0);
             settings.font.line_height = crate::config::LineHeight::new(1.7);
             view.apply_settings(&settings, window, cx);
-            let expected_family = chosen_family(window, settings.font.family.as_deref()).0;
+            let expected_family = chosen_family(window, settings.font.family.as_deref(), cx).0;
             assert_eq!(view.metrics.family(), expected_family);
             assert_ne!(view.metrics.family(), initial.family());
             assert_eq!(view.metrics.font_size(), px(21.0));
@@ -356,7 +418,8 @@ mod settings_effect_tests {
         let mut settings = Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
         let (view, cx) = cx.add_window_view(|window, cx| {
-            TerminalView::failed("reload test".into(), ".SystemUIFont".into(), window, cx)
+            let family = chosen_family(window, settings.font.family.as_deref(), cx).0;
+            TerminalView::failed("reload test".into(), family, window, cx)
         });
         view.update_in(cx, |view, window, cx| {
             let image = sprite_term::ImagePixels {
@@ -525,5 +588,147 @@ mod fallback_admission_tests {
         if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
+    }
+}
+
+#[cfg(test)]
+mod font_catalog_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn equivalent_font_preferences_preserve_measurements(cx: &mut gpui::TestAppContext) {
+        cx.set_global(FontDiscoveryProbe {
+            available: Some(vec!["Hack".into(), ".SystemUIFont".into()]),
+            ..Default::default()
+        });
+        let mut settings = crate::config::Settings::default();
+        settings.font.family = crate::config::NonBlank::new("MissingA".into());
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let family = chosen_family(window, settings.font.family.as_deref(), cx).0;
+            TerminalView::failed("font metrics test".into(), family, window, cx)
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.apply_settings(&settings, window, cx);
+            let measurements = CELL_MEASUREMENTS.get();
+            let metrics = view.metrics.clone();
+            view.size = None;
+            settings.font.family = crate::config::NonBlank::new("MissingB".into());
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(
+                CELL_MEASUREMENTS.get(),
+                measurements,
+                "equivalent resolved font preferences must not remeasure cells"
+            );
+            assert_eq!(view.metrics, metrics);
+            assert_eq!(view.grid_metrics().cells, metrics);
+            assert!(
+                view.size.is_none(),
+                "equivalent fonts must not force grid measurement"
+            );
+            assert_eq!(view.applied_settings.font.family, settings.font.family);
+            assert!(
+                chosen_family(window, settings.font.family.as_deref(), cx).1[0]
+                    .contains("MissingB")
+            );
+
+            settings.font.size = crate::config::FontSize::new(20.0);
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(CELL_MEASUREMENTS.get(), measurements + 1);
+            assert_eq!(view.metrics.font_size(), px(20.0));
+            settings.font.line_height = crate::config::LineHeight::new(1.5);
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(CELL_MEASUREMENTS.get(), measurements + 2);
+            assert_eq!(
+                view.metrics.height(),
+                px(crate::config::Font::cell_height(20.0, 1.5))
+            );
+            let height = view.metrics.height();
+            settings.font.line_height = crate::config::LineHeight::new(1.501);
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(CELL_MEASUREMENTS.get(), measurements + 3);
+            assert_eq!(view.metrics.height(), height);
+            assert_eq!(view.metrics.line_height, 1.501);
+            settings.font.family = crate::config::NonBlank::new(".SystemUIFont".into());
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(CELL_MEASUREMENTS.get(), measurements + 4);
+            assert_eq!(view.metrics.family().as_ref(), ".SystemUIFont");
+            assert_eq!(view.grid_metrics().cells, view.metrics);
+            assert_eq!(cx.global::<FontDiscoveryProbe>().enumerations, 1);
+        });
+    }
+
+    #[gpui::test]
+    fn font_catalog_is_reused_for_selection_and_second_pane(cx: &mut gpui::TestAppContext) {
+        cx.set_global(FontDiscoveryProbe {
+            available: Some(vec!["Menlo".into(), "Hack".into(), "Installed".into()]),
+            ..Default::default()
+        });
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        for _ in 0..2 {
+            let settings = settings.clone();
+            let (view, visual) = cx.add_window_view(|window, cx| {
+                let (sender, _receiver) = async_channel::unbounded();
+                TerminalView::new(
+                    Some(vec!["/sprite-font-test-missing-executable".into()]),
+                    settings,
+                    Vec::new(),
+                    None,
+                    PaneExit {
+                        sender,
+                        identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                    },
+                    window,
+                    cx,
+                )
+            });
+            view.update_in(visual, |view, window, cx| {
+                assert_eq!(view.metrics.family().as_ref(), "Hack");
+                assert_eq!(chosen_family(window, None, cx), ("Hack".into(), vec![]));
+                assert_eq!(
+                    chosen_family(window, Some("Installed"), cx),
+                    ("Installed".into(), vec![])
+                );
+                for _ in 0..2 {
+                    let (family, complaints) = chosen_family(window, Some("Missing"), cx);
+                    assert_eq!(family.as_ref(), "Hack");
+                    assert_eq!(
+                        complaints,
+                        ["font.family \"Missing\" is not installed; using Hack instead"]
+                    );
+                }
+                let mut changed = crate::config::Settings::default();
+                changed.font.family = crate::config::NonBlank::new("Installed".into());
+                view.apply_settings(&changed, window, cx);
+                assert_eq!(view.metrics.family().as_ref(), "Installed");
+                changed.font.size = crate::config::FontSize::new(19.0);
+                view.apply_settings(&changed, window, cx);
+                assert_eq!(view.metrics.font_size(), px(19.0));
+                assert_eq!(view.metrics.family().as_ref(), "Installed");
+                view.size = None;
+                view.apply_settings(&changed, window, cx);
+                assert!(
+                    view.size.is_none(),
+                    "unchanged settings must not force grid measurement"
+                );
+                let metrics = CellMetrics::measure(window, "Hack".into(), 14.0, 1.2);
+                assert_eq!(
+                    metrics.width(),
+                    measure_cell_width(window, &"Hack".into(), px(14.0))
+                );
+                assert_eq!(
+                    metrics.height(),
+                    px(crate::config::Font::cell_height(14.0, 1.2))
+                );
+            });
+        }
+        cx.update(|cx| {
+            assert_eq!(
+                cx.global::<FontDiscoveryProbe>().enumerations,
+                1,
+                "all font selection and pane creation must share one enumeration per app epoch"
+            )
+        });
     }
 }

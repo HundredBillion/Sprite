@@ -280,7 +280,7 @@ impl TerminalView {
 
         // The cell is shaped before the session starts, so the child never
         // observes scale-1 metrics for a moment on a HiDPI display.
-        let (font_family, mut complaints) = chosen_family(window, font.family.as_deref());
+        let (font_family, mut complaints) = chosen_family(window, font.family.as_deref(), cx);
         let metrics = CellMetrics::measure(
             window,
             font_family.clone(),

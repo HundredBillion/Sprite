@@ -241,7 +241,7 @@ fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::Te
         let (view, cx) = cx.add_window_view(|window, cx| {
             TerminalView::failed(
                 "accepted colors revert".into(),
-                ".SystemUIFont".into(),
+                chosen_family(window, settings.font.family.as_deref(), cx).0,
                 window,
                 cx,
             )
