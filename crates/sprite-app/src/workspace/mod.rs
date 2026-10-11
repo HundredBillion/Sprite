@@ -234,6 +234,11 @@ impl Workspace {
         let tabs = Tabs::new(make_pane(
             command.clone(),
             settings.clone(),
+            Some(pane_allocation(
+                window.viewport_size(),
+                1,
+                crate::pane_tree::Rect::FULL,
+            )),
             PaneServices {
                 panes: &panes,
                 endpoint: endpoint.as_ref(),
@@ -354,19 +359,31 @@ impl Workspace {
             .layout()
             .into_iter()
             .map(|(pane, rect, handle)| {
+                let allocated = pane_allocation(self.viewport, self.tabs.len(), rect);
                 (
                     pane,
                     rect.x * width,
                     rect.y * height,
-                    (rect.width * width - DIVIDER_PX).max(1.0),
-                    (rect.height * height - DIVIDER_PX).max(1.0),
+                    f32::from(allocated.width),
+                    f32::from(allocated.height),
                     Rc::clone(handle),
                 )
             })
             .collect();
+        let previous: std::collections::HashMap<_, _> = self
+            .placements
+            .iter()
+            .map(|(pane, _, _, width, height, handle)| {
+                #[cfg(test)]
+                PLACEMENT_MATCH_WORK.with(|count| count.set(count.get() + 1));
+                (*pane, (width, height, handle))
+            })
+            .collect();
         for (pane, _, _, width, height, handle) in &placements {
-            let unchanged = self.placements.iter().any(|(old, _, _, w, h, old_handle)| {
-                old == pane && w == width && h == height && Rc::ptr_eq(old_handle, handle)
+            #[cfg(test)]
+            PLACEMENT_MATCH_WORK.with(|count| count.set(count.get() + 1));
+            let unchanged = previous.get(pane).is_some_and(|(w, h, old_handle)| {
+                *w == width && *h == height && Rc::ptr_eq(old_handle, handle)
             });
             if !unchanged {
                 handle.set_allocated(gpui::size(px(*width), px(*height)), cx);
@@ -401,17 +418,29 @@ impl Workspace {
     }
 
     fn cached_pane_area(&self) -> (f32, f32, f32) {
-        let strip = if self.tabs.len() > 1 {
-            TAB_STRIP_HEIGHT
-        } else {
-            0.0
-        };
-        (
-            f32::from(self.viewport.width),
-            (f32::from(self.viewport.height) - strip).max(1.0),
-            strip,
-        )
+        pane_area(self.viewport, self.tabs.len())
     }
+}
+
+fn pane_area(viewport: Size<Pixels>, tabs: usize) -> (f32, f32, f32) {
+    let strip = if tabs > 1 { TAB_STRIP_HEIGHT } else { 0.0 };
+    (
+        f32::from(viewport.width),
+        (f32::from(viewport.height) - strip).max(1.0),
+        strip,
+    )
+}
+
+fn pane_allocation(
+    viewport: Size<Pixels>,
+    tabs: usize,
+    rect: crate::pane_tree::Rect,
+) -> Size<Pixels> {
+    let (width, height, _) = pane_area(viewport, tabs);
+    gpui::size(
+        px((rect.width * width - DIVIDER_PX).max(1.0)),
+        px((rect.height * height - DIVIDER_PX).max(1.0)),
+    )
 }
 
 /// (x, y, width, height), and the pane itself.
@@ -559,3 +588,6 @@ impl Render for Workspace {
 #[cfg(test)]
 #[path = "layout_tests.rs"]
 mod layout_tests;
+
+#[cfg(test)]
+mod startup_tests;

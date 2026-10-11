@@ -94,6 +94,16 @@ fn pump_failure(outcome: PumpOutcome) -> Option<SessionError> {
 /// share one queue so their order is defined.
 pub(crate) enum Message {
     Command(TerminalCommand),
+    HistoryRequest {
+        ticket: crate::Ticket,
+        lines: crate::HistoryLines,
+        cancelled: Arc<AtomicBool>,
+    },
+    #[cfg(test)]
+    HistoryGate {
+        reached: std::sync::mpsc::Sender<usize>,
+        resume: Receiver<()>,
+    },
     /// One chunk of PTY output, carrying one output permit.
     PtyOutput(crate::pty_unix::OutputChunk),
     /// The consumer took a snapshot and is ready for the next one.
@@ -236,6 +246,8 @@ struct Session {
     pending: Pending,
     size: ValidTerminalSize,
     has_selection: bool,
+    #[cfg(test)]
+    cadence_metrics: Option<Arc<cadence_tests::Metrics>>,
 }
 
 fn emit(events: &Arc<crate::event_mailbox::Mailbox>, event: TerminalEvent) -> Flow {
@@ -315,6 +327,8 @@ pub(crate) fn run(
         },
         size: config.size,
         has_selection: false,
+        #[cfg(test)]
+        cadence_metrics: cadence_tests::metrics_for(&config),
     };
     if emit(&session.runtime.events, TerminalEvent::Ready).is_continue()
         && session.capture().is_continue()
@@ -396,6 +410,19 @@ impl Session {
 
     /// Applies one message to the terminal. Capturing is the pass's business.
     fn apply(&mut self, message: Message) -> Flow {
+        let message = match message {
+            Message::HistoryRequest {
+                ticket,
+                lines,
+                cancelled,
+            } => {
+                if cancelled.load(Ordering::SeqCst) {
+                    return Continue(());
+                }
+                Message::Command(TerminalCommand::CaptureHistory { ticket, lines })
+            }
+            other => other,
+        };
         let Self {
             owned:
                 Owned {
@@ -423,10 +450,22 @@ impl Session {
             ..
         } = self;
         match message {
+            Message::HistoryRequest { .. } => {
+                unreachable!("history request normalized before dispatch")
+            }
+            #[cfg(test)]
+            Message::HistoryGate { reached, resume } => {
+                let _ = reached.send(HISTORY_TRAVERSALS.get());
+                let _ = resume.recv_timeout(std::time::Duration::from_secs(10));
+            }
             Message::PtyOutput(chunk) => {
                 // One chunk, one mutation, one generation. What the parser
                 // raised on the way is published when the pass ends.
                 terminal.vt_write(chunk.as_bytes());
+                #[cfg(test)]
+                if let Some(metrics) = &self.cadence_metrics {
+                    metrics.parsed(chunk.as_bytes().len());
+                }
                 pending.mutated();
                 drop(chunk);
             }
@@ -719,6 +758,8 @@ impl Session {
                     // belong to one generation rather than a moving target.
                     // Both outcomes carry the ticket, so the answer can only
                     // reach the request that asked.
+                    #[cfg(test)]
+                    HISTORY_TRAVERSALS.set(HISTORY_TRAVERSALS.get() + 1);
                     let foreground = foreground_executable(master.as_ref());
                     match projector.capture_history(
                         pending.generation,
@@ -778,12 +819,20 @@ impl Session {
             return Continue(());
         }
         if self.pending.dirty && self.snapshots.is_empty() {
-            self.pending.dirty = match self.owned.projector.capture(
-                self.pending.generation,
-                self.size,
-                self.has_selection,
-                &self.owned.terminal,
-            ) {
+            let capture = {
+                #[cfg(test)]
+                let _capture = self
+                    .cadence_metrics
+                    .as_ref()
+                    .map(|metrics| metrics.capture(false));
+                self.owned.projector.capture(
+                    self.pending.generation,
+                    self.size,
+                    self.has_selection,
+                    &self.owned.terminal,
+                )
+            };
+            self.pending.dirty = match capture {
                 Ok(bundle) => self.snapshots.try_send(Arc::new(bundle)).is_err(),
                 Err(error) => {
                     emit(&self.runtime.events, TerminalEvent::Error(error))?;
@@ -829,12 +878,19 @@ impl Session {
     fn finish(mut self) -> Option<pty_unix::SessionProcesses> {
         self.drain_accepted_output();
         if self.pending.dirty
-            && let Ok(bundle) = self.owned.projector.capture(
-                self.pending.generation,
-                self.size,
-                self.has_selection,
-                &self.owned.terminal,
-            )
+            && let Ok(bundle) = {
+                #[cfg(test)]
+                let _capture = self
+                    .cadence_metrics
+                    .as_ref()
+                    .map(|metrics| metrics.capture(true));
+                self.owned.projector.capture(
+                    self.pending.generation,
+                    self.size,
+                    self.has_selection,
+                    &self.owned.terminal,
+                )
+            }
         {
             let _ = self.snapshots.force_send(Arc::new(bundle));
         }
@@ -984,3 +1040,11 @@ mod notice_tests;
 
 #[cfg(test)]
 mod coalescing_tests;
+
+#[cfg(test)]
+thread_local! {
+    static HISTORY_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod cadence_tests;

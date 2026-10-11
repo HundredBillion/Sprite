@@ -542,6 +542,16 @@ impl<T> PaneTree<T> {
         self.get(self.focus?)
     }
 
+    /// The new pane receives the second half of the focused pane's rectangle.
+    pub(crate) fn prospective_split(&self, orientation: Orientation) -> Option<Rect> {
+        let focus = self.focus?;
+        let (_, area, _) = self
+            .layout()
+            .into_iter()
+            .find(|(pane, _, _)| *pane == focus)?;
+        Some(split_area(area, orientation, 0.5).1)
+    }
+
     /// Empty trees and duplicate identities refuse splits without constructing a payload.
     pub fn split(
         &mut self,

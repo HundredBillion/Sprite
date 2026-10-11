@@ -13,6 +13,11 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+thread_local! {
+    static MEMBERSHIP_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 use libghostty_vt::Terminal;
 use libghostty_vt::kitty::graphics::PlacementIterator;
 
@@ -398,8 +403,11 @@ pub(crate) fn capture_frame(
     }
 
     let mut images: Vec<Arc<ImagePixels>> = Vec::new();
+    let mut referenced = std::collections::HashSet::with_capacity(found.len());
     for placement in &found {
-        if images.iter().any(|image| image.id == placement.image) {
+        #[cfg(test)]
+        MEMBERSHIP_WORK.set(MEMBERSHIP_WORK.get() + 1);
+        if !referenced.insert(placement.image) {
             continue;
         }
         let Some(image) = graphics.image(placement.image) else {
@@ -429,9 +437,11 @@ pub(crate) fn capture_frame(
     }
 
     // Anything no longer placed stops being held.
-    cache
-        .images
-        .retain(|id, _| images.iter().any(|image| image.id == *id));
+    cache.images.retain(|id, _| {
+        #[cfg(test)]
+        MEMBERSHIP_WORK.set(MEMBERSHIP_WORK.get() + 1);
+        referenced.contains(id)
+    });
 
     images.sort_by_key(|image| image.id);
     found.sort_by_key(|placement| (placement.layer, placement.image, placement.placement));
@@ -493,4 +503,132 @@ pub(crate) fn capture_placements(
 
     found.sort_by_key(|placement| (placement.layer, placement.image, placement.placement));
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libghostty_vt::terminal::Options;
+
+    fn populated_terminal(count: u32, repeats: u32) -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(Options {
+            rows: 24,
+            cols: 80,
+            max_scrollback: 1000,
+        })
+        .unwrap();
+        terminal.set_kitty_image_storage_limit(1024 * 1024).unwrap();
+        for id in (1..=count).rev() {
+            terminal.vt_write(format!("\x1b_Ga=t,f=32,s=1,v=1,i={id};ESIzRA==\x1b\\").as_bytes());
+            for placement in 1..=repeats {
+                terminal.vt_write(
+                    format!("\x1b[H\x1b_Ga=p,i={id},p={placement},c=1,r=1,C=1\x1b\\").as_bytes(),
+                );
+            }
+        }
+        terminal
+    }
+
+    fn capture_sample(count: u32, repeats: u32) -> usize {
+        let terminal = populated_terminal(count, repeats);
+        let mut iterator = PlacementIterator::new().unwrap();
+        let mut cache = PixelCache::default();
+        let first = capture_frame(&terminal, &mut iterator, &mut cache)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.images.len(), count as usize);
+        assert_eq!(first.placements.len(), (count * repeats) as usize);
+        MEMBERSHIP_WORK.set(0);
+        let second = capture_frame(&terminal, &mut iterator, &mut cache)
+            .unwrap()
+            .unwrap();
+        let work = MEMBERSHIP_WORK.get();
+        assert_eq!(first, second);
+        for (index, image) in second.images.iter().enumerate() {
+            assert_eq!(image.id, index as u32 + 1);
+            assert!(Arc::ptr_eq(image, &first.images[index]));
+        }
+        assert!(second.placements.windows(2).all(|pair| {
+            let key = |p: &Placement| (p.layer, p.image, p.placement);
+            key(&pair[0]) <= key(&pair[1])
+        }));
+        work
+    }
+
+    #[test]
+    fn capture_membership_work_scales_with_placements_and_images() {
+        let mut samples = Vec::new();
+        for count in [1, 32, 128, 512] {
+            let work = capture_sample(count, 4);
+            println!(
+                "images={count} placements={} membership_work={work}",
+                count * 4
+            );
+            samples.push((count, work));
+        }
+        for (count, work) in samples {
+            assert!(
+                work <= count as usize * 6,
+                "{count} images required {work} membership operations"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_deletion_evicts_pixels_and_preserves_survivors() {
+        let mut terminal = populated_terminal(3, 2);
+        let mut iterator = PlacementIterator::new().unwrap();
+        let mut cache = PixelCache::default();
+        let first = capture_frame(&terminal, &mut iterator, &mut cache)
+            .unwrap()
+            .unwrap();
+        terminal.vt_write(b"\x1b_Ga=d,d=I,i=2\x1b\\");
+        let second = capture_frame(&terminal, &mut iterator, &mut cache)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second
+                .images
+                .iter()
+                .map(|image| image.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert!(!cache.images.contains_key(&2));
+        assert!(Arc::ptr_eq(
+            first.image(1).unwrap(),
+            second.image(1).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            first.image(3).unwrap(),
+            second.image(3).unwrap()
+        ));
+        terminal.vt_write(b"\x1b_Ga=d,d=A\x1b\\");
+        assert!(
+            capture_frame(&terminal, &mut iterator, &mut cache)
+                .unwrap()
+                .is_none()
+        );
+        assert!(cache.images.is_empty());
+    }
+
+    #[test]
+    #[ignore = "opt-in release capture timing"]
+    fn graphics_capture_scaling_probe() {
+        for count in [1, 32, 128, 512] {
+            let terminal = populated_terminal(count, 4);
+            let mut iterator = PlacementIterator::new().unwrap();
+            let mut cache = PixelCache::default();
+            capture_frame(&terminal, &mut iterator, &mut cache).unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(capture_frame(&terminal, &mut iterator, &mut cache).unwrap());
+            }
+            println!(
+                "images={count} placements={} captures=100 elapsed={:?}",
+                count * 4,
+                started.elapsed()
+            );
+        }
+    }
 }

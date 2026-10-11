@@ -10,12 +10,18 @@ impl Workspace {
         if self.stopping {
             return;
         }
+        let allocated = self
+            .tabs
+            .active()
+            .and_then(|tree| tree.prospective_split(orientation))
+            .map(|rect| pane_allocation(self.viewport, self.tabs.len(), rect));
         // A split starts a fresh session; panes never share one.
         self.tabs.split(
             orientation,
             make_pane(
                 self.command.clone(),
                 self.active_settings(),
+                allocated,
                 PaneServices {
                     panes: &self.panes,
                     endpoint: self.endpoint.as_ref(),
@@ -36,6 +42,11 @@ impl Workspace {
         self.tabs.open(make_pane(
             self.command.clone(),
             self.active_settings(),
+            Some(pane_allocation(
+                self.viewport,
+                self.tabs.len() + 1,
+                crate::pane_tree::Rect::FULL,
+            )),
             PaneServices {
                 panes: &self.panes,
                 endpoint: self.endpoint.as_ref(),
@@ -65,6 +76,7 @@ pub(super) struct PaneServices<'a> {
 pub(super) fn make_pane<'a>(
     command: Option<Vec<std::ffi::OsString>>,
     settings: crate::config::Settings,
+    allocated: Option<Size<Pixels>>,
     services: PaneServices<'a>,
     window: &'a mut Window,
     cx: &'a mut Context<Workspace>,
@@ -73,7 +85,7 @@ pub(super) fn make_pane<'a>(
         let environment = session_environment(services.endpoint, services.surfaces, tab, pane);
         let link = pane_link(services.panes, tab, pane);
         let view = cx.new(|cx| {
-            TerminalView::new(
+            TerminalView::new_allocated(
                 command,
                 settings,
                 environment,
@@ -82,6 +94,7 @@ pub(super) fn make_pane<'a>(
                     sender: services.exit,
                     identity: (tab, pane),
                 },
+                allocated,
                 window,
                 cx,
             )

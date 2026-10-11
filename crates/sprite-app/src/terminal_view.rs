@@ -80,6 +80,8 @@ pub struct TerminalView {
     fallback_colors: (Rgb, Rgb),
     /// The last size successfully sent, so an unchanged layout sends nothing.
     size: Option<sprite_term::ValidTerminalSize>,
+    #[cfg(test)]
+    spawn_size: Option<sprite_term::ValidTerminalSize>,
     /// How this pane is reached by observation. Every pane a window opens
     /// has one; it is `None` for a pane whose session never started, once
     /// the pane has begun shutting down, and in tests that build a view
@@ -258,6 +260,7 @@ impl TerminalView {
     /// `environment` carries this pane's observation variables: the window's
     /// socket and key, and the pane's own identity. It is the only route by
     /// which a child learns the key.
+    #[cfg(test)]
     pub fn new(
         command: Option<Vec<std::ffi::OsString>>,
         settings: crate::config::Settings,
@@ -267,6 +270,31 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_allocated(
+            command,
+            settings,
+            environment,
+            observation,
+            exit,
+            None,
+            window,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_allocated(
+        command: Option<Vec<std::ffi::OsString>>,
+        settings: crate::config::Settings,
+        environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        observation: Option<crate::observation::panes::PaneLink>,
+        exit: PaneExit,
+        allocated: Option<Size<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        #[cfg(any(test, feature = "startup-benchmark"))]
+        crate::startup_benchmark::constructor_started(cx.entity_id(), cx);
         let applied_settings = settings.clone();
         let defaults = theme::session_defaults(&settings);
         let crate::config::Settings {
@@ -280,7 +308,7 @@ impl TerminalView {
 
         // The cell is shaped before the session starts, so the child never
         // observes scale-1 metrics for a moment on a HiDPI display.
-        let (font_family, mut complaints) = chosen_family(window, font.family.as_deref());
+        let (font_family, mut complaints) = chosen_family(window, font.family.as_deref(), cx);
         let metrics = CellMetrics::measure(
             window,
             font_family.clone(),
@@ -306,8 +334,7 @@ impl TerminalView {
                 Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
             },
         };
-        // The initial 24x80 grid is kept; only the physical cell metrics are
-        // corrected for the display this window opened on.
+        // Keep a valid fallback when layout bounds are not available yet.
         config.size = match sprite_term::ValidTerminalSize::new(
             TerminalSize {
                 cell_width_px: physical(metrics.width(), scale_factor),
@@ -319,6 +346,16 @@ impl TerminalView {
             Ok(size) => size,
             Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
         };
+        if let Some(size) = allocated.and_then(|area| {
+            geometry::grid_size(
+                crate::grid::content_area(area, grid.padding.get()),
+                metrics.width(),
+                metrics.height(),
+                scale_factor,
+            )
+        }) {
+            config.size = size;
+        }
         // The terminal's own limit: how much decoded image it will hold.
         config.graphics = sprite_term::GraphicsPolicy {
             enabled: graphics.enabled,
@@ -416,7 +453,6 @@ impl TerminalView {
                         if newer {
                             view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
-                            view.refresh_display_title(cx);
                             view.follow_hover();
                             cx.notify();
                         }
@@ -466,7 +502,9 @@ impl TerminalView {
             focus,
             fallback_colors,
             size: Some(initial_size),
-            allocated: None,
+            #[cfg(test)]
+            spawn_size: Some(initial_size),
+            allocated,
             title: None,
             display_title: None,
             scroll: ScrollAccumulator::default(),
@@ -551,6 +589,8 @@ impl TerminalView {
             focus,
             fallback_colors: (unpack(FOREGROUND), unpack(BACKGROUND)),
             size: None,
+            #[cfg(test)]
+            spawn_size: None,
             allocated: None,
             title: None,
             display_title: None,
@@ -869,6 +909,32 @@ impl TerminalView {
         self.allocated
     }
 
+    #[cfg(test)]
+    pub(crate) fn startup_geometry_for_test(
+        &self,
+        scale: f32,
+    ) -> (
+        Option<sprite_term::ValidTerminalSize>,
+        Option<sprite_term::ValidTerminalSize>,
+    ) {
+        (
+            self.spawn_size,
+            self.allocated.and_then(|area| {
+                geometry::grid_size(
+                    crate::grid::content_area(area, self.padding),
+                    self.metrics.width(),
+                    self.metrics.height(),
+                    scale,
+                )
+            }),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bundle_for_test(&self) -> Option<Arc<SnapshotBundle>> {
+        self.bundle.clone()
+    }
+
     fn refresh_display_title(&mut self, cx: &mut Context<Self>) {
         let wanted = if let Some(title) = &self.title {
             Some(title.clone())
@@ -963,3 +1029,6 @@ impl sprite_pane::Pane for TerminalView {
 
 #[cfg(test)]
 mod submission_regressions;
+
+#[cfg(test)]
+mod cosmetic_tests;

@@ -74,14 +74,14 @@ impl GraphicsCache {
             return Some(Arc::clone(&entry.texture));
         }
 
-        let bgra = to_bgra(pixels)?;
-        let bytes = bgra.len();
+        let (_, bytes) = bgra_layout(pixels)?;
         if bytes > self.budget {
             // Refused rather than admitted and then evicting everything else to
             // make room for something that still would not fit.
             return None;
         }
 
+        let bgra = to_bgra(pixels)?;
         let buffer = image::RgbaImage::from_raw(pixels.width, pixels.height, bgra)?;
         let texture = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
 
@@ -184,26 +184,30 @@ impl GraphicsCache {
     }
 }
 
-/// Converts what libghostty stored into what GPUI draws.
-///
-/// Every branch produces four bytes a pixel in blue, green, red, alpha order.
-/// Getting this wrong swaps red and blue, which looks like a plausible picture
-/// and is therefore exactly the kind of defect that survives a review.
-fn to_bgra(pixels: &ImagePixels) -> Option<Vec<u8>> {
-    let width = pixels.width as usize;
-    let height = pixels.height as usize;
-    let count = width.checked_mul(height)?;
+#[cfg(test)]
+thread_local! {
+    static CONVERSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn bgra_layout(pixels: &ImagePixels) -> Option<(usize, usize)> {
+    let count = (pixels.width as usize).checked_mul(pixels.height as usize)?;
+    let bytes = count.checked_mul(4)?;
     if count == 0 {
         return None;
     }
-    let stride = pixels.bytes_per_pixel();
-    // A declared size that disagrees with the data is not something to guess
-    // about: the pixels came from a program that can print anything.
-    if stride == 0 || count.checked_mul(stride)? != pixels.pixels.len() {
+    let stride = pixels.pixels.len() / count;
+    if !(1..=4).contains(&stride) || count.checked_mul(stride)? != pixels.pixels.len() {
         return None;
     }
+    Some((stride, bytes))
+}
 
-    let mut out = Vec::with_capacity(count * 4);
+/// Converts stored pixels to blue, green, red, alpha order for GPUI.
+fn to_bgra(pixels: &ImagePixels) -> Option<Vec<u8>> {
+    let (stride, bytes) = bgra_layout(pixels)?;
+    #[cfg(test)]
+    CONVERSIONS.with(|count| count.set(count.get() + 1));
+    let mut out = Vec::with_capacity(bytes);
     for chunk in pixels.pixels.chunks_exact(stride) {
         let (red, green, blue, alpha) = match stride {
             4 => (chunk[0], chunk[1], chunk[2], chunk[3]),
@@ -231,6 +235,66 @@ mod tests {
             transmitted: TransmittedFormat::Rgba,
             pixels: vec![value; (size * size * 4) as usize],
         }
+    }
+
+    #[test]
+    fn admission_checks_layout_and_budget_before_conversion() {
+        let mut cache = GraphicsCache::with_budget(usize::MAX);
+        for (width, height, data) in [
+            (u32::MAX, u32::MAX, vec![]),
+            (0, 1, vec![]),
+            (2, 2, vec![0; 7]),
+            (1, 1, vec![0; 5]),
+        ] {
+            let mut pixels = image(1, 1, 1, 0);
+            pixels.width = width;
+            pixels.height = height;
+            pixels.pixels = data;
+            CONVERSIONS.set(0);
+            assert!(cache.texture(&pixels).is_none());
+            assert_eq!(CONVERSIONS.get(), 0);
+        }
+        cache.set_budget(0);
+        CONVERSIONS.set(0);
+        assert!(cache.texture(&image(1, 1, 1, 0)).is_none());
+        assert_eq!(CONVERSIONS.get(), 0);
+    }
+
+    #[test]
+    fn exact_fit_generation_and_collective_pressure_account_for_conversions() {
+        let mut cache = GraphicsCache::with_budget(8);
+        CONVERSIONS.set(0);
+        let first = cache.texture(&image(1, 1, 1, 1)).unwrap();
+        cache.texture(&image(2, 1, 1, 2)).unwrap();
+        assert_eq!(cache.used_bytes(), 8);
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache.texture(&image(1, 1, 1, 1)).unwrap()
+        ));
+        assert_eq!(CONVERSIONS.get(), 2);
+        cache.texture(&image(3, 1, 1, 3)).unwrap();
+        assert!(cache.get(2, 1).is_none());
+        let changed = cache.texture(&image(1, 2, 1, 4)).unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!(cache.used_bytes(), 8);
+        assert_eq!(CONVERSIONS.get(), 4);
+        for _ in 0..2 {
+            assert!(cache.texture(&image(1, 3, 2, 5)).is_none());
+        }
+        assert_eq!(CONVERSIONS.get(), 4);
+        assert!(cache.get(1, 2).is_some());
+        assert!(cache.get(1, 3).is_none());
+    }
+
+    #[test]
+    fn over_budget_images_never_allocate_conversion_output() {
+        let mut cache = GraphicsCache::with_budget(63);
+        let pixels = image(1, 1, 4, 17);
+        CONVERSIONS.set(0);
+        assert!(cache.texture(&pixels).is_none());
+        assert!(cache.texture(&pixels).is_none());
+        assert_eq!(CONVERSIONS.get(), 0, "refused images must not convert");
+        assert_eq!(cache.used_bytes(), 0);
     }
 
     #[test]
