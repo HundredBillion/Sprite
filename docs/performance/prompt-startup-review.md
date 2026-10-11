@@ -1,8 +1,10 @@
 # Prompt startup and throughput review
 
 Reviewed master `afece5293271b410d83c63e236938ff2a7e0a250` on 2026-10-11.
-Production code is unchanged. The accompanying prompt tests establish a baseline;
-they do not implement the recommendations below.
+This is the historical review before implementation. Production code was unchanged
+at that point; the accompanying prompt tests established a baseline.
+See [implementation and measurements](prompt-throughput-results.md) for the fixes,
+regression coverage, and the snapshot-pacing experiment that was rejected.
 
 The first optimization to pursue is font discovery before session creation.
 Sprite enumerates installed fonts for every new pane, twice with default font
