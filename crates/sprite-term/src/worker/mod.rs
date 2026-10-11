@@ -246,6 +246,8 @@ struct Session {
     pending: Pending,
     size: ValidTerminalSize,
     has_selection: bool,
+    #[cfg(test)]
+    cadence_metrics: Option<Arc<cadence_tests::Metrics>>,
 }
 
 fn emit(events: &Arc<crate::event_mailbox::Mailbox>, event: TerminalEvent) -> Flow {
@@ -325,6 +327,8 @@ pub(crate) fn run(
         },
         size: config.size,
         has_selection: false,
+        #[cfg(test)]
+        cadence_metrics: cadence_tests::metrics_for(&config),
     };
     if emit(&session.runtime.events, TerminalEvent::Ready).is_continue()
         && session.capture().is_continue()
@@ -458,6 +462,10 @@ impl Session {
                 // One chunk, one mutation, one generation. What the parser
                 // raised on the way is published when the pass ends.
                 terminal.vt_write(chunk.as_bytes());
+                #[cfg(test)]
+                if let Some(metrics) = &self.cadence_metrics {
+                    metrics.parsed(chunk.as_bytes().len());
+                }
                 pending.mutated();
                 drop(chunk);
             }
@@ -811,12 +819,20 @@ impl Session {
             return Continue(());
         }
         if self.pending.dirty && self.snapshots.is_empty() {
-            self.pending.dirty = match self.owned.projector.capture(
-                self.pending.generation,
-                self.size,
-                self.has_selection,
-                &self.owned.terminal,
-            ) {
+            let capture = {
+                #[cfg(test)]
+                let _capture = self
+                    .cadence_metrics
+                    .as_ref()
+                    .map(|metrics| metrics.capture(false));
+                self.owned.projector.capture(
+                    self.pending.generation,
+                    self.size,
+                    self.has_selection,
+                    &self.owned.terminal,
+                )
+            };
+            self.pending.dirty = match capture {
                 Ok(bundle) => self.snapshots.try_send(Arc::new(bundle)).is_err(),
                 Err(error) => {
                     emit(&self.runtime.events, TerminalEvent::Error(error))?;
@@ -862,12 +878,19 @@ impl Session {
     fn finish(mut self) -> Option<pty_unix::SessionProcesses> {
         self.drain_accepted_output();
         if self.pending.dirty
-            && let Ok(bundle) = self.owned.projector.capture(
-                self.pending.generation,
-                self.size,
-                self.has_selection,
-                &self.owned.terminal,
-            )
+            && let Ok(bundle) = {
+                #[cfg(test)]
+                let _capture = self
+                    .cadence_metrics
+                    .as_ref()
+                    .map(|metrics| metrics.capture(true));
+                self.owned.projector.capture(
+                    self.pending.generation,
+                    self.size,
+                    self.has_selection,
+                    &self.owned.terminal,
+                )
+            }
         {
             let _ = self.snapshots.force_send(Arc::new(bundle));
         }
@@ -1022,3 +1045,6 @@ mod coalescing_tests;
 thread_local! {
     static HISTORY_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+#[cfg(test)]
+mod cadence_tests;
