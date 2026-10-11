@@ -15,7 +15,7 @@ are preserved.
 | Workspace shortcuts left unsafe paste armed. | Consumed workspace actions cancel focused-pane pending input. | Real workspace shortcuts and a held paste. |
 | Natural exit forgot incomplete hangup work. | Retry transient HUP failures before publishing the outcome; retain retry responsibility for later cleanup if the deadline expires. | Real cleanup state handoff with injected scan failure and existing deadline. |
 | Socket cancellation test measured thread scheduling delay. | Assert cancellation readiness with the peer closed, retaining the ordinary wait's lower bound. | Delayed-closer reproduction and cancellation-disabled mutation. |
-| Linux tests timed out during allowed final output draining. | Exit test permits the existing six-second drain; input test keeps its child alive until observing the marker. | Reproduced failures on Linux, parser timing probes, and deadline-renewal mutation that still fails. |
+| Linux tests timed out during allowed final output draining. | Exit test permits the existing six-second drain; input test and benchmark keep their child alive until observing the marker. | Reproduced failures on Linux, parser timing probes, and deadline-renewal mutation that still fails. |
 | Login identity test depended on personal startup files. | Use a clean, explicitly configured login shell and wait for a readiness reply before probing identity. | Controlled slow-startup fixture fails before the change; login, identity, terminfo and PATH assertions remain. |
 
 The CI source guards now explicitly fail on each forbidden match. Bash does not
@@ -76,3 +76,33 @@ The socket test proves cancellation readiness and the ordinary rest duration;
 it no longer asserts sub-period wake latency under thread scheduling. Existing
 listener shutdown coverage remains. Independent review found no blocking
 correctness issues in the fixes.
+
+
+## Native CI benchmark follow-up
+
+The first follow-up run on native Arch passed the two original Linux regressions
+but exposed the same early-exit fixture in `sprite-term-bench`. The unchanged
+benchmark report test failed with `snapshot stream ended waiting for MARK:Z`;
+this was reproduced locally on Linux before editing the harness.
+
+The input-under-load benchmark now waits for its flood producer to stop and
+keeps the shell alive until its marker is observed. `finish(session)` then
+performs the existing explicit cleanup. Terminal drain deadlines and report
+assertions are unchanged. Searches for `read line; kill $producer` and for
+`yes ` in terminal Rust sources found two sites: the integration fixture already
+fixed above and this benchmark. Both are covered by their existing failing
+integration tests. This metric now excludes natural-exit draining; compare
+future numbers with a new baseline, not the old mixed-lifetime measurement.
+
+The unchanged benchmark report test passes after the repair on both macOS and
+Linux under emulation. All-target `sprite-term` Clippy and workspace formatting
+also pass. These scoped checks follow the full 962-test workspace run above.
+
+Independent review identified a missing-marker hang: a blocking snapshot receive
+could never reach the timeout check once output became silent. The under-load
+measurement now observes the async stream with an absolute deadline and returns
+through session cleanup on either success or failure. A new real-PTY test keeps
+a shell alive after printing the wrong marker, checks the timeout error, and
+asserts that the shell has been reaped before the measurement returns. It failed
+at its ten-second watchdog before the timed receive and passed after the fix.
+This adds one test. The terminal engine and its public API are unchanged.
