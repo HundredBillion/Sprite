@@ -296,10 +296,10 @@ fn dropping_after_a_shutdown_request_finishes_quickly() {
         handle.wait().expect("the worker terminates cleanly");
     }
     assert!(
-        started.elapsed() < support::WATCHDOG,
+        started.elapsed() < support::watchdog(),
         "shutdown took {:?}, over the {:?} budget",
         started.elapsed(),
-        support::WATCHDOG
+        support::watchdog()
     );
 }
 
@@ -470,7 +470,7 @@ os._exit(7)
         other => panic!("expected natural Exited, got {other:?}"),
     }
     let final_snapshot = final_rx
-        .recv_timeout(support::WATCHDOG)
+        .recv_timeout(support::watchdog())
         .expect("snapshot stream closes after exit")
         .expect("exit published a snapshot");
     let text = support::pane_text(&final_snapshot);
@@ -550,12 +550,7 @@ os._exit(0)
         other => panic!("expected natural Exited, got {other:?}"),
     }
     // `_session` is still alive here, as the application keeps an ended pane.
-    let deadline = std::time::Instant::now() + support::WATCHDOG;
-    while !hung_up.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the descendant still holds an open terminal after the session ended"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    support::wait_until("the descendant to release the terminal", || {
+        hung_up.exists().then_some(())
+    });
 }

@@ -4,7 +4,6 @@
 mod support;
 
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
 
 use sprite_term::{ForegroundState, SessionConfig, TerminalCommand, TerminalSession};
 
@@ -24,34 +23,23 @@ fn wait_for(
     what: &str,
     wanted: impl Fn(&ForegroundState) -> bool,
 ) -> ForegroundState {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    support::wait_until(what, || {
         let state = session.foreground();
-        if wanted(&state) {
-            return state;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "waited five seconds for {what}; the pane reported {state:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        wanted(&state).then_some(state)
+    })
 }
 
 fn wait_for_owner(session: &TerminalSession, pid: u32, present: bool) -> Option<i32> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let owner = session.foreground_owner_group(pid);
-        if owner.is_some() == present {
-            return owner;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "waited five seconds for owner {pid} to be {}foreground; got {owner:?}",
+    support::wait_until(
+        &format!(
+            "owner {pid} to be {}foreground",
             if present { "" } else { "not " }
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        ),
+        || {
+            let owner = session.foreground_owner_group(pid);
+            (owner.is_some() == present).then_some(owner)
+        },
+    )
 }
 
 fn reported_owner(text: &str) -> Option<u32> {
@@ -107,16 +95,10 @@ fn a_running_program_is_reported_by_name() {
         .send(TerminalCommand::Input(b"sleep 4\n".to_vec()))
         .expect("send input");
 
-    let state = wait_for(
-        &session,
-        "the program to start",
-        ForegroundState::should_confirm,
-    );
-    assert_eq!(
-        state.program(),
-        Some("sleep"),
-        "the name comes from the kernel, not from the screen: {state:?}"
-    );
+    let state = wait_for(&session, "sleep to be in the foreground", |state| {
+        state.program() == Some("sleep")
+    });
+    assert_eq!(state.program(), Some("sleep"));
 }
 
 /// The other half: a pane that *was* busy must go back to idle, or every pane

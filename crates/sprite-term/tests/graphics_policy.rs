@@ -8,7 +8,7 @@
 mod support;
 
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sprite_term::{
     GraphicsPolicy, GraphicsSnapshot, SessionConfig, TerminalCommand, TerminalEvent,
@@ -23,7 +23,7 @@ fn args(values: &[&str]) -> Vec<OsString> {
 
 /// Waits for the answer to one graphics probe, ignoring unrelated events.
 fn wait_for_graphics(events: &EventPump) -> GraphicsSnapshot {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::PROGRESS_CEILING;
     while Instant::now() < deadline {
         match events.next() {
             TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
@@ -31,7 +31,10 @@ fn wait_for_graphics(events: &EventPump) -> GraphicsSnapshot {
             _ => {}
         }
     }
-    panic!("watchdog: no graphics answer arrived");
+    panic!(
+        "watchdog: no graphics answer arrived within {:?}",
+        support::PROGRESS_CEILING
+    );
 }
 
 /// A Kitty transmit-and-display sequence for raw RGBA pixels.

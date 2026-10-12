@@ -15,23 +15,27 @@ fn isolated(name: &str, timeout: Duration, body: impl FnOnce()) {
         body();
         return;
     }
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", name, "--include-ignored", "--nocapture"])
-        .env(CHILD, name)
-        .spawn()
-        .expect("start isolated prompt test");
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().expect("poll prompt test") {
-            assert!(status.success(), "isolated prompt test failed: {status}");
-            return;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("{name} exceeded its process watchdog");
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    let mut child = KillOnDrop(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--include-ignored", "--nocapture"])
+            .env(CHILD, name)
+            .spawn()
+            .expect("start isolated prompt test"),
+    );
+    let status = support::wait_within(name, timeout, || {
+        child.0.try_wait().expect("poll prompt test")
+    });
+    assert!(status.success(), "isolated prompt test failed: {status}");
+}
+
+/// Kills and reaps the child when dropped, so a wait that times out by
+/// panicking still does not leave the process running.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _killed = self.0.kill();
+        let _reaped = self.0.wait();
     }
 }
 
@@ -149,7 +153,7 @@ fn start_busy_session() -> Spawned {
         let _ = sender.send(spawned);
     });
     receiver
-        .recv_timeout(support::WATCHDOG)
+        .recv_timeout(support::watchdog())
         .expect("background output must start")
 }
 

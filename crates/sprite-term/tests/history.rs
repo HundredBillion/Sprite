@@ -4,7 +4,7 @@
 mod support;
 
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sprite_term::{
     HistoryLines, HistorySnapshot, ScreenKind, SessionConfig, TerminalCommand, TerminalEvent,
@@ -38,7 +38,7 @@ fn has_less() -> bool {
 /// A live shell also reports its title and working directory, so the answer is
 /// rarely the very next event.
 fn wait_for_history(events: &EventPump) -> HistorySnapshot {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::PROGRESS_CEILING;
     while Instant::now() < deadline {
         match events.next() {
             TerminalEvent::History { snapshot, .. } => return (*snapshot).clone(),
@@ -49,7 +49,10 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
             _ => {}
         }
     }
-    panic!("watchdog: no history answer arrived");
+    panic!(
+        "watchdog: no history answer arrived within {:?}",
+        support::PROGRESS_CEILING
+    );
 }
 
 /// One history request. These tests ask one question at a time, so every
@@ -505,7 +508,7 @@ fn every_answer_carries_the_ticket_it_was_asked_with() {
     }
 
     let mut answered = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::PROGRESS_CEILING;
     while answered.len() < 2 && Instant::now() < deadline {
         match events.next() {
             TerminalEvent::History { ticket, snapshot } => {
