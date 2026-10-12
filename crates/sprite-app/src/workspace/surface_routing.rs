@@ -33,7 +33,7 @@ impl Workspace {
                     // the real colour on its next frame.
                     self.repaint_panes(cx);
                 }
-                let _ = reply.send(answer.map(|_| ()));
+                reply.send(answer.map(|_| ())).ok();
             }
             request => {
                 let pane = request.pane().expect("pane request");

@@ -83,13 +83,13 @@ impl Workspace {
                     if let Some(gate) = gate {
                         // A dropped gate releases the cleanup as surely as an
                         // opened one.
-                        let _ = gate.recv_blocking();
+                        gate.recv_blocking().ok();
                     }
                     let cleanup = slot.lock().ok().and_then(|mut slot| slot.take());
                     if let Some(cleanup) = cleanup {
                         cleanup();
                     }
-                    let _ = report.send_blocking(());
+                    report.send_blocking(()).ok();
                 }
             });
         let task = match spawned {
@@ -101,7 +101,7 @@ impl Workspace {
                 #[cfg(not(test))]
                 drop(thread);
                 cx.background_executor().spawn(async move {
-                    let _ = reported.recv().await;
+                    reported.recv().await.ok();
                     mark_completed.store(true, std::sync::atomic::Ordering::Release);
                 })
             }
@@ -138,7 +138,7 @@ impl Workspace {
         });
         cx.spawn(async move |_workspace, cx| {
             finished.await;
-            let _ = cx.update(quit_app);
+            cx.update(quit_app).ok();
         })
         .detach();
     }

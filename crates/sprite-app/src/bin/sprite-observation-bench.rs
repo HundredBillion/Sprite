@@ -105,7 +105,7 @@ impl PaneSource for Panes {
         if self.stall_first && pane == PaneId(0) {
             self.held.lock().expect("lock").push(sender);
         } else {
-            let _ = sender.send(Ok(Arc::clone(&self.snapshot)));
+            sender.send(Ok(Arc::clone(&self.snapshot))).ok();
         }
         Ok(Pending {
             address,

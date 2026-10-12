@@ -7,7 +7,7 @@ fn within_watchdog(body: impl FnOnce() + Send + 'static) {
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         body();
-        let _ = done.send(());
+        done.send(()).ok();
     });
     match finished.recv_timeout(Duration::from_secs(20)) {
         Ok(()) => {}
@@ -115,7 +115,7 @@ impl Fixture {
     /// point and the generation of any snapshot left unread.
     fn finish(self) -> (Vec<TerminalEvent>, Option<u64>) {
         self.shutdown.store(true, Ordering::SeqCst);
-        let _ = self.commands.send(Message::Shutdown);
+        self.commands.send(Message::Shutdown).ok();
         if let Some(processes) = self.worker.join().expect("the worker did not panic") {
             finish_shutdown(processes, std::time::Instant::now());
         }

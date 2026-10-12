@@ -282,7 +282,7 @@ impl Workspace {
                     .unwrap_or_else(|_| "this window is closing".to_owned());
                 // The endpoint thread is waiting on this with a timeout of its
                 // own, so a failure here costs it a wait rather than a thread.
-                let _ = request.reply.send(answer);
+                request.reply.send(answer).ok();
             }
         });
 

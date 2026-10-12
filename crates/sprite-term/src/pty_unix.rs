@@ -175,7 +175,7 @@ impl InputQueue {
 /// a socket that is already full is still a poke, because the pump has not yet
 /// looked and will see everything queued when it does.
 fn poke(wake: &UnixStream) {
-    let _ = (&*wake).write(&[0]);
+    (&*wake).write_all(&[0]).ok();
 }
 
 impl Pump {
@@ -233,7 +233,7 @@ impl Pump {
                         commands: &commands,
                     });
                     // Exactly one stop report on every path.
-                    let _ = commands.send(Message::PumpStopped(outcome));
+                    commands.send(Message::PumpStopped(outcome)).ok();
                 }
             })
             .map_err(|error| SessionError::new("spawn_pty_pump", error))?;
@@ -255,7 +255,7 @@ impl Pump {
     /// The byte is never read; the pump only needs the socket to become
     /// readable, and cancellation is checked before PTY readiness.
     pub(crate) fn cancel(&self) {
-        let _ = (&self.cancel).write_all(&[0]);
+        (&self.cancel).write_all(&[0]).ok();
     }
 
     /// Cancels the pump and joins it.
@@ -266,10 +266,10 @@ impl Pump {
     /// would wait for a send that waits for the join.
     pub(crate) fn shutdown(&mut self) {
         self.cancel();
-        let _ = self.cancel.shutdown(std::net::Shutdown::Both);
+        self.cancel.shutdown(std::net::Shutdown::Both).ok();
 
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            thread.join().ok();
         }
     }
 }
@@ -653,7 +653,7 @@ pub(crate) fn process_group_of(pid: u32) -> Option<i32> {
 /// Signals a whole process group. A group that is already gone counts as
 /// success: the goal is its absence, not the delivery.
 pub(crate) fn signal_group(group: i32, signal: &GroupSignal) {
-    let _ = killpg(Pid::from_raw(group), Signal::from(signal));
+    killpg(Pid::from_raw(group), Signal::from(signal)).ok();
 }
 
 pub(crate) fn group_is_alive(group: i32) -> bool {
@@ -854,7 +854,7 @@ mod tests {
                 }
             }
             drop(inbox);
-            let _ = (&cancel).write_all(&[0]);
+            (&cancel).write_all(&[0]).ok();
             delivered
         });
         let (outcome, allocations) = crate::test_allocations::measure(|| {

@@ -214,7 +214,7 @@ fn close_with_signal_since(
         pump.shutdown();
     }
     if exit_status.is_some() {
-        let _ = waiter.join();
+        waiter.join().ok();
     }
 
     // Only now, with every helper thread finished and the Ordinary Session Job policy

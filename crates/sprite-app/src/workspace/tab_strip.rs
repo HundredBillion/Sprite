@@ -32,15 +32,17 @@ impl Workspace {
                 let subscription = pane.subscribe_title(
                     cx,
                     Box::new(move |event, cx| {
-                        let _ = workspace.update(cx, |workspace, cx| {
-                            if let Some(cached) = workspace.pane_titles.get_mut(&id)
-                                && cached.title != event.0
-                            {
-                                cached.title = event.0.clone();
-                                workspace.refresh_labels();
-                                cx.notify();
-                            }
-                        });
+                        workspace
+                            .update(cx, |workspace, cx| {
+                                if let Some(cached) = workspace.pane_titles.get_mut(&id)
+                                    && cached.title != event.0
+                                {
+                                    cached.title = event.0.clone();
+                                    workspace.refresh_labels();
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
                     }),
                 );
                 PaneTitle {

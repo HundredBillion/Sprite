@@ -142,9 +142,10 @@ impl WindowPanes {
         let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.remove(&pane) {
             for waiter in entry.waiting.into_values() {
-                let _ = waiter
+                waiter
                     .answer
-                    .send(Err("the pane closed before it answered".to_owned()));
+                    .send(Err("the pane closed before it answered".to_owned()))
+                    .ok();
             }
         }
     }
@@ -158,7 +159,7 @@ impl WindowPanes {
         let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.get_mut(&pane) {
             for (_, waiter) in entry.waiting.drain() {
-                let _ = waiter.answer.send(Err(reason.clone()));
+                waiter.answer.send(Err(reason.clone())).ok();
             }
         }
     }
@@ -180,7 +181,7 @@ impl WindowPanes {
         if let Some(entry) = entries.get_mut(&pane)
             && let Some(waiter) = entry.waiting.remove(&ticket)
         {
-            let _ = waiter.answer.send(answer);
+            waiter.answer.send(answer).ok();
         }
     }
 }
@@ -452,7 +453,7 @@ mod tests {
                     .unwrap()
                     .wait()
                     .unwrap();
-                let _ = done.send(tickets);
+                done.send(tickets).ok();
             });
             let tickets = result.recv_timeout(Duration::from_secs(10)).unwrap();
             if tickets.contains(&abandoned) {
@@ -495,7 +496,7 @@ mod tests {
             let result = registry
                 .begin(PaneId(0), HistoryLines::default())
                 .map(|_| ());
-            let _ = tx.send(result);
+            tx.send(result).ok();
         });
         let result = rx.recv_timeout(Duration::from_secs(1));
         spawned
@@ -751,7 +752,7 @@ mod tests {
         // destroyed. Nothing here touches the session.
         let directory = std::env::temp_dir().join(format!("sprite-panes-{}", std::process::id()));
         drop(Endpoint::open_in(directory.clone(), |_| String::new()).expect("an endpoint"));
-        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::remove_dir_all(&directory).ok();
 
         // The child is still there, and the session still takes commands.
         assert!(

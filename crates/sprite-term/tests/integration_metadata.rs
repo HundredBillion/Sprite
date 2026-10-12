@@ -186,5 +186,5 @@ fn a_bell_is_reported_as_an_event() {
         }
     }
     assert!(saw_bell, "the bell arrived as an event");
-    let _ = session.send(TerminalCommand::Capture);
+    session.send(TerminalCommand::Capture).ok();
 }

@@ -96,7 +96,7 @@ impl Mailbox {
             state.normal.push_back(event);
         }
         state.pending = batch;
-        let _ = self.wake.force_send(());
+        self.wake.force_send(()).ok();
         while !state.pending.is_empty() && !state.canceled && !state.consumer_gone {
             if let Some(deadline) = state.drain_deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -184,7 +184,7 @@ impl Receiver {
             if let Some(event) = self.pop()? {
                 return Ok(event);
             }
-            let _ = self.wake.recv().await;
+            self.wake.recv().await.ok();
         }
     }
 
@@ -193,7 +193,7 @@ impl Receiver {
             if let Some(event) = self.pop()? {
                 return Ok(event);
             }
-            let _ = self.wake.recv_blocking();
+            self.wake.recv_blocking().ok();
         }
     }
 }
@@ -259,7 +259,7 @@ mod producer_lifetime_tests {
             while let Ok(event) = receiver.next_blocking() {
                 error |= matches!(event, TerminalEvent::Error(_));
             }
-            let _ = tx.send(error);
+            tx.send(error).ok();
         });
         let result = rx.recv_timeout(Duration::from_millis(200));
         mailbox.seal(Vec::new());

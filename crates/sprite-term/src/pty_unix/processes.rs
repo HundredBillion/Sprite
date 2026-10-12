@@ -737,12 +737,13 @@ mod tests {
                     .flatten()
                     .is_some_and(|now| same_member(self.0, now))
                 {
-                    let _ = nix::sys::signal::kill(
+                    nix::sys::signal::kill(
                         nix::unistd::Pid::from_raw(self.0.pid),
                         nix::sys::signal::Signal::SIGKILL,
-                    );
+                    )
+                    .ok();
                 }
-                let _ = std::fs::remove_file(&self.1);
+                std::fs::remove_file(&self.1).ok();
             }
         }
         let _cleanup = Cleanup(member, file);

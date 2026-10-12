@@ -454,17 +454,17 @@ mod tests {
                     self.held.lock().expect("lock").push(sender);
                 }
                 Some(Behaviour::Fails(reason)) => {
-                    let _ = sender.send(Err((*reason).to_owned()));
+                    sender.send(Err((*reason).to_owned())).ok();
                 }
                 Some(Behaviour::Closes) => drop(sender),
                 Some(Behaviour::Unaskable) => {
                     return Err("the pane closed as the request arrived".to_owned());
                 }
                 Some(Behaviour::Answers(text)) => {
-                    let _ = sender.send(Ok(snapshot(text)));
+                    sender.send(Ok(snapshot(text))).ok();
                 }
                 None => {
-                    let _ = sender.send(Ok(snapshot("default")));
+                    sender.send(Ok(snapshot("default"))).ok();
                 }
             }
             let withdrawn = Arc::clone(&self.withdrawn);

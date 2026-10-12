@@ -48,25 +48,27 @@ fn credentials(errors: &mut dyn Write) -> Result<Credentials, Exit> {
     let environment = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     let (Some(socket), Some(key)) = (environment(SOCKET_VARIABLE), environment(KEY_VARIABLE))
     else {
-        let _ = writeln!(
+        writeln!(
             errors,
             "sprite: not running inside a Sprite window, so there is no pane to draw in\n\
              (this command reads {SOCKET_VARIABLE} and {KEY_VARIABLE}, which a Sprite window \
              sets for the sessions it starts)"
-        );
+        )
+        .ok();
         return Err(Exit::NoWindow);
     };
     let pane = match environment(PANE_VARIABLE).map(|text| text.parse::<u64>()) {
         Some(Ok(pane)) => pane,
         Some(Err(_)) => {
-            let _ = writeln!(errors, "sprite: {PANE_VARIABLE} is not a pane id");
+            writeln!(errors, "sprite: {PANE_VARIABLE} is not a pane id").ok();
             return Err(Exit::Usage);
         }
         None => {
-            let _ = writeln!(
+            writeln!(
                 errors,
                 "sprite: {PANE_VARIABLE} is not set, so there is no pane to draw in"
-            );
+            )
+            .ok();
             return Err(Exit::NoWindow);
         }
     };
@@ -75,10 +77,11 @@ fn credentials(errors: &mut dyn Write) -> Result<Credentials, Exit> {
 
 fn connect(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exit> {
     UnixStream::connect(socket).map_err(|error| {
-        let _ = writeln!(
+        writeln!(
             errors,
             "sprite: could not reach this window's surface channel: {error}"
-        );
+        )
+        .ok();
         Exit::Unreachable
     })
 }
@@ -87,10 +90,11 @@ fn connect(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exit> {
 fn first_line(reader: &mut BufReader<UnixStream>, errors: &mut dyn Write) -> Result<Value, Exit> {
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-        let _ = writeln!(
+        writeln!(
             errors,
             "sprite: the window closed the connection without answering"
-        );
+        )
+        .ok();
         return Err(Exit::Unreachable);
     }
     Ok(serde_json::from_str(line.trim()).unwrap_or(Value::String(line.trim().to_owned())))
@@ -103,7 +107,7 @@ fn refused(verdict: &Value, errors: &mut dyn Write) -> Exit {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| verdict.to_string());
-    let _ = writeln!(errors, "sprite: {reason}");
+    writeln!(errors, "sprite: {reason}").ok();
     Exit::Refused
 }
 
@@ -162,7 +166,7 @@ pub fn run_surface_open(
     let (cancellation, cancel_events) = match UnixStream::pair() {
         Ok(pair) => pair,
         Err(error) => {
-            let _ = writeln!(errors, "sprite: could not monitor standard input: {error}");
+            writeln!(errors, "sprite: could not monitor standard input: {error}").ok();
             return Exit::Unreachable;
         }
     };
@@ -177,17 +181,19 @@ pub fn run_surface_open(
     let description = match documents.next() {
         Some(Ok(description)) => description,
         Some(Err(error)) => {
-            let _ = writeln!(
+            writeln!(
                 errors,
                 "sprite: the description on standard input is not JSON: {error}"
-            );
+            )
+            .ok();
             return Exit::Usage;
         }
         None => {
-            let _ = writeln!(
+            writeln!(
                 errors,
                 "sprite: nothing arrived on standard input; a surface needs a description"
-            );
+            )
+            .ok();
             return Exit::Usage;
         }
     };
@@ -207,14 +213,15 @@ pub fn run_surface_open(
         Err(exit) => return exit,
     };
     let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
-        let _ = writeln!(errors, "sprite: could not read from the surface channel");
+        writeln!(errors, "sprite: could not read from the surface channel").ok();
         return Exit::Unreachable;
     };
     if !send_line(&stream, &format!("{} {open}", credentials.key)) {
-        let _ = writeln!(
+        writeln!(
             errors,
             "sprite: the window closed the connection before the surface opened"
-        );
+        )
+        .ok();
         return Exit::Unreachable;
     }
     let verdict = match first_line(&mut reader, errors) {
@@ -228,7 +235,7 @@ pub fn run_surface_open(
         .and_then(|_| out.flush())
         .is_err()
     {
-        let _ = stream.shutdown(Shutdown::Both);
+        stream.shutdown(Shutdown::Both).ok();
         return Exit::Ok;
     }
 
@@ -240,7 +247,7 @@ pub fn run_surface_open(
                 break;
             }
         }
-        let _ = reader.get_ref().shutdown(Shutdown::Both);
+        reader.get_ref().shutdown(Shutdown::Both).ok();
         event_canceled.store(true, Ordering::Release);
         drop(cancel_events);
     });
@@ -253,19 +260,19 @@ pub fn run_surface_open(
             Ok(value) if value.get("type").is_some() => value,
             Ok(value) => json!({ "type": "update", "description": value }),
             Err(error) => {
-                let _ = writeln!(errors, "sprite: standard input is not JSON: {error}");
+                writeln!(errors, "sprite: standard input is not JSON: {error}").ok();
                 bad_input = true;
                 break;
             }
         };
         if !send_line(&stream, &versioned(message).to_string()) {
-            let _ = stream.shutdown(Shutdown::Both);
+            stream.shutdown(Shutdown::Both).ok();
             break;
         }
     }
     // Standard input is done: tell the window, and let it say `closed`.
-    let _ = stream.shutdown(Shutdown::Write);
-    let _ = events.join();
+    stream.shutdown(Shutdown::Write).ok();
+    events.join().ok();
     if bad_input { Exit::Usage } else { Exit::Ok }
 }
 
@@ -311,23 +318,24 @@ fn one_exchange(
         Ok(stream) => stream,
         Err(exit) => return exit,
     };
-    let _ = stream.set_read_timeout(Some(CLIENT_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(CLIENT_TIMEOUT));
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(CLIENT_TIMEOUT)).ok();
     let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
-        let _ = writeln!(errors, "sprite: could not read from the surface channel");
+        writeln!(errors, "sprite: could not read from the surface channel").ok();
         return Exit::Unreachable;
     };
     if !send_line(
         &stream,
         &format!("{} {}", credentials.key, versioned(message.clone())),
     ) {
-        let _ = writeln!(
+        writeln!(
             errors,
             "sprite: the window closed the connection without answering"
-        );
+        )
+        .ok();
         return Exit::Unreachable;
     }
-    let _ = stream.shutdown(Shutdown::Write);
+    stream.shutdown(Shutdown::Write).ok();
     let verdict = match first_line(&mut reader, errors) {
         Ok(verdict) => verdict,
         Err(exit) => return exit,
@@ -335,6 +343,6 @@ fn one_exchange(
     if verdict.get("type").and_then(Value::as_str) != Some(expected) {
         return refused(&verdict, errors);
     }
-    let _ = writeln!(out, "{verdict}");
+    writeln!(out, "{verdict}").ok();
     Exit::Ok
 }

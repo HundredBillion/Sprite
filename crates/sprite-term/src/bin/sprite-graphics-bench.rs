@@ -179,7 +179,7 @@ fn transmit_to_placement(size: u32) -> Duration {
             .is_some_and(|frame| !frame.placements.is_empty())
     });
 
-    let _ = fs::remove_dir_all(&directory);
+    fs::remove_dir_all(&directory).ok();
     elapsed
 }
 
@@ -214,7 +214,7 @@ fn text_capture(with_image: bool) -> Duration {
                 .as_ref()
                 .is_some_and(|frame| !frame.placements.is_empty())
         });
-        let _ = fs::remove_dir_all(&directory);
+        fs::remove_dir_all(&directory).ok();
     }
 
     // The measurement: one line of text, from written to captured.
@@ -294,7 +294,7 @@ fn steady_state() -> (usize, usize) {
     }
     let late = reading(&mut session, 60);
 
-    let _ = fs::remove_dir_all(&directory);
+    fs::remove_dir_all(&directory).ok();
     (early, late)
 }
 

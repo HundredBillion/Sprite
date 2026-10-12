@@ -1037,7 +1037,7 @@ impl GridPaint {
             ),
         };
         window.with_content_mask(Some(mask), |window| {
-            let _ = line.paint(origin, self.cell_height, window, cx);
+            line.paint(origin, self.cell_height, window, cx).ok();
         });
     }
 

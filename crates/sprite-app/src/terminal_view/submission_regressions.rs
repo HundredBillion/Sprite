@@ -3,7 +3,7 @@ use super::*;
 fn submit_probe(commands: sprite_term::CommandSender, command: TerminalCommand) {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let sender = std::thread::spawn(move || {
-        let _ = tx.send(commands.send(command));
+        tx.send(commands.send(command)).ok();
     });
     rx.recv_timeout(std::time::Duration::from_secs(5))
         .expect("probe admission deadline")
@@ -295,7 +295,7 @@ fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppConte
         while let Ok(event) = events.next_blocking() {
             if matches!(&event, sprite_term::TerminalEvent::TitleChanged(Some(title)) if title == "RESTORED_READY")
             {
-                let _ = ready_tx.send(());
+                ready_tx.send(()).ok();
             }
             if let sprite_term::TerminalEvent::History {
                 snapshot: history, ..

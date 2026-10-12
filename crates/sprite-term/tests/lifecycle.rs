@@ -380,11 +380,12 @@ fn retained_descendant_exits(writes: bool) {
     impl Drop for Descendant {
         fn drop(&mut self) {
             if let Ok(pid) = std::fs::read_to_string(&self.0) {
-                let _ = std::process::Command::new("kill")
+                std::process::Command::new("kill")
                     .args(["-KILL", pid.trim()])
-                    .status();
+                    .status()
+                    .ok();
             }
-            let _ = std::fs::remove_file(&self.0);
+            std::fs::remove_file(&self.0).ok();
         }
     }
     let _descendant = Descendant(pid_file.clone());
@@ -461,7 +462,7 @@ os._exit(7)
         while let Ok(bundle) = snapshots.next_blocking() {
             final_snapshot = Some(bundle);
         }
-        let _ = final_tx.send(final_snapshot);
+        final_tx.send(final_snapshot).ok();
     });
     let events = EventPump::new(events);
     events.expect_ready();
@@ -496,12 +497,13 @@ fn an_ended_session_releases_the_terminal_to_a_lingering_descendant() {
     impl Drop for Descendant {
         fn drop(&mut self) {
             if let Ok(pid) = std::fs::read_to_string(&self.0) {
-                let _ = std::process::Command::new("kill")
+                std::process::Command::new("kill")
                     .args(["-KILL", pid.trim()])
-                    .status();
+                    .status()
+                    .ok();
             }
-            let _ = std::fs::remove_file(&self.0);
-            let _ = std::fs::remove_file(&self.1);
+            std::fs::remove_file(&self.0).ok();
+            std::fs::remove_file(&self.1).ok();
         }
     }
     let _descendant = Descendant(pid_file.clone(), hung_up.clone());

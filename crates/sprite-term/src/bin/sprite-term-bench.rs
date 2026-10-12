@@ -262,7 +262,7 @@ fn await_ready(mut events: sprite_term::EventStream) -> sprite_term::EventStream
 
 fn finish(mut session: TerminalSession) {
     if let Ok(Some(handle)) = session.begin_shutdown() {
-        let _ = handle.wait();
+        handle.wait().ok();
     }
 }
 
@@ -292,7 +292,7 @@ fn input_to_snapshot_idle() -> Duration {
     let _events = await_ready(events);
 
     // Drain the generation-0 blank so the measured snapshot is the response.
-    let _ = snapshots.next_blocking();
+    snapshots.next_blocking().ok();
 
     let started = Instant::now();
     session
@@ -680,7 +680,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let worker = thread::spawn(move || {
             let result = measure_input_under_load(&script, "MARK:Z", Duration::from_millis(500));
-            let _ = sender.send(result);
+            sender.send(result).ok();
         });
         let result = receiver.recv_timeout(Duration::from_secs(10));
         let pid = Pid::from_raw(
@@ -691,9 +691,9 @@ mod tests {
                 .expect("shell pid"),
         );
         if result.is_err() {
-            let _ = kill(pid, Signal::SIGKILL);
+            kill(pid, Signal::SIGKILL).ok();
         }
-        let _ = worker.join();
+        worker.join().ok();
         fs::remove_file(pid_file).expect("remove fixture pid");
         assert_eq!(
             result.expect("silent marker wait must finish"),

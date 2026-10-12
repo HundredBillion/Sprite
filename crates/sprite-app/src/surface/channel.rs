@@ -268,7 +268,7 @@ impl Shared {
         queue.in_flight = 0;
         drop(queue);
         if shut_down {
-            let _ = self.stream.shutdown(Shutdown::Both);
+            self.stream.shutdown(Shutdown::Both).ok();
         }
         self.changed.notify_all();
     }
@@ -480,7 +480,7 @@ fn write_events(shared: &Shared) {
             // stream. A dead one was already shut down, or — refused — is
             // about to carry the connection thread's refusal.
             if !queue.dead && queue.ready {
-                let _ = shared.stream.shutdown(Shutdown::Write);
+                shared.stream.shutdown(Shutdown::Write).ok();
             }
             queue.finish();
             drop(queue);
@@ -502,7 +502,7 @@ fn write_events(shared: &Shared) {
             // The write timed out or failed: the program is not reading, or
             // is gone. Shutting the socket down ends the connection thread's
             // read, and the window hears the Surface closed.
-            let _ = shared.stream.shutdown(Shutdown::Both);
+            shared.stream.shutdown(Shutdown::Both).ok();
             queue.finish();
             shared.kill(queue, false);
             return;
@@ -626,12 +626,12 @@ impl SurfaceRequest {
     pub(crate) fn refuse_with(self, refusal: Refusal) {
         match self {
             Self::Capabilities { reply, .. } => {
-                let _ = reply.send(Err(refusal));
+                reply.send(Err(refusal)).ok();
             }
             Self::Open { reply, .. }
             | Self::FocusPane { reply, .. }
             | Self::RegisterToken { reply, .. } => {
-                let _ = reply.send(Err(refusal));
+                reply.send(Err(refusal)).ok();
             }
             Self::Update { .. }
             | Self::Focus { .. }
@@ -861,7 +861,10 @@ fn serve_surface(
         Err(RelayError::Applying) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
-            let _ = lanes.stream.try_send(SurfaceRequest::Closed { id, pane });
+            lanes
+                .stream
+                .try_send(SurfaceRequest::Closed { id, pane })
+                .ok();
             return;
         }
     }
@@ -892,9 +895,10 @@ fn serve_surface(
             Ok(Message::Grid(ops)) => SurfaceRequest::Grid { id, pane, ops },
             Ok(Message::List(op)) => SurfaceRequest::List { id, pane, op },
             Ok(Message::Close) => {
-                let _ = lanes
+                lanes
                     .stream
-                    .send_blocking(SurfaceRequest::Close { id, pane });
+                    .send_blocking(SurfaceRequest::Close { id, pane })
+                    .ok();
                 return;
             }
             Err(refusal) => {
@@ -908,9 +912,10 @@ fn serve_surface(
             break;
         }
     }
-    let _ = lanes
+    lanes
         .stream
-        .send_blocking(SurfaceRequest::Closed { id, pane });
+        .send_blocking(SurfaceRequest::Closed { id, pane })
+        .ok();
 }
 
 /// Asks the window once and relays its answer, then ends the connection.
@@ -923,8 +928,8 @@ fn one_shot<T>(
     use crate::workspace::{RelayError, relay};
     match relay(requests, REPLY_PATIENCE, request) {
         Ok(Ok(value)) => {
-            let _ = writeln!(stream, "{}", success(value));
-            let _ = stream.shutdown(Shutdown::Write);
+            writeln!(stream, "{}", success(value)).ok();
+            stream.shutdown(Shutdown::Write).ok();
         }
         Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
         Err(RelayError::Disconnected) => refuse(stream, NOT_ANSWERING),
@@ -936,8 +941,8 @@ fn one_shot<T>(
 }
 
 fn refuse(stream: &mut UnixStream, reason: &str) {
-    let _ = writeln!(stream, "{}", event_refused(reason));
-    let _ = stream.shutdown(Shutdown::Write);
+    writeln!(stream, "{}", event_refused(reason)).ok();
+    stream.shutdown(Shutdown::Write).ok();
 }
 
 #[cfg(test)]
@@ -966,7 +971,7 @@ mod tests {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let ordinal = NEXT.fetch_add(1, Ordering::SeqCst);
             let path = std::env::temp_dir().join(scratch_name(std::process::id(), ordinal));
-            let _ = std::fs::remove_dir_all(&path);
+            std::fs::remove_dir_all(&path).ok();
             std::fs::create_dir_all(&path).expect("scratch");
             Self(path)
         }
@@ -974,7 +979,7 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            std::fs::remove_dir_all(&self.0).ok();
         }
     }
 
@@ -1196,7 +1201,7 @@ mod tests {
                 },
                 &lanes,
             );
-            let _ = done.send(());
+            done.send(()).ok();
         });
         let open = receivers.one_shot.recv_blocking().unwrap();
         assert!(open.claim());
@@ -1257,7 +1262,7 @@ mod tests {
                 },
                 &lanes,
             );
-            let _ = done.send(());
+            done.send(()).ok();
         });
         let outcome = finished.recv_timeout(Duration::from_secs(2));
         if outcome.is_err() {
@@ -1518,11 +1523,11 @@ mod tests {
             } else {
                 open_message(3).to_string()
             };
-            let _ = write!(stream, "{} {body}", endpoint.key_hex());
+            write!(stream, "{} {body}", endpoint.key_hex()).ok();
             if terminated {
-                let _ = writeln!(stream);
+                writeln!(stream).ok();
             }
-            let _ = stream.shutdown(Shutdown::Write);
+            stream.shutdown(Shutdown::Write).ok();
             assert_eq!(
                 line(&mut reader),
                 json!({"type":"refused", "reason":"denied"})
@@ -1757,7 +1762,7 @@ mod tests {
             while let Ok(request) = one_shot.recv_blocking() {
                 if let SurfaceRequest::Open { reply, .. } = request {
                     assert!(reply.claim());
-                    let _ = reply.send(Ok(()));
+                    reply.send(Ok(())).ok();
                 } else {
                     panic!("only Opens reach the one-shot lane here");
                 }
@@ -2488,7 +2493,7 @@ mod tests {
             frame.resize(MAX_MESSAGE_BYTES as usize, b' ');
             frame.extend_from_slice(b"{\"type\":\"close\"}\n");
         }
-        let _ = stream.write_all(&frame);
+        stream.write_all(&frame).ok();
         stream.shutdown(Shutdown::Write).unwrap();
         assert_eq!(
             received.recv_timeout(Duration::from_secs(5)).unwrap(),

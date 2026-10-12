@@ -306,7 +306,9 @@ impl TerminalView {
                 ..
             } => {
                 let answer = self.capability_owner_group(owner_pid, return_target);
-                let _ = reply.send(answer.map(|_| crate::surface::channel::capabilities(true)));
+                reply
+                    .send(answer.map(|_| crate::surface::channel::capabilities(true)))
+                    .ok();
             }
             SurfaceRequest::Open {
                 id,
@@ -315,7 +317,9 @@ impl TerminalView {
                 reply,
                 ..
             } => {
-                let _ = reply.send(self.open_surface(id, open, connection, window, cx));
+                reply
+                    .send(self.open_surface(id, open, connection, window, cx))
+                    .ok();
             }
             SurfaceRequest::Update {
                 id, description, ..
@@ -329,7 +333,7 @@ impl TerminalView {
                 self.close_surface(id, window, cx);
             }
             SurfaceRequest::FocusPane { target, reply, .. } => {
-                let _ = reply.send(self.focus_target(target, window, cx));
+                reply.send(self.focus_target(target, window, cx)).ok();
             }
             SurfaceRequest::Grid { id, ops, .. } => self.grid_operations(id, ops, cx),
             SurfaceRequest::List { id, op, .. } => self.list_operation(id, op, cx),

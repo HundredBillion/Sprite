@@ -18,13 +18,15 @@ struct CountingAllocator;
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn count(bytes: usize) {
-    let _ = ACTIVE_SAMPLE.try_with(|active| {
-        if let Some(mut sample) = active.get() {
-            sample.allocations += 1;
-            sample.bytes += bytes as u64;
-            active.set(Some(sample));
-        }
-    });
+    ACTIVE_SAMPLE
+        .try_with(|active| {
+            if let Some(mut sample) = active.get() {
+                sample.allocations += 1;
+                sample.bytes += bytes as u64;
+                active.set(Some(sample));
+            }
+        })
+        .ok();
 }
 
 // Safety: every pointer and layout is forwarded unchanged to System.

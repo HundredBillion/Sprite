@@ -116,7 +116,7 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
         }
     }
 
-    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::remove_dir_all(&directory).ok();
     (
         snapshot.expect("the pane showed an image within the watchdog"),
         payload,

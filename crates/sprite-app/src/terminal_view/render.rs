@@ -139,9 +139,12 @@ impl TerminalView {
             let window = self.surface_window;
             // Background panes also need cleanup, even when they never render.
             cx.defer(move |cx| {
-                let _ = window.update(cx, |_, window, cx| {
-                    let _ = view.update(cx, |view, cx| view.close_dead_surfaces(window, cx));
-                });
+                window
+                    .update(cx, |_, window, cx| {
+                        view.update(cx, |view, cx| view.close_dead_surfaces(window, cx))
+                            .ok();
+                    })
+                    .ok();
             });
         }
         self.refresh_display_title(cx);

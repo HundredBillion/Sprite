@@ -105,7 +105,7 @@ struct FixtureFiles(PathBuf);
 impl Drop for FixtureFiles {
     fn drop(&mut self) {
         *ACTIVE.lock().unwrap() = None;
-        let _ = std::fs::remove_dir_all(&self.0);
+        std::fs::remove_dir_all(&self.0).ok();
     }
 }
 

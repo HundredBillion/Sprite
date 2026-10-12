@@ -588,7 +588,7 @@ mod tests {
                 .recv_blocking()
                 .expect("a request reached the window");
             let verb = request.what;
-            let _ = request.reply.send("the window answered".to_owned());
+            request.reply.send("the window answered".to_owned()).ok();
             verb
         });
 
@@ -675,7 +675,7 @@ mod tests {
                 .expect("a request reached the window");
             assert!(request.reply.claim(), "taken before the endpoint gave up");
             // Held open without an answer, as a window still applying would.
-            let _ = done.recv();
+            done.recv().ok();
             drop(request);
         });
         // A first wait long enough that the stand-in window certainly claims

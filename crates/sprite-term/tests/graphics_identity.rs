@@ -195,7 +195,7 @@ fn closing_the_session_releases_the_pixels_it_held() {
     drop(bundle);
 
     if let Ok(Some(handle)) = pane.session.begin_shutdown() {
-        let _ = handle.wait();
+        handle.wait().ok();
     }
     drop(pane);
 

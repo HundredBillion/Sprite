@@ -562,7 +562,7 @@ mod tests {
                     reply,
                     reply_connection: None,
                 });
-                let _ = done.send(outcome);
+                done.send(outcome).ok();
             });
             let outcome = finished.recv_timeout(std::time::Duration::from_secs(2));
             if outcome.is_err() {
@@ -675,7 +675,7 @@ mod tests {
         let window = std::thread::spawn(move || {
             // Held open without an answer, as a window still applying would.
             let reply = requests.recv_blocking().expect("a request");
-            let _ = done.recv();
+            done.recv().ok();
             drop(reply);
         });
         let started = std::time::Instant::now();
@@ -727,7 +727,7 @@ mod tests {
                         reply_connection: None,
                     },
                 );
-                let _ = done.send(matches!(answer, Err(RelayError::Timeout)));
+                done.send(matches!(answer, Err(RelayError::Timeout))).ok();
             });
         }
         for _ in 0..MAX_CONNECTIONS {

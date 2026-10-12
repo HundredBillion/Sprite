@@ -28,23 +28,27 @@ struct CountingAllocator;
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn record(bytes: usize) {
-    let _ = SAMPLE.try_with(|sample| {
-        if let Some(mut count) = sample.get() {
-            count.allocations += 1;
-            count.bytes += bytes;
-            count.largest = count.largest.max(bytes);
-            sample.set(Some(count));
-        }
-    });
+    SAMPLE
+        .try_with(|sample| {
+            if let Some(mut count) = sample.get() {
+                count.allocations += 1;
+                count.bytes += bytes;
+                count.largest = count.largest.max(bytes);
+                sample.set(Some(count));
+            }
+        })
+        .ok();
 }
 
 fn record_free(bytes: usize) {
-    let _ = SAMPLE.try_with(|sample| {
-        if let Some(mut count) = sample.get() {
-            count.freed += bytes;
-            sample.set(Some(count));
-        }
-    });
+    SAMPLE
+        .try_with(|sample| {
+            if let Some(mut count) = sample.get() {
+                count.freed += bytes;
+                sample.set(Some(count));
+            }
+        })
+        .ok();
 }
 
 // SAFETY: allocation and deallocation preserve System's pointer and layout contracts.

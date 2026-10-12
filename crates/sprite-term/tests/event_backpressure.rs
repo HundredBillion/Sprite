@@ -75,7 +75,7 @@ fn shutdown_retains_accepted_clipboard_writes_without_consumer_progress() {
     let handle = session.begin_shutdown().unwrap().unwrap();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(handle.wait());
+        tx.send(handle.wait()).ok();
     });
     let joined = rx.recv_timeout(Duration::from_secs(7));
     let mut retained = Vec::new();
@@ -188,7 +188,7 @@ fn dropping_the_consumer_releases_event_pressure() {
     let handle = session.begin_shutdown().unwrap().unwrap();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(handle.wait());
+        tx.send(handle.wait()).ok();
     });
     rx.recv_timeout(Duration::from_secs(7))
         .expect("drop releases producer")

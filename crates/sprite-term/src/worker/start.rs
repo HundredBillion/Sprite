@@ -559,7 +559,7 @@ fn spawn_child_waiter(
             };
             let status = child.wait().map_err(|error| error.to_string());
             events.begin_natural_drain();
-            let _ = commands.send(Message::ChildExited(status));
+            commands.send(Message::ChildExited(status)).ok();
         });
     match spawned {
         Ok(waiter) => {

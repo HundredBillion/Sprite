@@ -25,16 +25,17 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         for &(pid, birth) in &self.children {
             if identity(pid).is_some_and(|(now, _, live)| now == birth && live) {
-                let _ = nix::sys::signal::kill(
+                nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid),
                     nix::sys::signal::Signal::SIGKILL,
-                );
+                )
+                .ok();
             }
         }
         if let Some(child) = &mut self.independent {
-            let _ = child.wait();
+            child.wait().ok();
         }
-        let _ = fs::remove_dir_all(&self.path);
+        fs::remove_dir_all(&self.path).ok();
     }
 }
 #[test]

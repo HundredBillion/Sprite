@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 # `gpui` and nothing else. This list is the dependency invariant in checkable
 # form: a pane type from another repository implements what is here, and
 # Sprite Terminal never has to know that repository's name. A test in

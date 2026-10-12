@@ -220,7 +220,7 @@ fn an_image_is_never_read_from_a_file() {
     feed(&mut session, &snapshots, transmit_rgba(12, 2, 2));
     assert!(probe(&mut session, &events).holds(12));
 
-    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::remove_dir_all(&directory).ok();
 }
 
 /// None of the three filesystem mediums may turn terminal output into a file
@@ -259,7 +259,7 @@ fn no_filesystem_medium_can_load_an_image() {
     feed(&mut session, &snapshots, transmit_rgba(23, 2, 2));
     assert!(probe(&mut session, &events).holds(23));
 
-    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::remove_dir_all(&directory).ok();
 }
 
 /// A pane with graphics turned off holds nothing at all — the image is dropped

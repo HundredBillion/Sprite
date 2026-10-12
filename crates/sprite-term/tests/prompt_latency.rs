@@ -150,7 +150,7 @@ fn start_busy_session() -> Spawned {
             .contains("sprite-background-output")
         {}
         // Keep the streams alive but paused, as an inactive consumer would.
-        let _ = sender.send(spawned);
+        sender.send(spawned).ok();
     });
     receiver
         .recv_timeout(support::watchdog())

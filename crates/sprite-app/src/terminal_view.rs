@@ -408,7 +408,7 @@ impl TerminalView {
             loop {
                 let decision = crate::terminal_events::decide(events.next().await);
                 if decision.stop {
-                    let _ = view.update(cx, |view, cx| {
+                    view.update(cx, |view, cx| {
                         view.session = match std::mem::replace(
                             &mut view.session,
                             SessionState::NeverStarted,
@@ -427,12 +427,13 @@ impl TerminalView {
                                 "the pane's session ended before it answered".to_owned(),
                             );
                         }
-                        let _ = view.retry_wake.force_send(());
+                        view.retry_wake.force_send(()).ok();
                         view.refresh_display_title(cx);
-                    });
+                    })
+                    .ok();
                 }
                 if decision.close_pane {
-                    let _ = exit.sender.try_send(exit.identity);
+                    exit.sender.try_send(exit.identity).ok();
                     return;
                 }
                 if !decision.effects.is_empty() {
@@ -788,7 +789,7 @@ impl TerminalView {
         self.admission_closed = true;
         self.pending.clear();
         self.pane_focus.forget_pending();
-        let _ = self.retry_wake.force_send(());
+        self.retry_wake.force_send(()).ok();
         // Retained view handles must not keep a closed pane reachable by commands.
         if let Some(link) = self.observation.take() {
             link.panes.forget(link.pane);
@@ -1034,7 +1035,7 @@ impl sprite_pane::Pane for TerminalView {
         // The interface promises blocking work and nothing about children;
         // what this pane's blocking work happens to be stays in here.
         Some(Box::new(move || {
-            let _ = handle.wait();
+            handle.wait().ok();
         }))
     }
 

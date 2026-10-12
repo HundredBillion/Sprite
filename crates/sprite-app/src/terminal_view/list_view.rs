@@ -339,9 +339,10 @@ impl VirtualListView {
             let host = self.host.clone();
             let surface = self.surface;
             window.defer(cx, move |window, cx| {
-                let _ = host.update(cx, |view, cx| {
+                host.update(cx, |view, cx| {
                     view.dispatch_surface_event(surface, &event, window, cx)
-                });
+                })
+                .ok();
             });
         }
     }
@@ -634,9 +635,11 @@ impl Render for VirtualListView {
                                 "left",
                                 &neovim_modifiers(&event.modifiers()),
                             );
-                            let _ = row_host.update(cx, |view, cx| {
-                                view.dispatch_surface_event(surface, &payload, window, cx)
-                            });
+                            row_host
+                                .update(cx, |view, cx| {
+                                    view.dispatch_surface_event(surface, &payload, window, cx)
+                                })
+                                .ok();
                         })
                         .into_any_element()
                     })
@@ -912,9 +915,12 @@ fn header_element(
             .cursor_pointer()
             .on_click(move |_event, window, cx| {
                 let payload = event_list_action(event.revision, &action);
-                let _ = event.host.update(cx, |view, cx| {
-                    view.dispatch_surface_event(event.surface, &payload, window, cx)
-                });
+                event
+                    .host
+                    .update(cx, |view, cx| {
+                        view.dispatch_surface_event(event.surface, &payload, window, cx)
+                    })
+                    .ok();
             })
             .into_any_element()
         }

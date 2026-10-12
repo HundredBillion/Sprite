@@ -597,7 +597,7 @@ mod history_cancellation_tests {
         let shutdown = spawned.session.begin_shutdown().unwrap().unwrap();
         let (done, result) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done.send(shutdown.wait());
+            done.send(shutdown.wait()).ok();
         });
         result
             .recv_timeout(Duration::from_secs(10))

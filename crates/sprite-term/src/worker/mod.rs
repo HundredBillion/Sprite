@@ -405,7 +405,11 @@ impl Session {
                 // taken from the queue is still recorded: each helper reports
                 // once, and closing waits for both reports.
                 if matches!(message, Message::PumpStopped(_) | Message::ChildExited(_)) {
-                    let _ = self.apply(message);
+                    // The loop is stopping already, so whether recording the
+                    // report would have stopped it changes nothing.
+                    match self.apply(message) {
+                        Continue(()) | Stop(()) => {}
+                    }
                 }
                 return Stop(());
             }
@@ -500,8 +504,8 @@ impl Session {
             }
             #[cfg(test)]
             Message::HistoryGate { reached, resume } => {
-                let _ = reached.send(HISTORY_TRAVERSALS.get());
-                let _ = resume.recv_timeout(std::time::Duration::from_secs(10));
+                reached.send(HISTORY_TRAVERSALS.get()).ok();
+                resume.recv_timeout(std::time::Duration::from_secs(10)).ok();
             }
             Message::PtyOutput(chunk) => {
                 // One chunk, one mutation, one generation. What the parser
@@ -780,14 +784,14 @@ impl Session {
                     // The colours live in the render state, so a frame has to be
                     // taken for anyone to see them.
                     pending.mutated();
-                    let _ = commands.try_send(Message::CaptureRequested);
+                    commands.try_send(Message::CaptureRequested).ok();
                 }
                 TerminalCommand::SetCursor(cursor) => {
                     if let Err(error) = apply_cursor_defaults(terminal, cursor) {
                         emit(events, TerminalEvent::Error(error))?;
                     }
                     pending.mutated();
-                    let _ = commands.try_send(Message::CaptureRequested);
+                    commands.try_send(Message::CaptureRequested).ok();
                 }
                 TerminalCommand::CaptureGraphics => match projector.capture_graphics(terminal) {
                     Ok(snapshot) => {
@@ -937,7 +941,7 @@ impl Session {
                 )
             }
         {
-            let _ = self.snapshots.force_send(Arc::new(bundle));
+            self.snapshots.force_send(Arc::new(bundle)).ok();
         }
         drop(self.owned);
         closing::close(self.runtime)

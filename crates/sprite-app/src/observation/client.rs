@@ -54,19 +54,20 @@ pub fn run_snapshot(args: &SnapshotArgs, out: &mut dyn Write, errors: &mut dyn W
         // The common case for this message is a person running the command in
         // an ordinary terminal, so it says what is wrong rather than naming a
         // variable and leaving them to guess.
-        let _ = writeln!(
+        writeln!(
             errors,
             "sprite: not running inside a Sprite window, so there are no panes to observe\n\
              (this command reads {SOCKET_VARIABLE} and {KEY_VARIABLE}, which a Sprite window sets \
              for the sessions it starts)"
-        );
+        )
+        .ok();
         return Exit::NoWindow;
     };
 
     let request = match request_line(args, &key, environment(PANE_VARIABLE).as_deref()) {
         Ok(request) => request,
         Err(message) => {
-            let _ = writeln!(errors, "sprite: {message}");
+            writeln!(errors, "sprite: {message}").ok();
             return Exit::Usage;
         }
     };
@@ -74,10 +75,11 @@ pub fn run_snapshot(args: &SnapshotArgs, out: &mut dyn Write, errors: &mut dyn W
     let answer = match exchange(&socket, &request) {
         Ok(answer) => answer,
         Err(error) => {
-            let _ = writeln!(
+            writeln!(
                 errors,
                 "sprite: could not ask this window about its panes: {error}"
-            );
+            )
+            .ok();
             return Exit::Unreachable;
         }
     };
@@ -92,11 +94,11 @@ pub fn run_snapshot(args: &SnapshotArgs, out: &mut dyn Write, errors: &mut dyn W
         } else {
             trimmed
         };
-        let _ = writeln!(errors, "sprite: {detail}");
+        writeln!(errors, "sprite: {detail}").ok();
         return Exit::Refused;
     }
 
-    let _ = writeln!(out, "{trimmed}");
+    writeln!(out, "{trimmed}").ok();
     Exit::Ok
 }
 
@@ -110,11 +112,12 @@ pub fn run_config_reload(out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
 
     let (Some(socket), Some(key)) = (environment(SOCKET_VARIABLE), environment(KEY_VARIABLE))
     else {
-        let _ = writeln!(
+        writeln!(
             errors,
             "sprite: not running inside a Sprite window, so there is no window to reload\n\
              (a window reloads its own configuration; this command asks the one it is running in)"
-        );
+        )
+        .ok();
         return Exit::NoWindow;
     };
 
@@ -122,27 +125,29 @@ pub fn run_config_reload(out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
         Ok(answer) => {
             let trimmed = answer.trim();
             if trimmed.is_empty() {
-                let _ = writeln!(
+                writeln!(
                     errors,
                     "sprite: the window closed the connection without answering"
-                );
+                )
+                .ok();
                 return Exit::Refused;
             }
             // A refusal is prose too, so it is told apart by what it says
             // rather than by its shape: only a reload that happened begins by
             // saying so.
             if !trimmed.starts_with("reloaded ") {
-                let _ = writeln!(errors, "sprite: {trimmed}");
+                writeln!(errors, "sprite: {trimmed}").ok();
                 return Exit::Refused;
             }
-            let _ = writeln!(out, "{trimmed}");
+            writeln!(out, "{trimmed}").ok();
             Exit::Ok
         }
         Err(error) => {
-            let _ = writeln!(
+            writeln!(
                 errors,
                 "sprite: could not ask this window to reload: {error}"
-            );
+            )
+            .ok();
             Exit::Unreachable
         }
     }
@@ -164,10 +169,10 @@ pub fn run_config_print(
     if let Some(path) = &args.path {
         let (settings, complaints) = crate::config::Settings::load_explicit(path);
         for complaint in complaints.0 {
-            let _ = writeln!(errors, "sprite: {complaint}");
+            writeln!(errors, "sprite: {complaint}").ok();
         }
-        let _ = writeln!(out, "# {}", path.display());
-        let _ = write!(out, "{}", settings.to_toml());
+        writeln!(out, "# {}", path.display()).ok();
+        write!(out, "{}", settings.to_toml()).ok();
         return Exit::Ok;
     }
 
@@ -181,27 +186,29 @@ pub fn run_config_print(
                         Err(error) => Some(error),
                     };
                     if let Some(error) = invalid {
-                        let _ = writeln!(
+                        writeln!(
                             errors,
                             "sprite: invalid configuration response: {} ({error})",
                             answer.trim()
-                        );
+                        )
+                        .ok();
                         return Exit::Refused;
                     }
-                    let _ = writeln!(out, "# in effect in this window");
-                    let _ = write!(out, "{}", answer.trim_end());
-                    let _ = writeln!(out);
+                    writeln!(out, "# in effect in this window").ok();
+                    write!(out, "{}", answer.trim_end()).ok();
+                    writeln!(out).ok();
                     Exit::Ok
                 }
                 Ok(_) => {
-                    let _ = writeln!(
+                    writeln!(
                         errors,
                         "sprite: the window closed the connection without answering"
-                    );
+                    )
+                    .ok();
                     Exit::Refused
                 }
                 Err(error) => {
-                    let _ = writeln!(errors, "sprite: could not ask this window: {error}");
+                    writeln!(errors, "sprite: could not ask this window: {error}").ok();
                     Exit::Unreachable
                 }
             }
@@ -216,24 +223,25 @@ pub fn run_config_print(
                 None => (crate::config::Settings::default(), Default::default()),
             };
             for complaint in complaints.0 {
-                let _ = writeln!(errors, "sprite: {complaint}");
+                writeln!(errors, "sprite: {complaint}").ok();
             }
             match path {
                 Some(path) if path.exists() => {
-                    let _ = writeln!(out, "# {} (not running inside a window)", path.display());
+                    writeln!(out, "# {} (not running inside a window)", path.display()).ok();
                 }
                 Some(path) => {
-                    let _ = writeln!(
+                    writeln!(
                         out,
                         "# {} does not exist, so these are Sprite's defaults",
                         path.display()
-                    );
+                    )
+                    .ok();
                 }
                 None => {
-                    let _ = writeln!(out, "# no configuration file location; Sprite's defaults");
+                    writeln!(out, "# no configuration file location; Sprite's defaults").ok();
                 }
             }
-            let _ = write!(out, "{}", settings.to_toml());
+            write!(out, "{}", settings.to_toml()).ok();
             Exit::Ok
         }
     }

@@ -192,7 +192,7 @@ fn prompt_child(root: &std::path::Path, args: &[String]) {
         }
         bounded_wait(Duration::from_millis(10));
     }
-    let _ = std::fs::remove_file(registration);
+    std::fs::remove_file(registration).ok();
 }
 
 #[cfg(feature = "startup-benchmark")]
@@ -281,5 +281,5 @@ fn native(root: std::path::PathBuf, args: &[String]) {
 #[cfg(feature = "startup-benchmark")]
 fn bounded_wait(duration: Duration) {
     let (_sender, receiver) = std::sync::mpsc::channel::<()>();
-    let _ = receiver.recv_timeout(duration);
+    receiver.recv_timeout(duration).ok();
 }

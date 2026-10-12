@@ -188,13 +188,13 @@ where
         body,
         reply_connection,
     });
-    let _ = writeln!(stream, "{response}");
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    writeln!(stream, "{response}").ok();
+    stream.shutdown(std::net::Shutdown::Write).ok();
 }
 
 fn refuse(stream: &mut UnixStream) {
-    let _ = writeln!(stream, "{DENIED}");
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    writeln!(stream, "{DENIED}").ok();
+    stream.shutdown(std::net::Shutdown::Write).ok();
 }
 
 #[cfg(test)]
@@ -215,10 +215,10 @@ mod tests {
             .unwrap();
         // Rejection can close the peer before an oversized write finishes.
         // The response and dispatch assertions below establish the outcome.
-        let _ = write!(stream, "{} {body}", endpoint.key_hex());
-        let _ = stream.shutdown(std::net::Shutdown::Write);
+        write!(stream, "{} {body}", endpoint.key_hex()).ok();
+        stream.shutdown(std::net::Shutdown::Write).ok();
         let mut answer = String::new();
-        let _ = stream.read_to_string(&mut answer);
+        stream.read_to_string(&mut answer).ok();
         assert_eq!(answer.trim(), DENIED);
         assert!(calls.0.lock().unwrap().is_empty());
     }
@@ -257,7 +257,7 @@ mod tests {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let ordinal = NEXT.fetch_add(1, Ordering::SeqCst);
             let path = std::env::temp_dir().join(scratch_name(std::process::id(), ordinal));
-            let _ = fs::remove_dir_all(&path);
+            fs::remove_dir_all(&path).ok();
             Self(path)
         }
 
@@ -268,7 +268,7 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            fs::remove_dir_all(&self.0).ok();
         }
     }
 
