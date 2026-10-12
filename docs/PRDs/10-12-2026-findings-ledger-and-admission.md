@@ -17,17 +17,17 @@ New finding IDs introduced by this work continue the `GAP-C` series:
 
 | ID | Defect | Disposition here |
 |---|---|---|
-| GAP-C06 | BCA-26's "zero scrollback" selection-anchor drift is reachable: `ScrollbackBytes` accepts 0. | Open, issue |
-| GAP-C07 | A Surface writer that drains slowly keeps one of the 64 connection slots. | Deferred by design, issue |
-| GAP-C08 | Placeholder tiles snap against the previous frame's origin; a stale seam persists in an unfocused pane. | Open, issue |
-| GAP-C09 | A relayed request refused at admission is reported as "did not answer in time"; ADR 0018 still describes a blocking enqueue. | Fixed here |
+| GAP-C06 | BCA-26's "zero scrollback" selection-anchor drift is reachable: `ScrollbackBytes` accepts 0. | Open, #66 |
+| GAP-C07 | A Surface writer that drains slowly keeps one of the 64 connection slots. | Deferred by design, #67 |
+| GAP-C08 | Placeholder tiles snap against the previous frame's origin; a stale seam persists in an unfocused pane. | Open, #68 |
+| GAP-C09 | A relayed request refused at admission is reported as "did not answer in time"; ADR 0018 still describes a blocking enqueue. | Fixed here, closes #69 |
 | GAP-C10 | Arch CI is flaky on timing-sensitive tests (GitHub #57). | Partly fixed here; #57 stays open until hosted evidence |
-| GAP-C11 | A keystroke can be refused while a program floods output: the worker's one spare inbox slot is shared with capture requests. | Fixed here |
-| GAP-C12 | One Surface streaming updates keeps the shared 64-slot request queue full, so every other program's open/focus/token request is refused at once. | Fixed here |
-| GAP-C13 | The Surface and observation clients time out at 15 s; the window's "still applying" answer arrives after 5 s + 10 s measured from later, so the client never sees it. | Fixed here |
-| GAP-C14 | Cached GPUI views per pane (PRD 10-09 "out of scope"). | Deferred, issue |
-| GAP-C15 | Divider-drag per-move layout work (PRD 10-09 "out of scope"). | Deferred, issue |
-| GAP-C16 | Kitty Unicode-placeholder row/column inheritance (PRD 10-09 "out of scope"). | Deferred, issue |
+| GAP-C11 | A keystroke can be refused while a program floods output: the worker's one spare inbox slot is shared with capture requests. | Fixed here, closes #70 |
+| GAP-C12 | One Surface streaming updates keeps the shared 64-slot request queue full, so every other program's open/focus/token request is refused at once. | Fixed here, closes #71 |
+| GAP-C13 | The Surface and observation clients time out at 15 s; the window's "still applying" answer arrives after 5 s + 10 s measured from later, so the client never sees it. | Fixed here, closes #72 |
+| GAP-C14 | Cached GPUI views per pane (PRD 10-09 "out of scope"). | Deferred, #73 |
+| GAP-C15 | Divider-drag per-move layout work (PRD 10-09 "out of scope"). | Deferred, #74 |
+| GAP-C16 | Kitty Unicode-placeholder row/column inheritance (PRD 10-09 "out of scope"). | Deferred, #75 |
 
 GAP-C02 (inherited endpoint variables) and GAP-C05 (child leaked when a later
 start-up step fails) are also fixed here because each is a small, contained
@@ -71,9 +71,10 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
 - R-L4 `.github/pull_request_template.md` carries a Findings table: ID,
   status after this PR, guarding test or issue. The narrative audit documents
   are unchanged; status lives only in the ledger.
-- R-L5 Issue drafts for every open or deferred finding and a script that
-  creates the resolved ones already closed with their PR link. Filed only on
-  the user's go.
+- R-L5 Issues #61..#75 were filed on 2026-10-12 for GAP-C01..09 and
+  GAP-C11..16 (GAP-C10 is #57); the ledger carries each number. A script that
+  creates the 55 resolved findings as already-closed issues with their PR link
+  stays in the review folder, unfiled.
 
 ## R-K. Lints replace comments as the carrier of rules
 
