@@ -18,8 +18,13 @@ PTY output that was already queued in the inbox. This replaces the earlier
 single-queue FIFO, and the test
 `a_queued_command_is_applied_before_output_that_arrived_first` pins it at both
 drain sites. The reason is that a keystroke must never wait behind a flood.
-The one consequence is that a capture requested after output was received but
-before it was parsed reflects the screen as shown, not the bytes in flight.
+History requests and the Pane Snapshots taken for Pane Observation overtake
+queued output the same way: a capture requested after output was received but
+before it was parsed reflects the screen as shown, not the bytes in flight, so
+a snapshot can miss up to 16 chunks already read but not yet parsed.
+Control-first is strict priority with no fairness bound: the only producers
+that could sustain it are observation connections issuing history requests,
+and a bound is a follow-up, not a change made here.
 
 Every nonblocking offer answers with one type, `Admitted<T>`: `Accepted`,
 `Saturated(T)` or `Closed(T)`, the latter two handing the command back.

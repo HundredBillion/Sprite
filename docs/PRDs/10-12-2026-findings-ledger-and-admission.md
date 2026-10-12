@@ -74,9 +74,9 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
   status after this PR, guarding test or issue. The narrative audit documents
   are unchanged; status lives only in the ledger.
 - R-L5 Issues #61..#75 were filed on 2026-10-12 for GAP-C01..09 and
-  GAP-C11..16 (GAP-C10 is #57); the ledger carries each number. A script that
-  creates the 55 resolved findings as already-closed issues with their PR link
-  stays in the review folder, unfiled.
+  GAP-C11..16 (GAP-C10 is #57); the ledger carries each number. The 55
+  resolved findings are not filed as issues; the ledger records the PR that
+  fixed each.
 
 ## R-K. Lints replace comments as the carrier of rules
 
@@ -119,10 +119,13 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
   success wakes an idle worker; a full inbox means the worker is busy and
   reaches `control` after its current message. `Shutdown` keeps its flag and
   knock; the closing loops are unchanged.
-- R-A3 `TerminalView::submit` keeps one `Pending { settings, resize, focus }`
-  filled from `Saturated(cmd)` by matching the command, replacing the three
-  separate slots; `admission_closed` is set from `Closed(_)`, never from
-  error text. Keys, paste and text commits report a refusal, as today; with a
+- R-A3 `TerminalView` keeps one `Pending { settings, resize }`, replacing
+  the separate slots: a resize is kept from `Saturated(_)`, and settings are
+  kept whole while any live change was not admitted. Focus is not in
+  `Pending`: `PaneFocus` (`terminal_view/pane_focus.rs`) keeps a refused
+  Pane Focus value from `Saturated(_)` and delivers the latest one when room
+  returns. `admission_closed` is set from `Closed(_)`, never from error
+  text. Keys, paste and text commits report a refusal, as today; with a
   64-deep control lane that now means a wedged worker, not a flood.
 - R-A4 The workspace's `SurfaceRequest` channel becomes two: a stream lane
   (Update, Grid, List, Focus, Close, Closed; `send_blocking` from the
