@@ -10,6 +10,10 @@ pub(crate) enum ScanError {
     /// The answer could not be read.
     Unparsable,
     /// The process changed identity between two readings.
+    #[cfg_attr(
+        target_os = "linux",
+        allow(dead_code, reason = "only the macOS two-reading scan can see it")
+    )]
     Changed,
 }
 
@@ -164,14 +168,16 @@ fn same_member(before: Process, after: Process) -> bool {
 
 #[cfg(target_os = "linux")]
 fn parse_stat(pid: i32, stat: &str) -> Result<Process, ScanError> {
-    let tail = stat.get(stat.rfind(')').ok_or(())? + 1..).ok_or(())?;
+    let tail = stat
+        .get(stat.rfind(')').ok_or(ScanError::Unparsable)? + 1..)
+        .ok_or(ScanError::Unparsable)?;
     let fields: Vec<_> = tail.split_whitespace().collect();
-    let field = |index| fields.get(index).copied().ok_or(());
+    let field = |index| fields.get(index).copied().ok_or(ScanError::Unparsable);
     Ok(Process {
         pid,
-        group: field(2)?.parse().map_err(|_| ScanError::Denied)?,
-        session: field(3)?.parse().map_err(|_| ScanError::Denied)?,
-        birth: field(19)?.parse().map_err(|_| ScanError::Denied)?,
+        group: field(2)?.parse().map_err(|_| ScanError::Unparsable)?,
+        session: field(3)?.parse().map_err(|_| ScanError::Unparsable)?,
+        birth: field(19)?.parse().map_err(|_| ScanError::Unparsable)?,
         live: !matches!(field(0)?, "Z" | "X" | "x"),
     })
 }
@@ -181,7 +187,7 @@ fn read_process(pid: i32) -> Result<Option<Process>, ScanError> {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => parse_stat(pid, &stat).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(ScanError::Unparsable),
+        Err(_) => Err(ScanError::Denied),
     }
 }
 
@@ -323,8 +329,8 @@ fn scan(session: i32) -> Result<Vec<Process>, ScanError> {
     let mut capacity = count as usize + 64;
     for _ in 0..4 {
         let mut pids = vec![0_i32; capacity];
-        let bytes =
-            i32::try_from(capacity * std::mem::size_of::<i32>()).map_err(|_| ScanError::Denied)?;
+        let bytes = i32::try_from(capacity * std::mem::size_of::<i32>())
+            .map_err(|_| ScanError::Unparsable)?;
         // SAFETY: the output buffer holds exactly the supplied byte capacity.
         let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
         if count <= 0 {
