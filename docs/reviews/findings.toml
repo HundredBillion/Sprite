@@ -553,7 +553,10 @@ title = "The Surface and observation clients time out before the window's 'still
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
 fixed_by = "fix/findings-ledger-and-admission"
-test = "a_client_outlives_the_windows_reply_and_after_claim_waits"
+test = [
+  "an_observation_exchange_is_bounded_by_the_client_timeout",
+  "a_surface_exchange_is_bounded_by_the_client_timeout",
+]
 
 [[finding]]
 id = "GAP-C14"

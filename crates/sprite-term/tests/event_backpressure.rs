@@ -6,6 +6,8 @@ use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession
 use std::sync::mpsc;
 use std::time::Duration;
 
+mod support;
+
 /// Standard base64, enough to spell an OSC 52 payload.
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -280,31 +282,73 @@ fn input_is_admitted_while_every_output_permit_is_outstanding() {
     let writes = clipboard_writes(100);
     let sprite_term::Spawned {
         mut session,
-        events: _events,
+        events,
         snapshots: _snapshots,
     } = TerminalSession::spawn(on_cue(&writes, "yes")).unwrap();
     focus_and_release(&mut session);
+    // The flood has begun once the first clipboard write arrives: the worker
+    // has taken the release, and the ninety-nine writes left unread are more
+    // than the mailbox holds, so the worker will stall. The stream is handed
+    // back rather than dropped, because dropping it releases the pressure.
+    let (handed_back, first_write) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut events = events;
+        let flooding = loop {
+            match events.next_blocking() {
+                Ok(TerminalEvent::ClipboardWrite(_)) => break true,
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        };
+        handed_back.send((flooding, events)).ok();
+    });
+    let (flooding, _events) = first_write.recv_timeout(support::watchdog()).unwrap();
+    assert!(flooding, "the session ended before the flood began");
     // Pressure: the events are never taken, so the worker stalls in publish
     // and the pump fills every permit behind it. `yes` never exits, so no
     // drain deadline starts and nothing releases the stall before shutdown.
-    std::thread::sleep(Duration::from_millis(300));
-    for n in 0..sprite_term::CONTROL_CAPACITY {
+    //
+    // Keystrokes are offered until one is refused. One refusal is not proof
+    // of a stall: this thread fills the lane faster than a running worker
+    // drains it. So a refusal counts only when another offer is still refused
+    // after `STALL_PROOF`; until then the offers go on, within the watchdog.
+    const STALL_PROOF: Duration = Duration::from_millis(100);
+    let offer = |session: &mut TerminalSession| {
+        session
+            .try_admit(TerminalCommand::Input(b"x".to_vec()))
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + support::watchdog();
+    let mut accepted = 0;
+    loop {
+        loop {
+            match offer(&mut session) {
+                sprite_term::Admitted::Accepted => accepted += 1,
+                sprite_term::Admitted::Saturated(_) => break,
+                sprite_term::Admitted::Closed(_) => panic!("the session ended under the flood"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no keystroke was ever refused: the worker is not stalled"
+            );
+        }
+        std::thread::sleep(STALL_PROOF);
+        match offer(&mut session) {
+            sprite_term::Admitted::Saturated(_) => break,
+            sprite_term::Admitted::Accepted => accepted += 1,
+            sprite_term::Admitted::Closed(_) => panic!("the session ended under the flood"),
+        }
         assert!(
-            session
-                .try_admit(TerminalCommand::Input(b"x".to_vec()))
-                .unwrap()
-                .is_accepted(),
-            "keystroke {n} refused under an output flood"
+            std::time::Instant::now() < deadline,
+            "the worker never stalled behind the flood"
         );
     }
-    // The evidence that the stall held throughout: a worker that took even
-    // one of those keystrokes would have left room for another.
+    // The lane is full and stays full, so the worker is stalled; every
+    // keystroke offered on the way was admitted, and a whole lane's worth of
+    // them was, even though the inbox is saturated with output.
     assert!(
-        matches!(
-            session.try_admit(TerminalCommand::Input(b"x".to_vec())),
-            Ok(sprite_term::Admitted::Saturated(_))
-        ),
-        "the worker took a keystroke, so it was not stalled behind the flood"
+        accepted >= sprite_term::CONTROL_CAPACITY,
+        "only {accepted} keystrokes were admitted under an output flood"
     );
     session.begin_shutdown().unwrap().unwrap().wait().unwrap();
 }

@@ -45,6 +45,15 @@ class FindingsLedgerTests(unittest.TestCase):
         absent = RESOLVED.replace('test = "guards_it"\n', "")
         self.assertIn("without a test", "\n".join(check_findings(fixture(absent))))
 
+    def test_a_resolved_finding_may_cite_a_list_of_tests(self):
+        both = RESOLVED.replace('test = "guards_it"', 'test = ["guards_it", "also_guards"]')
+        rust = "#[test]\nfn guards_it() {}\n#[test]\nfn also_guards() {}"
+        self.assertEqual(check_findings(fixture(both, rust=rust)), [])
+        one_missing = RESOLVED.replace('test = "guards_it"', 'test = ["guards_it", "nope"]')
+        complaints = check_findings(fixture(one_missing))
+        self.assertEqual(len(complaints), 1, complaints)
+        self.assertIn("'nope'", complaints[0])
+
     def test_a_resolved_finding_cannot_cite_a_plain_fn(self):
         complaints = check_findings(fixture(RESOLVED, rust="fn guards_it() {}"))
         self.assertEqual(len(complaints), 1, complaints)

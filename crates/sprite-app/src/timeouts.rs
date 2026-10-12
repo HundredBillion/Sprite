@@ -50,6 +50,27 @@ pub(crate) fn bound_client(stream: &std::os::unix::net::UnixStream) -> std::io::
     stream.set_write_timeout(Some(CLIENT_TIMEOUT))
 }
 
+/// The read and write timeouts a client's `open` gives a stream it connects
+/// to a fresh listening socket, which is removed before this returns.
+#[cfg(test)]
+pub(crate) fn exchange_timeouts(
+    open: impl FnOnce(&std::path::Path) -> std::io::Result<std::os::unix::net::UnixStream>,
+) -> std::io::Result<(Option<Duration>, Option<Duration>)> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let directory =
+        std::env::temp_dir().join(format!("sprite-exchange-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&directory)?;
+    let socket = directory.join("window.sock");
+    let timeouts = std::os::unix::net::UnixListener::bind(&socket).and_then(|_listener| {
+        let stream = open(&socket)?;
+        Ok((stream.read_timeout()?, stream.write_timeout()?))
+    });
+    std::fs::remove_dir_all(&directory)?;
+    timeouts
+}
+
 const fn longer(a: Duration, b: Duration) -> bool {
     a.as_millis() > b.as_millis()
 }

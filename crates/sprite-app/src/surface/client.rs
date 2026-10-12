@@ -84,6 +84,15 @@ fn connect(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exit> {
     })
 }
 
+/// Connects for one exchange, bounded by the client timeout. A Surface's own
+/// connection goes through `connect` instead and has no timeout: it lives as
+/// long as the Surface.
+fn open_exchange(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exit> {
+    let stream = connect(socket, errors)?;
+    bound_client(&stream).ok();
+    Ok(stream)
+}
+
 /// Reads the window's first line, which is always its verdict.
 fn first_line(reader: &mut BufReader<UnixStream>, errors: &mut dyn Write) -> Result<Value, Exit> {
     let mut line = String::new();
@@ -312,11 +321,10 @@ fn one_exchange(
     out: &mut dyn Write,
     errors: &mut dyn Write,
 ) -> Exit {
-    let stream = match connect(&credentials.socket, errors) {
+    let stream = match open_exchange(&credentials.socket, errors) {
         Ok(stream) => stream,
         Err(exit) => return exit,
     };
-    bound_client(&stream).ok();
     let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
         writeln!(errors, "sprite: could not read from the surface channel").ok();
         return Exit::Unreachable;
@@ -342,4 +350,21 @@ fn one_exchange(
     }
     writeln!(out, "{verdict}").ok();
     Exit::Ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_exchange;
+
+    #[test]
+    fn a_surface_exchange_is_bounded_by_the_client_timeout() -> std::io::Result<()> {
+        let timeouts = crate::timeouts::exchange_timeouts(|socket| {
+            let socket = socket.to_str().ok_or(std::io::ErrorKind::InvalidInput)?;
+            open_exchange(socket, &mut std::io::sink())
+                .map_err(|exit| std::io::Error::other(format!("{exit:?}")))
+        })?;
+        let bound = Some(crate::timeouts::CLIENT_TIMEOUT);
+        assert_eq!(timeouts, (bound, bound));
+        Ok(())
+    }
 }

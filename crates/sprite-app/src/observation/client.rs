@@ -293,10 +293,17 @@ fn request_line(args: &SnapshotArgs, key: &str, pane: Option<&str>) -> Result<St
     Ok(format!("{key} {}", request::render(&query)))
 }
 
-/// One request, one answer, with a bound on every step.
-fn exchange(socket: &str, request: &str) -> std::io::Result<String> {
+/// Connects for one exchange. The only way this command reaches the window,
+/// so every exchange carries the client timeout.
+pub(crate) fn open_exchange(socket: &std::path::Path) -> std::io::Result<UnixStream> {
     let stream = UnixStream::connect(socket)?;
     bound_client(&stream)?;
+    Ok(stream)
+}
+
+/// One request, one answer, with a bound on every step.
+fn exchange(socket: &str, request: &str) -> std::io::Result<String> {
+    let stream = open_exchange(std::path::Path::new(socket))?;
 
     {
         let mut writer = &stream;
@@ -317,6 +324,14 @@ mod tests {
 
     fn line(args: &SnapshotArgs, pane: Option<&str>) -> String {
         request_line(args, "the-key", pane).expect("a request")
+    }
+
+    #[test]
+    fn an_observation_exchange_is_bounded_by_the_client_timeout() -> std::io::Result<()> {
+        let timeouts = crate::timeouts::exchange_timeouts(open_exchange)?;
+        let bound = Some(crate::timeouts::CLIENT_TIMEOUT);
+        assert_eq!(timeouts, (bound, bound));
+        Ok(())
     }
 
     #[test]
