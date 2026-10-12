@@ -4,6 +4,10 @@
 
 use std::time::Duration;
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one blocking pause tests may use"
+)]
 pub(crate) fn pause(duration: Duration) {
     std::thread::sleep(duration);
 }

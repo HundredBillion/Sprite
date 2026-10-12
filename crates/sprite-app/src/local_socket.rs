@@ -426,6 +426,10 @@ fn rests_after(error: &io::Error) -> bool {
 /// Rests for [`ACCEPT_REST_MS`], waking early if the socket is closed.
 ///
 /// Returns whether the socket is being closed.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a failed poll must not turn this rest into a spin; this is the listener thread"
+)]
 fn rest(cancelled: &UnixStream, running: &AtomicBool) -> bool {
     let mut fds = [PollFd::new(cancelled.as_fd(), PollFlags::POLLIN)];
     if poll(&mut fds, PollTimeout::from(ACCEPT_REST_MS)).is_err() {
@@ -631,6 +635,7 @@ mod tests {
         }
     }
 
+    #[expect(clippy::disallowed_methods, reason = "a test's own pacing")]
     fn watchdog(test: &str, run: impl FnOnce(&Path)) {
         const CHILD: &str = "SPRITE_SOCKET_HOUSEKEEPING_CHILD";
         if let Some(directory) = std::env::var_os(CHILD) {
