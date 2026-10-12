@@ -282,7 +282,8 @@ fn emit(events: &Arc<crate::event_mailbox::Mailbox>, event: TerminalEvent) -> Fl
     }
 }
 
-// The worker's whole wiring arrives here once, from `spawn`.
+// The arguments mirror what `spawn` creates; bundling the channel ends would
+// hide which end each caller, tests included, holds.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     config: SessionConfig,
@@ -362,16 +363,19 @@ pub(crate) fn run(
         && session.capture().is_continue()
     {
         while !session.runtime.shutdown.load(Ordering::SeqCst) {
+            // The drain deadline comes before the control lane, so a lane
+            // that never empties cannot hold the worker past it.
+            let remaining = session.runtime.events.drain_remaining();
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                break;
+            }
             // Input first: a command never waits behind output.
             let message = match session.runtime.control.try_recv() {
                 Ok(message) => Some(message),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
-                    match session.runtime.events.drain_remaining() {
-                        Some(remaining) if remaining.is_zero() => break,
-                        Some(remaining) => session.runtime.inbox.recv_timeout(remaining).ok(),
-                        None => session.runtime.inbox.recv().ok(),
-                    }
-                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => match remaining {
+                    Some(remaining) => session.runtime.inbox.recv_timeout(remaining).ok(),
+                    None => session.runtime.inbox.recv().ok(),
+                },
             };
             let Some(message) = message else { break };
             if session.handle(message).is_break() {

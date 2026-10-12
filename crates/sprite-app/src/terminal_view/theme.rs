@@ -544,8 +544,8 @@ mod fallback_admission_tests {
                                 }
                             }
                         }
-                        Ok(sprite_term::Admitted::Closed(_)) | Err(_) => {
-                            panic!("unexpected refusal")
+                        outcome @ (Ok(sprite_term::Admitted::Closed(_)) | Err(_)) => {
+                            panic!("unexpected refusal: {outcome:?}")
                         }
                     }
                     assert!(
