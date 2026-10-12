@@ -16,7 +16,6 @@ use std::sync::{
 
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde_json::{Value, json};
@@ -29,7 +28,7 @@ use crate::surface::wire::versioned;
 
 /// For the one-exchange commands. A Surface's own connection has no timeout:
 /// it lives as long as the Surface.
-const TIMEOUT: Duration = Duration::from_secs(15);
+use crate::timeouts::CLIENT_TIMEOUT;
 
 /// One line to the window, flushed, with the truth about whether it went.
 fn send_line(stream: &UnixStream, line: &str) -> bool {
@@ -312,8 +311,8 @@ fn one_exchange(
         Ok(stream) => stream,
         Err(exit) => return exit,
     };
-    let _ = stream.set_read_timeout(Some(TIMEOUT));
-    let _ = stream.set_write_timeout(Some(TIMEOUT));
+    let _ = stream.set_read_timeout(Some(CLIENT_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CLIENT_TIMEOUT));
     let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
         let _ = writeln!(errors, "sprite: could not read from the surface channel");
         return Exit::Unreachable;

@@ -10,6 +10,7 @@
 //! newline-delimited JSON. The connection closing — or the program dying —
 //! removes the Surface, so nothing is ever left on screen without an owner.
 
+use crate::timeouts::{HANDSHAKE_TIMEOUT, REPLY_TIMEOUT, WRITE_TIMEOUT};
 use crate::workspace::{Patience, Relayed};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -18,6 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+#[cfg(test)]
 use std::time::Duration;
 
 use serde_json::Value;
@@ -39,20 +41,6 @@ pub const KEY_VARIABLE: &str = "SPRITE_SURFACE_KEY";
 
 /// Surfaces are long-lived, so this caps how many a window hosts at once.
 const MAX_CONNECTIONS: usize = 64;
-/// A client that will not accept an event for this long is treated as gone.
-/// Short under test so the dead-write test finishes in well under a second.
-#[cfg(not(test))]
-const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(test)]
-const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
-/// A client that connects and sends no first line for this long has its
-/// thread taken back; the connection is refused as any bad handshake is.
-#[cfg(not(test))]
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
-/// How long a connection waits for the window to answer a request.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// The same wait, plus the bounded extra wait for a request the window has
 /// already claimed.
 const REPLY_PATIENCE: Patience = Patience::new(REPLY_TIMEOUT);

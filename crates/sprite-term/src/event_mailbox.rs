@@ -133,7 +133,7 @@ impl Mailbox {
         crate::locked::locked(&self.state)
             .drain_deadline
             .map(|deadline| {
-                (deadline + Duration::from_secs(6) - NATURAL_DRAIN)
+                (deadline + crate::worker::closing::GIVE_UP_AFTER - NATURAL_DRAIN)
                     .saturating_duration_since(Instant::now())
             })
     }

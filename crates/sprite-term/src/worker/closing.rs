@@ -11,7 +11,12 @@ const KILL_AFTER: Duration = Duration::from_secs(3);
 
 /// Cleanup stops waiting here even if a group somehow survives KILL, so a
 /// worker can never hang forever.
-const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
+pub(crate) const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
+
+// Both measured from the moment shutdown was requested: TERM is owed first,
+// KILL after it, and cleanup gives up only after KILL had its chance.
+const _: () = assert!(TERM_AFTER.as_millis() < KILL_AFTER.as_millis());
+const _: () = assert!(KILL_AFTER.as_millis() < GIVE_UP_AFTER.as_millis());
 
 /// Short enough that escalation deadlines are re-checked promptly even under
 /// continuous output.
@@ -299,6 +304,11 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escalation_fits_inside_the_give_up_budget() {
+        assert!(TERM_AFTER < KILL_AFTER && KILL_AFTER < GIVE_UP_AFTER);
+    }
 
     fn settled_runtime() -> Runtime {
         let pair = portable_pty::native_pty_system()

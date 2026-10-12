@@ -11,7 +11,6 @@
 
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
 
 use sprite_term::HistoryLines;
 
@@ -27,7 +26,7 @@ pub const PANE_VARIABLE: &str = "SPRITE_PANE";
 
 /// Generous next to the window's own 500 ms deadline, because a response may
 /// span megabytes. Each blocking socket operation gets this inactivity budget.
-const TIMEOUT: Duration = Duration::from_secs(15);
+use crate::timeouts::CLIENT_TIMEOUT;
 
 /// What the command should exit with.
 ///
@@ -291,8 +290,8 @@ fn request_line(args: &SnapshotArgs, key: &str, pane: Option<&str>) -> Result<St
 /// One request, one answer, with a bound on every step.
 fn exchange(socket: &str, request: &str) -> std::io::Result<String> {
     let stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(TIMEOUT))?;
-    stream.set_write_timeout(Some(TIMEOUT))?;
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CLIENT_TIMEOUT))?;
 
     {
         let mut writer = &stream;

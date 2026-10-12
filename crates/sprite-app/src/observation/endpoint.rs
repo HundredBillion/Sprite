@@ -25,10 +25,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use crate::pane_tree::PaneId;
 use crate::tabs::TabId;
+use crate::timeouts::SILENT_CLIENT_TIMEOUT;
 
 /// The one answer to every request that is not allowed to proceed.
 ///
@@ -44,8 +44,6 @@ const MAX_REQUEST_BYTES: u64 = 8 * 1024;
 ///
 /// A local client connects and writes immediately, so this only ever expires
 /// for something that is not making a request.
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// How many requests may be in flight at once.
 ///
 /// Each connection is served on its own thread so that one silent client
@@ -112,8 +110,8 @@ impl Endpoint {
             suffix: ".sock",
             max_connections: MAX_CONNECTIONS,
             max_first_line: MAX_REQUEST_BYTES as usize,
-            handshake_timeout: CLIENT_TIMEOUT,
-            write_timeout: CLIENT_TIMEOUT,
+            handshake_timeout: SILENT_CLIENT_TIMEOUT,
+            write_timeout: SILENT_CLIENT_TIMEOUT,
         };
         let transport = LocalSocket::open_in(
             directory,
@@ -202,6 +200,7 @@ mod tests {
     use super::*;
     use std::io::BufWriter;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     fn assert_denied_without_dispatch(body: &str) {
         let (_scratch, endpoint, calls) = endpoint_with_spy();

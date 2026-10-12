@@ -29,6 +29,7 @@ mod test_blocking_wait;
 mod test_child;
 #[cfg(test)]
 mod test_event_pressure;
+mod timeouts;
 mod tokens;
 mod workspace;
 

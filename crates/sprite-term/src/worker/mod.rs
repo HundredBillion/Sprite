@@ -26,7 +26,7 @@ use crate::{
     ValidTerminalSize,
 };
 
-mod closing;
+pub(crate) mod closing;
 pub(crate) use closing::finish_shutdown;
 mod start;
 use crate::hyperlink::resolve_hyperlink;

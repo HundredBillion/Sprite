@@ -33,7 +33,7 @@ use crate::tabs::TabId;
 ///
 /// Per-pane deadlines would let a request grow without limit as panes are
 /// added, so a caller could stall the endpoint simply by opening more of them.
-pub const DEADLINE: Duration = Duration::from_millis(500);
+pub const DEADLINE: Duration = crate::timeouts::BROKER_DEADLINE;
 
 /// Where a pane lives in this window.
 #[derive(Clone, Copy, Debug, PartialEq)]

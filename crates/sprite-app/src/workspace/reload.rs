@@ -1,4 +1,5 @@
 use super::*;
+use crate::timeouts::AFTER_CLAIM;
 
 impl Workspace {
     /// Turns pane observation on or off while the window is running.
@@ -132,13 +133,6 @@ pub(crate) fn reload_channel() -> (
 ) {
     async_channel::bounded(crate::observation::endpoint::MAX_CONNECTIONS)
 }
-
-/// How much longer an asker waits once the window has claimed its request.
-///
-/// Bounded, because a wedged GPUI thread must not pin an endpoint thread and
-/// its connection slot forever. Generous, because by then the work is under
-/// way and the only honest early answer is that it still is.
-pub(crate) const AFTER_CLAIM: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Where one relayed request stands, shared by the thread that asked and the
 /// window that answers.
