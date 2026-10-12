@@ -1,5 +1,9 @@
 //! Ordered input into the PTY, state-aware key encoding, and terminal-generated
 //! replies travelling back out.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

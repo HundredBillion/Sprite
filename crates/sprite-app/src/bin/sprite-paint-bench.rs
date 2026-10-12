@@ -1,4 +1,9 @@
 //! Allocation and time measurements of live terminal paint preparation/decisions.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a benchmark is a developer tool; a failed setup stops it with the cause"
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -26,13 +31,15 @@ struct CountingAllocator;
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn count(bytes: usize) {
-    let _ = ACTIVE_SAMPLE.try_with(|active| {
-        if let Some(mut sample) = active.get() {
-            sample.allocations += 1;
-            sample.bytes += bytes as u64;
-            active.set(Some(sample));
-        }
-    });
+    ACTIVE_SAMPLE
+        .try_with(|active| {
+            if let Some(mut sample) = active.get() {
+                sample.allocations += 1;
+                sample.bytes += bytes as u64;
+                active.set(Some(sample));
+            }
+        })
+        .ok();
 }
 
 // Safety: every pointer and layout is forwarded unchanged to System.

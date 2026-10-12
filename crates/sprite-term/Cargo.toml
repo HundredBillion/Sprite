@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 async-channel = { workspace = true }
 libghostty-vt = { workspace = true }

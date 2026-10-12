@@ -353,7 +353,11 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
                     id: Some(id),
                 })
             }
-            _ => Ok(ListGuide {
+            Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::Array(_) => Ok(ListGuide {
                 offset: finite(Some(guide), "guide", 0.0, MAX_OFFSET)?,
                 id: None,
             }),
@@ -456,7 +460,11 @@ fn nullable_row(
 ) -> Result<Option<String>, Refusal> {
     match value {
         Value::Null => Ok(None),
-        _ => Ok(Some(row(value, ids, key)?)),
+        Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_)
+        | Value::Object(_) => Ok(Some(row(value, ids, key)?)),
     }
 }
 fn row(value: &Value, ids: &HashMap<String, usize>, key: &str) -> Result<String, Refusal> {
@@ -486,7 +494,11 @@ fn parse_anchor(
 fn nullable_string(value: &Value, key: &str) -> Result<Option<String>, Refusal> {
     match value {
         Value::Null => Ok(None),
-        _ => Ok(Some(string_value(value, key)?)),
+        Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_)
+        | Value::Object(_) => Ok(Some(string_value(value, key)?)),
     }
 }
 fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {

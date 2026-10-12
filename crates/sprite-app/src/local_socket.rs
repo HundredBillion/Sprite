@@ -182,7 +182,7 @@ pub(crate) struct ConnectionSlot {
 
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
-        self.connections.lock().unwrap().remove(&self.id);
+        crate::locked::locked(&self.connections).remove(&self.id);
     }
 }
 
@@ -217,7 +217,7 @@ impl LocalSocket {
         let (cancellation, cancelled) = UnixStream::pair()?;
         let listener = bind_private(&socket)?;
         if let Err(error) = listener.set_nonblocking(true) {
-            let _ = fs::remove_file(&socket);
+            fs::remove_file(&socket).ok();
             return Err(error);
         }
         let running = Arc::new(AtomicBool::new(true));
@@ -289,7 +289,7 @@ impl LocalSocket {
                         let id = next_id;
                         next_id += 1;
                         let deadline = Instant::now() + policy.handshake_timeout;
-                        let mut live = connections.lock().unwrap();
+                        let mut live = crate::locked::locked(&connections);
                         if live.len() >= policy.max_connections {
                             continue;
                         }
@@ -306,7 +306,7 @@ impl LocalSocket {
                         let key = Arc::clone(&key);
                         let handler = Arc::clone(&handler);
                         // The slot also drops if spawning fails or an adapter panics.
-                        let _ = std::thread::Builder::new()
+                        std::thread::Builder::new()
                             .name(format!("{}-connection", policy.name))
                             .spawn(move || {
                                 let _slot = slot;
@@ -330,14 +330,15 @@ impl LocalSocket {
                                     }),
                                     Err(_) => refused(&mut stream),
                                 }
-                            });
+                            })
+                            .ok();
                     }
                 }
             });
         let thread = match thread {
             Ok(thread) => thread,
             Err(error) => {
-                let _ = fs::remove_file(&socket);
+                fs::remove_file(&socket).ok();
                 return Err(error);
             }
         };
@@ -376,21 +377,23 @@ impl LocalSocket {
         }
         self.running.store(false, Ordering::SeqCst);
         // Cancellation stays reachable even after the public socket pathname disappears.
-        let _ = self.cancellation.shutdown(Shutdown::Both);
+        self.cancellation.shutdown(Shutdown::Both).ok();
         if let Some(thread) = self.listener.take() {
-            let _ = thread.join();
+            thread.join().ok();
         }
-        for (id, stream) in self.connections.lock().unwrap().iter() {
+        for (id, stream) in crate::locked::locked(&self.connections).iter() {
             let finishing_reply = reply.is_some_and(|reply| {
                 Arc::ptr_eq(&reply.connections, &self.connections) && reply.id == *id
             });
-            let _ = stream.shutdown(if finishing_reply {
-                Shutdown::Read
-            } else {
-                Shutdown::Both
-            });
+            stream
+                .shutdown(if finishing_reply {
+                    Shutdown::Read
+                } else {
+                    Shutdown::Both
+                })
+                .ok();
         }
-        let _ = fs::remove_file(&self.socket);
+        fs::remove_file(&self.socket).ok();
         // Other windows may be between directory creation and binding their socket.
         // Leaving the shared directory avoids racing their startup.
     }
@@ -423,6 +426,10 @@ fn rests_after(error: &io::Error) -> bool {
 /// Rests for [`ACCEPT_REST_MS`], waking early if the socket is closed.
 ///
 /// Returns whether the socket is being closed.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a failed poll must not turn this rest into a spin; this is the listener thread"
+)]
 fn rest(cancelled: &UnixStream, running: &AtomicBool) -> bool {
     let mut fds = [PollFd::new(cancelled.as_fd(), PollFlags::POLLIN)];
     if poll(&mut fds, PollTimeout::from(ACCEPT_REST_MS)).is_err() {
@@ -443,7 +450,7 @@ pub(crate) fn bind_private(socket: &Path) -> io::Result<UnixListener> {
     let listener = UnixListener::bind(socket)?;
     if let Err(error) = fs::set_permissions(socket, fs::Permissions::from_mode(0o600)) {
         drop(listener);
-        let _ = fs::remove_file(socket);
+        fs::remove_file(socket).ok();
         return Err(error);
     }
     Ok(listener)
@@ -497,7 +504,7 @@ fn authenticate(
 }
 
 /// Removes abandoned socket files without entering a live listener's accept queue.
-#[allow(dead_code)] // Retained for endpoint test fixtures; production sweeps incrementally.
+#[cfg(test)]
 pub(crate) fn sweep_dead_sockets(directory: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
@@ -533,7 +540,7 @@ fn sweep_socket_entry(entry: fs::DirEntry) {
     if let Err(error) = probe.connect(&path)
         && error.kind() == io::ErrorKind::ConnectionRefused
     {
-        let _ = fs::remove_file(&path);
+        fs::remove_file(&path).ok();
     }
 }
 
@@ -608,13 +615,13 @@ mod tests {
     }
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            fs::remove_dir_all(&self.0).ok();
         }
     }
 
     fn rejected(stream: &mut UnixStream) {
-        let _ = writeln!(stream, "denied");
-        let _ = stream.shutdown(Shutdown::Write);
+        writeln!(stream, "denied").ok();
+        stream.shutdown(Shutdown::Write).ok();
     }
 
     fn wait_for_count(socket: &LocalSocket, count: usize) {
@@ -654,7 +661,7 @@ mod tests {
                 child.kill().unwrap();
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            crate::test_blocking_wait::pause(Duration::from_millis(10));
         }
         let output = child.wait_with_output().unwrap();
         println!(
@@ -932,7 +939,7 @@ mod tests {
             move |mut connection| {
                 entered.send(()).unwrap();
                 let mut done = String::new();
-                let _ = connection.reader.read_line(&mut done);
+                connection.reader.read_line(&mut done).ok();
             },
         )
         .unwrap();
@@ -1043,7 +1050,7 @@ mod tests {
                     .unwrap()
                     .recv_timeout(Duration::from_secs(2))
                     .unwrap();
-                let _ = writeln!(connection.stream, "finished");
+                writeln!(connection.stream, "finished").ok();
             },
         )
         .unwrap();
@@ -1089,7 +1096,7 @@ mod tests {
                         .unwrap();
                     writeln!(connection.stream, "finished").unwrap();
                 } else {
-                    let _ = connection.reader.read_line(&mut String::new());
+                    connection.reader.read_line(&mut String::new()).ok();
                 }
             },
         )
@@ -1213,7 +1220,7 @@ mod tests {
             move |mut connection| {
                 entered.send(()).unwrap();
                 let mut line = String::new();
-                let _ = connection.reader.read_line(&mut line);
+                connection.reader.read_line(&mut line).ok();
             },
         )
         .unwrap();
@@ -1337,7 +1344,7 @@ mod tests {
             POLICY,
             rejected,
             move |connection| {
-                let _ = bodies.send(connection.body);
+                bodies.send(connection.body).ok();
             },
         )
         .unwrap();
@@ -1351,7 +1358,7 @@ mod tests {
         // A connection arrives while no descriptor is free to accept it with.
         let held = exhaust_descriptors();
         let mut first = connect_with_retries(&path);
-        let _ = writeln!(first, "{key} first");
+        writeln!(first, "{key} first").ok();
 
         // The listener waits that out without spinning.
         let before = cpu_time();
@@ -1369,7 +1376,7 @@ mod tests {
         // arrives as well and either proves the listener survived.
         drop(held);
         let mut retry = connect_with_retries(&path);
-        let _ = writeln!(retry, "{key} retry");
+        writeln!(retry, "{key} retry").ok();
         let body = received
             .recv_timeout(Duration::from_secs(2))
             .expect("the listener must survive running out of descriptors");
@@ -1381,7 +1388,7 @@ mod tests {
         // were freed or taken, and discards a connection a failed accept
         // touched, so neither the connect nor the write is required to land.
         let mut second = connect_with_retries(&path);
-        let _ = writeln!(second, "{key} second");
+        writeln!(second, "{key} second").ok();
         crate::test_blocking_wait::pause(Duration::from_millis(250));
         let (done, completed) = mpsc::channel();
         std::thread::spawn(move || {

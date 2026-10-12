@@ -33,7 +33,7 @@ use crate::tabs::TabId;
 ///
 /// Per-pane deadlines would let a request grow without limit as panes are
 /// added, so a caller could stall the endpoint simply by opening more of them.
-pub const DEADLINE: Duration = Duration::from_millis(500);
+pub const DEADLINE: Duration = crate::timeouts::BROKER_DEADLINE;
 
 /// Where a pane lives in this window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -454,17 +454,17 @@ mod tests {
                     self.held.lock().expect("lock").push(sender);
                 }
                 Some(Behaviour::Fails(reason)) => {
-                    let _ = sender.send(Err((*reason).to_owned()));
+                    sender.send(Err((*reason).to_owned())).ok();
                 }
                 Some(Behaviour::Closes) => drop(sender),
                 Some(Behaviour::Unaskable) => {
                     return Err("the pane closed as the request arrived".to_owned());
                 }
                 Some(Behaviour::Answers(text)) => {
-                    let _ = sender.send(Ok(snapshot(text)));
+                    sender.send(Ok(snapshot(text))).ok();
                 }
                 None => {
-                    let _ = sender.send(Ok(snapshot("default")));
+                    sender.send(Ok(snapshot("default"))).ok();
                 }
             }
             let withdrawn = Arc::clone(&self.withdrawn);

@@ -1,0 +1,14 @@
+# Clippy reads the nearest clippy.toml to the crate being checked and does
+# not merge it with the workspace root's, so the test exemptions are
+# repeated here.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# UI code stays event driven: the view repaints when its worker says something
+# changed, never on a clock. The two sanctioned sleeps carry an expect
+# attribute.
+disallowed-methods = [
+  { path = "std::thread::sleep", reason = "the GPUI thread never sleeps; the socket listener's failed-poll rest and the test pause helper are the sanctioned sites" },
+  { path = "gpui::Timer::after", reason = "no animation timers; the view repaints on worker events" },
+  { path = "gpui::Window::request_animation_frame", reason = "no animation frames; the view repaints on worker events" },
+]

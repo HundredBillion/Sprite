@@ -131,19 +131,20 @@ impl TerminalView {
         self.origin.x += shift;
 
         if self.size == Some(size) {
-            self.pending_resize = None;
+            self.pending.resize = None;
             return;
         }
         self.admit_resize(size);
     }
 
     pub(super) fn admit_resize(&mut self, size: ValidTerminalSize) {
-        self.pending_resize = Some(size);
-        if self.submit(TerminalCommand::Resize(size)) {
-            self.size = Some(size);
-            self.pending_resize = None;
-        } else if self.admission_closed {
-            self.pending_resize = None;
+        match self.admit(TerminalCommand::Resize(size)) {
+            Ok(sprite_term::Admitted::Accepted) => {
+                self.size = Some(size);
+                self.pending.resize = None;
+            }
+            Ok(sprite_term::Admitted::Saturated(_)) => self.pending.resize = Some(size),
+            Ok(sprite_term::Admitted::Closed(_)) | Err(_) => self.pending.resize = None,
         }
     }
 

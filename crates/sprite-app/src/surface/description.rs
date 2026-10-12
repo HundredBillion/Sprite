@@ -239,10 +239,18 @@ impl Element {
         self.kind().body_kind()
     }
 
+    /// Only tests read a list's configuration back out of its element; the
+    /// pane takes it by destructuring the element it is replacing.
+    #[cfg(test)]
     pub fn list(&self) -> Option<&ListConfig> {
         match self {
             Self::VirtualList { config } => Some(config),
-            _ => None,
+            Self::Box { .. }
+            | Self::List { .. }
+            | Self::Text { .. }
+            | Self::Button { .. }
+            | Self::Image { .. }
+            | Self::Grid { .. } => None,
         }
     }
 }
@@ -343,7 +351,13 @@ fn element(
                 "an image is not clickable; put it in a box with on_click".to_owned(),
             ));
         }
-        _ => {}
+        Kind::Box
+        | Kind::Text
+        | Kind::List
+        | Kind::Image
+        | Kind::Button
+        | Kind::Grid
+        | Kind::VirtualList => {}
     }
 
     let grid = if kind == Kind::Grid {
@@ -441,28 +455,54 @@ fn element(
             on_click,
             children,
         },
-        Kind::Text => Element::Text {
-            style,
-            text: text.expect("validated text"),
-            on_click,
-        },
-        Kind::Button => Element::Button {
-            style,
-            text: text.expect("validated text"),
-            on_click,
-        },
-        Kind::Image => Element::Image {
-            style,
-            svg: svg.expect("validated image"),
-        },
-        Kind::Grid => Element::Grid {
-            size: grid.expect("validated grid"),
-            color: style.color,
-            background: style.background,
-        },
-        Kind::VirtualList => Element::VirtualList {
-            config: Box::new(list.expect("validated list")),
-        },
+        // The checks above already refused each missing field; these arms
+        // raise the same refusal rather than assume it.
+        Kind::Text => {
+            let Some(text) = text else {
+                return Err(Refusal::Malformed("a text needs text".to_owned()));
+            };
+            Element::Text {
+                style,
+                text,
+                on_click,
+            }
+        }
+        Kind::Button => {
+            let Some(text) = text else {
+                return Err(Refusal::Malformed("a button needs text".to_owned()));
+            };
+            Element::Button {
+                style,
+                text,
+                on_click,
+            }
+        }
+        Kind::Image => {
+            let Some(svg) = svg else {
+                return Err(Refusal::Malformed("an image needs svg".to_owned()));
+            };
+            Element::Image { style, svg }
+        }
+        Kind::Grid => {
+            let Some(size) = grid else {
+                return Err(Refusal::Malformed("a grid needs cols and rows".to_owned()));
+            };
+            Element::Grid {
+                size,
+                color: style.color,
+                background: style.background,
+            }
+        }
+        Kind::VirtualList => {
+            let Some(config) = list else {
+                return Err(Refusal::Malformed(
+                    "a virtual_list needs its list configuration".to_owned(),
+                ));
+            };
+            Element::VirtualList {
+                config: Box::new(config),
+            }
+        }
     })
 }
 

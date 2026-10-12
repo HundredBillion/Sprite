@@ -91,7 +91,7 @@ impl ElementImageCache {
             render_svg_with_budget(svg, None, available)
         };
         if let Some(picture) = &picture {
-            self.retained_bytes += picture.as_bytes(0).expect("raster frame").len();
+            self.retained_bytes += raster_bytes(picture);
         }
         self.images.insert(Arc::from(svg), picture.clone());
         picture
@@ -111,7 +111,7 @@ impl ElementImageCache {
             .images
             .values()
             .flatten()
-            .map(|picture| picture.as_bytes(0).expect("raster frame").len())
+            .map(|picture| raster_bytes(picture))
             .sum();
     }
 }
@@ -300,6 +300,15 @@ thread_local! {
     /// How many clickable-element ids this thread has built, counted where
     /// the id's name is formatted, so a test can see what a frame cost.
     static CLICK_IDS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// The event name and id of each clickable element this thread has drawn,
+    /// in drawing order, so a test can see which id each element was handed.
+    static CLICKS_DRAWN: RefCell<Vec<(String, ElementId)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What a decoded picture holds against the image budget.
+pub(crate) fn raster_bytes(picture: &RenderImage) -> usize {
+    picture.as_bytes(0).map_or(0, <[u8]>::len)
 }
 
 pub(crate) const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -583,10 +592,16 @@ fn element(
         Element::Grid { .. } | Element::VirtualList { .. } => return div().into_any_element(),
     };
     // Taken before the children, which come after this element in tree order.
-    let click = on_click.as_ref().map(|name| {
-        let id = walk.clicks.next();
-        (name, id.expect("every clickable element has an id").clone())
-    });
+    // Both walks visit the tree in the same order, so every clickable element
+    // finds its id; were one ever missing, the element would draw without its
+    // click rather than take down the window.
+    let click = on_click
+        .as_ref()
+        .and_then(|name| walk.clicks.next().map(|id| (name, id.clone())));
+    #[cfg(test)]
+    if let Some((name, id)) = &click {
+        CLICKS_DRAWN.with(|drawn| drawn.borrow_mut().push(((*name).clone(), id.clone())));
+    }
     boxed = apply_described_style(boxed, node, registry);
     if let Some(text) = text {
         boxed = boxed.child(SharedString::from(text.to_owned()));
@@ -886,6 +901,48 @@ mod tests {
             let _ = body.render(&registry, &connection, None);
         }
         assert_eq!(built() - start, 4, "an update builds its own ids, once");
+    }
+
+    #[test]
+    fn click_ids_and_element_walk_the_tree_in_the_same_order() {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let document = description::parse(
+            &json!({"version":1,"root":{"kind":"box","on_click":"outer","children":[
+                {"kind":"button","text":"a","on_click":"a"},
+                {"kind":"list","on_click":"inner","children":[
+                    {"kind":"text","text":"plain"},
+                    {"kind":"box","children":[{"kind":"text","text":"b","on_click":"b"}]},
+                ]},
+                {"kind":"button","text":"c","on_click":"c"},
+            ]}}),
+            &registry,
+        )
+        .unwrap()
+        .description;
+        let clicks = click_ids(&document.root, SurfaceId(1));
+        CLICKS_DRAWN.with(|drawn| drawn.borrow_mut().clear());
+        let _ = render(
+            &document,
+            &clicks,
+            SurfaceId(1),
+            &registry,
+            &connection,
+            None,
+            &mut ElementImageCache::default(),
+        );
+        let drawn = CLICKS_DRAWN.with(|drawn| drawn.take());
+        assert_eq!(drawn.len(), clicks.len(), "every clickable drew with an id");
+        for (name, id) in &drawn {
+            assert_eq!(
+                id,
+                &ElementId::NamedInteger(SharedString::from(format!("surface-1-{name}")), 0),
+                "the element sending {name} was handed its own id"
+            );
+        }
+        let names: Vec<&str> = drawn.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["outer", "a", "inner", "b", "c"]);
     }
 
     #[test]

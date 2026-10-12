@@ -96,10 +96,7 @@ impl WindowPanes {
 
     /// Records a pane, so requests can reach it.
     pub fn register(&self, pane: PaneId, tab: TabId, commands: CommandSender) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         entries.insert(
             pane,
             Entry {
@@ -128,10 +125,7 @@ impl WindowPanes {
         #[cfg(test)]
         self.layout_publications
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         for (pane, placement) in placements {
             if let Some(entry) = entries.get_mut(pane) {
                 entry.placement = *placement;
@@ -145,15 +139,13 @@ impl WindowPanes {
     /// pane is known to be gone, so making a caller wait out the deadline for
     /// it would be a lie about what is happening.
     pub fn forget(&self, pane: PaneId) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.remove(&pane) {
             for waiter in entry.waiting.into_values() {
-                let _ = waiter
+                waiter
                     .answer
-                    .send(Err("the pane closed before it answered".to_owned()));
+                    .send(Err("the pane closed before it answered".to_owned()))
+                    .ok();
             }
         }
     }
@@ -164,13 +156,10 @@ impl WindowPanes {
     /// rather than at the deadline. The pane stays listed, because it is still
     /// on screen; asking it again is refused when the request cannot be sent.
     pub fn fail_all(&self, pane: PaneId, reason: String) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.get_mut(&pane) {
             for (_, waiter) in entry.waiting.drain() {
-                let _ = waiter.answer.send(Err(reason.clone()));
+                waiter.answer.send(Err(reason.clone())).ok();
             }
         }
     }
@@ -188,25 +177,18 @@ impl WindowPanes {
         ticket: Ticket,
         answer: Result<Arc<HistorySnapshot>, String>,
     ) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.get_mut(&pane)
             && let Some(waiter) = entry.waiting.remove(&ticket)
         {
-            let _ = waiter.answer.send(answer);
+            waiter.answer.send(answer).ok();
         }
     }
 }
 
 impl PaneSource for WindowPanes {
     fn panes(&self) -> Vec<PaneAddress> {
-        let entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut addresses: Vec<PaneAddress> = entries
+        let mut addresses: Vec<PaneAddress> = crate::locked::locked(&self.entries)
             .iter()
             .map(|(pane, entry)| PaneAddress {
                 tab: entry.tab,
@@ -230,10 +212,7 @@ impl PaneSource for WindowPanes {
     }
 
     fn begin(&self, pane: PaneId, lines: HistoryLines) -> Result<Pending, String> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         let entry = entries
             .get_mut(&pane)
             .ok_or_else(|| "the pane closed before it could be asked".to_owned())?;
@@ -262,6 +241,7 @@ impl PaneSource for WindowPanes {
                 _request: request,
             },
         );
+        drop(entries);
         // A caller that stops waiting takes its ticket back, so the registry
         // holds nothing for a request nobody will read. Weak, so an
         // outstanding request does not keep a closed window's registry alive.
@@ -271,7 +251,7 @@ impl PaneSource for WindowPanes {
             answer,
             withdraw: Withdraw::new(move || {
                 if let Some(entries) = registry.upgrade() {
-                    let mut entries = entries.lock().unwrap_or_else(|error| error.into_inner());
+                    let mut entries = crate::locked::locked(&entries);
                     if let Some(entry) = entries.get_mut(&pane) {
                         entry.waiting.remove(&ticket);
                     }
@@ -341,8 +321,11 @@ mod tests {
 
     /// The tickets a pane is still waiting on, oldest first.
     fn waiting(panes: &WindowPanes, pane: PaneId) -> Vec<Ticket> {
-        let entries = panes.entries.lock().unwrap();
-        let mut tickets: Vec<Ticket> = entries[&pane].waiting.keys().copied().collect();
+        let mut tickets: Vec<Ticket> = panes.entries.lock().unwrap()[&pane]
+            .waiting
+            .keys()
+            .copied()
+            .collect();
         tickets.sort_unstable();
         tickets
     }
@@ -473,7 +456,7 @@ mod tests {
                     .unwrap()
                     .wait()
                     .unwrap();
-                let _ = done.send(tickets);
+                done.send(tickets).ok();
             });
             let tickets = result.recv_timeout(Duration::from_secs(10)).unwrap();
             if tickets.contains(&abandoned) {
@@ -507,8 +490,7 @@ mod tests {
         ))
         .unwrap();
         crate::test_event_pressure::focus_and_release(&spawned.session.commands());
-        crate::test_blocking_wait::pause(Duration::from_millis(300));
-        spawned.snapshots.next_blocking().unwrap();
+        crate::test_event_pressure::saturate_control(&spawned.session.commands());
         let panes = WindowPanes::new();
         panes.register(PaneId(0), TabId(0), spawned.session.commands());
         let (tx, rx) = std::sync::mpsc::channel();
@@ -517,7 +499,7 @@ mod tests {
             let result = registry
                 .begin(PaneId(0), HistoryLines::default())
                 .map(|_| ());
-            let _ = tx.send(result);
+            tx.send(result).ok();
         });
         let result = rx.recv_timeout(Duration::from_secs(1));
         spawned
@@ -531,11 +513,8 @@ mod tests {
             .expect("observation submission must release the UI registry promptly")
             .expect_err("saturated queue refuses observation");
         assert!(refusal.contains("queue is full"));
-        let entries = panes.entries.lock().unwrap();
-        assert!(
-            entries[&PaneId(0)].waiting.is_empty(),
-            "a refused request leaves no waiter"
-        );
+        let nothing_waiting = panes.entries.lock().unwrap()[&PaneId(0)].waiting.is_empty();
+        assert!(nothing_waiting, "a refused request leaves no waiter");
     }
 
     #[test]
@@ -773,7 +752,7 @@ mod tests {
         // destroyed. Nothing here touches the session.
         let directory = std::env::temp_dir().join(format!("sprite-panes-{}", std::process::id()));
         drop(Endpoint::open_in(directory.clone(), |_| String::new()).expect("an endpoint"));
-        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::remove_dir_all(&directory).ok();
 
         // The child is still there, and the session still takes commands.
         assert!(

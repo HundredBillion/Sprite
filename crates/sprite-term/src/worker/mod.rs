@@ -10,7 +10,7 @@ use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -26,7 +26,7 @@ use crate::{
     ValidTerminalSize,
 };
 
-mod closing;
+pub(crate) mod closing;
 pub(crate) use closing::finish_shutdown;
 mod start;
 use crate::hyperlink::resolve_hyperlink;
@@ -90,8 +90,9 @@ fn pump_failure(outcome: PumpOutcome) -> Option<SessionError> {
     }
 }
 
-/// Messages the worker accepts. Application commands and helper-thread reports
-/// share one queue so their order is defined.
+/// Messages the worker accepts. Helper-thread reports and output share the
+/// inbox, so their order is defined; commands and history requests wait on a
+/// separate control lane that the worker reads first.
 pub(crate) enum Message {
     Command(TerminalCommand),
     HistoryRequest {
@@ -108,16 +109,36 @@ pub(crate) enum Message {
     PtyOutput(crate::pty_unix::OutputChunk),
     /// The consumer took a snapshot and is ready for the next one.
     CaptureRequested,
+    /// A knock: something is waiting on the control lane. Carries nothing.
+    Wake,
     PumpStopped(PumpOutcome),
     ChildExited(Result<ExitStatus, String>),
     Shutdown,
+}
+
+impl Message {
+    /// The command a refused control message carried.
+    pub(crate) fn into_command(self) -> TerminalCommand {
+        match self {
+            Self::Command(command) => command,
+            Self::HistoryRequest { .. }
+            | Self::PtyOutput(_)
+            | Self::CaptureRequested
+            | Self::Wake
+            | Self::PumpStopped(_)
+            | Self::ChildExited(_)
+            | Self::Shutdown => unreachable!("only a command is offered through admit"),
+            #[cfg(test)]
+            Self::HistoryGate { .. } => unreachable!("only a command is offered through admit"),
+        }
+    }
 }
 
 /// The live PTY side of a session, owned solely by the worker.
 struct Started {
     master: Box<dyn MasterPty + Send>,
     master_fd: RawFd,
-    /// Recorded at spawn so descendants can still be reached after the child
+    /// Recorded at spawn so the session's Ordinary Session Jobs can still be reached after the child
     /// itself is gone and its own process id means nothing.
     process_group: Option<i32>,
     processes: Option<pty_unix::SessionProcesses>,
@@ -223,6 +244,9 @@ struct Runtime {
     started: Started,
     pump: Option<Pump>,
     inbox: Receiver<Message>,
+    /// Commands and history requests, read before the inbox so input never
+    /// waits behind output.
+    control: Receiver<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
     shutdown: Arc<AtomicBool>,
     /// Detached when the session closes, so its duplicate of the master
@@ -258,10 +282,14 @@ fn emit(events: &Arc<crate::event_mailbox::Mailbox>, event: TerminalEvent) -> Fl
     }
 }
 
+// The arguments mirror what `spawn` creates; bundling the channel ends would
+// hide which end each caller, tests included, holds.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     config: SessionConfig,
     commands: SyncSender<Message>,
     inbox: Receiver<Message>,
+    control: Receiver<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
@@ -280,6 +308,7 @@ pub(crate) fn run(
         started,
         pump: None,
         inbox,
+        control,
         events,
         shutdown,
         foreground,
@@ -334,10 +363,19 @@ pub(crate) fn run(
         && session.capture().is_continue()
     {
         while !session.runtime.shutdown.load(Ordering::SeqCst) {
-            let message = match session.runtime.events.drain_remaining() {
-                Some(remaining) if remaining.is_zero() => break,
-                Some(remaining) => session.runtime.inbox.recv_timeout(remaining).ok(),
-                None => session.runtime.inbox.recv().ok(),
+            // The drain deadline comes before the control lane, so a lane
+            // that never empties cannot hold the worker past it.
+            let remaining = session.runtime.events.drain_remaining();
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                break;
+            }
+            // Input first: a command never waits behind output.
+            let message = match session.runtime.control.try_recv() {
+                Ok(message) => Some(message),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => match remaining {
+                    Some(remaining) => session.runtime.inbox.recv_timeout(remaining).ok(),
+                    None => session.runtime.inbox.recv().ok(),
+                },
             };
             let Some(message) = message else { break };
             if session.handle(message).is_break() {
@@ -367,7 +405,11 @@ impl Session {
                 // taken from the queue is still recorded: each helper reports
                 // once, and closing waits for both reports.
                 if matches!(message, Message::PumpStopped(_) | Message::ChildExited(_)) {
-                    let _ = self.apply(message);
+                    // The loop is stopping already, so whether recording the
+                    // report would have stopped it changes nothing.
+                    match self.apply(message) {
+                        Continue(()) | Stop(()) => {}
+                    }
                 }
                 return Stop(());
             }
@@ -375,7 +417,14 @@ impl Session {
             if batch.is_full() || self.runtime.shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            next = self.runtime.inbox.try_recv().ok();
+            // Control first, then whatever output is already waiting. A
+            // control message counts against the batch like any other.
+            next = self
+                .runtime
+                .control
+                .try_recv()
+                .ok()
+                .or_else(|| self.runtime.inbox.try_recv().ok());
         }
         self.publish_notices()?;
         self.capture()
@@ -421,7 +470,15 @@ impl Session {
                 }
                 Message::Command(TerminalCommand::CaptureHistory { ticket, lines })
             }
-            other => other,
+            other @ (Message::Command(_)
+            | Message::PtyOutput(_)
+            | Message::CaptureRequested
+            | Message::Wake
+            | Message::PumpStopped(_)
+            | Message::ChildExited(_)
+            | Message::Shutdown) => other,
+            #[cfg(test)]
+            other @ Message::HistoryGate { .. } => other,
         };
         let Self {
             owned:
@@ -455,8 +512,8 @@ impl Session {
             }
             #[cfg(test)]
             Message::HistoryGate { reached, resume } => {
-                let _ = reached.send(HISTORY_TRAVERSALS.get());
-                let _ = resume.recv_timeout(std::time::Duration::from_secs(10));
+                reached.send(HISTORY_TRAVERSALS.get()).ok();
+                resume.recv_timeout(std::time::Duration::from_secs(10)).ok();
             }
             Message::PtyOutput(chunk) => {
                 // One chunk, one mutation, one generation. What the parser
@@ -473,7 +530,7 @@ impl Session {
             // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
             // leaves `dirty` set with the loop blocked on `recv`. This gives
             // the gate below a second pass once the app has drained the slot.
-            Message::CaptureRequested => {}
+            Message::CaptureRequested | Message::Wake => {}
             Message::Command(command) => match command {
                 TerminalCommand::Input(bytes) => {
                     // Trusted, already-encoded bytes: one command, one write.
@@ -735,14 +792,14 @@ impl Session {
                     // The colours live in the render state, so a frame has to be
                     // taken for anyone to see them.
                     pending.mutated();
-                    let _ = commands.try_send(Message::CaptureRequested);
+                    commands.try_send(Message::CaptureRequested).ok();
                 }
                 TerminalCommand::SetCursor(cursor) => {
                     if let Err(error) = apply_cursor_defaults(terminal, cursor) {
                         emit(events, TerminalEvent::Error(error))?;
                     }
                     pending.mutated();
-                    let _ = commands.try_send(Message::CaptureRequested);
+                    commands.try_send(Message::CaptureRequested).ok();
                 }
                 TerminalCommand::CaptureGraphics => match projector.capture_graphics(terminal) {
                     Ok(snapshot) => {
@@ -784,7 +841,7 @@ impl Session {
                 }
             },
             Message::ChildExited(status) => {
-                // Recorded, not published: Exited is only sent once descendant
+                // Recorded, not published: Exited is only sent once Ordinary Session Job
                 // cleanup has finished, so its signal is never presented as an
                 // unexpected failure.
                 *exit_status = Some(status);
@@ -892,7 +949,7 @@ impl Session {
                 )
             }
         {
-            let _ = self.snapshots.force_send(Arc::new(bundle));
+            self.snapshots.force_send(Arc::new(bundle)).ok();
         }
         drop(self.owned);
         closing::close(self.runtime)
@@ -993,6 +1050,7 @@ mod closing_regressions {
         const CHILD: &str = "SPRITE_READY_CLOSE_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let (commands, inbox) = std::sync::mpsc::sync_channel(1);
+            let (_control, control_rx) = std::sync::mpsc::sync_channel(1);
             commands.send(Message::CaptureRequested).unwrap();
             let (events, receiver) = crate::event_mailbox::bounded(1);
             drop(receiver);
@@ -1001,6 +1059,7 @@ mod closing_regressions {
                 SessionConfig::command("/bin/sh", vec!["-c".into(), "exit 0".into()]),
                 commands,
                 inbox,
+                control_rx,
                 events,
                 snapshots,
                 Arc::new(AtomicBool::new(true)),

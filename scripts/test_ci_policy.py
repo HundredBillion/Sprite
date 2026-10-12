@@ -38,9 +38,6 @@ class CiPolicyTests(unittest.TestCase):
             ("src/ui.rs", "portable_pty::openpty();"),
             ("Cargo.toml", 'libghostty-vt = "1"'),
             ("Cargo.toml", 'portable-pty = "1"'),
-            ("src/ui.rs", "std::thread::sleep(delay);"),
-            ("src/ui.rs", "Timer::after(delay);"),
-            ("src/ui.rs", "request_animation_frame();"),
         ]
         for name, source in cases:
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
@@ -51,18 +48,11 @@ class CiPolicyTests(unittest.TestCase):
                 result = self.run_gate(directory)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
-    def test_background_and_test_waits_are_allowed_but_no_animation_timers(self):
-        with tempfile.TemporaryDirectory() as directory:
-            app = Path(directory) / "crates/sprite-app"
-            (app / "src").mkdir(parents=True)
-            (app / "Cargo.toml").write_text("")
-            for name in ["local_socket.rs", "test_blocking_wait.rs"]:
-                (app / "src" / name).write_text("std::thread::sleep(delay);")
-            result = self.run_gate(directory)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            (app / "src/local_socket.rs").write_text("Timer::after(delay);")
-            result = self.run_gate(directory)
-            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    def test_event_driven_rule_lives_in_clippy_config(self):
+        config = (ROOT / "crates/sprite-app/clippy.toml").read_text()
+        for path in ["std::thread::sleep", "gpui::Timer::after", "request_animation_frame"]:
+            self.assertIn(path, config)
+        self.assertIn("allow-unwrap-in-tests = true", config)
 
 
 if __name__ == "__main__":

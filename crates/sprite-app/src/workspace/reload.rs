@@ -1,4 +1,5 @@
 use super::*;
+use crate::timeouts::AFTER_CLAIM;
 
 impl Workspace {
     /// Turns pane observation on or off while the window is running.
@@ -133,13 +134,6 @@ pub(crate) fn reload_channel() -> (
     async_channel::bounded(crate::observation::endpoint::MAX_CONNECTIONS)
 }
 
-/// How much longer an asker waits once the window has claimed its request.
-///
-/// Bounded, because a wedged GPUI thread must not pin an endpoint thread and
-/// its connection slot forever. Generous, because by then the work is under
-/// way and the only honest early answer is that it still is.
-pub(crate) const AFTER_CLAIM: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Where one relayed request stands, shared by the thread that asked and the
 /// window that answers.
 ///
@@ -210,6 +204,7 @@ impl<Answer> Relayed<Answer> {
     /// False when the asker has already given up and told its caller that
     /// nothing changed: the request must then be dropped without being
     /// applied.
+    #[must_use = "a false claim means the request must be dropped unapplied"]
     pub(crate) fn claim(&self) -> bool {
         self.claim.claim()
     }
@@ -265,8 +260,11 @@ impl Patience {
 pub(crate) enum RelayError {
     /// The window is gone; the request never reached it.
     Disconnected,
-    /// Admission was refused or the window did not claim the request in
-    /// time and now never will, so nothing was applied.
+    /// The lane was full, so the request never reached the window. Nothing
+    /// was applied, and the asker may say so.
+    Refused,
+    /// The window did not claim the request in time and now never will, so
+    /// nothing was applied.
     Timeout,
     /// The window claimed the request and has not answered within the extra
     /// wait. It may still be applying it, so nobody may say nothing changed.
@@ -291,7 +289,7 @@ pub(crate) fn relay<Request, Answer>(
         Ok(()) => {}
         Err(async_channel::TrySendError::Full(_)) => {
             claim.abandon();
-            return Err(RelayError::Timeout);
+            return Err(RelayError::Refused);
         }
         Err(async_channel::TrySendError::Closed(_)) => {
             claim.abandon();
@@ -564,7 +562,7 @@ mod tests {
                     reply,
                     reply_connection: None,
                 });
-                let _ = done.send(outcome);
+                done.send(outcome).ok();
             });
             let outcome = finished.recv_timeout(std::time::Duration::from_secs(2));
             if outcome.is_err() {
@@ -572,7 +570,7 @@ mod tests {
             }
             caller.join().unwrap();
             assert!(
-                matches!(outcome, Ok(Err(RelayError::Timeout))),
+                matches!(outcome, Ok(Err(RelayError::Refused))),
                 "admission must finish with the abandoned wave still queued: {outcome:?}"
             );
         }
@@ -677,7 +675,7 @@ mod tests {
         let window = std::thread::spawn(move || {
             // Held open without an answer, as a window still applying would.
             let reply = requests.recv_blocking().expect("a request");
-            let _ = done.recv();
+            done.recv().ok();
             drop(reply);
         });
         let started = std::time::Instant::now();
@@ -729,7 +727,7 @@ mod tests {
                         reply_connection: None,
                     },
                 );
-                let _ = done.send(matches!(answer, Err(RelayError::Timeout)));
+                done.send(matches!(answer, Err(RelayError::Timeout))).ok();
             });
         }
         for _ in 0..MAX_CONNECTIONS {

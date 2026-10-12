@@ -1,5 +1,10 @@
 //! Paste and focus reporting. Paste is where hostile content matters most: text
 //! from the clipboard must never be interpretable as a command.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
@@ -234,7 +239,17 @@ fn an_unsafe_unbracketed_paste_is_withheld_and_reported() {
                 break;
             }
             TerminalEvent::Error(error) => panic!("unexpected error: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
     assert_eq!(

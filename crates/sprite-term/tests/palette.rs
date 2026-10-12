@@ -4,6 +4,10 @@
 //! snapshot that carries the index without the palette leaves a renderer able
 //! to draw only the default foreground — which is how `ls --color`, git diffs
 //! and shell prompts all come out the same shade.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
@@ -103,7 +107,7 @@ fn every_standard_colour_is_a_distinct_index() {
         .iter()
         .filter_map(|cell| match cell.style.foreground {
             SnapshotColor::Palette(index) => Some(index),
-            _ => None,
+            SnapshotColor::Default | SnapshotColor::Rgb(_) => None,
         })
         .collect();
     for index in 0..8_u8 {

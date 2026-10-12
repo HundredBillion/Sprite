@@ -4,7 +4,10 @@
 //! taken stream moves into a helper thread that blocks in `next_blocking` and
 //! forwards each item through `std::sync::mpsc`, so a hung worker fails the
 //! test on the watchdog instead of hanging the suite.
-
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 #![allow(dead_code)]
 
 use std::sync::Arc;
@@ -19,15 +22,44 @@ use sprite_term::{
 
 /// Every blocking wait in the suite fails after this long without progress.
 ///
-/// This is a hang detector: it measures *silence*, not total elapsed time. A
-/// stream that has produced nothing for this long is stuck, and the test that
-/// is waiting on it should fail rather than hold the suite open.
-pub const WATCHDOG: Duration = Duration::from_secs(5);
+/// A hang detector: it measures *silence*, not elapsed time. Five seconds by
+/// default; `SPRITE_TEST_WATCHDOG_SECS` raises it on a runner that starves
+/// a worker past that.
+pub fn watchdog() -> Duration {
+    std::env::var("SPRITE_TEST_WATCHDOG_SECS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(Duration::from_secs(5), Duration::from_secs)
+}
+
+/// Polls until `poll` returns a value, failing after `limit`.
+///
+/// Polling rather than sleeping, because the assertion that follows is about
+/// the value this returns: a test that slept and then looked would be
+/// asserting on a different moment than the one it waited for.
+pub fn wait_within<T>(what: &str, limit: Duration, mut poll: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(value) = poll() {
+            return value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watchdog: {what} did not happen within {limit:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `wait_within` with the watchdog as the limit.
+pub fn wait_until<T>(what: &str, poll: impl FnMut() -> Option<T>) -> T {
+    wait_within(what, watchdog(), poll)
+}
 
 /// A wait that is still making progress may run this long in total.
 ///
 /// The other shape of a stuck test: a child that streams forever without ever
-/// producing what the test asked for. `WATCHDOG` never fires there, because
+/// producing what the test asked for. `watchdog()` never fires there, because
 /// bundles keep arriving, so this bounds the wait so the suite still
 /// terminates. It is deliberately far above any real wait — it exists to stop
 /// a wedge, not to hold a child to a schedule.
@@ -58,7 +90,7 @@ impl EventPump {
 
     /// The next event, or a panic describing which wait timed out.
     pub fn next(&self) -> TerminalEvent {
-        self.next_with_timeout(WATCHDOG)
+        self.next_with_timeout(watchdog())
     }
 
     pub fn next_with_timeout(&self, timeout: Duration) -> TerminalEvent {
@@ -74,10 +106,11 @@ impl EventPump {
 
     /// Waits for `Ready`, failing on any other event.
     pub fn expect_ready(&self) {
-        match self.next() {
-            TerminalEvent::Ready => {}
-            other => panic!("expected Ready, got {other:?}"),
-        }
+        let event = self.next();
+        assert!(
+            matches!(event, TerminalEvent::Ready),
+            "expected Ready, got {event:?}"
+        );
     }
 }
 
@@ -110,11 +143,11 @@ impl SnapshotPump {
 
     /// The next bundle, whatever it holds.
     pub fn next(&self) -> Arc<SnapshotBundle> {
-        match self.receiver.recv_timeout(WATCHDOG) {
+        match self.receiver.recv_timeout(watchdog()) {
             Ok(Ok(bundle)) => bundle,
             Ok(Err(error)) => panic!("snapshot stream ended early: {error}"),
             Err(RecvTimeoutError::Timeout) => {
-                panic!("watchdog: no snapshot within {WATCHDOG:?}")
+                panic!("watchdog: no snapshot within {:?}", watchdog())
             }
             Err(RecvTimeoutError::Disconnected) => panic!("snapshot pump thread died"),
         }
@@ -123,7 +156,7 @@ impl SnapshotPump {
     /// The first bundle satisfying `predicate`, for as long as bundles keep
     /// coming.
     ///
-    /// The watchdog belongs to `next`, which fails after `WATCHDOG` of silence.
+    /// The watchdog belongs to `next`, which fails after `watchdog()` of silence.
     /// Bounding the whole wait by the same duration would instead hold the
     /// child to a schedule: one still streaming output is not stuck, and on a
     /// loaded machine a child that arrives in two seconds here can need three
@@ -348,7 +381,17 @@ impl GraphicsSession {
             match self.events.next() {
                 TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
                 TerminalEvent::Error(error) => panic!("graphics probe failed: {error}"),
-                _ => {}
+                TerminalEvent::Ready
+                | TerminalEvent::Exited(_)
+                | TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::History { .. }
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::Hyperlink { .. }
+                | TerminalEvent::ClipboardWrite(_) => {}
             }
         }
         panic!("watchdog: no graphics answer arrived");

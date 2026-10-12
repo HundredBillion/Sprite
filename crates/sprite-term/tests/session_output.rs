@@ -271,7 +271,7 @@ fn a_smaller_scrollback_budget_retains_less_history() {
         let rows = bundle.render.viewport.scrollback_rows();
 
         if let Ok(Some(handle)) = session.begin_shutdown() {
-            let _ = handle.wait();
+            handle.wait().ok();
         }
         rows
     }

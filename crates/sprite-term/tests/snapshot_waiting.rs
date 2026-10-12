@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use sprite_term::{SessionConfig, TerminalSession};
 
-use support::{SnapshotPump, WATCHDOG, pane_text};
+use support::{SnapshotPump, pane_text, watchdog};
 
 /// A child that streams for longer than the watchdog, and only then arrives.
 ///
@@ -26,7 +26,7 @@ use support::{SnapshotPump, WATCHDOG, pane_text};
 /// that fits it locally.
 #[test]
 fn a_child_still_producing_output_is_not_timed_out() {
-    let ticks = (WATCHDOG.as_secs() + 2) * 10;
+    let ticks = (watchdog().as_secs() + 2) * 10;
     let script = format!(
         "i=0; while [ $i -lt {ticks} ]; do printf 'filler %d\\n' \"$i\"; \
          i=$((i+1)); sleep 0.1; done; printf 'ARRIVED\\n'; sleep 30"
@@ -52,9 +52,10 @@ fn a_child_still_producing_output_is_not_timed_out() {
         "the bundle that satisfied the wait is the one that shows the marker"
     );
     assert!(
-        started.elapsed() > WATCHDOG,
-        "this test only proves anything if the wait outlived the {WATCHDOG:?} \
+        started.elapsed() > watchdog(),
+        "this test only proves anything if the wait outlived the {:?} \
          watchdog; it took {:?}",
+        watchdog(),
         started.elapsed()
     );
 }

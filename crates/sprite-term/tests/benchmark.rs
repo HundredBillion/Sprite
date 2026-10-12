@@ -1,5 +1,9 @@
 //! The benchmark harness must produce a stable, machine-readable report, since
 //! its numbers become committed regression budgets.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 use std::fs;
 use std::path::PathBuf;

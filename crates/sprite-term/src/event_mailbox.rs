@@ -1,7 +1,7 @@
 //! Ordered event ownership with one retained mutation batch and reserved outcomes.
 use crate::{SessionError, TerminalEvent};
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 const NATURAL_DRAIN: Duration = Duration::from_secs(2);
@@ -57,22 +57,20 @@ pub(crate) struct CompletionGuard(Arc<Mailbox>);
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if !state.sealed {
-            state
-                .outcomes
-                .push_back(TerminalEvent::Error(SessionError::new(
-                    "worker",
-                    "the terminal worker ended before cleanup completed",
-                )));
-            state.sealed = true;
-            self.0.wake.close();
-            self.0.space.notify_all();
+        let mut state = crate::locked::locked(&self.0.state);
+        if state.sealed {
+            return;
         }
+        state
+            .outcomes
+            .push_back(TerminalEvent::Error(SessionError::new(
+                "worker",
+                "the terminal worker ended before cleanup completed",
+            )));
+        state.sealed = true;
+        drop(state);
+        self.0.wake.close();
+        self.0.space.notify_all();
     }
 }
 
@@ -84,7 +82,7 @@ impl Mailbox {
     /// Transfers the whole batch before applying pressure.
     /// The next mutation waits until the retained batch drains or cancellation arrives.
     pub(crate) fn publish(&self, batch: Vec<TerminalEvent>) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = crate::locked::locked(&self.state);
         if state.consumer_gone || state.sealed {
             return false;
         }
@@ -100,16 +98,23 @@ impl Mailbox {
             state.normal.push_back(event);
         }
         state.pending = batch;
-        let _ = self.wake.force_send(());
+        self.wake.force_send(()).ok();
         while !state.pending.is_empty() && !state.canceled && !state.consumer_gone {
             if let Some(deadline) = state.drain_deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     return false;
                 }
-                state = self.space.wait_timeout(state, remaining).unwrap().0;
+                state = self
+                    .space
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             } else {
-                state = self.space.wait(state).unwrap();
+                state = self
+                    .space
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
         }
         !state.canceled && !state.consumer_gone
@@ -118,32 +123,32 @@ impl Mailbox {
     /// The waiter starts the deadline independently of the worker inbox.
     /// Event pressure must not hide direct-child exit indefinitely.
     pub(crate) fn begin_natural_drain(&self) {
-        self.state.lock().unwrap().drain_deadline = Some(Instant::now() + NATURAL_DRAIN);
+        crate::locked::locked(&self.state).drain_deadline = Some(Instant::now() + NATURAL_DRAIN);
         self.space.notify_all();
     }
 
     pub(crate) fn drain_remaining(&self) -> Option<Duration> {
-        self.state
-            .lock()
-            .unwrap()
+        crate::locked::locked(&self.state)
             .drain_deadline
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
     }
 
     pub(crate) fn producer_ready(&self) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = crate::locked::locked(&self.state);
         state.pending.is_empty() && !state.canceled && !state.consumer_gone && !state.sealed
     }
 
     pub(crate) fn finish_remaining(&self) -> Option<Duration> {
-        self.state.lock().unwrap().drain_deadline.map(|deadline| {
-            (deadline + Duration::from_secs(6) - NATURAL_DRAIN)
-                .saturating_duration_since(Instant::now())
-        })
+        crate::locked::locked(&self.state)
+            .drain_deadline
+            .map(|deadline| {
+                (deadline + crate::worker::closing::GIVE_UP_AFTER - NATURAL_DRAIN)
+                    .saturating_duration_since(Instant::now())
+            })
     }
 
     pub(crate) fn cancel(&self) {
-        self.state.lock().unwrap().canceled = true;
+        crate::locked::locked(&self.state).canceled = true;
         self.space.notify_all();
     }
 
@@ -151,12 +156,13 @@ impl Mailbox {
     /// Final outcomes follow retained live events without waiting for the consumer.
     pub(crate) fn seal(&self, outcomes: Vec<TerminalEvent>) {
         assert!(outcomes.len() <= 2);
-        let mut state = self.state.lock().unwrap();
+        let mut state = crate::locked::locked(&self.state);
         if state.sealed {
             return;
         }
         state.outcomes = outcomes.into();
         state.sealed = true;
+        drop(state);
         self.wake.close();
         self.space.notify_all();
     }
@@ -164,21 +170,19 @@ impl Mailbox {
 
 impl Receiver {
     fn pop(&self) -> Result<Option<TerminalEvent>, SessionError> {
-        let mut state = self
-            .mailbox
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = crate::locked::locked(&self.mailbox.state);
         let event = state
             .normal
             .pop_front()
             .or_else(|| state.pending.pop_front())
             .or_else(|| state.outcomes.pop_front());
+        let sealed = state.sealed;
+        drop(state);
         if event.is_some() {
             self.mailbox.space.notify_all();
             return Ok(event);
         }
-        if state.sealed {
+        if sealed {
             return Err(SessionError::new(
                 "event_stream",
                 "the terminal session ended",
@@ -192,7 +196,7 @@ impl Receiver {
             if let Some(event) = self.pop()? {
                 return Ok(event);
             }
-            let _ = self.wake.recv().await;
+            self.wake.recv().await.ok();
         }
     }
 
@@ -201,22 +205,19 @@ impl Receiver {
             if let Some(event) = self.pop()? {
                 return Ok(event);
             }
-            let _ = self.wake.recv_blocking();
+            self.wake.recv_blocking().ok();
         }
     }
 }
 
 impl Drop for Receiver {
     fn drop(&mut self) {
-        let mut state = self
-            .mailbox
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = crate::locked::locked(&self.mailbox.state);
         state.consumer_gone = true;
         state.normal.clear();
         state.pending.clear();
         state.outcomes.clear();
+        drop(state);
         self.mailbox.space.notify_all();
     }
 }
@@ -271,7 +272,7 @@ mod producer_lifetime_tests {
             while let Ok(event) = receiver.next_blocking() {
                 error |= matches!(event, TerminalEvent::Error(_));
             }
-            let _ = tx.send(error);
+            tx.send(error).ok();
         });
         let result = rx.recv_timeout(Duration::from_millis(200));
         mailbox.seal(Vec::new());

@@ -703,9 +703,7 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
         cx.simulate_mouse_move(start, None, modifiers);
         view.read_with(cx, |v, _| {
             assert!(
-                v.status
-                    .as_ref()
-                    .is_none_or(|s| !s.contains("queue is full")),
+                v.status.as_ref().is_none_or(|s| !s.contains(BUSY_STATUS)),
                 "fixture refused its first motion: {:?}",
                 v.status
             )

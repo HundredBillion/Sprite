@@ -3,6 +3,10 @@
 //! Everything here comes from the terminal's own parsing of what the child
 //! emitted. Nothing is inferred from displayed text, so a Pane reports
 //! "unknown" rather than a guess.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
@@ -182,9 +186,19 @@ fn a_bell_is_reported_as_an_event() {
                 break;
             }
             TerminalEvent::Error(error) => panic!("unexpected error: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
     assert!(saw_bell, "the bell arrived as an event");
-    let _ = session.send(TerminalCommand::Capture);
+    session.send(TerminalCommand::Capture).ok();
 }

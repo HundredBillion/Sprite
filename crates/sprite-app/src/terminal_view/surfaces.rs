@@ -102,13 +102,13 @@ impl Body {
             ));
         }
         match (self, parsed.description.root) {
-            (Self::List { root, view }, replacement @ Element::VirtualList { .. }) => {
-                let config = replacement.list().expect("virtual_list").clone();
-                *root = replacement;
-                view.update(cx, |view, cx| view.reconfigure(config, cx));
+            (Self::List { root, view }, Element::VirtualList { config }) => {
+                let reconfigured = (*config).clone();
+                *root = Element::VirtualList { config };
+                view.update(cx, |view, cx| view.reconfigure(reconfigured, cx));
             }
             (Self::Elements(elements), root) => elements.replace(Description { root }),
-            _ => {
+            (Self::Grid { .. } | Self::List { .. }, _) => {
                 return Err(Refusal::Malformed(
                     "an update must preserve the Surface body kind".to_owned(),
                 ));
@@ -306,7 +306,9 @@ impl TerminalView {
                 ..
             } => {
                 let answer = self.capability_owner_group(owner_pid, return_target);
-                let _ = reply.send(answer.map(|_| crate::surface::channel::capabilities(true)));
+                reply
+                    .send(answer.map(|_| crate::surface::channel::capabilities(true)))
+                    .ok();
             }
             SurfaceRequest::Open {
                 id,
@@ -315,7 +317,9 @@ impl TerminalView {
                 reply,
                 ..
             } => {
-                let _ = reply.send(self.open_surface(id, open, connection, window, cx));
+                reply
+                    .send(self.open_surface(id, open, connection, window, cx))
+                    .ok();
             }
             SurfaceRequest::Update {
                 id, description, ..
@@ -329,7 +333,7 @@ impl TerminalView {
                 self.close_surface(id, window, cx);
             }
             SurfaceRequest::FocusPane { target, reply, .. } => {
-                let _ = reply.send(self.focus_target(target, window, cx));
+                reply.send(self.focus_target(target, window, cx)).ok();
             }
             SurfaceRequest::Grid { id, ops, .. } => self.grid_operations(id, ops, cx),
             SurfaceRequest::List { id, op, .. } => self.list_operation(id, op, cx),
@@ -1609,7 +1613,7 @@ mod tests {
         let list = host.read_with(cx, |view, _| {
             match &view.surfaces.fill.as_ref().unwrap().body {
                 Body::List { view, .. } => view.downgrade(),
-                _ => panic!("expected a list"),
+                Body::Elements(_) | Body::Grid { .. } => panic!("expected a list"),
             }
         });
         let weak_host = host.downgrade();

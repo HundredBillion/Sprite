@@ -10,6 +10,7 @@
 //! newline-delimited JSON. The connection closing — or the program dying —
 //! removes the Surface, so nothing is ever left on screen without an owner.
 
+use crate::timeouts::{HANDSHAKE_TIMEOUT, REPLY_TIMEOUT, WRITE_TIMEOUT};
 use crate::workspace::{Patience, Relayed};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -18,6 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+#[cfg(test)]
 use std::time::Duration;
 
 use serde_json::Value;
@@ -29,6 +31,7 @@ use crate::local_socket::{
     Authenticated, ConnectionSlot, LocalSocket, ObservationKey, TransportPolicy, runtime_directory,
 };
 use crate::pane_tree::PaneId;
+use crate::surface::lanes::SurfaceLanes;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tabs::TabId;
 
@@ -38,26 +41,13 @@ pub const KEY_VARIABLE: &str = "SPRITE_SURFACE_KEY";
 
 /// Surfaces are long-lived, so this caps how many a window hosts at once.
 const MAX_CONNECTIONS: usize = 64;
-/// A client that will not accept an event for this long is treated as gone.
-/// Short under test so the dead-write test finishes in well under a second.
-#[cfg(not(test))]
-const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(test)]
-const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
-/// A client that connects and sends no first line for this long has its
-/// thread taken back; the connection is refused as any bad handshake is.
-#[cfg(not(test))]
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
-/// How long a connection waits for the window to answer a request.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// The same wait, plus the bounded extra wait for a request the window has
 /// already claimed.
 const REPLY_PATIENCE: Patience = Patience::new(REPLY_TIMEOUT);
 
 const NOT_ANSWERING: &str = "this window is no longer answering";
 const NO_ANSWER: &str = "this window did not answer in time";
+const BUSY: &str = "this window is busy; nothing was changed";
 
 /// Hex digits in a socket file name. With the `.surface.sock` suffix this is
 /// as wide as the observation socket's name, which is measured against a
@@ -278,7 +268,7 @@ impl Shared {
         queue.in_flight = 0;
         drop(queue);
         if shut_down {
-            let _ = self.stream.shutdown(Shutdown::Both);
+            self.stream.shutdown(Shutdown::Both).ok();
         }
         self.changed.notify_all();
     }
@@ -292,9 +282,7 @@ struct Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        if let Ok(mut queue) = self.shared.queue.lock() {
-            queue.closing = true;
-        }
+        crate::locked::locked(&self.shared.queue).closing = true;
         self.shared.changed.notify_all();
     }
 }
@@ -385,9 +373,7 @@ impl SurfaceConnection {
     /// kills the connection, and the iterator is not consumed past it.
     pub fn send_batch<'a>(&self, lines: impl IntoIterator<Item = &'a str>) -> bool {
         let shared = &self.handle.shared;
-        let Ok(mut queue) = shared.queue.lock() else {
-            return false;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         if queue.dead {
             return false;
         }
@@ -411,9 +397,7 @@ impl SurfaceConnection {
     /// queued before it had already reached the pending bound.
     pub(crate) fn establish(&self, line: &str) -> bool {
         let shared = &self.handle.shared;
-        let Ok(mut queue) = shared.queue.lock() else {
-            return false;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         if queue.dead {
             return false;
         }
@@ -439,18 +423,11 @@ impl SurfaceConnection {
     /// writes next.
     fn abandon(&self) {
         let shared = &self.handle.shared;
-        if let Ok(queue) = shared.queue.lock() {
-            shared.kill(queue, false);
-        }
+        shared.kill(crate::locked::locked(&shared.queue), false);
     }
 
     pub(crate) fn is_dead(&self) -> bool {
-        self.handle
-            .shared
-            .queue
-            .lock()
-            .map(|queue| queue.dead)
-            .unwrap_or(true)
+        crate::locked::locked(&self.handle.shared.queue).dead
     }
 
     /// Bytes queued or being written; zero once the connection is dead.
@@ -466,13 +443,21 @@ impl SurfaceConnection {
     #[cfg(test)]
     pub(crate) fn settle(&self) {
         let shared = &self.handle.shared;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let mut queue = shared.queue.lock().unwrap();
-        while !queue.dead && queue.ready && (!queue.queued.is_empty() || queue.in_flight > 0) {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            assert!(!left.is_zero(), "the writer did not drain its queue in 5 s");
-            queue = shared.changed.wait_timeout(queue, left).unwrap().0;
-        }
+        let waited = shared
+            .changed
+            .wait_timeout_while(
+                shared.queue.lock().unwrap(),
+                Duration::from_secs(5),
+                |queue| {
+                    !queue.dead && queue.ready && (!queue.queued.is_empty() || queue.in_flight > 0)
+                },
+            )
+            .unwrap()
+            .1;
+        assert!(
+            !waited.timed_out(),
+            "the writer did not drain its queue in 5 s"
+        );
     }
 
     /// A view of this connection's writer that, unlike a clone, does not
@@ -489,14 +474,14 @@ impl SurfaceConnection {
 fn write_events(shared: &Shared) {
     let mut outgoing = Vec::new();
     loop {
-        let Ok(mut queue) = shared.queue.lock() else {
-            return;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         while !queue.has_work() {
-            queue = match shared.changed.wait(queue) {
-                Ok(queue) => queue,
-                Err(_) => return,
-            };
+            // Recovered like every lock here (see `crate::locked`), so a
+            // poisoned wait still reaches `queue.finish()` below.
+            queue = shared
+                .changed
+                .wait(queue)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         if queue.dead || !queue.ready || queue.queued.is_empty() {
             // Dead, or closing with nothing left that may be sent. A
@@ -505,7 +490,7 @@ fn write_events(shared: &Shared) {
             // stream. A dead one was already shut down, or — refused — is
             // about to carry the connection thread's refusal.
             if !queue.dead && queue.ready {
-                let _ = shared.stream.shutdown(Shutdown::Write);
+                shared.stream.shutdown(Shutdown::Write).ok();
             }
             queue.finish();
             drop(queue);
@@ -521,15 +506,13 @@ fn write_events(shared: &Shared) {
         if outgoing.capacity() > KEPT_WRITE_BUFFER_BYTES {
             outgoing = Vec::new();
         }
-        let Ok(mut queue) = shared.queue.lock() else {
-            return;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         queue.in_flight = 0;
         if written.is_err() {
             // The write timed out or failed: the program is not reading, or
             // is gone. Shutting the socket down ends the connection thread's
             // read, and the window hears the Surface closed.
-            let _ = shared.stream.shutdown(Shutdown::Both);
+            shared.stream.shutdown(Shutdown::Both).ok();
             queue.finish();
             shared.kill(queue, false);
             return;
@@ -547,16 +530,13 @@ pub(crate) struct WriterProbe(Arc<Shared>);
 impl WriterProbe {
     /// Whether the writer thread returned within `limit`.
     pub(crate) fn finished_within(&self, limit: Duration) -> bool {
-        let deadline = std::time::Instant::now() + limit;
-        let mut queue = self.0.queue.lock().unwrap();
-        while !queue.finished {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                return false;
-            }
-            queue = self.0.changed.wait_timeout(queue, left).unwrap().0;
-        }
-        true
+        let waited = self
+            .0
+            .changed
+            .wait_timeout_while(self.0.queue.lock().unwrap(), limit, |queue| !queue.finished)
+            .unwrap()
+            .1;
+        !waited.timed_out()
     }
 }
 
@@ -653,12 +633,12 @@ impl SurfaceRequest {
     pub(crate) fn refuse_with(self, refusal: Refusal) {
         match self {
             Self::Capabilities { reply, .. } => {
-                let _ = reply.send(Err(refusal));
+                reply.send(Err(refusal)).ok();
             }
             Self::Open { reply, .. }
             | Self::FocusPane { reply, .. }
             | Self::RegisterToken { reply, .. } => {
-                let _ = reply.send(Err(refusal));
+                reply.send(Err(refusal)).ok();
             }
             Self::Update { .. }
             | Self::Focus { .. }
@@ -675,6 +655,7 @@ impl SurfaceRequest {
     /// False only when its connection has already given up and told its
     /// program so; such a request must be dropped unapplied. A request nobody
     /// waits on is always the window's.
+    #[must_use = "a false claim means the request must be dropped unapplied"]
     pub(crate) fn claim(&self) -> bool {
         match self {
             Self::Capabilities { reply, .. } => reply.claim(),
@@ -704,17 +685,14 @@ pub struct SurfaceEndpoint {
 }
 
 impl SurfaceEndpoint {
-    pub fn open(
-        key: Arc<ObservationKey>,
-        requests: async_channel::Sender<SurfaceRequest>,
-    ) -> std::io::Result<Self> {
-        Self::open_in(runtime_directory()?, key, requests)
+    pub fn open(key: Arc<ObservationKey>, lanes: SurfaceLanes) -> std::io::Result<Self> {
+        Self::open_in(runtime_directory()?, key, lanes)
     }
 
     pub fn open_in(
         directory: PathBuf,
         key: Arc<ObservationKey>,
-        requests: async_channel::Sender<SurfaceRequest>,
+        lanes: SurfaceLanes,
     ) -> std::io::Result<Self> {
         let policy = TransportPolicy {
             name: "sprite-surface",
@@ -730,7 +708,7 @@ impl SurfaceEndpoint {
             key,
             policy,
             |stream| refuse(stream, &Refusal::Denied.reason()),
-            move |connection| converse(connection, &requests),
+            move |connection| converse(connection, &lanes),
         )?;
         Ok(Self { transport })
     }
@@ -771,7 +749,7 @@ impl SurfaceEndpoint {
 
 static NEXT_SURFACE: AtomicU64 = AtomicU64::new(1);
 
-fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceRequest>) {
+fn converse(connection: Authenticated, lanes: &SurfaceLanes) {
     let Authenticated {
         mut stream,
         reader,
@@ -782,7 +760,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
     match first_line(&body) {
         Ok(FirstRequest::Open { pane, open }) => {
             let connection = SurfaceConnection::holding(&stream, Some(slot));
-            serve_surface(stream, reader, connection, pane, open, requests)
+            serve_surface(stream, reader, connection, pane, open, lanes)
         }
         Ok(FirstRequest::Capabilities {
             pane,
@@ -790,7 +768,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
             return_target,
         }) => one_shot(
             &mut stream,
-            requests,
+            &lanes.one_shot,
             |reply| SurfaceRequest::Capabilities {
                 pane,
                 owner_pid,
@@ -801,7 +779,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
         ),
         Ok(FirstRequest::Focus { pane, target }) => one_shot(
             &mut stream,
-            requests,
+            &lanes.one_shot,
             |reply| SurfaceRequest::FocusPane {
                 pane,
                 target,
@@ -815,7 +793,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
             description,
         }) => one_shot(
             &mut stream,
-            requests,
+            &lanes.one_shot,
             |reply| SurfaceRequest::RegisterToken {
                 name,
                 default,
@@ -834,7 +812,7 @@ fn serve_surface(
     connection: std::io::Result<SurfaceConnection>,
     pane: PaneId,
     open: Open,
-    requests: &async_channel::Sender<SurfaceRequest>,
+    lanes: &SurfaceLanes,
 ) {
     // A connection with no writer could never be sent `opened`. Say so
     // rather than closing it with no answer.
@@ -850,12 +828,14 @@ fn serve_surface(
     let handle = connection.clone();
     let id = SurfaceId(NEXT_SURFACE.fetch_add(1, Ordering::SeqCst));
     use crate::workspace::{RelayError, relay};
-    match relay(requests, REPLY_PATIENCE, |reply| SurfaceRequest::Open {
-        id,
-        pane,
-        open,
-        connection,
-        reply,
+    match relay(&lanes.one_shot, REPLY_PATIENCE, |reply| {
+        SurfaceRequest::Open {
+            id,
+            pane,
+            open,
+            connection,
+            reply,
+        }
     }) {
         Ok(Ok(())) => {
             let _ = handle.establish(&event_opened(id));
@@ -870,18 +850,28 @@ fn serve_surface(
             refuse(&mut stream, NOT_ANSWERING);
             return;
         }
+        // The handshake lane is full of other programs' handshakes. Refuse
+        // and close, as any refused Open is; the program reconnects.
+        Err(RelayError::Refused) => {
+            handle.abandon();
+            refuse(&mut stream, BUSY);
+            return;
+        }
         Err(RelayError::Timeout) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
             return;
         }
-        // The window clock removes dead connections even if its request queue
+        // The window clock removes dead connections even if the stream lane
         // is full. Closed is a prompt cleanup when there is room, not a reason
         // to keep this connection thread and its slot waiting on the window.
         Err(RelayError::Applying) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
-            let _ = requests.try_send(SurfaceRequest::Closed { id, pane });
+            lanes
+                .stream
+                .try_send(SurfaceRequest::Closed { id, pane })
+                .ok();
             return;
         }
     }
@@ -912,7 +902,10 @@ fn serve_surface(
             Ok(Message::Grid(ops)) => SurfaceRequest::Grid { id, pane, ops },
             Ok(Message::List(op)) => SurfaceRequest::List { id, pane, op },
             Ok(Message::Close) => {
-                let _ = requests.send_blocking(SurfaceRequest::Close { id, pane });
+                lanes
+                    .stream
+                    .send_blocking(SurfaceRequest::Close { id, pane })
+                    .ok();
                 return;
             }
             Err(refusal) => {
@@ -922,11 +915,14 @@ fn serve_surface(
                 break;
             }
         };
-        if requests.send_blocking(request).is_err() {
+        if lanes.stream.send_blocking(request).is_err() {
             break;
         }
     }
-    let _ = requests.send_blocking(SurfaceRequest::Closed { id, pane });
+    lanes
+        .stream
+        .send_blocking(SurfaceRequest::Closed { id, pane })
+        .ok();
 }
 
 /// Asks the window once and relays its answer, then ends the connection.
@@ -939,11 +935,12 @@ fn one_shot<T>(
     use crate::workspace::{RelayError, relay};
     match relay(requests, REPLY_PATIENCE, request) {
         Ok(Ok(value)) => {
-            let _ = writeln!(stream, "{}", success(value));
-            let _ = stream.shutdown(Shutdown::Write);
+            writeln!(stream, "{}", success(value)).ok();
+            stream.shutdown(Shutdown::Write).ok();
         }
         Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
         Err(RelayError::Disconnected) => refuse(stream, NOT_ANSWERING),
+        Err(RelayError::Refused) => refuse(stream, BUSY),
         // The refusal on the wire is unchanged. It says the window did not
         // answer, which is true of both, and never that nothing changed.
         Err(RelayError::Timeout | RelayError::Applying) => refuse(stream, NO_ANSWER),
@@ -951,8 +948,8 @@ fn one_shot<T>(
 }
 
 fn refuse(stream: &mut UnixStream, reason: &str) {
-    let _ = writeln!(stream, "{}", event_refused(reason));
-    let _ = stream.shutdown(Shutdown::Write);
+    writeln!(stream, "{}", event_refused(reason)).ok();
+    stream.shutdown(Shutdown::Write).ok();
 }
 
 #[cfg(test)]
@@ -963,6 +960,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use crate::surface::lanes::{SurfaceReceivers, surface_lanes_with};
     use serde_json::{Value, json};
 
     /// A private directory of this test's own, removed when it is dropped.
@@ -980,7 +978,7 @@ mod tests {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let ordinal = NEXT.fetch_add(1, Ordering::SeqCst);
             let path = std::env::temp_dir().join(scratch_name(std::process::id(), ordinal));
-            let _ = std::fs::remove_dir_all(&path);
+            std::fs::remove_dir_all(&path).ok();
             std::fs::create_dir_all(&path).expect("scratch");
             Self(path)
         }
@@ -988,17 +986,31 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            std::fs::remove_dir_all(&self.0).ok();
         }
     }
 
-    /// The GPUI side, played by a thread with a script of answers.
+    /// The GPUI side, played by a thread with a script of answers. Both lanes
+    /// feed the one script, so a scripted test sees every request whichever
+    /// lane it came by.
     fn window(
-        requests: async_channel::Receiver<SurfaceRequest>,
+        receivers: SurfaceReceivers,
         mut script: impl FnMut(SurfaceRequest) -> bool + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
+        let (merged, requests) = mpsc::channel();
+        for lane in [receivers.stream, receivers.one_shot] {
+            let merged = merged.clone();
+            std::thread::spawn(move || {
+                while let Ok(request) = lane.recv_blocking() {
+                    if merged.send(request).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(merged);
         std::thread::spawn(move || {
-            while let Ok(request) = requests.recv_blocking() {
+            while let Ok(request) = requests.recv() {
                 if !script(request) {
                     break;
                 }
@@ -1006,11 +1018,16 @@ mod tests {
         })
     }
 
-    fn endpoint(scratch: &Scratch) -> (SurfaceEndpoint, async_channel::Receiver<SurfaceRequest>) {
-        let (tx, rx) = async_channel::bounded(8);
+    fn endpoint(scratch: &Scratch) -> (SurfaceEndpoint, SurfaceReceivers) {
+        let (lanes, receivers) = surface_lanes_with(8, 8);
         let key = Arc::new(ObservationKey::generate().expect("key"));
-        let endpoint = SurfaceEndpoint::open_in(scratch.0.clone(), key, tx).expect("open");
-        (endpoint, rx)
+        let endpoint = SurfaceEndpoint::open_in(scratch.0.clone(), key, lanes).expect("open");
+        (endpoint, receivers)
+    }
+
+    /// Whether nothing has reached the window by either lane.
+    fn nothing_reached(receivers: &SurfaceReceivers) -> bool {
+        receivers.stream.is_empty() && receivers.one_shot.is_empty()
     }
 
     fn connect(endpoint: &SurfaceEndpoint) -> (UnixStream, BufReader<UnixStream>) {
@@ -1175,8 +1192,8 @@ mod tests {
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
         let handle = connection.clone();
-        let (requests, window) = async_channel::bounded(1);
-        let filler = requests.clone();
+        let (lanes, receivers) = surface_lanes_with(1, 1);
+        let filler = lanes.stream.clone();
         let (done, finished) = mpsc::channel();
         let caller = std::thread::spawn(move || {
             serve_surface(
@@ -1189,11 +1206,11 @@ mod tests {
                     focus: true,
                     description: json!({}),
                 },
-                &requests,
+                &lanes,
             );
-            let _ = done.send(());
+            done.send(()).ok();
         });
-        let open = window.recv_blocking().unwrap();
+        let open = receivers.one_shot.recv_blocking().unwrap();
         assert!(open.claim());
         filler
             .try_send(SurfaceRequest::Close {
@@ -1204,7 +1221,8 @@ mod tests {
         drop(open);
         let outcome = finished.recv_timeout(Duration::from_secs(2));
         if outcome.is_err() {
-            window.close();
+            receivers.stream.close();
+            receivers.one_shot.close();
         }
         caller.join().unwrap();
         assert!(
@@ -1212,7 +1230,7 @@ mod tests {
             "claimed Open cleanup must not hold the server: {outcome:?}"
         );
         assert!(handle.is_dead());
-        assert_eq!(window.len(), 1);
+        assert_eq!(receivers.stream.len(), 1);
         let mut wire = String::new();
         peer.read_to_string(&mut wire).unwrap();
         let refusal: Value = serde_json::from_str(wire.trim()).unwrap();
@@ -1220,17 +1238,21 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_open_refused_admission_finishes_with_the_queue_still_full() {
+    fn a_surface_open_refused_admission_finishes_with_the_lane_still_full() {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
         let handle = connection.clone();
-        let (requests, window) = async_channel::bounded(1);
-        requests
-            .try_send(SurfaceRequest::Close {
-                id: SurfaceId(99),
-                pane: PaneId(1),
+        let (lanes, receivers) = surface_lanes_with(1, 1);
+        // Another program's handshake, unanswered, holds the one slot.
+        lanes
+            .one_shot
+            .try_send(SurfaceRequest::Capabilities {
+                pane: PaneId(2),
+                owner_pid: 1,
+                return_target: ReturnTarget::Terminal,
+                reply: std::sync::mpsc::sync_channel(1).0.into(),
             })
             .unwrap();
         let (done, finished) = mpsc::channel();
@@ -1245,13 +1267,14 @@ mod tests {
                     focus: false,
                     description: json!({}),
                 },
-                &requests,
+                &lanes,
             );
-            let _ = done.send(());
+            done.send(()).ok();
         });
         let outcome = finished.recv_timeout(Duration::from_secs(2));
         if outcome.is_err() {
-            window.close();
+            receivers.stream.close();
+            receivers.one_shot.close();
         }
         caller.join().unwrap();
         assert!(
@@ -1259,15 +1282,15 @@ mod tests {
             "refused Open must not block sending Closed: {outcome:?}"
         );
         assert!(handle.is_dead());
-        assert_eq!(
-            window.len(),
-            1,
+        assert_eq!(receivers.one_shot.len(), 1, "the Open was never queued");
+        assert!(
+            receivers.stream.is_empty(),
             "refused Open cannot create a Surface to clean up"
         );
         let mut wire = String::new();
         peer.read_to_string(&mut wire).unwrap();
         let refusal: Value = serde_json::from_str(wire.trim()).unwrap();
-        assert_eq!(refusal["reason"], NO_ANSWER);
+        assert_eq!(refusal["reason"], BUSY);
     }
 
     /// A Surface the window cannot give a writer to is told so, rather than
@@ -1280,7 +1303,7 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
-        let (requests, window) = async_channel::bounded(1);
+        let (lanes, receivers) = surface_lanes_with(1, 1);
         serve_surface(
             stream,
             reader,
@@ -1291,7 +1314,7 @@ mod tests {
                 focus: false,
                 description: json!({}),
             },
-            &requests,
+            &lanes,
         );
         let mut wire = String::new();
         std::io::Read::read_to_string(&mut peer, &mut wire).unwrap();
@@ -1299,7 +1322,7 @@ mod tests {
             serde_json::from_str(wire.lines().next().expect("a refusal line")).unwrap();
         assert_eq!(refusal["type"], "refused");
         assert_eq!(refusal["reason"], NOT_ANSWERING);
-        assert!(window.try_recv().is_err(), "the window was asked nothing");
+        assert!(nothing_reached(&receivers), "the window was asked nothing");
     }
 
     #[test]
@@ -1441,11 +1464,11 @@ mod tests {
         for length in [MAX_SOCKET_PATH, MAX_SOCKET_PATH + 1] {
             let padding = length - scratch.0.as_os_str().len() - 2 - SOCKET_NAME_BYTES;
             let directory = scratch.0.join("p".repeat(padding));
-            let (tx, _rx) = async_channel::unbounded();
+            let (lanes, _receivers) = surface_lanes_with(1, 1);
             let endpoint = SurfaceEndpoint::open_in(
                 directory.clone(),
                 Arc::new(ObservationKey::generate().unwrap()),
-                tx,
+                lanes,
             );
             if length > MAX_SOCKET_PATH {
                 assert!(endpoint.is_err());
@@ -1482,7 +1505,13 @@ mod tests {
                     seen.send(description).unwrap();
                 }
                 SurfaceRequest::Close { .. } => return false,
-                other => panic!("unexpected request: {other:?}"),
+                other @ (SurfaceRequest::Capabilities { .. }
+                | SurfaceRequest::Focus { .. }
+                | SurfaceRequest::Closed { .. }
+                | SurfaceRequest::FocusPane { .. }
+                | SurfaceRequest::Grid { .. }
+                | SurfaceRequest::List { .. }
+                | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected request: {other:?}"),
             }
             true
         });
@@ -1507,16 +1536,16 @@ mod tests {
             } else {
                 open_message(3).to_string()
             };
-            let _ = write!(stream, "{} {body}", endpoint.key_hex());
+            write!(stream, "{} {body}", endpoint.key_hex()).ok();
             if terminated {
-                let _ = writeln!(stream);
+                writeln!(stream).ok();
             }
-            let _ = stream.shutdown(Shutdown::Write);
+            stream.shutdown(Shutdown::Write).ok();
             assert_eq!(
                 line(&mut reader),
                 json!({"type":"refused", "reason":"denied"})
             );
-            assert!(rx.try_recv().is_err());
+            assert!(nothing_reached(&rx));
         }
     }
 
@@ -1537,7 +1566,17 @@ mod tests {
                 reply.send(Ok(capabilities(true))).expect("reply");
                 false
             }
-            other => panic!("discovery opened or changed a Surface: {other:?}"),
+            other @ (SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => {
+                panic!("discovery opened or changed a Surface: {other:?}")
+            }
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -1575,7 +1614,7 @@ mod tests {
             // could ever produce a `SurfaceRequest`, so having already read
             // it is proof nothing reached the window — no wait needed.
             assert!(
-                rx.try_recv().is_err(),
+                nothing_reached(&rx),
                 "the window was asked by an unauthorised caller"
             );
         }
@@ -1616,7 +1655,7 @@ mod tests {
                 line(&mut reader),
                 json!({ "type": "refused", "reason": reason })
             );
-            assert!(rx.try_recv().is_err(), "invalid discovery reached window");
+            assert!(nothing_reached(&rx), "invalid discovery reached window");
         }
     }
 
@@ -1642,7 +1681,17 @@ mod tests {
                 reply.send(Err(refusal)).expect("reply");
                 true
             }
-            other => panic!("discovery opened or changed a Surface: {other:?}"),
+            other @ (SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => {
+                panic!("discovery opened or changed a Surface: {other:?}")
+            }
         });
 
         for (message, reason) in [
@@ -1699,7 +1748,12 @@ mod tests {
                 seen_tx.send("closed".to_owned()).expect("seen");
                 false
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -1734,6 +1788,51 @@ mod tests {
         assert_eq!(seen_rx.recv().expect("seen"), "closed");
     }
 
+    /// One program streaming faster than the window drains must not refuse
+    /// another program's Open.
+    #[test]
+    fn a_full_stream_lane_does_not_refuse_another_connections_open() {
+        let scratch = Scratch::new();
+        let (endpoint, receivers) = endpoint(&scratch);
+        // Only the one-shot lane is served; the stream lane is left to fill.
+        let one_shot = receivers.one_shot;
+        let answering = std::thread::spawn(move || {
+            while let Ok(request) = one_shot.recv_blocking() {
+                if let SurfaceRequest::Open { reply, .. } = request {
+                    assert!(reply.claim());
+                    reply.send(Ok(())).ok();
+                } else {
+                    panic!("only Opens reach the one-shot lane here");
+                }
+            }
+        });
+        let (mut first, mut first_reader) = connect(&endpoint);
+        writeln!(first, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
+        assert_eq!(line(&mut first_reader)["type"], "opened");
+        for _ in 0..(crate::surface::lanes::STREAM_CAPACITY + 8) {
+            writeln!(first, r#"{{"type":"update","description":{{"version":1,"root":{{"kind":"text","text":"hi"}}}}}}"#).expect("write");
+        }
+        // The second Open is sent only once the first program's stream has
+        // filled its lane, so the test cannot pass by winning a race.
+        let deadline = Instant::now() + crate::test_blocking_wait::watchdog();
+        while !receivers.stream.is_full() {
+            assert!(Instant::now() < deadline, "the stream lane never filled");
+            crate::test_blocking_wait::pause(Duration::from_millis(1));
+        }
+        let (mut second, mut second_reader) = connect(&endpoint);
+        writeln!(second, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
+        assert_eq!(
+            line(&mut second_reader)["type"],
+            "opened",
+            "the second program's Open waited behind the first program's stream"
+        );
+        drop(second);
+        drop(first);
+        drop(endpoint);
+        drop(receivers.stream);
+        answering.join().expect("the answering thread finished");
+    }
+
     #[test]
     fn an_event_sent_before_the_open_is_answered_follows_opened_on_the_wire() {
         let scratch = Scratch::new();
@@ -1749,7 +1848,15 @@ mod tests {
                 reply.send(Ok(())).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -1925,7 +2032,14 @@ mod tests {
                     closes.send(()).expect("close");
                     return false;
                 }
-                other => panic!("unexpected request: {other:?}"),
+                other @ (SurfaceRequest::Capabilities { .. }
+                | SurfaceRequest::Update { .. }
+                | SurfaceRequest::Focus { .. }
+                | SurfaceRequest::Closed { .. }
+                | SurfaceRequest::FocusPane { .. }
+                | SurfaceRequest::Grid { .. }
+                | SurfaceRequest::List { .. }
+                | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected request: {other:?}"),
             }
             true
         });
@@ -2030,7 +2144,15 @@ mod tests {
                 reply.send(Err(Refusal::PositionOccupied)).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -2064,10 +2186,10 @@ mod tests {
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
 
         let open = seen_rx.recv().expect("open");
-        let id = match &open {
-            SurfaceRequest::Open { id, .. } => *id,
-            other => panic!("unexpected {other:?}"),
+        let SurfaceRequest::Open { id, .. } = &open else {
+            panic!("unexpected {open:?}");
         };
+        let id = *id;
         // Losing the reply after claiming is still Applying, never abandonment.
         drop(open);
 
@@ -2083,7 +2205,15 @@ mod tests {
                 assert_eq!(closed_id, id);
                 assert_eq!(pane, PaneId(1));
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         }
     }
 
@@ -2096,7 +2226,15 @@ mod tests {
                 reply.send(Err(Refusal::PositionOccupied)).expect("reply");
                 true
             }
-            _ => true,
+            SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. } => true,
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -2151,7 +2289,14 @@ mod tests {
                 reply.send(Err(Refusal::UnknownPane)).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -2269,7 +2414,13 @@ mod tests {
                 true
             }
             SurfaceRequest::Closed { .. } => false,
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("write");
@@ -2314,7 +2465,13 @@ mod tests {
                 true
             }
             SurfaceRequest::Closed { .. } => false,
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("write");
@@ -2357,7 +2514,15 @@ mod tests {
                 reply.send(answer).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(
@@ -2422,7 +2587,14 @@ mod tests {
                 seen.send("close").unwrap();
                 false
             }
-            other => panic!("unexpected frame dispatch: {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => {
+                panic!("unexpected frame dispatch: {other:?}")
+            }
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).unwrap();
@@ -2432,10 +2604,19 @@ mod tests {
             frame.resize(MAX_MESSAGE_BYTES as usize, b' ');
             frame.extend_from_slice(b"{\"type\":\"close\"}\n");
         }
-        let _ = stream.write_all(&frame);
-        stream.shutdown(Shutdown::Write).unwrap();
+        stream.write_all(&frame).ok();
+        // The window closes an oversized connection on its own, so the peer may already be gone.
+        if let Err(error) = stream.shutdown(Shutdown::Write) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotConnected,
+                "shutdown: {error}"
+            );
+        }
         assert_eq!(
-            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            received
+                .recv_timeout(crate::test_blocking_wait::watchdog())
+                .unwrap(),
             "closed"
         );
         window.join().unwrap();

@@ -1,5 +1,10 @@
 //! Terminal Session lifecycle: real PTY spawn, child exit, launch failure, and
 //! shutdown. Every assertion goes through the public interface.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
@@ -35,7 +40,18 @@ fn child_exit_is_reported() {
             assert_eq!(exit.signal, None, "a plain exit invents no signal");
             assert!(!exit.requested, "the application did not request this exit");
         }
-        other => panic!("expected Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected Exited, got {other:?}"),
     }
 }
 
@@ -57,7 +73,18 @@ fn missing_executable_reports_spawn_error() {
                 "a launch failure explains itself: {error:?}"
             );
         }
-        other => panic!("expected Error, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::Exited(_)
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)) => panic!("expected Error, got {other:?}"),
     }
 
     let handle = session
@@ -296,10 +323,10 @@ fn dropping_after_a_shutdown_request_finishes_quickly() {
         handle.wait().expect("the worker terminates cleanly");
     }
     assert!(
-        started.elapsed() < support::WATCHDOG,
+        started.elapsed() < support::watchdog(),
         "shutdown took {:?}, over the {:?} budget",
         started.elapsed(),
-        support::WATCHDOG
+        support::watchdog()
     );
 }
 
@@ -353,7 +380,18 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
     // requested so its signal is never read as an unexpected child failure.
     match events.next() {
         TerminalEvent::Exited(exit) => assert!(exit.requested),
-        other => panic!("expected Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected Exited, got {other:?}"),
     }
 }
 
@@ -380,11 +418,12 @@ fn retained_descendant_exits(writes: bool) {
     impl Drop for Descendant {
         fn drop(&mut self) {
             if let Ok(pid) = std::fs::read_to_string(&self.0) {
-                let _ = std::process::Command::new("kill")
+                std::process::Command::new("kill")
                     .args(["-KILL", pid.trim()])
-                    .status();
+                    .status()
+                    .ok();
             }
-            let _ = std::fs::remove_file(&self.0);
+            std::fs::remove_file(&self.0).ok();
         }
     }
     let _descendant = Descendant(pid_file.clone());
@@ -434,7 +473,18 @@ os._exit(7)
             assert_eq!(exit.code, Some(7));
             assert!(!exit.requested);
         }
-        other => panic!("expected natural Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
 }
 
@@ -461,16 +511,27 @@ os._exit(7)
         while let Ok(bundle) = snapshots.next_blocking() {
             final_snapshot = Some(bundle);
         }
-        let _ = final_tx.send(final_snapshot);
+        final_tx.send(final_snapshot).ok();
     });
     let events = EventPump::new(events);
     events.expect_ready();
     match events.next() {
         TerminalEvent::Exited(exit) => assert_eq!(exit.code, Some(7)),
-        other => panic!("expected natural Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
     let final_snapshot = final_rx
-        .recv_timeout(support::WATCHDOG)
+        .recv_timeout(support::watchdog())
         .expect("snapshot stream closes after exit")
         .expect("exit published a snapshot");
     let text = support::pane_text(&final_snapshot);
@@ -496,12 +557,13 @@ fn an_ended_session_releases_the_terminal_to_a_lingering_descendant() {
     impl Drop for Descendant {
         fn drop(&mut self) {
             if let Ok(pid) = std::fs::read_to_string(&self.0) {
-                let _ = std::process::Command::new("kill")
+                std::process::Command::new("kill")
                     .args(["-KILL", pid.trim()])
-                    .status();
+                    .status()
+                    .ok();
             }
-            let _ = std::fs::remove_file(&self.0);
-            let _ = std::fs::remove_file(&self.1);
+            std::fs::remove_file(&self.0).ok();
+            std::fs::remove_file(&self.1).ok();
         }
     }
     let _descendant = Descendant(pid_file.clone(), hung_up.clone());
@@ -547,15 +609,21 @@ os._exit(0)
     events.expect_ready();
     match events.next() {
         TerminalEvent::Exited(exit) => assert!(!exit.requested),
-        other => panic!("expected natural Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
     // `_session` is still alive here, as the application keeps an ended pane.
-    let deadline = std::time::Instant::now() + support::WATCHDOG;
-    while !hung_up.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the descendant still holds an open terminal after the session ended"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    support::wait_until("the descendant to release the terminal", || {
+        hung_up.exists().then_some(())
+    });
 }

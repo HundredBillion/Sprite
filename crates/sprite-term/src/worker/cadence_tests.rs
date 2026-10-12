@@ -30,13 +30,17 @@ pub(super) struct Metrics {
 }
 
 pub(super) fn metrics_for(config: &SessionConfig) -> Option<Arc<Metrics>> {
-    let active = ACTIVE.lock().unwrap();
-    let (key, metrics) = active.as_ref()?;
-    config
-        .environment
-        .iter()
-        .any(|(name, value)| name == METRICS_KEY && value == key.as_str())
-        .then(|| Arc::clone(metrics))
+    ACTIVE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(key, _)| {
+            config
+                .environment
+                .iter()
+                .any(|(name, value)| name == METRICS_KEY && value == key.as_str())
+        })
+        .map(|(_, metrics)| Arc::clone(metrics))
 }
 
 impl Metrics {
@@ -72,6 +76,10 @@ pub(super) struct Capture<'a> {
     cpu_started: u64,
 }
 
+#[allow(
+    unsafe_code,
+    reason = "reads the thread CPU clock; the out-param is a plain C struct"
+)]
 fn thread_cpu_ns() -> u64 {
     let mut time = nix::libc::timespec {
         tv_sec: 0,
@@ -101,7 +109,7 @@ struct FixtureFiles(PathBuf);
 impl Drop for FixtureFiles {
     fn drop(&mut self) {
         *ACTIVE.lock().unwrap() = None;
-        let _ = std::fs::remove_dir_all(&self.0);
+        std::fs::remove_dir_all(&self.0).ok();
     }
 }
 
@@ -210,7 +218,16 @@ fn sample(mode: Consumer, cols: u16, rows: u16, payload_bytes: usize, ordinal: u
                 TerminalEvent::Ready => ready = true,
                 TerminalEvent::Exited(_) => exited = true,
                 TerminalEvent::Error(error) => panic!("session error: {error}"),
-                _ => {}
+                TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::History { .. }
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::Graphics(_)
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::Hyperlink { .. }
+                | TerminalEvent::ClipboardWrite(_) => {}
             }
         }
         event_tx.send((ready, exited)).unwrap();

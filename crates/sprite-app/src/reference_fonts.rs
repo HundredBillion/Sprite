@@ -1,11 +1,13 @@
 #[cfg(target_os = "linux")]
 pub fn install(cx: &mut gpui::App) {
-    cx.text_system()
-        .add_fonts(vec![
-            std::borrow::Cow::Borrowed(REGULAR),
-            std::borrow::Cow::Borrowed(BOLD),
-        ])
-        .expect("load bundled Adwaita Sans faces");
+    // A refusal costs only the reference faces; the system's own fonts still
+    // draw the window, so say so and carry on.
+    if let Err(error) = cx.text_system().add_fonts(vec![
+        std::borrow::Cow::Borrowed(REGULAR),
+        std::borrow::Cow::Borrowed(BOLD),
+    ]) {
+        eprintln!("sprite: reference fonts not installed: {error}");
+    }
 }
 
 #[cfg(target_os = "linux")]

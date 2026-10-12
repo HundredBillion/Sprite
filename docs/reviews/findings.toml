@@ -1,0 +1,580 @@
+# Every reviewed finding, open or closed. This file is the definition of
+# "closed": scripts/check_findings.py requires a resolved finding to name the
+# test that guards it and an open or deferred finding to name its GitHub
+# issue, and refuses any SPR/BCA/GAP-C ID that appears under docs/ without an
+# entry here. The audit documents under docs/reviews keep the narrative;
+# status lives only here.
+#
+# Fields: id, title, status (open | resolved | deferred | wontfix), source;
+# test + fixed_by when resolved; issue when open or deferred; reason when
+# wontfix. `test` is a Rust fn under crates/ or a Python test under scripts/.
+
+# ---- 2026-10-06 whole-repository audit (PR #53) ----------------------------
+
+[[finding]]
+id = "SPR-001"
+title = "Natural exit waits forever while a descendant holds the PTY"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "natural_exit_finishes_when_a_descendant_retains_the_pty"
+
+[[finding]]
+id = "SPR-002"
+title = "An accepted paste from history does not return to live output"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "accepted_paste_returns_to_live_output"
+
+[[finding]]
+id = "SPR-003"
+title = "Endpoint close hangs after the socket path is unlinked"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "closing_after_unlink_cancels_the_listener_and_authenticated_client"
+
+[[finding]]
+id = "SPR-004"
+title = "Oversized or partial Surface stream lines dispatch requests"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "an_oversized_stream_line_cannot_dispatch_its_prefix_or_suffix"
+
+[[finding]]
+id = "SPR-005"
+title = "A tiny SVG can request a multi-gigabyte raster"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "svg_raster_refuses_oversized_dimensions_and_bytes"
+
+[[finding]]
+id = "SPR-006"
+title = "An element Surface update to a grid root blanks the Surface"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "element_update_refuses_grid_and_preserves_text"
+
+[[finding]]
+id = "SPR-007"
+title = "Quitting before pane cleanup completes leaks children"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "last_pane_waits_for_prior_and_final_cleanup_before_quit"
+
+[[finding]]
+id = "SPR-008"
+title = "Image id u32::MAX collides with the eviction sentinel"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "maximum_image_id_is_evictable"
+
+[[finding]]
+id = "SPR-009"
+title = "Raising the texture budget while the child is quiet loses images"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "texture_budget_growth_restores_a_quiet_terminal_image"
+
+[[finding]]
+id = "SPR-010"
+title = "`sprite -e` child inherits the caller's TERM and terminfo"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "explicit_application_command_receives_sprite_terminal_identity"
+
+[[finding]]
+id = "SPR-011"
+title = "Fresh local Arch package preparation lacks ghostty.terminfo"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "test_fresh_local_recipe_prepares_terminfo_before_packaging"
+
+[[finding]]
+id = "SPR-012"
+title = "Local package version drifts from the workspace"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "test_local_recipe_version_follows_workspace_for_makepkg_and_update"
+
+[[finding]]
+id = "SPR-013"
+title = "Release preparation leaves mixed versions on a write failure"
+status = "resolved"
+source = "docs/reviews/sprite-bug-audit.md"
+fixed_by = "#53"
+test = "test_filesystem_failure_never_leaves_mixed_release_versions"
+
+# ---- 2026-10-06 remaining-gap review (PR #54) -------------------------------
+
+[[finding]]
+id = "SPR-014"
+title = "macOS update deletes the installed app before the copy succeeds"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "test_failed_replacement_restores_working_bundle_and_cli"
+
+[[finding]]
+id = "SPR-015"
+title = "Nested Fish inherits the parent's integration marker and installs no hooks"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "test_nested_fish_installs_its_own_prompt_hooks"
+
+[[finding]]
+id = "SPR-016"
+title = "The Zsh prompt hook assigns the read-only `status` parameter"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "test_zsh_prompt_preserves_exit_code_and_emits_completion"
+
+[[finding]]
+id = "SPR-017"
+title = "IME marked and selected ranges use byte lengths, not UTF-16 units"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "native_ime_ranges_use_utf16"
+
+[[finding]]
+id = "SPR-018"
+title = "The close confirmation banner shifts pane geometry under cached dividers"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates"
+
+[[finding]]
+id = "SPR-019"
+title = "A Wayland commit without preedit is dropped"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "native_commit_without_preedit_reaches_actual_pty"
+
+[[finding]]
+id = "SPR-020"
+title = "Terminal mouse reporting omits middle and right buttons and Alt/Control"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "pointer_events_preserve_buttons_modifiers_and_buttonless_motion"
+
+[[finding]]
+id = "SPR-021"
+title = "Explicit shutdown misses ordinary job-control groups"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "shutdown_owns_ordinary_job_groups_and_excludes_detached_sessions"
+
+[[finding]]
+id = "SPR-022"
+title = "The tmux graphics fixture breaks on a TMPDIR containing spaces"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "an_image_survives_tmux_with_shell_metacharacters_in_fixture_paths"
+
+[[finding]]
+id = "SPR-023"
+title = "Blocking UI command submission deadlocks with event backpressure"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#54"
+test = "settings_callback_recovers_latest_values_after_real_event_pressure"
+
+# ---- 2026-10-09 bug-class audit (PR #58) ------------------------------------
+
+[[finding]]
+id = "BCA-01"
+title = "No production code sends Focus, so OSC 52 is always denied and focus reports never reach programs"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "pane_focus_follows_the_keyboard_and_the_window_and_reaches_the_child"
+
+[[finding]]
+id = "BCA-02"
+title = "Holding the close key answers its own confirmation through auto-repeat"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_held_close_key_cannot_answer_its_own_question"
+
+[[finding]]
+id = "BCA-03"
+title = "A highlight relink scans every stored name"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_relink_touches_one_stored_entry_however_many_the_grid_holds"
+
+[[finding]]
+id = "BCA-04"
+title = "Every visible cell is shaped on every frame"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "shaping_happens_only_for_cells_whose_drawn_text_changed"
+
+[[finding]]
+id = "BCA-05"
+title = "A held unsafe paste never expires and resends the old text"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_confirming_paste_rereads_the_clipboard"
+
+[[finding]]
+id = "BCA-06"
+title = "History answers are delivered by arrival order, and any error fails the oldest waiter"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "an_unrelated_error_neither_fails_nor_shifts_waiting_history_requests"
+
+[[finding]]
+id = "BCA-07"
+title = "Grayscale Kitty PNGs are rejected"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "every_colour_type_and_bit_depth_decodes_to_rgba8"
+
+[[finding]]
+id = "BCA-08"
+title = "A relayed request times out as 'nothing was changed' and is applied later anyway"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_reload_the_endpoint_gave_up_on_is_never_applied"
+
+[[finding]]
+id = "BCA-09"
+title = "Surface event writes block the GPUI thread"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "sends_to_a_peer_that_never_reads_return_at_once_then_the_connection_closes"
+
+[[finding]]
+id = "BCA-10"
+title = "Element Surface images are decoded again on every update"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "an_update_keeps_the_decode_of_an_unchanged_svg_and_decodes_a_changed_one_once"
+
+[[finding]]
+id = "BCA-11"
+title = "Panes register with observation only while an endpoint exists"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "panes_opened_while_observation_was_off_are_observable_once_reload_turns_it_on"
+
+[[finding]]
+id = "BCA-12"
+title = "Faint (SGR 2) text is recorded but never drawn"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "faint_text_draws_its_glyph_at_half_alpha_over_an_opaque_ground"
+
+[[finding]]
+id = "BCA-13"
+title = "A cursor on a wide character's tail column disappears"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_cursor_on_a_wide_tail_reports_the_lead_column"
+
+[[finding]]
+id = "BCA-14"
+title = "A hovered link is re-requested on every snapshot"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "hover_link_requests_and_repaints_follow_only_real_changes"
+
+[[finding]]
+id = "BCA-15"
+title = "The local-socket accept loop ends on a single accept error"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "running_out_of_descriptors_rests_the_listener_instead_of_ending_it"
+
+[[finding]]
+id = "BCA-16"
+title = "Each queued output chunk produces its own snapshot"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "sixteen_queued_chunks_produce_one_snapshot"
+
+[[finding]]
+id = "BCA-17"
+title = "Virtual-list rows are keyed by index, so a press and its release can hit different rows"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_row_inserted_above_between_press_and_release_does_not_take_the_click"
+
+[[finding]]
+id = "BCA-18"
+title = "Every active_guides patch rescans all rows"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "active_guides_are_checked_against_ids_gathered_once_per_rows"
+
+[[finding]]
+id = "BCA-19"
+title = "A config reload resets font zoom"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_colour_only_reload_keeps_the_zoom_and_reports_only_colours"
+
+[[finding]]
+id = "BCA-20"
+title = "An unreadable explicit --config silently uses defaults"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "an_explicit_file_that_cannot_be_read_is_said_in_the_words_reload_uses"
+
+[[finding]]
+id = "BCA-21"
+title = "Splits smaller than twice the floor cannot move"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_drag_moves_a_split_smaller_than_two_floors"
+
+[[finding]]
+id = "BCA-22"
+title = "The input backlog equals the paste limit, so a near-limit paste always fails"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_bracketed_paste_of_the_largest_allowed_text_is_accepted"
+
+[[finding]]
+id = "BCA-23"
+title = "Title and directory events are not coalesced within a batch"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_pass_of_title_changes_yields_one_event_with_the_latest_title"
+
+[[finding]]
+id = "BCA-24"
+title = "ForegroundWatch keeps a duplicate PTY master open after the session ends"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "an_ended_session_releases_the_terminal_to_a_lingering_descendant"
+
+[[finding]]
+id = "BCA-25"
+title = "The PNG scratch buffer grows to the largest image and never shrinks"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "no_pixels_outlive_the_decode_that_produced_them"
+
+[[finding]]
+id = "BCA-26"
+title = "The selection anchor drifts while output scrolls"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_gesture_anchor_follows_its_content_while_output_scrolls"
+
+[[finding]]
+id = "BCA-27"
+title = "On Darwin a member dying mid-scan aborts the scan, yet escalation advances"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "escalation_advances_only_past_a_signal_that_was_attempted"
+
+[[finding]]
+id = "BCA-28"
+title = "Selected hidden text shows no highlight"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_selected_hidden_cell_shows_the_selection_and_still_hides_its_glyph"
+
+[[finding]]
+id = "BCA-29"
+title = "Box drawing allocates a Vec per cell"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "drawing_box_characters_allocates_nothing"
+
+[[finding]]
+id = "BCA-30"
+title = "Kitty placeholder tiles are fractionally positioned and can seam"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "placeholder_tiles_snap_to_the_cell_grid_and_share_one_image_origin"
+
+[[finding]]
+id = "BCA-31"
+title = "Holding the split key makes many splits"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "a_held_binding_acts_once_unless_it_is_movement"
+
+[[finding]]
+id = "BCA-32"
+title = "Pane cleanup blocks a shared background-executor thread"
+status = "resolved"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+fixed_by = "#58"
+test = "pane_cleanups_run_together_on_their_own_named_threads"
+
+# ---- Unconfirmed candidates and known gaps ----------------------------------
+# issue = 0 marks an issue not yet filed; the checker fails until it is.
+
+[[finding]]
+id = "GAP-C01"
+title = "Dock or system termination may bypass the window cleanup gate"
+status = "open"
+source = "docs/reviews/sprite-gap-audit.md"
+issue = 61
+
+[[finding]]
+id = "GAP-C02"
+title = "A nested Sprite with endpoints disabled inherits the parent's endpoint variables"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#76"
+test = "inherited_sprite_endpoint_variables_are_removed"
+
+[[finding]]
+id = "GAP-C03"
+title = "Small SVG filter documents cost seconds of synchronous decoder work on the UI thread"
+status = "open"
+source = "docs/reviews/sprite-gap-audit.md"
+issue = 63
+
+[[finding]]
+id = "GAP-C04"
+title = "The distribution PKGBUILD labels a fixed version but fetches unpinned git HEAD"
+status = "open"
+source = "docs/reviews/sprite-gap-audit.md"
+issue = 64
+
+[[finding]]
+id = "GAP-C05"
+title = "When the child-waiter thread cannot be spawned, the launched child is dropped unkilled and unreaped"
+status = "resolved"
+source = "docs/reviews/sprite-gap-audit.md"
+fixed_by = "#76"
+test = "a_failed_start_up_step_discards_the_child"
+
+[[finding]]
+id = "GAP-C06"
+title = "BCA-26's zero-scrollback anchor drift is reachable: ScrollbackBytes accepts 0"
+status = "open"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+issue = 66
+
+[[finding]]
+id = "GAP-C07"
+title = "A slowly draining Surface writer keeps one of the 64 connection slots"
+status = "deferred"
+source = "docs/reviews/pr-58-follow-up.md"
+issue = 67
+
+[[finding]]
+id = "GAP-C08"
+title = "Placeholder tiles snap against the previous frame's origin"
+status = "open"
+source = "docs/reviews/pr-58-follow-up.md"
+issue = 68
+
+[[finding]]
+id = "GAP-C09"
+title = "A relayed request refused at admission is reported as 'did not answer in time'; ADR 0018 still describes a blocking enqueue"
+status = "resolved"
+source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
+fixed_by = "#76"
+test = "a_refused_admission_says_the_window_is_busy_not_that_it_did_not_answer"
+
+[[finding]]
+id = "GAP-C10"
+title = "Arch CI fails intermittently on timing-sensitive tests"
+status = "open"
+source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
+issue = 57
+
+[[finding]]
+id = "GAP-C11"
+title = "A keystroke can be refused while a program floods output"
+status = "resolved"
+source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
+fixed_by = "#76"
+test = "input_is_admitted_while_every_output_permit_is_outstanding"
+
+[[finding]]
+id = "GAP-C12"
+title = "One Surface streaming updates starves every other program's one-shot request"
+status = "resolved"
+source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
+fixed_by = "#76"
+test = "a_full_stream_lane_does_not_refuse_another_connections_open"
+
+[[finding]]
+id = "GAP-C13"
+title = "The Surface and observation clients time out before the window's 'still applying' answer can arrive"
+status = "resolved"
+source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
+fixed_by = "#76"
+test = [
+  "an_observation_exchange_is_bounded_by_the_client_timeout",
+  "a_surface_exchange_is_bounded_by_the_client_timeout",
+]
+
+[[finding]]
+id = "GAP-C14"
+title = "Cached GPUI views per pane"
+status = "deferred"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+issue = 73
+
+[[finding]]
+id = "GAP-C15"
+title = "Divider-drag per-move layout work"
+status = "deferred"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+issue = 74
+
+[[finding]]
+id = "GAP-C16"
+title = "Kitty Unicode-placeholder implicit row and column inheritance"
+status = "deferred"
+source = "docs/PRDs/10-09-2026-bug-class-audit.md"
+issue = 75

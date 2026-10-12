@@ -28,10 +28,10 @@ pub(crate) fn run_child_test(name: &str, env: &[(&str, &OsStr)], what: &str) {
     // Waited on its own thread, so both pipes are drained while it runs.
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = done.send(child.wait_with_output());
+        done.send(child.wait_with_output()).ok();
     });
     let Ok(output) = finished.recv_timeout(CHILD_DEADLINE) else {
-        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL).ok();
         panic!("{what} stalled");
     };
     let output = output.unwrap();

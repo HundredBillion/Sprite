@@ -1,7 +1,13 @@
-/// Ordered command/output queue depth. Sixteen slots are available to PTY
-/// output permits; the seventeenth is reserved so application and lifecycle
-/// work is never starved by a saturated output stream.
+/// Ordered output/report queue depth. Sixteen slots are available to PTY
+/// output permits; the seventeenth is reserved so wakes and lifecycle work
+/// are never starved by a saturated output stream. Commands wait on the
+/// control lane instead.
 pub(crate) const WORKER_QUEUE_CAPACITY: usize = 17;
+
+/// Commands and history requests wait here, apart from output, so a flood
+/// of output never refuses a keystroke. Sixty-four is a wedged worker's
+/// worth of typing, not a flood's.
+pub const CONTROL_CAPACITY: usize = 64;
 
 use crate::command::MAX_INPUT_BYTES;
 use crate::{
@@ -64,11 +70,54 @@ impl SnapshotStream {
     }
 
     fn ended(_: async_channel::RecvError) -> SessionError {
-        SessionError::new("snapshot_stream", "the terminal session ended")
+        SessionError::ended("snapshot_stream", "the terminal session ended")
     }
 }
 
-/// Ownership of the worker thread, handed over exactly once.
+/// What became of a command offered without waiting.
+#[must_use = "a saturated or closed admission hands the command back"]
+#[derive(Debug)]
+pub enum Admitted<T> {
+    /// Queued for the worker.
+    Accepted,
+    /// The control lane is full: the worker is wedged or far behind. The
+    /// command is handed back for the caller to keep or drop.
+    Saturated(T),
+    /// The worker is gone; nothing will ever take the command. Handed back.
+    Closed(T),
+}
+
+impl<T> Admitted<T> {
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+}
+
+/// Offers one command to the control lane, then knocks on the inbox so an
+/// idle worker wakes. A full inbox means the worker is busy and reaches the
+/// control lane after its current message, so a failed knock is not an error.
+fn admit(
+    control: &SyncSender<worker::Message>,
+    inbox: &SyncSender<worker::Message>,
+    command: TerminalCommand,
+) -> Admitted<TerminalCommand> {
+    match control.try_send(worker::Message::Command(command)) {
+        Ok(()) => {
+            knock(inbox);
+            Admitted::Accepted
+        }
+        Err(TrySendError::Full(message)) => Admitted::Saturated(message.into_command()),
+        Err(TrySendError::Disconnected(message)) => Admitted::Closed(message.into_command()),
+    }
+}
+
+/// Wakes a worker that may be blocked on an empty inbox.
+fn knock(inbox: &SyncSender<worker::Message>) {
+    match inbox.try_send(worker::Message::Wake) {
+        Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
 /// Sends commands to one session's worker from any thread.
 ///
 /// Cloneable and `Send`, and deliberately write-only in the narrow sense that
@@ -76,35 +125,33 @@ impl SnapshotStream {
 /// session's event stream, which has exactly one consumer.
 #[derive(Clone)]
 pub struct CommandSender {
-    commands: SyncSender<worker::Message>,
+    control: SyncSender<worker::Message>,
+    inbox: SyncSender<worker::Message>,
     shutdown: Arc<AtomicBool>,
 }
 
 impl CommandSender {
-    /// Submits a command, waiting for queue space on the calling thread.
+    /// Submits a command, waiting for lane space on the calling thread.
     pub fn send(&self, command: TerminalCommand) -> Result<(), SessionError> {
         self.validate(&command)?;
-        self.commands
+        self.control
             .send(worker::Message::Command(command))
-            .map_err(|_| SessionError::new("send", "the terminal worker ended"))
+            .map_err(|_| SessionError::ended("send", "the terminal worker ended"))?;
+        knock(&self.inbox);
+        Ok(())
     }
 
-    /// Submits without waiting; saturation is an explicit refusal.
-    pub fn try_send(&self, command: TerminalCommand) -> Result<(), SessionError> {
+    /// Offers a command without waiting. `Err` is a refusal of the command
+    /// itself; a full or closed lane hands the command back instead.
+    pub fn try_admit(
+        &self,
+        command: TerminalCommand,
+    ) -> Result<Admitted<TerminalCommand>, SessionError> {
         self.validate(&command)?;
-        match self.commands.try_send(worker::Message::Command(command)) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(SessionError::new(
-                "send",
-                "the terminal command queue is full",
-            )),
-            Err(TrySendError::Disconnected(_)) => {
-                Err(SessionError::new("send", "the terminal worker ended"))
-            }
-        }
+        Ok(admit(&self.control, &self.inbox, command))
     }
 
-    /// Requests history without waiting for queue space; answers retain `ticket`.
+    /// Requests history without waiting for lane space; answers retain `ticket`.
     pub fn request_history(
         &self,
         ticket: crate::Ticket,
@@ -115,18 +162,21 @@ impl CommandSender {
         let request = HistoryRequest {
             cancelled: Arc::clone(&cancelled),
         };
-        match self.commands.try_send(worker::Message::HistoryRequest {
+        match self.control.try_send(worker::Message::HistoryRequest {
             ticket,
             lines,
             cancelled,
         }) {
-            Ok(()) => Ok(request),
-            Err(TrySendError::Full(_)) => Err(SessionError::new(
+            Ok(()) => {
+                knock(&self.inbox);
+                Ok(request)
+            }
+            Err(TrySendError::Full(_)) => Err(SessionError::transient(
                 "send",
                 "the terminal command queue is full",
             )),
             Err(TrySendError::Disconnected(_)) => {
-                Err(SessionError::new("send", "the terminal worker ended"))
+                Err(SessionError::ended("send", "the terminal worker ended"))
             }
         }
     }
@@ -134,7 +184,7 @@ impl CommandSender {
     fn validate(&self, command: &TerminalCommand) -> Result<(), SessionError> {
         validate(command)?;
         if self.shutdown.load(Ordering::SeqCst) {
-            return Err(SessionError::new(
+            return Err(SessionError::ended(
                 "send",
                 "the terminal session is shutting down",
             ));
@@ -201,10 +251,24 @@ fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
                 .saturating_add(key.text.as_ref().map_or(0, String::len)),
             MAX_INPUT_BYTES,
         ),
-        _ => (0, MAX_INPUT_BYTES),
+        TerminalCommand::Wheel(_)
+        | TerminalCommand::Resize(_)
+        | TerminalCommand::Scroll(_)
+        | TerminalCommand::Select { .. }
+        | TerminalCommand::BeginSelection { .. }
+        | TerminalCommand::ClearSelection
+        | TerminalCommand::CopySelection
+        | TerminalCommand::Mouse(_)
+        | TerminalCommand::Focus(_)
+        | TerminalCommand::ResolveHyperlink { .. }
+        | TerminalCommand::Capture
+        | TerminalCommand::CaptureHistory { .. }
+        | TerminalCommand::CaptureGraphics
+        | TerminalCommand::SetColors(_)
+        | TerminalCommand::SetCursor(_) => (0, MAX_INPUT_BYTES),
     };
     if bytes > limit {
-        return Err(SessionError::new(
+        return Err(SessionError::invalid(
             "send",
             format!("input of {bytes} bytes exceeds the {limit} byte limit"),
         ));
@@ -219,7 +283,8 @@ pub struct Spawned {
 }
 
 pub struct TerminalSession {
-    commands: SyncSender<worker::Message>,
+    control: SyncSender<worker::Message>,
+    inbox: SyncSender<worker::Message>,
     shutdown: Arc<AtomicBool>,
     /// Answers "what is running in this pane" without a round-trip.
     foreground: Arc<ForegroundWatch>,
@@ -231,7 +296,8 @@ impl TerminalSession {
     /// Starts the worker. Returns once the worker is running; `Ready` means the
     /// PTY, child, and terminal are live.
     pub fn spawn(config: SessionConfig) -> Result<Spawned, SessionError> {
-        let (commands, command_rx) = mpsc::sync_channel(WORKER_QUEUE_CAPACITY);
+        let (inbox, inbox_rx) = mpsc::sync_channel(WORKER_QUEUE_CAPACITY);
+        let (control, control_rx) = mpsc::sync_channel(CONTROL_CAPACITY);
         let (event_tx, event_rx) = crate::event_mailbox::bounded(EVENT_CAPACITY);
         let event_cancel = Arc::clone(&event_tx);
         let (snapshot_tx, snapshot_rx) = async_channel::bounded(SNAPSHOT_CAPACITY);
@@ -242,13 +308,14 @@ impl TerminalSession {
             .name("sprite-term-worker".to_owned())
             .spawn({
                 let shutdown = Arc::clone(&shutdown);
-                let commands = commands.clone();
+                let commands = inbox.clone();
                 let foreground = Arc::clone(&foreground);
                 move || {
                     worker::run(
                         config,
                         commands,
-                        command_rx,
+                        inbox_rx,
+                        control_rx,
                         event_tx,
                         snapshot_tx,
                         shutdown,
@@ -258,10 +325,11 @@ impl TerminalSession {
             })
             .map_err(|error| SessionError::new("spawn_worker", error))?;
 
-        let requests = commands.clone();
+        let requests = inbox.clone();
         Ok(Spawned {
             session: Self {
-                commands,
+                control,
+                inbox,
                 shutdown,
                 foreground,
                 worker: Some(worker),
@@ -296,7 +364,8 @@ impl TerminalSession {
     /// back through this handle.
     pub fn commands(&self) -> CommandSender {
         CommandSender {
-            commands: self.commands.clone(),
+            control: self.control.clone(),
+            inbox: self.inbox.clone(),
             shutdown: Arc::clone(&self.shutdown),
         }
     }
@@ -305,9 +374,12 @@ impl TerminalSession {
         self.commands().send(command)
     }
 
-    /// Submits without waiting for a queue slot, suitable for the UI thread.
-    pub fn try_send(&mut self, command: TerminalCommand) -> Result<(), SessionError> {
-        self.commands().try_send(command)
+    /// Offers a command without waiting, suitable for the UI thread.
+    pub fn try_admit(
+        &mut self,
+        command: TerminalCommand,
+    ) -> Result<Admitted<TerminalCommand>, SessionError> {
+        self.commands().try_admit(command)
     }
 
     /// Idempotent and non-blocking. The first call hands over the worker; later
@@ -326,7 +398,7 @@ impl TerminalSession {
     fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         self.events.cancel();
-        match self.commands.try_send(worker::Message::Shutdown) {
+        match self.inbox.try_send(worker::Message::Shutdown) {
             Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }
     }
@@ -350,12 +422,13 @@ mod history_cancellation_tests {
         let (reached, counts) = mpsc::channel();
         let (resume, release) = mpsc::channel();
         sender
-            .commands
+            .control
             .send(worker::Message::HistoryGate {
                 reached,
                 resume: release,
             })
             .unwrap();
+        knock(&sender.inbox);
         (counts, resume)
     }
 
@@ -373,8 +446,10 @@ mod history_cancellation_tests {
         let commands = spawned.session.commands();
         let (held, release) = gate(&commands);
         assert_eq!(held.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        // On the control lane, so it stays ahead of the history requests
+        // behind it: output on the inbox would be overtaken by them.
         commands
-            .commands
+            .control
             .send(worker::Message::PtyOutput(
                 crate::pty_unix::OutputChunk::detached(b"history-marker"),
             ))
@@ -421,32 +496,30 @@ mod history_cancellation_tests {
 
     #[test]
     fn history_refusal_and_cancellation_do_not_need_queue_space() {
-        let (commands, inbox) = mpsc::sync_channel(1);
+        let (control, lane) = mpsc::sync_channel(1);
+        let (inbox, _knocks) = mpsc::sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let sender = CommandSender {
-            commands,
+            control,
+            inbox,
             shutdown: Arc::clone(&shutdown),
         };
         let handle = sender
             .request_history(Ticket::new(1), HistoryLines::default())
             .unwrap();
         let state = Arc::downgrade(&handle.cancelled);
-        assert!(
-            sender
-                .request_history(Ticket::new(2), HistoryLines::default())
-                .unwrap_err()
-                .to_string()
-                .contains("queue is full")
-        );
+        let full = sender
+            .request_history(Ticket::new(2), HistoryLines::default())
+            .unwrap_err();
+        assert!(full.to_string().contains("queue is full"), "{full}");
+        assert_eq!(full.kind, crate::ErrorKind::Transient, "{full}");
         handle.cancel();
         drop(handle);
-        let message = inbox.try_recv().unwrap();
-        match &message {
-            worker::Message::HistoryRequest { cancelled, .. } => {
-                assert!(cancelled.load(Ordering::SeqCst))
-            }
-            _ => panic!("expected history"),
-        }
+        let message = lane.try_recv().unwrap();
+        let worker::Message::HistoryRequest { cancelled, .. } = &message else {
+            panic!("expected history");
+        };
+        assert!(cancelled.load(Ordering::SeqCst));
         drop(message);
         assert!(
             state.upgrade().is_none(),
@@ -460,9 +533,9 @@ mod history_cancellation_tests {
                 .to_string()
                 .contains("shutting down")
         );
-        assert!(inbox.try_recv().is_err());
+        assert!(lane.try_recv().is_err());
         shutdown.store(false, Ordering::SeqCst);
-        drop(inbox);
+        drop(lane);
         assert!(
             sender
                 .request_history(Ticket::new(4), HistoryLines::default())
@@ -534,12 +607,45 @@ mod history_cancellation_tests {
         let shutdown = spawned.session.begin_shutdown().unwrap().unwrap();
         let (done, result) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done.send(shutdown.wait());
+            done.send(shutdown.wait()).ok();
         });
         result
             .recv_timeout(Duration::from_secs(10))
             .unwrap()
             .unwrap();
         assert!(state.upgrade().is_none());
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_control_lane_hands_the_command_back_and_does_not_knock() {
+        let (control, _control_rx) = mpsc::sync_channel(1);
+        let (inbox, inbox_rx) = mpsc::sync_channel(1);
+        assert!(admit(&control, &inbox, TerminalCommand::Capture).is_accepted());
+        assert!(matches!(inbox_rx.try_recv(), Ok(worker::Message::Wake)));
+        let second = admit(&control, &inbox, TerminalCommand::ClearSelection);
+        assert!(matches!(
+            second,
+            Admitted::Saturated(TerminalCommand::ClearSelection)
+        ));
+        assert!(
+            inbox_rx.try_recv().is_err(),
+            "a refused command must not knock"
+        );
+    }
+
+    #[test]
+    fn a_closed_control_lane_reports_closed() {
+        let (control, control_rx) = mpsc::sync_channel::<worker::Message>(1);
+        let (inbox, _inbox_rx) = mpsc::sync_channel(1);
+        drop(control_rx);
+        assert!(matches!(
+            admit(&control, &inbox, TerminalCommand::Capture),
+            Admitted::Closed(TerminalCommand::Capture)
+        ));
     }
 }

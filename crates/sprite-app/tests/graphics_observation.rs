@@ -4,6 +4,10 @@
 //! filenames. Graphics are the first feature that could breach it by accident,
 //! so this drives a real terminal, transmits a recognisable picture, and
 //! searches the finished JSON for it.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -111,12 +115,23 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
                     break;
                 }
                 TerminalEvent::History { .. } => break,
-                _ => {}
+                TerminalEvent::Ready
+                | TerminalEvent::Exited(_)
+                | TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::Graphics(_)
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::Hyperlink { .. }
+                | TerminalEvent::ClipboardWrite(_)
+                | TerminalEvent::Error(_) => {}
             }
         }
     }
 
-    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::remove_dir_all(&directory).ok();
     (
         snapshot.expect("the pane showed an image within the watchdog"),
         payload,

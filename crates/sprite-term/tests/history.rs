@@ -1,10 +1,14 @@
 //! History extraction for observation: the active screen plus up to N lines of
 //! scrollback, answered once and never carried in the render bundle.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sprite_term::{
     HistoryLines, HistorySnapshot, ScreenKind, SessionConfig, TerminalCommand, TerminalEvent,
@@ -38,7 +42,7 @@ fn has_less() -> bool {
 /// A live shell also reports its title and working directory, so the answer is
 /// rarely the very next event.
 fn wait_for_history(events: &EventPump) -> HistorySnapshot {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::PROGRESS_CEILING;
     while Instant::now() < deadline {
         match events.next() {
             TerminalEvent::History { snapshot, .. } => return (*snapshot).clone(),
@@ -46,10 +50,22 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
                 panic!("history request failed: {error}")
             }
             TerminalEvent::Error(error) => panic!("the session reported an error: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
-    panic!("watchdog: no history answer arrived");
+    panic!(
+        "watchdog: no history answer arrived within {:?}",
+        support::PROGRESS_CEILING
+    );
 }
 
 /// One history request. These tests ask one question at a time, so every
@@ -505,7 +521,7 @@ fn every_answer_carries_the_ticket_it_was_asked_with() {
     }
 
     let mut answered = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::PROGRESS_CEILING;
     while answered.len() < 2 && Instant::now() < deadline {
         match events.next() {
             TerminalEvent::History { ticket, snapshot } => {
@@ -514,7 +530,17 @@ fn every_answer_carries_the_ticket_it_was_asked_with() {
             TerminalEvent::HistoryFailed { ticket, error } => {
                 panic!("request {} failed: {error}", ticket.get())
             }
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_)
+            | TerminalEvent::Error(_) => {}
         }
     }
     assert_eq!(

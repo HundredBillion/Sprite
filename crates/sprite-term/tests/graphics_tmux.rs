@@ -9,6 +9,10 @@
 //!
 //! Skipped with a clear message when tmux is absent, in the same shape as the
 //! Croft gate: a machine without tmux should say so rather than fail.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
@@ -130,10 +134,11 @@ fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapsho
     }
 
     // Leave no server behind on the machine running the tests.
-    let _ = std::process::Command::new(&tmux)
+    std::process::Command::new(&tmux)
         .args(["-L", &socket, "kill-server"])
-        .output();
-    let _ = std::fs::remove_dir_all(&directory);
+        .output()
+        .ok();
+    std::fs::remove_dir_all(&directory).ok();
 
     answer.expect("a graphics answer arrived")
 }

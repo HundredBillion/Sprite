@@ -25,10 +25,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use crate::pane_tree::PaneId;
 use crate::tabs::TabId;
+use crate::timeouts::SILENT_CLIENT_TIMEOUT;
 
 /// The one answer to every request that is not allowed to proceed.
 ///
@@ -39,12 +39,6 @@ pub const DENIED: &str = "denied";
 
 /// A client sending more than this before a newline is not making a request.
 const MAX_REQUEST_BYTES: u64 = 8 * 1024;
-
-/// A connected client that never speaks must not hold its own thread for long.
-///
-/// A local client connects and writes immediately, so this only ever expires
-/// for something that is not making a request.
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How many requests may be in flight at once.
 ///
@@ -57,9 +51,11 @@ pub(crate) const MAX_CONNECTIONS: usize = 16;
 pub use crate::local_socket::ObservationKey;
 #[cfg(test)]
 use crate::local_socket::bind_private;
+#[cfg(test)]
+pub(crate) use crate::local_socket::sweep_dead_sockets;
 use crate::local_socket::{Authenticated, LocalSocket, TransportPolicy};
 #[allow(unused_imports)]
-pub(crate) use crate::local_socket::{MAX_SOCKET_PATH, runtime_directory, sweep_dead_sockets};
+pub(crate) use crate::local_socket::{MAX_SOCKET_PATH, runtime_directory};
 
 /// What an authenticated caller asked for.
 ///
@@ -112,8 +108,8 @@ impl Endpoint {
             suffix: ".sock",
             max_connections: MAX_CONNECTIONS,
             max_first_line: MAX_REQUEST_BYTES as usize,
-            handshake_timeout: CLIENT_TIMEOUT,
-            write_timeout: CLIENT_TIMEOUT,
+            handshake_timeout: SILENT_CLIENT_TIMEOUT,
+            write_timeout: SILENT_CLIENT_TIMEOUT,
         };
         let transport = LocalSocket::open_in(
             directory,
@@ -188,13 +184,13 @@ where
         body,
         reply_connection,
     });
-    let _ = writeln!(stream, "{response}");
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    writeln!(stream, "{response}").ok();
+    stream.shutdown(std::net::Shutdown::Write).ok();
 }
 
 fn refuse(stream: &mut UnixStream) {
-    let _ = writeln!(stream, "{DENIED}");
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    writeln!(stream, "{DENIED}").ok();
+    stream.shutdown(std::net::Shutdown::Write).ok();
 }
 
 #[cfg(test)]
@@ -202,6 +198,7 @@ mod tests {
     use super::*;
     use std::io::BufWriter;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     fn assert_denied_without_dispatch(body: &str) {
         let (_scratch, endpoint, calls) = endpoint_with_spy();
@@ -214,10 +211,10 @@ mod tests {
             .unwrap();
         // Rejection can close the peer before an oversized write finishes.
         // The response and dispatch assertions below establish the outcome.
-        let _ = write!(stream, "{} {body}", endpoint.key_hex());
-        let _ = stream.shutdown(std::net::Shutdown::Write);
+        write!(stream, "{} {body}", endpoint.key_hex()).ok();
+        stream.shutdown(std::net::Shutdown::Write).ok();
         let mut answer = String::new();
-        let _ = stream.read_to_string(&mut answer);
+        stream.read_to_string(&mut answer).ok();
         assert_eq!(answer.trim(), DENIED);
         assert!(calls.0.lock().unwrap().is_empty());
     }
@@ -256,7 +253,7 @@ mod tests {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let ordinal = NEXT.fetch_add(1, Ordering::SeqCst);
             let path = std::env::temp_dir().join(scratch_name(std::process::id(), ordinal));
-            let _ = fs::remove_dir_all(&path);
+            fs::remove_dir_all(&path).ok();
             Self(path)
         }
 
@@ -267,7 +264,7 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            fs::remove_dir_all(&self.0).ok();
         }
     }
 

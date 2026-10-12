@@ -5,11 +5,15 @@
 //! transfer path is the protocol parser, the decoder, and image storage acting
 //! together. A decoder that works in isolation and never receives a byte in
 //! practice would pass a unit test and show nothing on screen.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sprite_term::{
     GraphicsPolicy, GraphicsSnapshot, SessionConfig, TerminalCommand, TerminalEvent,
@@ -23,15 +27,28 @@ fn args(values: &[&str]) -> Vec<OsString> {
 }
 
 fn wait_for_graphics(events: &EventPump) -> GraphicsSnapshot {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::PROGRESS_CEILING;
     while Instant::now() < deadline {
         match events.next() {
             TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
             TerminalEvent::Error(error) => panic!("graphics probe failed: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
-    panic!("watchdog: no graphics answer arrived");
+    panic!(
+        "watchdog: no graphics answer arrived within {:?}",
+        support::PROGRESS_CEILING
+    );
 }
 
 fn session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {

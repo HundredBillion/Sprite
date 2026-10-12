@@ -9,6 +9,13 @@ edition = "2024"
 rust-version = "1.97.1"
 license = "MIT OR Apache-2.0"
 
+[workspace.lints.clippy]
+let_underscore_must_use = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+wildcard_enum_match_arm = "deny"
+significant_drop_tightening = "deny"
+
 [workspace.dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 async-channel = "=2.5.0"

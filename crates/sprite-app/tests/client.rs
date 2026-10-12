@@ -4,7 +4,13 @@
 //! promises being checked are about a command: what reaches standard output,
 //! what reaches standard error, what the exit status is, and that it always
 //! returns. None of that is observable from inside the crate.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
+// Shared with the library's own tests; this binary uses only `pause`.
+#[allow(dead_code)]
 #[path = "../src/test_blocking_wait.rs"]
 mod test_blocking_wait;
 
@@ -79,12 +85,25 @@ fn run_with_input(arguments: &[&str], environment: &[(&str, &str)], input: &str)
 fn surface_window(
     script: impl FnMut(sprite_app::SurfaceRequest) -> bool + Send + 'static,
 ) -> (sprite_app::SurfaceEndpoint, std::thread::JoinHandle<()>) {
-    let (tx, rx) = async_channel::bounded(8);
+    let (lanes, receivers) = sprite_app::surface_lanes();
     let key = std::sync::Arc::new(sprite_app::ObservationKey::generate().expect("key"));
-    let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), key, tx).expect("endpoint");
+    let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), key, lanes).expect("endpoint");
+    // Both lanes feed the one script, whichever lane a request came by.
+    let (merged, requests) = std::sync::mpsc::channel();
+    for lane in [receivers.stream, receivers.one_shot] {
+        let merged = merged.clone();
+        std::thread::spawn(move || {
+            while let Ok(request) = lane.recv_blocking() {
+                if merged.send(request).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(merged);
     let mut script = script;
     let window = std::thread::spawn(move || {
-        while let Ok(request) = rx.recv_blocking() {
+        while let Ok(request) = requests.recv() {
             if !script(request) {
                 break;
             }
@@ -137,7 +156,12 @@ fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
         }
         sprite_app::SurfaceRequest::Focus { .. } => true,
         sprite_app::SurfaceRequest::Closed { .. } => false,
-        other => panic!("unexpected {other:?}"),
+        other @ (sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
     });
     let credentials = surface_credentials(&endpoint, "4");
     let input = format!(
@@ -167,7 +191,15 @@ fn a_refused_surface_open_reports_the_reason_and_exits_five() {
                 .expect("reply");
             false
         }
-        _ => false,
+        sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::Closed { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. } => false,
     });
     let credentials = surface_credentials(&endpoint, "4");
     let outcome = run_with_input(
@@ -192,7 +224,14 @@ fn a_malformed_later_document_closes_the_surface_and_exits_two() {
             true
         }
         sprite_app::SurfaceRequest::Closed { .. } => false,
-        other => panic!("unexpected {other:?}"),
+        other @ (sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
     });
     let credentials = surface_credentials(&endpoint, "4");
     let input = format!("{DESCRIPTION}\nthis is not json\n");
@@ -243,7 +282,15 @@ fn a_token_registration_is_acknowledged() {
             reply.send(Ok(())).expect("reply");
             false
         }
-        _ => false,
+        sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Open { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::Closed { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. } => false,
     });
     let credentials = surface_credentials(&endpoint, "4");
     let outcome = run(
@@ -406,8 +453,12 @@ fn the_request_carries_the_options_the_command_was_given() {
     );
     assert_eq!(outcome.status, 0);
 
-    let requests = seen.lock().expect("lock");
-    let request = requests.first().expect("the window was asked");
+    let request = seen
+        .lock()
+        .expect("lock")
+        .first()
+        .expect("the window was asked")
+        .clone();
     assert!(request.contains("sprite-observation/1"), "{request}");
     assert!(request.contains("--from 3"), "its own pane: {request}");
     assert!(request.contains("--window"));
@@ -548,7 +599,14 @@ fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
                 true
             }
             sprite_app::SurfaceRequest::Closed { .. } => false,
-            _ => true,
+            sprite_app::SurfaceRequest::Capabilities { .. }
+            | sprite_app::SurfaceRequest::Update { .. }
+            | sprite_app::SurfaceRequest::Focus { .. }
+            | sprite_app::SurfaceRequest::Close { .. }
+            | sprite_app::SurfaceRequest::FocusPane { .. }
+            | sprite_app::SurfaceRequest::Grid { .. }
+            | sprite_app::SurfaceRequest::List { .. }
+            | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
         });
         let environment = surface_credentials(&endpoint, "4");
         let mut child = Command::new(SPRITE)
@@ -626,7 +684,13 @@ fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
                 true
             }
             sprite_app::SurfaceRequest::Closed { .. } => false,
-            _ => true,
+            sprite_app::SurfaceRequest::Capabilities { .. }
+            | sprite_app::SurfaceRequest::Update { .. }
+            | sprite_app::SurfaceRequest::Close { .. }
+            | sprite_app::SurfaceRequest::FocusPane { .. }
+            | sprite_app::SurfaceRequest::Grid { .. }
+            | sprite_app::SurfaceRequest::List { .. }
+            | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
         });
         let environment = surface_credentials(&endpoint, "4");
         let mut child = Command::new(SPRITE)
@@ -711,7 +775,14 @@ fn surface_stdin_eof_drains_the_windows_final_event() {
             assert!(live.take().unwrap().send(r#"{"type":"closed"}"#));
             false
         }
-        _ => true,
+        sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
     });
     let environment = surface_credentials(&endpoint, "4");
     let outcome = run_with_input(

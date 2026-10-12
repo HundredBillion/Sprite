@@ -1,6 +1,10 @@
 //! Selection lives in Terminal Core because libghostty already models it over
 //! the whole screen including scrollback, and because the render iterator only
 //! reports a cell as selected when the terminal itself holds the selection.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
@@ -169,7 +173,17 @@ fn copying_returns_the_selected_text() {
                 return;
             }
             TerminalEvent::Error(error) => panic!("copy failed: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
 }
@@ -205,7 +219,17 @@ fn copying_without_a_selection_yields_nothing() {
                 return;
             }
             TerminalEvent::Error(error) => panic!("copy failed: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
 }
@@ -360,7 +384,17 @@ fn copied(events: &EventPump) -> String {
         match events.next() {
             TerminalEvent::SelectionCopied(text) => return text,
             TerminalEvent::Error(error) => panic!("selection failed: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
 }

@@ -14,6 +14,7 @@ mod grid;
 mod grid_paint;
 mod input;
 mod local_socket;
+mod locked;
 mod observation;
 #[doc(hidden)]
 pub mod paint_benchmark;
@@ -28,6 +29,7 @@ mod test_blocking_wait;
 mod test_child;
 #[cfg(test)]
 mod test_event_pressure;
+mod timeouts;
 mod tokens;
 mod workspace;
 
@@ -50,6 +52,7 @@ pub use surface::channel::{
     SurfaceEndpoint, SurfaceRequest,
 };
 pub use surface::client::{run_surface_focus, run_surface_open, run_token_register};
+pub use surface::lanes::{SurfaceLanes, SurfaceReceivers, surface_lanes};
 pub use tabs::TabId;
 pub use workspace::Workspace;
 

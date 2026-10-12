@@ -10,6 +10,10 @@
 //! the cost of a real capture belongs to `sprite-term`'s own budgets, and
 //! mixing it in would hide the broker's and the encoder's contribution behind
 //! it.
+#![expect(
+    clippy::expect_used,
+    reason = "a benchmark is a developer tool; a failed setup stops it with the cause"
+)]
 
 use std::fs;
 use std::io::{self, Write};
@@ -105,7 +109,7 @@ impl PaneSource for Panes {
         if self.stall_first && pane == PaneId(0) {
             self.held.lock().expect("lock").push(sender);
         } else {
-            let _ = sender.send(Ok(Arc::clone(&self.snapshot)));
+            sender.send(Ok(Arc::clone(&self.snapshot))).ok();
         }
         Ok(Pending {
             address,

@@ -7,7 +7,7 @@ fn within_watchdog(body: impl FnOnce() + Send + 'static) {
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         body();
-        let _ = done.send(());
+        done.send(()).ok();
     });
     match finished.recv_timeout(Duration::from_secs(20)) {
         Ok(()) => {}
@@ -28,6 +28,8 @@ fn within_watchdog(body: impl FnOnce() + Send + 'static) {
 /// snapshot slot is empty, and sees every snapshot the worker publishes.
 struct Fixture {
     commands: SyncSender<Message>,
+    /// Held so the lane stays open, as a live session's would.
+    _control: SyncSender<Message>,
     mailbox: Arc<crate::event_mailbox::Mailbox>,
     events: crate::event_mailbox::Receiver,
     snapshots: async_channel::Receiver<Arc<SnapshotBundle>>,
@@ -46,11 +48,23 @@ impl Fixture {
     }
 
     fn start_with(queued: Vec<Message>) -> Self {
+        Self::start_with_control(queued, Vec::new())
+    }
+
+    /// As `start_with`, with `control` already waiting on the control lane.
+    fn start_with_control(queued: Vec<Message>, control: Vec<Message>) -> Self {
         let (commands, inbox) = std::sync::mpsc::sync_channel(crate::WORKER_QUEUE_CAPACITY);
         for message in queued {
             assert!(
                 commands.try_send(message).is_ok(),
                 "the inbox holds every queued message"
+            );
+        }
+        let (control_tx, control_rx) = std::sync::mpsc::sync_channel(crate::CONTROL_CAPACITY);
+        for message in control {
+            assert!(
+                control_tx.try_send(message).is_ok(),
+                "the control lane holds every queued command"
             );
         }
         let (events, receiver) = crate::event_mailbox::bounded(0);
@@ -65,6 +79,7 @@ impl Fixture {
                     SessionConfig::command("/bin/sh", vec!["-c".into(), "exec sleep 30".into()]),
                     commands,
                     inbox,
+                    control_rx,
                     events,
                     published,
                     shutdown,
@@ -74,6 +89,7 @@ impl Fixture {
         });
         Self {
             commands,
+            _control: control_tx,
             mailbox,
             events: receiver,
             snapshots,
@@ -99,7 +115,7 @@ impl Fixture {
     /// point and the generation of any snapshot left unread.
     fn finish(self) -> (Vec<TerminalEvent>, Option<u64>) {
         self.shutdown.store(true, Ordering::SeqCst);
-        let _ = self.commands.send(Message::Shutdown);
+        self.commands.send(Message::Shutdown).ok();
         if let Some(processes) = self.worker.join().expect("the worker did not panic") {
             finish_shutdown(processes, std::time::Instant::now());
         }
@@ -117,10 +133,10 @@ impl Fixture {
 }
 
 fn title_of(event: TerminalEvent) -> String {
-    match event {
-        TerminalEvent::TitleChanged(Some(title)) => title,
-        other => panic!("expected a title, got {other:?}"),
-    }
+    let TerminalEvent::TitleChanged(Some(title)) = event else {
+        panic!("expected a title, got {event:?}");
+    };
+    title
 }
 
 /// Sixteen chunks already waiting are one pass: one snapshot and one title.
@@ -212,5 +228,63 @@ fn a_report_taken_into_a_refused_pass_is_still_recorded() {
                 && error.message.contains("injected read failure")),
             "the report taken into the refused pass was dropped: {failures:?}"
         );
+    });
+}
+
+/// Commands waiting on the control lane are applied before output that was
+/// queued on the inbox earlier: both when the worker picks its first message
+/// and when a pass continues. A hyperlink answer carries the generation it was
+/// resolved against, so an answer given after the output was parsed says so.
+#[test]
+fn a_queued_command_is_applied_before_output_that_arrived_first() {
+    within_watchdog(|| {
+        let output = |text: &str| {
+            Message::PtyOutput(pty_unix::OutputChunk::detached(
+                format!("{text}\r\n").as_bytes(),
+            ))
+        };
+        let resolve = |request_id| {
+            Message::Command(TerminalCommand::ResolveHyperlink {
+                position: crate::CellPosition { row: 0, column: 0 },
+                request_id,
+            })
+        };
+        let fixture = Fixture::start_with_control(
+            vec![output("first"), output("second")],
+            vec![resolve(1), resolve(2)],
+        );
+        assert!(matches!(fixture.next_event(), TerminalEvent::Ready));
+        assert_eq!(fixture.next_generation(), 0, "the frame before any output");
+        for expected in [1, 2] {
+            match fixture.next_event() {
+                TerminalEvent::Hyperlink {
+                    request_id,
+                    generation,
+                    ..
+                } => assert_eq!(
+                    (request_id, generation),
+                    (expected, 0),
+                    "a command waited behind output that was already queued"
+                ),
+                other @ (TerminalEvent::Ready
+                | TerminalEvent::Exited(_)
+                | TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::History { .. }
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::Graphics(_)
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::ClipboardWrite(_)
+                | TerminalEvent::Error(_)) => panic!("expected a hyperlink answer, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            fixture.next_generation(),
+            2,
+            "the output is parsed after the commands"
+        );
+        fixture.finish();
     });
 }

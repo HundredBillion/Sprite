@@ -1,7 +1,7 @@
 //! The audited Unix PTY I/O pump.
 //!
 //! This module owns the pump descriptor and never touches libghostty. The pump blocks in `poll` on the PTY, a wake socket and a
-//! cancellation socket, so it is always joinable even when a descendant keeps
+//! cancellation socket, so it is always joinable even when an Ordinary Session Job keeps
 //! the PTY open — no periodic wake-up, no async runtime, and no detached thread.
 //!
 //! It carries both directions. Output is read under a permit scheme rather than
@@ -9,8 +9,8 @@
 //! readability, fills that token's buffer with whatever is already waiting, and
 //! dropping the resulting chunk returns its buffer and token.
 //! At most sixteen 16 KiB chunks can therefore
-//! occupy the 17-slot worker queue, which structurally reserves the last slot
-//! for input and lifecycle work.
+//! occupy the 17-slot worker queue. The spare slot carries wakes and lifecycle
+//! reports; it is not structurally reserved for them.
 //!
 //! Input the worker queues is written here as well, only when the PTY reports
 //! room and never through a call that can block. A kernel's input queue is
@@ -19,8 +19,6 @@
 //! what happened while the worker wrote inline: it blocked on a full input
 //! queue, the child blocked on an output queue the worker was no longer
 //! draining, and the pane froze for good (ADR 0015).
-
-#![deny(unsafe_code)]
 
 mod processes;
 pub(crate) use processes::SessionProcesses;
@@ -79,6 +77,10 @@ pub(crate) struct OutputChunk {
 }
 
 impl OutputChunk {
+    #[expect(
+        clippy::expect_used,
+        reason = "a permit's buffer is taken only by its Drop"
+    )]
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.permit.buffer.as_ref().expect("live permit")[..self.len]
     }
@@ -177,7 +179,7 @@ impl InputQueue {
 /// a socket that is already full is still a poke, because the pump has not yet
 /// looked and will see everything queued when it does.
 fn poke(wake: &UnixStream) {
-    let _ = (&*wake).write(&[0]);
+    (&*wake).write_all(&[0]).ok();
 }
 
 impl Pump {
@@ -235,7 +237,7 @@ impl Pump {
                         commands: &commands,
                     });
                     // Exactly one stop report on every path.
-                    let _ = commands.send(Message::PumpStopped(outcome));
+                    commands.send(Message::PumpStopped(outcome)).ok();
                 }
             })
             .map_err(|error| SessionError::new("spawn_pty_pump", error))?;
@@ -257,7 +259,7 @@ impl Pump {
     /// The byte is never read; the pump only needs the socket to become
     /// readable, and cancellation is checked before PTY readiness.
     pub(crate) fn cancel(&self) {
-        let _ = (&self.cancel).write_all(&[0]);
+        (&self.cancel).write_all(&[0]).ok();
     }
 
     /// Cancels the pump and joins it.
@@ -268,10 +270,10 @@ impl Pump {
     /// would wait for a send that waits for the join.
     pub(crate) fn shutdown(&mut self) {
         self.cancel();
-        let _ = self.cancel.shutdown(std::net::Shutdown::Both);
+        self.cancel.shutdown(std::net::Shutdown::Both).ok();
 
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            thread.join().ok();
         }
     }
 }
@@ -294,6 +296,10 @@ struct Ends<'a> {
     commands: &'a SyncSender<Message>,
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "the pump reads only while it holds a permit, and a permit's buffer is taken only by its Drop"
+)]
 fn run(ends: Ends<'_>) -> PumpOutcome {
     let Ends {
         master,
@@ -594,7 +600,7 @@ impl From<&GroupSignal> for Signal {
 /// so this adds no dependency.
 pub(crate) fn process_name(pid: i32) -> Option<String> {
     #[cfg(target_os = "macos")]
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, reason = "libproc FFI; see the SAFETY comments")]
     {
         use nix::libc;
 
@@ -629,7 +635,7 @@ pub(crate) fn process_name(pid: i32) -> Option<String> {
 /// number is reused the moment it is free — so asking a stale number what is
 /// running on it could answer for an unrelated file. Holding a duplicate means
 /// the question is always asked of this session's terminal or of nothing.
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "adopts a descriptor dup(2) just returned")]
 pub(crate) fn duplicate(fd: RawFd) -> Option<OwnedFd> {
     let copy = fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(0)).ok()?;
     // SAFETY: F_DUPFD_CLOEXEC returns a fresh descriptor that no other owner
@@ -645,7 +651,7 @@ pub(crate) fn foreground_group(master: &OwnedFd) -> Option<i32> {
     nix::unistd::tcgetpgrp(master).ok().map(Pid::as_raw)
 }
 
-/// The process group a child belongs to, recorded so descendants that outlive
+/// The process group a child belongs to, recorded so Ordinary Session Jobs that outlive
 /// the child can still be reached.
 pub(crate) fn process_group_of(pid: u32) -> Option<i32> {
     let pid = Pid::from_raw(i32::try_from(pid).ok()?);
@@ -655,7 +661,7 @@ pub(crate) fn process_group_of(pid: u32) -> Option<i32> {
 /// Signals a whole process group. A group that is already gone counts as
 /// success: the goal is its absence, not the delivery.
 pub(crate) fn signal_group(group: i32, signal: &GroupSignal) {
-    let _ = killpg(Pid::from_raw(group), Signal::from(signal));
+    killpg(Pid::from_raw(group), Signal::from(signal)).ok();
 }
 
 pub(crate) fn group_is_alive(group: i32) -> bool {
@@ -856,7 +862,7 @@ mod tests {
                 }
             }
             drop(inbox);
-            let _ = (&cancel).write_all(&[0]);
+            (&cancel).write_all(&[0]).ok();
             delivered
         });
         let (outcome, allocations) = crate::test_allocations::measure(|| {

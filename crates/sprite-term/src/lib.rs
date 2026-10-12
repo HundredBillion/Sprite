@@ -5,6 +5,8 @@
 //! the Sprite application. No libghostty pointer, borrowed row or cell,
 //! allocator, iterator, or PTY handle appears in this crate's public interface.
 
+#![deny(unsafe_code)]
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("Sprite Terminal Core supports Linux and macOS only");
 
@@ -14,6 +16,7 @@ pub mod capture_benchmark;
 mod event_mailbox;
 mod foreground;
 mod graphics;
+mod locked;
 mod png_decoder;
 mod pty_unix;
 mod shell;

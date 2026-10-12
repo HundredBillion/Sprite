@@ -1,4 +1,8 @@
 #![cfg(target_os = "linux")]
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 mod support;
 use sprite_term::{SessionConfig, TerminalSession};
 use std::{
@@ -25,16 +29,17 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         for &(pid, birth) in &self.children {
             if identity(pid).is_some_and(|(now, _, live)| now == birth && live) {
-                let _ = nix::sys::signal::kill(
+                nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid),
                     nix::sys::signal::Signal::SIGKILL,
-                );
+                )
+                .ok();
             }
         }
         if let Some(child) = &mut self.independent {
-            let _ = child.wait();
+            child.wait().ok();
         }
-        let _ = fs::remove_dir_all(&self.path);
+        fs::remove_dir_all(&self.path).ok();
     }
 }
 #[test]
@@ -91,7 +96,7 @@ fn shutdown_ignores_denied_metadata_of_proven_foreign_process() {
     // Only this isolated test process receives the fault; other tests keep their real procfs.
     let stdout = path.join("stdout");
     let stderr = path.join("stderr");
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "shutdown_ignores_denied_metadata_of_proven_foreign_process",
@@ -103,23 +108,29 @@ fn shutdown_ignores_denied_metadata_of_proven_foreign_process() {
         .stderr(fs::File::create(&stderr).unwrap())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(12);
-    let (status, timed_out) = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break (status, false);
-        }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            break (child.wait().unwrap(), true);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let mut child = KillOnDrop(child);
+    let status = support::wait_within(
+        "the fault subprocess to exit",
+        Duration::from_secs(12),
+        || child.0.try_wait().unwrap(),
+    );
     assert!(
-        !timed_out && status.success(),
-        "fault subprocess: {status}, timed_out={timed_out}\nstdout:\n{}\nstderr:\n{}",
+        status.success(),
+        "fault subprocess: {status}\nstdout:\n{}\nstderr:\n{}",
         fs::read_to_string(stdout).unwrap(),
         fs::read_to_string(stderr).unwrap()
     );
+}
+
+/// Kills and reaps the child when dropped, so a wait that times out by
+/// panicking still does not leave the process running.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _killed = self.0.kill();
+        let _reaped = self.0.wait();
+    }
 }
 
 fn job_groups(fast: bool, late: bool) {
@@ -163,17 +174,16 @@ sleep 30
     .unwrap();
     let events = support::EventPump::new(events);
     events.expect_ready();
-    let deadline = Instant::now() + Duration::from_secs(3);
     for name in ["one", "two", "detached"] {
         let file = fixture.path.join(name);
-        while !fs::read_to_string(&file).is_ok_and(|s| !s.is_empty()) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let pid = fs::read_to_string(file)
-            .unwrap()
-            .trim()
-            .parse::<i32>()
-            .unwrap();
+        let pid = support::wait_within(
+            &format!("{name} to write its pid"),
+            Duration::from_secs(3),
+            || fs::read_to_string(&file).ok().filter(|s| !s.is_empty()),
+        )
+        .trim()
+        .parse::<i32>()
+        .unwrap();
         let (birth, _, live) = identity(pid).unwrap();
         assert!(live);
         fixture.children.push((pid, birth));
@@ -204,7 +214,20 @@ sleep 30
     if late {
         match events.next() {
             sprite_term::TerminalEvent::Exited(exit) => assert!(!exit.requested),
-            other => panic!("expected natural Exited, got {other:?}"),
+            other @ (sprite_term::TerminalEvent::Ready
+            | sprite_term::TerminalEvent::SelectionCopied(_)
+            | sprite_term::TerminalEvent::UnsafePaste(_)
+            | sprite_term::TerminalEvent::Bell
+            | sprite_term::TerminalEvent::TitleChanged(_)
+            | sprite_term::TerminalEvent::History { .. }
+            | sprite_term::TerminalEvent::HistoryFailed { .. }
+            | sprite_term::TerminalEvent::Graphics(_)
+            | sprite_term::TerminalEvent::WorkingDirectoryChanged(_)
+            | sprite_term::TerminalEvent::Hyperlink { .. }
+            | sprite_term::TerminalEvent::ClipboardWrite(_)
+            | sprite_term::TerminalEvent::Error(_)) => {
+                panic!("expected natural Exited, got {other:?}")
+            }
         }
     }
     let before = Instant::now();

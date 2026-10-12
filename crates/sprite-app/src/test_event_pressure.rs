@@ -38,3 +38,44 @@ pub(crate) fn focus_and_release(commands: &CommandSender) {
         .send(TerminalCommand::Input(b"\n".to_vec()))
         .expect("release the child");
 }
+
+/// Fills the worker's control lane so the next command is refused, and
+/// returns once it stays refused. The lane only stays full while the worker
+/// is stalled by event pressure; until it is, the worker drains what this
+/// sends, so this keeps trying within the watchdog instead of pausing and
+/// hoping.
+///
+/// One refusal is not proof of a stall: this thread fills the lane faster
+/// than a running worker wakes to drain it. So a refusal only counts when no
+/// slot has freed after [`STALL_PROOF`]; that is taken as a stall.
+pub(crate) fn saturate_control(commands: &CommandSender) {
+    let refused = || {
+        matches!(
+            commands
+                .try_admit(TerminalCommand::Capture)
+                .expect("a capture is always valid"),
+            sprite_term::Admitted::Saturated(_)
+        )
+    };
+    let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
+    loop {
+        if (0..=sprite_term::CONTROL_CAPACITY).any(|_| refused()) {
+            crate::test_blocking_wait::pause(STALL_PROOF);
+            if refused() {
+                return;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the control lane never saturated: the worker is not stalled"
+        );
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
+    }
+}
+
+/// How long a full lane must stay full to count as a stall. An assumption,
+/// not a guarantee: a worker stuck in one long pass (a debug build can spend
+/// about 150 ms on a pass under a flood) is mistaken for stalled. These
+/// fixtures tolerate that, because their clipboard burst stalls the worker
+/// anyway.
+pub(crate) const STALL_PROOF: std::time::Duration = std::time::Duration::from_millis(100);

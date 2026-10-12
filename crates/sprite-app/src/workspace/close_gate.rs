@@ -83,13 +83,13 @@ impl Workspace {
                     if let Some(gate) = gate {
                         // A dropped gate releases the cleanup as surely as an
                         // opened one.
-                        let _ = gate.recv_blocking();
+                        gate.recv_blocking().ok();
                     }
-                    let cleanup = slot.lock().ok().and_then(|mut slot| slot.take());
+                    let cleanup = crate::locked::locked(&slot).take();
                     if let Some(cleanup) = cleanup {
                         cleanup();
                     }
-                    let _ = report.send_blocking(());
+                    report.send_blocking(()).ok();
                 }
             });
         let task = match spawned {
@@ -101,7 +101,7 @@ impl Workspace {
                 #[cfg(not(test))]
                 drop(thread);
                 cx.background_executor().spawn(async move {
-                    let _ = reported.recv().await;
+                    reported.recv().await.ok();
                     mark_completed.store(true, std::sync::atomic::Ordering::Release);
                 })
             }
@@ -109,7 +109,7 @@ impl Workspace {
                 // A machine that cannot start one more thread is better served
                 // by a slow cleanup on the shared executor than by a skipped
                 // one, which would leave the pane's children running.
-                let cleanup = slot.lock().ok().and_then(|mut slot| slot.take());
+                let cleanup = crate::locked::locked(&slot).take();
                 cx.background_executor().spawn(async move {
                     if let Some(cleanup) = cleanup {
                         cleanup();
@@ -138,7 +138,7 @@ impl Workspace {
         });
         cx.spawn(async move |_workspace, cx| {
             finished.await;
-            let _ = cx.update(quit_app);
+            cx.update(quit_app).ok();
         })
         .detach();
     }
@@ -227,7 +227,7 @@ impl Workspace {
         // rather than in every route a close can arrive by.
         let confirmed = match &mut self.mode {
             Mode::ConfirmingClose(pending) => pending.confirmation.answer(&scope, is_held),
-            _ => false,
+            Mode::Idle | Mode::Renaming(_) | Mode::DraggingDivider(_) => false,
         };
         let running = if confirmed {
             Vec::new()
@@ -887,15 +887,17 @@ mod tests {
         /// arrive together, so they time out instead of hanging the test.
         fn arrive(&self) {
             let current = std::thread::current();
-            let mut arrived = self.arrived.lock().unwrap();
-            arrived.push((current.name().map(str::to_owned), current.id()));
-            self.everyone.notify_all();
-            let (_arrived, waited) = self
-                .everyone
-                .wait_timeout_while(arrived, std::time::Duration::from_secs(5), |arrived| {
-                    arrived.len() < self.expected
-                })
-                .unwrap();
+            let waited = {
+                let mut arrived = self.arrived.lock().unwrap();
+                arrived.push((current.name().map(str::to_owned), current.id()));
+                self.everyone.notify_all();
+                self.everyone
+                    .wait_timeout_while(arrived, std::time::Duration::from_secs(5), |arrived| {
+                        arrived.len() < self.expected
+                    })
+                    .unwrap()
+                    .1
+            };
             if !waited.timed_out() {
                 self.met.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }

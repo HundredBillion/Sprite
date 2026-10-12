@@ -1,4 +1,12 @@
 //! Opt-in measurements ending after terminal grid CPU paint, before presentation.
+#![cfg_attr(
+    feature = "startup-benchmark",
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "a benchmark is a developer tool; a failed setup stops it with the cause"
+    )
+)]
 
 use std::time::{Duration, Instant};
 
@@ -96,7 +104,12 @@ pub(crate) fn painted(paint: Option<Painted>, _window: &mut gpui::Window, cx: &m
     {
         probe.paints.push(paint.clone());
     }
-    if paint.marker && !probe.seen.contains(&paint.entity) && probe.seen.len() < MAX_PANES {
+    // A marker is found only in a snapshot, so a marked paint has its generation.
+    if paint.marker
+        && let Some(generation) = paint.generation
+        && !probe.seen.contains(&paint.entity)
+        && probe.seen.len() < MAX_PANES
+    {
         probe.seen.push(paint.entity);
         probe.sample = Some(Sample {
             label: probe.label,
@@ -106,7 +119,7 @@ pub(crate) fn painted(paint: Option<Painted>, _window: &mut gpui::Window, cx: &m
                 .iter()
                 .find(|(entity, _)| *entity == paint.entity)
                 .map(|(_, start)| start.elapsed()),
-            generation: paint.generation.expect("a marker belongs to a snapshot"),
+            generation,
         });
     }
 }
@@ -192,7 +205,7 @@ fn prompt_child(root: &std::path::Path, args: &[String]) {
         }
         bounded_wait(Duration::from_millis(10));
     }
-    let _ = std::fs::remove_file(registration);
+    std::fs::remove_file(registration).ok();
 }
 
 #[cfg(feature = "startup-benchmark")]
@@ -281,5 +294,5 @@ fn native(root: std::path::PathBuf, args: &[String]) {
 #[cfg(feature = "startup-benchmark")]
 fn bounded_wait(duration: Duration) {
     let (_sender, receiver) = std::sync::mpsc::channel::<()>();
-    let _ = receiver.recv_timeout(duration);
+    receiver.recv_timeout(duration).ok();
 }

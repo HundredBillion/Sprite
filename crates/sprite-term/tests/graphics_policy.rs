@@ -4,11 +4,15 @@
 //! escape-sequence bytes from an arbitrary child, so "a program printed
 //! something" must not become "the terminal read a file nobody named" or "the
 //! terminal held a gigabyte".
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sprite_term::{
     GraphicsPolicy, GraphicsSnapshot, SessionConfig, TerminalCommand, TerminalEvent,
@@ -23,15 +27,28 @@ fn args(values: &[&str]) -> Vec<OsString> {
 
 /// Waits for the answer to one graphics probe, ignoring unrelated events.
 fn wait_for_graphics(events: &EventPump) -> GraphicsSnapshot {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + support::PROGRESS_CEILING;
     while Instant::now() < deadline {
         match events.next() {
             TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
             TerminalEvent::Error(error) => panic!("graphics probe failed: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
-    panic!("watchdog: no graphics answer arrived");
+    panic!(
+        "watchdog: no graphics answer arrived within {:?}",
+        support::PROGRESS_CEILING
+    );
 }
 
 /// A Kitty transmit-and-display sequence for raw RGBA pixels.
@@ -217,7 +234,7 @@ fn an_image_is_never_read_from_a_file() {
     feed(&mut session, &snapshots, transmit_rgba(12, 2, 2));
     assert!(probe(&mut session, &events).holds(12));
 
-    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::remove_dir_all(&directory).ok();
 }
 
 /// None of the three filesystem mediums may turn terminal output into a file
@@ -256,7 +273,7 @@ fn no_filesystem_medium_can_load_an_image() {
     feed(&mut session, &snapshots, transmit_rgba(23, 2, 2));
     assert!(probe(&mut session, &events).holds(23));
 
-    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::remove_dir_all(&directory).ok();
 }
 
 /// A pane with graphics turned off holds nothing at all — the image is dropped

@@ -435,22 +435,37 @@ impl TextPool {
         id
     }
 
+    fn entry(&self, id: u32) -> &TextEntry {
+        self.entries
+            .get(id as usize)
+            .and_then(Option::as_ref)
+            .unwrap_or_else(|| unreachable!("id {id} was interned and never released"))
+    }
+
+    fn entry_mut(&mut self, id: u32) -> &mut TextEntry {
+        self.entries
+            .get_mut(id as usize)
+            .and_then(Option::as_mut)
+            .unwrap_or_else(|| unreachable!("id {id} was interned and never released"))
+    }
+
     fn retain(&mut self, id: u32) {
-        self.entries[id as usize].as_mut().unwrap().references += 1;
+        self.entry_mut(id).references += 1;
     }
 
     fn release(&mut self, id: u32) {
-        let entry = self.entries[id as usize].as_mut().unwrap();
+        let entry = self.entry_mut(id);
         entry.references -= 1;
         if entry.references == 0 {
-            self.ids.remove(entry.text.as_str());
-            self.entries[id as usize] = None;
+            if let Some(entry) = self.entries[id as usize].take() {
+                self.ids.remove(entry.text.as_str());
+            }
             self.free.push(id);
         }
     }
 
     fn text(&self, id: u32) -> &sprite_term::CellText {
-        &self.entries[id as usize].as_ref().unwrap().text
+        &self.entry(id).text
     }
 }
 
@@ -490,8 +505,7 @@ impl GridSurface {
         let mut texts = TextPool::default();
         // Slot zero has one permanent reference so blanking never needs an allocation.
         let blank = texts.intern(" ");
-        texts.entries[blank as usize].as_mut().unwrap().references =
-            usize::from(cols) * usize::from(rows) + 1;
+        texts.entry_mut(blank).references = usize::from(cols) * usize::from(rows) + 1;
         let empty_row = Arc::new(Vec::new());
         Self {
             cols,

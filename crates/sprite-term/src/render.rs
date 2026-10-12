@@ -106,6 +106,10 @@ enum CellTextStorage {
 }
 
 impl CellText {
+    #[expect(
+        clippy::expect_used,
+        reason = "the inline bytes were written by char::encode_utf8"
+    )]
     pub fn as_str(&self) -> &str {
         match &self.0 {
             CellTextStorage::Inline { bytes, len } => {

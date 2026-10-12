@@ -13,7 +13,7 @@
 //! shell asks itself, and it needs nothing from the worker thread.
 
 use std::os::fd::{OwnedFd, RawFd};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::pty_unix;
 
@@ -50,7 +50,7 @@ impl ForegroundState {
     pub fn program(&self) -> Option<&str> {
         match self {
             Self::Busy(name) => name.as_deref(),
-            _ => None,
+            Self::Idle | Self::Unknown => None,
         }
     }
 }
@@ -98,7 +98,7 @@ impl ForegroundWatch {
     /// Closes the private duplicate once the session has ended.
     ///
     /// Held any longer, it keeps the PTY master open after the worker has
-    /// closed its own, and a descendant still holding the terminal is never
+    /// closed its own, and an Ordinary Session Job still holding the terminal is never
     /// told it hung up. Afterwards the pane answers `Unknown`, which is all an
     /// ended session can honestly say.
     pub(crate) fn detach(&self) {
@@ -107,19 +107,24 @@ impl ForegroundWatch {
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Attached>> {
-        self.attached.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::locked::locked(&self.attached)
     }
 
     /// Asks the kernel what is in the foreground of this pane, right now.
     pub fn state(&self) -> ForegroundState {
-        let attached = self.lock();
-        let Some(attached) = attached.as_ref() else {
+        // The master is asked under the lock, which is what keeps `detach`
+        // from closing it mid-call; what follows needs only the answer.
+        let (group, shell_group) = match self.lock().as_ref() {
+            Some(attached) => (
+                pty_unix::foreground_group(&attached.master),
+                attached.shell_group,
+            ),
+            None => return ForegroundState::Unknown,
+        };
+        let Some(group) = group else {
             return ForegroundState::Unknown;
         };
-        let Some(group) = pty_unix::foreground_group(&attached.master) else {
-            return ForegroundState::Unknown;
-        };
-        if group == attached.shell_group {
+        if group == shell_group {
             return ForegroundState::Idle;
         }
         // A group the terminal still names but nothing is left in belongs to a
@@ -133,9 +138,8 @@ impl ForegroundWatch {
 
     /// Returns the process group when `pid` owns this pane's foreground.
     pub fn owner_group(&self, pid: u32) -> Option<i32> {
-        let attached = self.lock();
-        let attached = attached.as_ref()?;
-        let foreground = pty_unix::foreground_group(&attached.master)?;
+        // Asked under the lock, so `detach` cannot close the master mid-call.
+        let foreground = pty_unix::foreground_group(&self.lock().as_ref()?.master)?;
         let candidate = pty_unix::process_group_of(pid)?;
         (foreground == candidate).then_some(candidate)
     }

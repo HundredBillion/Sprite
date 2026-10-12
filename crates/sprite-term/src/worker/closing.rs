@@ -11,7 +11,12 @@ const KILL_AFTER: Duration = Duration::from_secs(3);
 
 /// Cleanup stops waiting here even if a group somehow survives KILL, so a
 /// worker can never hang forever.
-const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
+pub(crate) const GIVE_UP_AFTER: Duration = Duration::from_secs(6);
+
+// Both measured from the moment shutdown was requested: TERM is owed first,
+// KILL after it, and cleanup gives up only after KILL had its chance.
+const _: () = assert!(TERM_AFTER.as_millis() < KILL_AFTER.as_millis());
+const _: () = assert!(KILL_AFTER.as_millis() < GIVE_UP_AFTER.as_millis());
 
 /// Short enough that escalation deadlines are re-checked promptly even under
 /// continuous output.
@@ -98,6 +103,7 @@ fn close_with_signal_since(
             },
         mut pump,
         inbox,
+        control: _,
         events,
         shutdown,
         foreground,
@@ -105,7 +111,7 @@ fn close_with_signal_since(
         mut pump_stopped,
         mut fatal,
     } = runtime;
-    // The pump may be parked on a PTY that a descendant keeps open forever, so
+    // The pump may be parked on a PTY that an Ordinary Session Job keeps open forever, so
     // it is woken now rather than waited on.
     if let Some(pump) = &pump {
         pump.cancel();
@@ -142,7 +148,7 @@ fn close_with_signal_since(
         let hangup_pending = processes.is_some() && escalation == Escalation::Hangup;
         // Natural exit retries an incomplete HUP before publishing its outcome.
         // Explicit shutdown also waits for owned jobs to exit.
-        let descendants_gone = if requested {
+        let jobs_gone = if requested {
             processes
                 .as_mut()
                 .is_none_or(|processes| !processes.is_alive())
@@ -155,7 +161,7 @@ fn close_with_signal_since(
             Some(since) => since.elapsed() >= GIVE_UP_AFTER,
             None => closing_started.elapsed() >= GIVE_UP_AFTER,
         };
-        if (settled && descendants_gone) || exhausted {
+        if (settled && jobs_gone) || exhausted {
             break;
         }
 
@@ -208,10 +214,10 @@ fn close_with_signal_since(
         pump.shutdown();
     }
     if exit_status.is_some() {
-        let _ = waiter.join();
+        waiter.join().ok();
     }
 
-    // Only now, with every helper thread finished and the descendant policy
+    // Only now, with every helper thread finished and the Ordinary Session Job policy
     // complete, does the application hear how the session ended.
     let mut outcomes = Vec::with_capacity(2);
     if let Some(error) = fatal {
@@ -232,7 +238,7 @@ fn close_with_signal_since(
     }
     // Every descriptor this session holds on the PTY master closes before the
     // outcome is published: the worker's own and the duplicate kept for
-    // foreground questions. A descendant still holding the terminal then sees
+    // foreground questions. An Ordinary Session Job still holding the terminal then sees
     // it hang up, and whoever is told the session ended can rely on that.
     drop(master);
     foreground.detach();
@@ -299,11 +305,17 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
 mod tests {
     use super::*;
 
+    #[test]
+    fn escalation_fits_inside_the_give_up_budget() {
+        assert!(TERM_AFTER < KILL_AFTER && KILL_AFTER < GIVE_UP_AFTER);
+    }
+
     fn settled_runtime() -> Runtime {
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize::default())
             .unwrap();
         let (_, inbox) = std::sync::mpsc::sync_channel(1);
+        let (_, control) = std::sync::mpsc::sync_channel(1);
         let (events, _) = crate::event_mailbox::bounded(0);
         Runtime {
             started: Started {
@@ -315,6 +327,7 @@ mod tests {
             },
             pump: None,
             inbox,
+            control,
             events,
             shutdown: Arc::new(AtomicBool::new(false)),
             foreground: Arc::new(crate::ForegroundWatch::default()),

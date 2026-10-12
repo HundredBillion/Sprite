@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -424,10 +429,11 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
     let config_fixture = scratch.join("config.rs");
     std::fs::write(&config_fixture, config_source).unwrap();
     let prelude = format!(
-        "#![allow(dead_code, unused_imports, unused_variables)]\n#[path = {:?}] mod config;\n#[path = {:?}] mod graphics_cache;\n#[path = {:?}] mod local_socket;\n",
+        "#![allow(dead_code, unused_imports, unused_variables)]\n#[path = {:?}] mod config;\n#[path = {:?}] mod graphics_cache;\n#[path = {:?}] mod local_socket;\n#[path = {:?}] mod locked;\n",
         config_fixture,
         root.join("src/graphics_cache.rs"),
-        root.join("src/local_socket.rs")
+        root.join("src/local_socket.rs"),
+        root.join("src/locked.rs")
     );
     let compile = |name: &str, body: &str| {
         compile_source(

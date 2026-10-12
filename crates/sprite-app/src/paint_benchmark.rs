@@ -108,7 +108,9 @@ impl PaintBenchmark {
     ) -> (GridPaint, Option<GridPaint>) {
         let snapshot = match scenario {
             Scenario::OneRowChange => &self.changed,
-            _ => &self.snapshot,
+            Scenario::FirstFrame | Scenario::SameGenerationBlink | Scenario::Hover => {
+                &self.snapshot
+            }
         };
         let hover = (scenario == Scenario::Hover).then_some((
             snapshot.generation,
@@ -141,6 +143,10 @@ impl PaintBenchmark {
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "a fixed 60×200 benchmark size is always valid"
+)]
 pub(crate) fn fixture() -> RenderSnapshot {
     let rows = (0..60)
         .map(|row| {

@@ -150,7 +150,9 @@ pub(super) fn chosen_family(
         let fallback = monospace_family(&names);
         cx.set_global(FontCatalog(Some(AvailableFonts { names, fallback })));
     }
-    let available = cx.global::<FontCatalog>().0.as_ref().unwrap();
+    let Some(available) = cx.global::<FontCatalog>().0.as_ref() else {
+        unreachable!("the font catalog was filled just above");
+    };
     if let Some(wanted) = configured {
         if available.names.iter().any(|name| name == wanted) {
             return (wanted.to_owned().into(), Vec::new());
@@ -315,12 +317,8 @@ impl TerminalView {
                 self.refresh_textures(&bundle);
             }
         }
-        self.pending_settings =
-            if !self.admission_closed && !admitted.diff(settings).live.is_empty() {
-                Some(settings.clone())
-            } else {
-                None
-            };
+        let owed = !self.admission_closed && !admitted.diff(settings).live.is_empty();
+        self.pending.settings = owed.then(|| settings.clone());
         self.applied_settings = admitted;
         cx.notify();
     }
@@ -523,28 +521,21 @@ mod fallback_admission_tests {
                     panic!("running session");
                 };
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-                let mut full_since = None;
                 // Installed receivers stay paused while the real worker reaches sustained event pressure.
                 // Every accepted copy is one lossless event the paused UI does
                 // not take; past the mailbox's thirty-two the worker stalls and
-                // the queue stays full. A full queue only counts once the worker
-                // has certainly started taking from it.
+                // the lane stays full. The floor only proves the loop admitted
+                // more than a trivial number before saturating; the 1 ms pacing
+                // is what lets the worker take some of them first.
                 let mut accepted = 0;
                 loop {
-                    match session.try_send(TerminalCommand::CopySelection) {
-                        Ok(()) => {
-                            accepted += 1;
-                            full_since = None;
+                    match session.try_admit(TerminalCommand::CopySelection) {
+                        Ok(sprite_term::Admitted::Accepted) => accepted += 1,
+                        Ok(sprite_term::Admitted::Saturated(_)) if accepted > 40 => break,
+                        Ok(sprite_term::Admitted::Saturated(_)) => {}
+                        outcome @ (Ok(sprite_term::Admitted::Closed(_)) | Err(_)) => {
+                            panic!("unexpected refusal: {outcome:?}")
                         }
-                        Err(error) if error.message.contains("queue is full") => {
-                            if accepted > 40 {
-                                let since = full_since.get_or_insert_with(std::time::Instant::now);
-                                if since.elapsed() >= std::time::Duration::from_millis(100) {
-                                    break;
-                                }
-                            }
-                        }
-                        Err(error) => panic!("unexpected refusal: {error}"),
                     }
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -562,17 +553,17 @@ mod fallback_admission_tests {
                 assert!(
                     view.status
                         .as_ref()
-                        .is_some_and(|status| status.contains("queue is full"))
+                        .is_some_and(|status| status.contains(crate::terminal_view::BUSY_STATUS))
                 );
                 assert_eq!(view.applied_settings.colors, original.colors);
-                assert!(view.pending_settings.is_some());
+                assert!(view.pending.settings.is_some());
                 assert_eq!(
                     view.default_colors(),
                     session_defaults(&refused).fallback_colors
                 );
                 view.apply_settings(&original, window, cx);
                 assert!(view.bundle.is_none());
-                assert!(view.pending_settings.is_none());
+                assert!(view.pending.settings.is_none());
                 assert_eq!(view.applied_settings.colors, original.colors);
                 view.default_colors()
             });
