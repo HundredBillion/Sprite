@@ -611,9 +611,20 @@ fn selection_admission_pressure_child(cx: &mut gpui::TestAppContext) {
     }
 }
 
-/// Across a sustained output flood no keystroke is refused at the view.
-/// Before the control lane this depended on whether the worker kept up with
-/// the pump; now a keystroke never competes with output.
+/// While the worker keeps completing passes under a sustained output flood,
+/// no keystroke is refused at the view: a keystroke never competes with
+/// output for room. Before the control lane the first one was refused.
+///
+/// Every sixteenth keystroke waits for a newer Terminal Generation than the
+/// one shown before those sixteen were sent, so the claim does not depend on
+/// runner speed. Under the flood a debug build's view sees a new bundle far
+/// less often than the worker completes a pass, and pacing every keystroke
+/// took minutes; sixteen at a time takes seconds, and the 64-slot lane still
+/// holds four groups, so a refusal would need the worker to drain nothing
+/// across four windows in which it was seen to complete passes. A worker that
+/// completes no pass at all is wedged, and the busy status is for that (PRD
+/// R-A3). 128 keystrokes are twice the control lane, so a lane that never
+/// drains is still caught.
 #[gpui::test]
 fn no_keystroke_is_refused_under_a_sustained_output_flood(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
@@ -651,15 +662,34 @@ fn no_keystroke_is_refused_under_a_sustained_output_flood(cx: &mut gpui::TestApp
     }
     // `yes` never reads, so stay under the kernel's 1 KiB input queue: the
     // pump would otherwise report a write refusal, which is a different fact.
-    for n in 0..300 {
-        view.update(cx, |view, _| {
+    let shown = |cx: &mut gpui::VisualTestContext| {
+        view.read_with(cx, |view, _| {
+            view.bundle.as_ref().map(|bundle| bundle.generation)
+        })
+    };
+    const PACE: usize = 16;
+    for group in 0..128 / PACE {
+        let sent_at = shown(cx);
+        for n in group * PACE..(group + 1) * PACE {
+            view.update(cx, |view, _| {
+                assert!(
+                    view.submit(TerminalCommand::Input(b"x".to_vec())),
+                    "keystroke {n} refused under a flood: {:?}",
+                    view.status
+                );
+            });
+        }
+        let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
+        loop {
+            cx.run_until_parked();
+            if shown(cx) > sent_at {
+                break;
+            }
             assert!(
-                view.submit(TerminalCommand::Input(b"x".to_vec())),
-                "keystroke {n} refused under a flood: {:?}",
-                view.status
+                std::time::Instant::now() < deadline,
+                "the worker completed no pass after keystroke group {group}"
             );
-        });
-        cx.run_until_parked();
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(5));
+            crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
+        }
     }
 }
