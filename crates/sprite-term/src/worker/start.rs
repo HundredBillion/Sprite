@@ -332,20 +332,32 @@ fn apply_graphics_policy(
     Ok(())
 }
 
-/// A child inherits this process's environment except what another Sprite
-/// put there: a window's own endpoint variables are added back by
-/// `environment` when its endpoints are on, and must not leak from a parent
-/// window when they are off.
+/// A child inherits this process's environment minus every `SPRITE_`
+/// variable, and then gets this window's own through `environment`.
+///
+/// The prefix is the boundary because anything Sprite-named in the inherited
+/// environment was put there by a Sprite above this one, and this window
+/// re-adds what it owns. Stripping the whole prefix keeps a parent window's
+/// endpoints, including ones named later, from reaching a child of a window
+/// whose endpoints are off.
 fn configure_child_environment(
     command: &mut CommandBuilder,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
 ) {
     command.env_remove("NO_COLOR");
-    let inherited: Vec<String> = command
+    // The builder lists only UTF-8 entries, so keys from the process
+    // environment it was seeded with are read directly too: a non-UTF-8 key
+    // would otherwise slip through.
+    let mut inherited: std::collections::BTreeSet<std::ffi::OsString> = command
         .iter_full_env_as_str()
         .filter(|(key, _)| key.starts_with("SPRITE_"))
-        .map(|(key, _)| key.to_owned())
+        .map(|(key, _)| key.into())
         .collect();
+    inherited.extend(
+        std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| key.as_encoded_bytes().starts_with(b"SPRITE_")),
+    );
     for key in inherited {
         command.env_remove(key);
     }
@@ -553,7 +565,12 @@ fn spawn_child_waiter(
         Ok(waiter) => {
             // The buffer holds one and the thread holds the receiver until it
             // has taken the child, so this neither blocks nor fails.
-            let _ = hand_over.send(child);
+            if let Err(std::sync::mpsc::SendError(mut child)) = hand_over.send(child) {
+                // Unreachable while the invariant above holds; if it breaks,
+                // the child must still not be left running and unreaped.
+                let _killed = child.kill();
+                let _reaped = child.wait();
+            }
             Ok(waiter)
         }
         Err(error) => Err((child, SessionError::new("spawn_child_waiter", error))),
@@ -680,18 +697,16 @@ mod tests {
                 SessionError::new("spawn_child_waiter", "no thread for the test"),
             ))
         });
+        let pid = nix::unistd::Pid::from_raw(pid.get().expect("the child had a pid") as i32);
+        // Discarding is synchronous: the child is reaped before the error is
+        // returned, not at some later point.
+        assert!(
+            nix::sys::signal::kill(pid, None).is_err(),
+            "the child outlived its failed start-up"
+        );
         assert_eq!(
             started.err().map(|error| error.operation),
             Some("spawn_child_waiter")
         );
-        let pid = nix::unistd::Pid::from_raw(pid.get().expect("the child had a pid") as i32);
-        let gone = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while nix::sys::signal::kill(pid, None).is_ok() {
-            assert!(
-                std::time::Instant::now() < gone,
-                "the child outlived its failed start-up"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
     }
 }
