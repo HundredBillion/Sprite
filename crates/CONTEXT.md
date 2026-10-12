@@ -61,7 +61,15 @@ Whether a Pane is where the person is typing: it holds keyboard focus in its
 Sprite Window and that window is the active one. Only a Pane with Pane Focus
 may write the clipboard on its child's request, has its child told focus
 arrived, and blinks its cursor; any other Pane's child is told focus left.
-_Avoid_: active pane (ambiguous with the active tab), selected pane
+_Avoid_: active pane (ambiguous with the active tab), selected pane, the
+tab's focused pane (that is the Current Pane)
+
+**Current Pane**:
+The one Pane in a tab's layout that keyboard focus goes to whenever that tab
+is shown. Every tab has exactly one at all times, whether or not its window is
+active or the tab is in front, so a Current Pane need not have Pane Focus.
+Observation reports it to clients as `focused`.
+_Avoid_: focused pane (ambiguous with Pane Focus)
 
 **Pane Title**:
 What a Pane reports it is called: for a terminal Pane, the title its child set

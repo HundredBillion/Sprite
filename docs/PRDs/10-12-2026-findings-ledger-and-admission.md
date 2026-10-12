@@ -108,7 +108,9 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
   requests, pump and child messages; capacity unchanged) and `control`
   (`Command`, `HistoryRequest`; bounded 64). At the top of every pass and
   after every inbox message the worker drains `control` first, so input never
-  queues behind output. A control send is followed by `inbox.try_send(Wake)`:
+  queues behind output. Control messages count against the pass's
+  `BATCH_MESSAGES` budget like any other; a pass that ends on the budget
+  captures and the next pass starts on `control` again. A control send is followed by `inbox.try_send(Wake)`:
   success wakes an idle worker; a full inbox means the worker is busy and
   reaches `control` after its current message. `Shutdown` keeps its flag and
   knock; the closing loops are unchanged.
@@ -119,14 +121,18 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
   64-deep control lane that now means a wedged worker, not a flood.
 - R-A4 The workspace's `SurfaceRequest` channel becomes two: a stream lane
   (Update, Grid, List, Focus, Close, Closed; `send_blocking` from the
-  connection thread; capacity 64) and a one-shot lane (Open, Capabilities,
-  RegisterToken, first-request Focus; capacity 16; admitted through
-  `Admitted`). Each lane has its own drain task of the existing per-channel
-  shape. Order within a connection holds because a connection sends Open,
-  waits for the answer, then streams.
+  connection thread; capacity 64) and a one-shot lane (the four variants that
+  carry a `reply`: Open, Capabilities, FocusPane, RegisterToken; capacity 16;
+  admitted through `Admitted`). Each lane has its own drain task of the
+  existing per-channel shape. Order within a connection holds because a
+  connection sends Open, waits for the answer, then streams. A one-shot
+  request that finds its lane full is refused and the connection closed,
+  exactly as a refused Open is today; nothing waits.
 - R-A5 `relay` returns `RelayError::Refused` for a saturated admission; the
-  endpoint reports "this window is busy; nothing was changed". ADR 0018 is
-  amended to describe nonblocking admission (closing GAP-C09).
+  observation endpoint and the Surface refusal both say "this window is busy;
+  nothing was changed" (Surface reasons are free text today, so this is not a
+  wire change). ADR 0018 is amended to describe nonblocking admission
+  (closing GAP-C09).
 - R-A6 Evidence: with 16 outstanding output chunks and a pending capture
   request, `try_admit(Key)` is `Accepted`; across a sustained `yes` flood no
   keystroke is refused at the view; with one connection holding the stream
@@ -145,11 +151,15 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
 
 ## R-T. Timeouts are related at compile time
 
-- R-T1 `crates/sprite-app/src/timeouts.rs` holds `REPLY_TIMEOUT`,
-  `AFTER_CLAIM`, `HANDSHAKE_TIMEOUT`, `WRITE_TIMEOUT`, `BROKER_DEADLINE` and
+- R-T1 `crates/sprite-app/src/timeouts.rs` holds the durations that stand in
+  a relation to each other: `REPLY_TIMEOUT`, `AFTER_CLAIM`, `HANDSHAKE_TIMEOUT`,
+  `WRITE_TIMEOUT`, `BROKER_DEADLINE`, `SILENT_CLIENT_TIMEOUT` (today's
+  `observation/endpoint.rs` `CLIENT_TIMEOUT`, renamed because it is the
+  server's patience with a client that sends nothing) and
   `CLIENT_TIMEOUT = REPLY_TIMEOUT + AFTER_CLAIM + 1 s`, with their `cfg(test)`
   variants, and `const _: () = assert!(..)` for: client > reply + after-claim;
-  handshake < client; write < client; broker < reply. The Surface and
+  handshake < client; write < client; broker < reply; silent < reply. The
+  test-child and bench deadlines stay where they are. The Surface and
   observation clients import `CLIENT_TIMEOUT` (closing GAP-C13).
 - R-T2 In sprite-term, `closing.rs` asserts
   `TERM_AFTER + KILL_AFTER <= GIVE_UP_AFTER`, and `event_mailbox.rs`
