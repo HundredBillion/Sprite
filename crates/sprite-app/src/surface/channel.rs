@@ -29,6 +29,7 @@ use crate::local_socket::{
     Authenticated, ConnectionSlot, LocalSocket, ObservationKey, TransportPolicy, runtime_directory,
 };
 use crate::pane_tree::PaneId;
+use crate::surface::lanes::SurfaceLanes;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tabs::TabId;
 
@@ -58,6 +59,7 @@ const REPLY_PATIENCE: Patience = Patience::new(REPLY_TIMEOUT);
 
 const NOT_ANSWERING: &str = "this window is no longer answering";
 const NO_ANSWER: &str = "this window did not answer in time";
+const BUSY: &str = "this window is busy; nothing was changed";
 
 /// Hex digits in a socket file name. With the `.surface.sock` suffix this is
 /// as wide as the observation socket's name, which is measured against a
@@ -687,17 +689,14 @@ pub struct SurfaceEndpoint {
 }
 
 impl SurfaceEndpoint {
-    pub fn open(
-        key: Arc<ObservationKey>,
-        requests: async_channel::Sender<SurfaceRequest>,
-    ) -> std::io::Result<Self> {
-        Self::open_in(runtime_directory()?, key, requests)
+    pub fn open(key: Arc<ObservationKey>, lanes: SurfaceLanes) -> std::io::Result<Self> {
+        Self::open_in(runtime_directory()?, key, lanes)
     }
 
     pub fn open_in(
         directory: PathBuf,
         key: Arc<ObservationKey>,
-        requests: async_channel::Sender<SurfaceRequest>,
+        lanes: SurfaceLanes,
     ) -> std::io::Result<Self> {
         let policy = TransportPolicy {
             name: "sprite-surface",
@@ -713,7 +712,7 @@ impl SurfaceEndpoint {
             key,
             policy,
             |stream| refuse(stream, &Refusal::Denied.reason()),
-            move |connection| converse(connection, &requests),
+            move |connection| converse(connection, &lanes),
         )?;
         Ok(Self { transport })
     }
@@ -754,7 +753,7 @@ impl SurfaceEndpoint {
 
 static NEXT_SURFACE: AtomicU64 = AtomicU64::new(1);
 
-fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceRequest>) {
+fn converse(connection: Authenticated, lanes: &SurfaceLanes) {
     let Authenticated {
         mut stream,
         reader,
@@ -765,7 +764,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
     match first_line(&body) {
         Ok(FirstRequest::Open { pane, open }) => {
             let connection = SurfaceConnection::holding(&stream, Some(slot));
-            serve_surface(stream, reader, connection, pane, open, requests)
+            serve_surface(stream, reader, connection, pane, open, lanes)
         }
         Ok(FirstRequest::Capabilities {
             pane,
@@ -773,7 +772,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
             return_target,
         }) => one_shot(
             &mut stream,
-            requests,
+            &lanes.one_shot,
             |reply| SurfaceRequest::Capabilities {
                 pane,
                 owner_pid,
@@ -784,7 +783,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
         ),
         Ok(FirstRequest::Focus { pane, target }) => one_shot(
             &mut stream,
-            requests,
+            &lanes.one_shot,
             |reply| SurfaceRequest::FocusPane {
                 pane,
                 target,
@@ -798,7 +797,7 @@ fn converse(connection: Authenticated, requests: &async_channel::Sender<SurfaceR
             description,
         }) => one_shot(
             &mut stream,
-            requests,
+            &lanes.one_shot,
             |reply| SurfaceRequest::RegisterToken {
                 name,
                 default,
@@ -817,7 +816,7 @@ fn serve_surface(
     connection: std::io::Result<SurfaceConnection>,
     pane: PaneId,
     open: Open,
-    requests: &async_channel::Sender<SurfaceRequest>,
+    lanes: &SurfaceLanes,
 ) {
     // A connection with no writer could never be sent `opened`. Say so
     // rather than closing it with no answer.
@@ -833,12 +832,14 @@ fn serve_surface(
     let handle = connection.clone();
     let id = SurfaceId(NEXT_SURFACE.fetch_add(1, Ordering::SeqCst));
     use crate::workspace::{RelayError, relay};
-    match relay(requests, REPLY_PATIENCE, |reply| SurfaceRequest::Open {
-        id,
-        pane,
-        open,
-        connection,
-        reply,
+    match relay(&lanes.one_shot, REPLY_PATIENCE, |reply| {
+        SurfaceRequest::Open {
+            id,
+            pane,
+            open,
+            connection,
+            reply,
+        }
     }) {
         Ok(Ok(())) => {
             let _ = handle.establish(&event_opened(id));
@@ -853,18 +854,25 @@ fn serve_surface(
             refuse(&mut stream, NOT_ANSWERING);
             return;
         }
+        // The handshake lane is full of other programs' handshakes. Refuse
+        // and close, as any refused Open is; the program reconnects.
+        Err(RelayError::Refused) => {
+            handle.abandon();
+            refuse(&mut stream, BUSY);
+            return;
+        }
         Err(RelayError::Timeout) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
             return;
         }
-        // The window clock removes dead connections even if its request queue
+        // The window clock removes dead connections even if the stream lane
         // is full. Closed is a prompt cleanup when there is room, not a reason
         // to keep this connection thread and its slot waiting on the window.
         Err(RelayError::Applying) => {
             handle.abandon();
             refuse(&mut stream, NO_ANSWER);
-            let _ = requests.try_send(SurfaceRequest::Closed { id, pane });
+            let _ = lanes.stream.try_send(SurfaceRequest::Closed { id, pane });
             return;
         }
     }
@@ -895,7 +903,9 @@ fn serve_surface(
             Ok(Message::Grid(ops)) => SurfaceRequest::Grid { id, pane, ops },
             Ok(Message::List(op)) => SurfaceRequest::List { id, pane, op },
             Ok(Message::Close) => {
-                let _ = requests.send_blocking(SurfaceRequest::Close { id, pane });
+                let _ = lanes
+                    .stream
+                    .send_blocking(SurfaceRequest::Close { id, pane });
                 return;
             }
             Err(refusal) => {
@@ -905,11 +915,13 @@ fn serve_surface(
                 break;
             }
         };
-        if requests.send_blocking(request).is_err() {
+        if lanes.stream.send_blocking(request).is_err() {
             break;
         }
     }
-    let _ = requests.send_blocking(SurfaceRequest::Closed { id, pane });
+    let _ = lanes
+        .stream
+        .send_blocking(SurfaceRequest::Closed { id, pane });
 }
 
 /// Asks the window once and relays its answer, then ends the connection.
@@ -927,6 +939,7 @@ fn one_shot<T>(
         }
         Ok(Err(refusal)) => refuse(stream, &refusal.reason()),
         Err(RelayError::Disconnected) => refuse(stream, NOT_ANSWERING),
+        Err(RelayError::Refused) => refuse(stream, BUSY),
         // The refusal on the wire is unchanged. It says the window did not
         // answer, which is true of both, and never that nothing changed.
         Err(RelayError::Timeout | RelayError::Applying) => refuse(stream, NO_ANSWER),
@@ -946,6 +959,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use crate::surface::lanes::{SurfaceReceivers, surface_lanes_with};
     use serde_json::{Value, json};
 
     /// A private directory of this test's own, removed when it is dropped.
@@ -975,13 +989,27 @@ mod tests {
         }
     }
 
-    /// The GPUI side, played by a thread with a script of answers.
+    /// The GPUI side, played by a thread with a script of answers. Both lanes
+    /// feed the one script, so a scripted test sees every request whichever
+    /// lane it came by.
     fn window(
-        requests: async_channel::Receiver<SurfaceRequest>,
+        receivers: SurfaceReceivers,
         mut script: impl FnMut(SurfaceRequest) -> bool + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
+        let (merged, requests) = mpsc::channel();
+        for lane in [receivers.stream, receivers.one_shot] {
+            let merged = merged.clone();
+            std::thread::spawn(move || {
+                while let Ok(request) = lane.recv_blocking() {
+                    if merged.send(request).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(merged);
         std::thread::spawn(move || {
-            while let Ok(request) = requests.recv_blocking() {
+            while let Ok(request) = requests.recv() {
                 if !script(request) {
                     break;
                 }
@@ -989,11 +1017,16 @@ mod tests {
         })
     }
 
-    fn endpoint(scratch: &Scratch) -> (SurfaceEndpoint, async_channel::Receiver<SurfaceRequest>) {
-        let (tx, rx) = async_channel::bounded(8);
+    fn endpoint(scratch: &Scratch) -> (SurfaceEndpoint, SurfaceReceivers) {
+        let (lanes, receivers) = surface_lanes_with(8, 8);
         let key = Arc::new(ObservationKey::generate().expect("key"));
-        let endpoint = SurfaceEndpoint::open_in(scratch.0.clone(), key, tx).expect("open");
-        (endpoint, rx)
+        let endpoint = SurfaceEndpoint::open_in(scratch.0.clone(), key, lanes).expect("open");
+        (endpoint, receivers)
+    }
+
+    /// Whether nothing has reached the window by either lane.
+    fn nothing_reached(receivers: &SurfaceReceivers) -> bool {
+        receivers.stream.is_empty() && receivers.one_shot.is_empty()
     }
 
     fn connect(endpoint: &SurfaceEndpoint) -> (UnixStream, BufReader<UnixStream>) {
@@ -1158,8 +1191,8 @@ mod tests {
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
         let handle = connection.clone();
-        let (requests, window) = async_channel::bounded(1);
-        let filler = requests.clone();
+        let (lanes, receivers) = surface_lanes_with(1, 1);
+        let filler = lanes.stream.clone();
         let (done, finished) = mpsc::channel();
         let caller = std::thread::spawn(move || {
             serve_surface(
@@ -1172,11 +1205,11 @@ mod tests {
                     focus: true,
                     description: json!({}),
                 },
-                &requests,
+                &lanes,
             );
             let _ = done.send(());
         });
-        let open = window.recv_blocking().unwrap();
+        let open = receivers.one_shot.recv_blocking().unwrap();
         assert!(open.claim());
         filler
             .try_send(SurfaceRequest::Close {
@@ -1187,7 +1220,8 @@ mod tests {
         drop(open);
         let outcome = finished.recv_timeout(Duration::from_secs(2));
         if outcome.is_err() {
-            window.close();
+            receivers.stream.close();
+            receivers.one_shot.close();
         }
         caller.join().unwrap();
         assert!(
@@ -1195,7 +1229,7 @@ mod tests {
             "claimed Open cleanup must not hold the server: {outcome:?}"
         );
         assert!(handle.is_dead());
-        assert_eq!(window.len(), 1);
+        assert_eq!(receivers.stream.len(), 1);
         let mut wire = String::new();
         peer.read_to_string(&mut wire).unwrap();
         let refusal: Value = serde_json::from_str(wire.trim()).unwrap();
@@ -1209,8 +1243,9 @@ mod tests {
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
         let handle = connection.clone();
-        let (requests, window) = async_channel::bounded(1);
-        requests
+        let (lanes, receivers) = surface_lanes_with(1, 1);
+        lanes
+            .one_shot
             .try_send(SurfaceRequest::Close {
                 id: SurfaceId(99),
                 pane: PaneId(1),
@@ -1228,13 +1263,14 @@ mod tests {
                     focus: false,
                     description: json!({}),
                 },
-                &requests,
+                &lanes,
             );
             let _ = done.send(());
         });
         let outcome = finished.recv_timeout(Duration::from_secs(2));
         if outcome.is_err() {
-            window.close();
+            receivers.stream.close();
+            receivers.one_shot.close();
         }
         caller.join().unwrap();
         assert!(
@@ -1242,15 +1278,15 @@ mod tests {
             "refused Open must not block sending Closed: {outcome:?}"
         );
         assert!(handle.is_dead());
-        assert_eq!(
-            window.len(),
-            1,
+        assert_eq!(receivers.one_shot.len(), 1, "the Open was never queued");
+        assert!(
+            receivers.stream.is_empty(),
             "refused Open cannot create a Surface to clean up"
         );
         let mut wire = String::new();
         peer.read_to_string(&mut wire).unwrap();
         let refusal: Value = serde_json::from_str(wire.trim()).unwrap();
-        assert_eq!(refusal["reason"], NO_ANSWER);
+        assert_eq!(refusal["reason"], BUSY);
     }
 
     /// A Surface the window cannot give a writer to is told so, rather than
@@ -1263,7 +1299,7 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
-        let (requests, window) = async_channel::bounded(1);
+        let (lanes, receivers) = surface_lanes_with(1, 1);
         serve_surface(
             stream,
             reader,
@@ -1274,7 +1310,7 @@ mod tests {
                 focus: false,
                 description: json!({}),
             },
-            &requests,
+            &lanes,
         );
         let mut wire = String::new();
         std::io::Read::read_to_string(&mut peer, &mut wire).unwrap();
@@ -1282,7 +1318,7 @@ mod tests {
             serde_json::from_str(wire.lines().next().expect("a refusal line")).unwrap();
         assert_eq!(refusal["type"], "refused");
         assert_eq!(refusal["reason"], NOT_ANSWERING);
-        assert!(window.try_recv().is_err(), "the window was asked nothing");
+        assert!(nothing_reached(&receivers), "the window was asked nothing");
     }
 
     #[test]
@@ -1424,11 +1460,11 @@ mod tests {
         for length in [MAX_SOCKET_PATH, MAX_SOCKET_PATH + 1] {
             let padding = length - scratch.0.as_os_str().len() - 2 - SOCKET_NAME_BYTES;
             let directory = scratch.0.join("p".repeat(padding));
-            let (tx, _rx) = async_channel::unbounded();
+            let (lanes, _receivers) = surface_lanes_with(1, 1);
             let endpoint = SurfaceEndpoint::open_in(
                 directory.clone(),
                 Arc::new(ObservationKey::generate().unwrap()),
-                tx,
+                lanes,
             );
             if length > MAX_SOCKET_PATH {
                 assert!(endpoint.is_err());
@@ -1499,7 +1535,7 @@ mod tests {
                 line(&mut reader),
                 json!({"type":"refused", "reason":"denied"})
             );
-            assert!(rx.try_recv().is_err());
+            assert!(nothing_reached(&rx));
         }
     }
 
@@ -1558,7 +1594,7 @@ mod tests {
             // could ever produce a `SurfaceRequest`, so having already read
             // it is proof nothing reached the window — no wait needed.
             assert!(
-                rx.try_recv().is_err(),
+                nothing_reached(&rx),
                 "the window was asked by an unauthorised caller"
             );
         }
@@ -1599,7 +1635,7 @@ mod tests {
                 line(&mut reader),
                 json!({ "type": "refused", "reason": reason })
             );
-            assert!(rx.try_recv().is_err(), "invalid discovery reached window");
+            assert!(nothing_reached(&rx), "invalid discovery reached window");
         }
     }
 
@@ -1715,6 +1751,51 @@ mod tests {
         drop(stream);
         drop(reader);
         assert_eq!(seen_rx.recv().expect("seen"), "closed");
+    }
+
+    /// One program streaming faster than the window drains must not refuse
+    /// another program's Open.
+    #[test]
+    fn a_full_stream_lane_does_not_refuse_another_connections_open() {
+        let scratch = Scratch::new();
+        let (endpoint, receivers) = endpoint(&scratch);
+        // Only the one-shot lane is served; the stream lane is left to fill.
+        let one_shot = receivers.one_shot;
+        let answering = std::thread::spawn(move || {
+            while let Ok(request) = one_shot.recv_blocking() {
+                if let SurfaceRequest::Open { reply, .. } = request {
+                    assert!(reply.claim());
+                    let _ = reply.send(Ok(()));
+                } else {
+                    panic!("only Opens reach the one-shot lane here");
+                }
+            }
+        });
+        let (mut first, mut first_reader) = connect(&endpoint);
+        writeln!(first, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
+        assert_eq!(line(&mut first_reader)["type"], "opened");
+        for _ in 0..(crate::surface::lanes::STREAM_CAPACITY + 8) {
+            writeln!(first, r#"{{"type":"update","description":{{"version":1,"root":{{"kind":"text","text":"hi"}}}}}}"#).expect("write");
+        }
+        // The second Open is sent only once the first program's stream has
+        // filled its lane, so the test cannot pass by winning a race.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !receivers.stream.is_full() {
+            assert!(Instant::now() < deadline, "the stream lane never filled");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (mut second, mut second_reader) = connect(&endpoint);
+        writeln!(second, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
+        assert_eq!(
+            line(&mut second_reader)["type"],
+            "opened",
+            "the second program's Open waited behind the first program's stream"
+        );
+        drop(second);
+        drop(first);
+        drop(endpoint);
+        drop(receivers.stream);
+        answering.join().expect("the answering thread finished");
     }
 
     #[test]

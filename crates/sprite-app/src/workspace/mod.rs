@@ -134,7 +134,7 @@ pub struct Workspace {
     /// The Surface Channel, if the window could open one.
     surfaces: Option<SurfaceEndpoint>,
     /// Keeps the surface request loop alive for as long as the window is.
-    _surface_requests: gpui::Task<()>,
+    _surface_requests: [gpui::Task<()>; 2],
     /// Ordinary shell exits are handled here, where the owning tab is known.
     exit_sender: async_channel::Sender<(TabId, PaneId)>,
     _exits: gpui::Task<()>,
@@ -215,13 +215,13 @@ impl Workspace {
             .flatten();
         let reload_sender = reload_tx.clone();
 
-        let (surface_tx, surface_rx) = async_channel::bounded::<SurfaceRequest>(64);
+        let (surface_lanes, surface_receivers) = crate::surface::lanes::surface_lanes();
         // Its own key, never observation's: a program handed only the
         // observation credentials can read every pane but draw in none.
         let surface_key = crate::observation::endpoint::ObservationKey::generate()
             .ok()
             .map(Arc::new);
-        let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_tx).ok());
+        let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_lanes).ok());
 
         // Published before the settings, so a pane rendering on the first
         // settings notification already finds its colours by name.
@@ -285,16 +285,12 @@ impl Workspace {
             }
         });
 
-        let surface_task = cx.spawn_in(window, async move |workspace, cx| {
-            while let Ok(request) = surface_rx.recv().await {
-                let served = workspace.update_in(cx, |workspace, window, cx| {
-                    workspace.serve_surface_request(request, window, cx);
-                });
-                if served.is_err() {
-                    break;
-                }
-            }
-        });
+        // One task per lane, so a handshake never waits behind a stream.
+        let crate::surface::lanes::SurfaceReceivers { stream, one_shot } = surface_receivers;
+        let surface_tasks = [
+            Self::drain_surface_lane(stream, window, cx),
+            Self::drain_surface_lane(one_shot, window, cx),
+        ];
 
         let bounds = cx.observe_window_bounds(window, |workspace, window, cx| {
             let viewport = window.viewport_size();
@@ -343,12 +339,30 @@ impl Workspace {
             _reload: reload_task,
             reload_sender,
             surfaces,
-            _surface_requests: surface_task,
+            _surface_requests: surface_tasks,
             exit_sender,
             _exits: exit_task,
         };
         workspace.refresh_layout(cx);
         workspace
+    }
+
+    /// Serves one lane of Surface requests until the window or the lane ends.
+    fn drain_surface_lane(
+        lane: async_channel::Receiver<SurfaceRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<()> {
+        cx.spawn_in(window, async move |workspace, cx| {
+            while let Ok(request) = lane.recv().await {
+                let served = workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.serve_surface_request(request, window, cx);
+                });
+                if served.is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     fn refresh_layout(&mut self, cx: &mut Context<Self>) {

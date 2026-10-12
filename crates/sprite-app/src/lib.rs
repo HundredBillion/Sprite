@@ -51,6 +51,7 @@ pub use surface::channel::{
     SurfaceEndpoint, SurfaceRequest,
 };
 pub use surface::client::{run_surface_focus, run_surface_open, run_token_register};
+pub use surface::lanes::{SurfaceLanes, SurfaceReceivers, surface_lanes};
 pub use tabs::TabId;
 pub use workspace::Workspace;
 

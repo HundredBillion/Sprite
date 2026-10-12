@@ -265,8 +265,11 @@ impl Patience {
 pub(crate) enum RelayError {
     /// The window is gone; the request never reached it.
     Disconnected,
-    /// Admission was refused or the window did not claim the request in
-    /// time and now never will, so nothing was applied.
+    /// The lane was full, so the request never reached the window. Nothing
+    /// was applied, and the asker may say so.
+    Refused,
+    /// The window did not claim the request in time and now never will, so
+    /// nothing was applied.
     Timeout,
     /// The window claimed the request and has not answered within the extra
     /// wait. It may still be applying it, so nobody may say nothing changed.
@@ -291,7 +294,7 @@ pub(crate) fn relay<Request, Answer>(
         Ok(()) => {}
         Err(async_channel::TrySendError::Full(_)) => {
             claim.abandon();
-            return Err(RelayError::Timeout);
+            return Err(RelayError::Refused);
         }
         Err(async_channel::TrySendError::Closed(_)) => {
             claim.abandon();
@@ -572,7 +575,7 @@ mod tests {
             }
             caller.join().unwrap();
             assert!(
-                matches!(outcome, Ok(Err(RelayError::Timeout))),
+                matches!(outcome, Ok(Err(RelayError::Refused))),
                 "admission must finish with the abandoned wave still queued: {outcome:?}"
             );
         }

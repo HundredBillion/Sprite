@@ -79,12 +79,25 @@ fn run_with_input(arguments: &[&str], environment: &[(&str, &str)], input: &str)
 fn surface_window(
     script: impl FnMut(sprite_app::SurfaceRequest) -> bool + Send + 'static,
 ) -> (sprite_app::SurfaceEndpoint, std::thread::JoinHandle<()>) {
-    let (tx, rx) = async_channel::bounded(8);
+    let (lanes, receivers) = sprite_app::surface_lanes();
     let key = std::sync::Arc::new(sprite_app::ObservationKey::generate().expect("key"));
-    let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), key, tx).expect("endpoint");
+    let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), key, lanes).expect("endpoint");
+    // Both lanes feed the one script, whichever lane a request came by.
+    let (merged, requests) = std::sync::mpsc::channel();
+    for lane in [receivers.stream, receivers.one_shot] {
+        let merged = merged.clone();
+        std::thread::spawn(move || {
+            while let Ok(request) = lane.recv_blocking() {
+                if merged.send(request).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(merged);
     let mut script = script;
     let window = std::thread::spawn(move || {
-        while let Ok(request) = rx.recv_blocking() {
+        while let Ok(request) = requests.recv() {
             if !script(request) {
                 break;
             }

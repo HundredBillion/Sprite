@@ -118,13 +118,18 @@ Writes remain per-operation inactivity bounds, not total response deadlines.
 The observation CLI likewise uses per-operation read/write timeouts, not a total
 15-second exchange deadline.
 
-The generic workspace reply relay retains the existing queue submission and
-reply-wait semantics: blocking enqueue, then a bounded reply wait (5 seconds for
-Surface, the existing configuration timeout for config). Its deadline does not
-cover queue submission or arbitrary adapter work. Closing interrupts socket I/O;
-it does not join workers awaiting the GPUI queue/reply. Accepted workers remain
-bounded by each listener's connection cap. No new timer thread, polling animation,
-or dependency is introduced.
+The generic workspace reply relay admits without blocking: the connection
+thread offers its request to a bounded lane and, if the lane is full, reports
+"this window is busy; nothing was changed" at once (amended 2026-10-12,
+GAP-C09; the earlier text described a blocking enqueue that the code never
+had). Surface requests use two lanes (ADR 0030): a stream lane that a
+connection blocks on, and a one-shot lane for handshakes that must not queue
+behind another program's stream. Its reply deadline (5 seconds for Surface,
+the existing configuration timeout for config) does not cover arbitrary
+adapter work. Closing interrupts socket I/O; it does not join workers awaiting
+the GPUI queue/reply. Accepted workers remain bounded by each listener's
+connection cap. No new timer thread, polling animation, or dependency is
+introduced.
 
 The API evidence is Rust's [`UnixStream` documentation](https://doc.rust-lang.org/std/os/unix/net/struct.UnixStream.html#method.set_read_timeout),
 [`BufReader` documentation](https://doc.rust-lang.org/std/io/struct.BufReader.html),

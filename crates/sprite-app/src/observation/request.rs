@@ -322,6 +322,8 @@ fn ask_window(
     }) {
         Ok(answer) => answer,
         Err(RelayError::Disconnected) => "this window is no longer answering".to_owned(),
+        // Refused at admission: the window never saw it, so nothing changed.
+        Err(RelayError::Refused) => "this window is busy; nothing was changed".to_owned(),
         // Said only once the request is abandoned, which the window can then
         // no longer apply.
         Err(RelayError::Timeout) => {
@@ -341,7 +343,7 @@ mod tests {
         respond,
     };
     use crate::pane_tree::PaneId;
-    use crate::workspace::Patience;
+    use crate::workspace::{Patience, Relayed};
     use sprite_term::HistoryLines;
     use std::time::Duration;
 
@@ -635,6 +637,30 @@ mod tests {
         );
         let late = requests.try_recv().expect("the request is still queued");
         assert!(!late.reply.claim(), "and the window can no longer apply it");
+    }
+
+    /// A request refused at admission never reached the window, which may
+    /// be answering promptly; it is busy, not silent.
+    #[test]
+    fn a_refused_admission_says_the_window_is_busy_not_that_it_did_not_answer() {
+        let (requests, _window) = async_channel::bounded(1);
+        requests
+            .try_send(ReloadRequest {
+                what: ConfigVerb::Print,
+                reply: Relayed::waiting(std::sync::mpsc::sync_channel(1).0).0,
+                reply_connection: None,
+            })
+            .expect("fill the lane");
+        let answer = ask_window(
+            &requests,
+            ConfigVerb::Reload,
+            None,
+            Patience {
+                answer: Duration::from_millis(30),
+                after_claim: Duration::from_secs(5),
+            },
+        );
+        assert_eq!(answer, "this window is busy; nothing was changed");
     }
 
     /// A reload the window has taken but not finished is reported as under
