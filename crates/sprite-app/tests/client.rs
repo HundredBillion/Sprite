@@ -5,6 +5,8 @@
 //! what reaches standard error, what the exit status is, and that it always
 //! returns. None of that is observable from inside the crate.
 
+// Shared with the library's own tests; this binary uses only `pause`.
+#[allow(dead_code)]
 #[path = "../src/test_blocking_wait.rs"]
 mod test_blocking_wait;
 

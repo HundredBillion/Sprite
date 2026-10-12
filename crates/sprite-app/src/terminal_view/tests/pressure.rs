@@ -1,5 +1,11 @@
 use super::*;
 
+/// Takes every control-lane slot a stalled worker left, so the next command
+/// is refused. True when it was.
+fn saturate(view: &mut TerminalView) -> bool {
+    (0..=sprite_term::CONTROL_CAPACITY).any(|_| !view.submit(TerminalCommand::Capture))
+}
+
 #[test]
 fn settings_callback_recovers_latest_values_after_real_event_pressure() {
     crate::test_child::run_child_test(
@@ -26,7 +32,7 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             .as_nanos()
     ));
     // The burst must fit one macOS PTY read (1 KiB) yet overflow the event mailbox;
-    // a split burst leaves the worker holding a second chunk and the command queue short of full.
+    // a split burst leaves the worker holding a second chunk and the control lane short of full.
     // Clipboard writes, because a title keeps only its latest value per pass.
     let titles = crate::test_event_pressure::CLIPBOARD_WRITE.repeat(60);
     // ARMED proves the child waits at the gate, so a slow start cannot push the burst
@@ -64,6 +70,9 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
     assert!(view.read_with(cx, |view, _| view.pane_focused()));
     std::fs::write(&gate, b"go").unwrap();
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
+    view.update(cx, |view, _| {
+        assert!(saturate(view), "the fixture never filled the lane")
+    });
     let mut changed = settings.clone();
     changed.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
     changed.cursor.blink = Some(false);
@@ -74,24 +83,24 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             before.elapsed() < std::time::Duration::from_millis(200),
             "actual settings callback blocked"
         );
+        assert!(
+            view.status
+                .as_ref()
+                .is_some_and(|s| s.contains(BUSY_STATUS))
+        );
         assert_eq!(
-            view.applied_settings.colors, changed.colors,
-            "the reserved command slot accepted colors"
+            view.applied_settings.colors, settings.colors,
+            "color refusal must not advance its cache"
         );
         assert_eq!(
             view.applied_settings.cursor, settings.cursor,
             "cursor refusal must not advance its cache"
         );
-        assert!(
-            view.status
-                .as_ref()
-                .is_some_and(|s| s.contains("queue is full"))
-        );
-        assert!(view.pending_settings.is_some());
+        assert!(view.pending.settings.is_some());
         view.apply_settings(&settings, window, cx);
-        assert_eq!(
-            view.applied_settings.colors, changed.colors,
-            "refused revert must retain admitted color state"
+        assert!(
+            view.pending.settings.is_none(),
+            "reverting to what is applied owes nothing"
         );
         let allocated = gpui::size(px(400.0), px(200.0));
         view.set_allocated(allocated);
@@ -108,7 +117,7 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             Some(desired_size),
             "refused geometry cannot advance admission cache"
         );
-        assert_eq!(view.pending_resize, Some(desired_size));
+        assert_eq!(view.pending.resize, Some(desired_size));
         desired_size
     });
     cx.update(|window, cx| {
@@ -130,8 +139,8 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             .advance_clock(std::time::Duration::from_millis(5));
         cx.executor().tick();
         if view.read_with(cx, |v, _| {
-            v.pending_settings.is_none()
-                && v.pending_resize.is_none()
+            v.pending.settings.is_none()
+                && v.pending.resize.is_none()
                 && v.bundle.as_ref().is_some_and(|b| {
                     b.render.default_foreground == initial.render.default_foreground
                         && b.render.size == desired_size
@@ -144,8 +153,8 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             std::time::Instant::now() < deadline,
             "latest worker state: {:?}",
             view.read_with(cx, |v, _| (
-                v.pending_settings.is_some(),
-                v.pending_resize,
+                v.pending.settings.is_some(),
+                v.pending.resize,
                 v.size,
                 v.status.clone(),
                 v.bundle.as_ref().map(|b| (
@@ -176,9 +185,10 @@ fn focus_refused_under_a_full_queue_is_delivered_once_admission_recovers() {
 ///
 /// The child turns focus reporting on, then waits at a gate. While the UI
 /// thread is paused, copy commands fill the event mailbox so the worker
-/// stalls, and once released the child's output fills the command queue.
-/// Pane Focus is gained while the queue is full; the refused `Focus(true)` must still reach the child — as
-/// CSI I — once the UI resumes and admission recovers.
+/// stalls, and the test takes whatever room it left in the control lane.
+/// Pane Focus is gained while the lane is full; the refused `Focus(true)`
+/// must still reach the child — as CSI I — once the UI resumes and admission
+/// recovers.
 #[gpui::test]
 fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
     if std::env::var_os("SPRITE_FOCUS_PRESSURE_CHILD").is_none() {
@@ -260,26 +270,20 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
     view.update_in(cx, |view, window, cx| {
         // Whatever room the stalled worker left is taken, so the next command
         // is refused.
-        let mut refused = false;
-        for _ in 0..64 {
-            if !view.submit(TerminalCommand::ClearSelection) {
-                refused = true;
-                break;
-            }
-        }
-        assert!(refused, "the fixture never filled the command queue");
+        let refused = saturate(view);
+        assert!(refused, "the fixture never filled the control lane");
         window.focus(&view.focus);
         view.refresh_pane_focus(window, cx);
         assert!(view.pane_focused());
         assert_eq!(
-            view.pending_focus,
+            view.pane_focus.pending(),
             Some(true),
             "a refused Focus is kept for recovery"
         );
         assert!(
             view.status
                 .as_ref()
-                .is_some_and(|status| status.contains("queue is full"))
+                .is_some_and(|status| status.contains(BUSY_STATUS))
         );
     });
 
@@ -289,7 +293,7 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
             .advance_clock(std::time::Duration::from_millis(5));
         cx.executor().tick();
         if view.read_with(cx, |view, _| {
-            view.pending_focus.is_none()
+            view.pane_focus.pending().is_none()
                 && view.bundle.as_ref().is_some_and(|bundle| {
                     bundle
                         .pane
@@ -303,7 +307,10 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
         assert!(
             std::time::Instant::now() < deadline,
             "the refused Focus never reached the child: {:?}",
-            view.read_with(cx, |view, _| (view.pending_focus, view.status.clone()))
+            view.read_with(cx, |view, _| (
+                view.pane_focus.pending(),
+                view.status.clone()
+            ))
         );
         crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
     }
@@ -352,8 +359,7 @@ fn natural_completion_retires_idle_admission_recovery(cx: &mut gpui::TestAppCont
     }
     view.read_with(cx, |v, _| {
         assert!(matches!(v.session, SessionState::Ended(_)));
-        assert!(v.pending_settings.is_none());
-        assert!(v.pending_resize.is_none());
+        assert!(v.pending.is_empty());
     });
     if let Some(cleanup) = view.update(cx, |v, _| v.begin_shutdown()) {
         cleanup.wait().unwrap();
@@ -403,12 +409,8 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
             v.admission_closed,
             "disconnected admission must retire recovery"
         );
-        assert!(
-            v.status
-                .as_ref()
-                .is_some_and(|s| s.contains("worker ended"))
-        );
-        assert!(v.pending_settings.is_none());
+        assert!(v.status.as_ref().is_some_and(|s| s.contains(ENDED_STATUS)));
+        assert!(v.pending.settings.is_none());
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
@@ -492,21 +494,14 @@ fn selection_admission_pressure_child(cx: &mut gpui::TestAppContext) {
                     crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
                 }
             }
-            let mut refused = false;
-            for _ in 0..64 {
-                if !view.submit(TerminalCommand::CopySelection) {
-                    refused = true;
-                    break;
-                }
-            }
-            assert!(refused, "fixture must fill the real command queue");
+            assert!(saturate(view), "fixture must fill the real control lane");
         });
         cx.simulate_mouse_down(new_start, MouseButton::Left, Modifiers::default());
         view.read_with(cx, |view, _| {
             assert!(
                 view.status
                     .as_ref()
-                    .is_some_and(|status| status.contains("queue is full"))
+                    .is_some_and(|status| status.contains(BUSY_STATUS))
             );
             assert!(
                 view.drag.is_none(),
@@ -587,5 +582,58 @@ fn selection_admission_pressure_child(cx: &mut gpui::TestAppContext) {
     }
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
+    }
+}
+
+/// Across a sustained output flood no keystroke is refused at the view.
+/// Before the control lane this depended on whether the worker kept up with
+/// the pump; now a keystroke never competes with output.
+#[gpui::test]
+fn no_keystroke_is_refused_under_a_sustained_output_flood(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), "yes".into()]),
+            settings.clone(),
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    // A debug build takes longer than `wait_for_bundle`'s one second to show
+    // the first frame of a flood, so this waits on the watchdog instead.
+    let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
+    while !view.read_with(cx, |view, _| {
+        view.bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.pane.rows.iter().any(|row| row.text.starts_with('y')))
+    }) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flood never reached the pane"
+        );
+        cx.run_until_parked();
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
+    }
+    // `yes` never reads, so stay under the kernel's 1 KiB input queue: the
+    // pump would otherwise report a write refusal, which is a different fact.
+    for n in 0..300 {
+        view.update(cx, |view, _| {
+            assert!(
+                view.submit(TerminalCommand::Input(b"x".to_vec())),
+                "keystroke {n} refused under a flood: {:?}",
+                view.status
+            );
+        });
+        cx.run_until_parked();
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(5));
     }
 }

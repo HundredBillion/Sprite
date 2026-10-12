@@ -36,8 +36,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
-    snapshots.next_blocking().unwrap();
+    crate::test_event_pressure::saturate_control(&session.commands());
     let position = sprite_term::CellPosition { row: 0, column: 0 };
     view.update(cx, |view, _| {
         view.request_hover_link(position);
@@ -61,7 +60,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
         assert!(
             view.status
                 .as_ref()
-                .is_some_and(|status| status.contains("queue is full"))
+                .is_some_and(|status| status.contains(BUSY_STATUS))
         );
     });
     let (events_tx, events_rx) = std::sync::mpsc::sync_channel(1);
@@ -158,7 +157,7 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
     let sprite_term::Spawned {
         session,
         events,
-        mut snapshots,
+        snapshots: _snapshots,
     } = TerminalSession::spawn(SessionConfig::command(
         "/bin/sh",
         vec![
@@ -168,8 +167,7 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
-    snapshots.next_blocking().unwrap();
+    crate::test_event_pressure::saturate_control(&session.commands());
     let image = sprite_term::ImagePixels {
         id: 88,
         generation: 1,
@@ -203,7 +201,7 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
         assert!(
             view.status
                 .as_ref()
-                .is_some_and(|status| status.contains("queue is full"))
+                .is_some_and(|status| status.contains(BUSY_STATUS))
         );
         view.apply_settings(&settings, window, cx);
         assert_eq!(
@@ -231,165 +229,161 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
     drop(events);
 }
 
+/// A reload the worker refuses is kept whole and reverted whole: nothing of
+/// it reaches the terminal, and returning to what is applied owes nothing.
 #[gpui::test]
-fn accepted_colors_revert_after_the_other_reload_groups_refuse(cx: &mut gpui::TestAppContext) {
-    for accept_colors in [true, false] {
-        let mut settings = crate::config::Settings::default();
-        settings.cursor.blink = Some(true);
-        cx.set_global(crate::config::ActiveSettings(settings.clone()));
-        cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            TerminalView::failed(
-                "accepted colors revert".into(),
-                chosen_family(window, settings.font.family.as_deref(), cx).0,
-                window,
-                cx,
-            )
-        });
-        let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), crate::test_event_pressure::pressure_script("printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done").into()]);
-        let defaults = theme::session_defaults(&settings);
-        config.colors = defaults.colors;
-        config.cursor = defaults.cursor;
-        let sprite_term::Spawned {
-            session,
-            mut events,
-            mut snapshots,
-        } = TerminalSession::spawn(config).unwrap();
-        crate::test_event_pressure::focus_and_release(&session.commands());
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
-        let mut reloaded = settings.clone();
-        let changed_color = Rgb {
-            r: 0x12,
-            g: 0x34,
-            b: 0x56,
-        };
-        reloaded.colors.foreground = Some(changed_color);
-        reloaded.cursor.blink = Some(false);
-        view.update_in(cx, |view, window, cx| {
-            view.session = SessionState::Running(session);
-            view.applied_settings = settings.clone();
-            if !accept_colors {
-                let mut cursor_only = settings.clone();
-                cursor_only.cursor.blink = Some(false);
-                view.apply_settings(&cursor_only, window, cx);
-                assert_eq!(
-                    view.applied_settings.cursor.blink,
-                    Some(false),
-                    "the reserved slot accepts cursor B"
-                );
-            }
-            view.apply_settings(&reloaded, window, cx);
-            assert!(
-                view.status
-                    .as_ref()
-                    .is_some_and(|status| status.contains("queue is full")),
-                "the other terminal group refuses after the reserved slot is occupied"
-            );
-            assert_eq!(view.applied_settings.cursor.blink, Some(accept_colors));
-            view.apply_settings(&settings, window, cx);
-        });
-        let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let event_drain = std::thread::spawn(move || {
-            while let Ok(event) = events.next_blocking() {
-                if matches!(&event, sprite_term::TerminalEvent::TitleChanged(Some(title)) if title == "RESTORED_READY")
-                {
-                    let _ = ready_tx.send(());
-                }
-                if let sprite_term::TerminalEvent::History {
-                    snapshot: history, ..
-                } = event
-                    && history_tx.send(history).is_err()
-                {
-                    break;
-                }
-            }
-        });
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let snapshot_drain = std::thread::spawn(move || {
-            while let Ok(bundle) = snapshots.next_blocking() {
-                if tx.send(bundle).is_err() {
-                    break;
-                }
-            }
-        });
-        let wait_for_text = |text: &str| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                let bundle = rx
-                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-                    .expect("snapshot deadline");
-                if bundle.pane.rows.iter().any(|row| row.text.contains(text)) {
-                    break bundle;
-                }
-            }
-        };
-        let changed = wait_for_text("INPUT_READY");
-        assert_eq!(
-            changed.render.default_foreground,
-            if accept_colors {
-                changed_color
-            } else {
-                theme::session_defaults(&settings).fallback_colors.0
-            },
-            "accepted color state survives refusal of the other group"
+fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppContext) {
+    let mut settings = crate::config::Settings::default();
+    settings.cursor.blink = Some(true);
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::failed(
+            "refused reload revert".into(),
+            chosen_family(window, settings.font.family.as_deref(), cx).0,
+            window,
+            cx,
+        )
+    });
+    let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), crate::test_event_pressure::pressure_script("printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done").into()]);
+    let defaults = theme::session_defaults(&settings);
+    config.colors = defaults.colors;
+    config.cursor = defaults.cursor;
+    let sprite_term::Spawned {
+        session,
+        mut events,
+        mut snapshots,
+    } = TerminalSession::spawn(config).unwrap();
+    crate::test_event_pressure::focus_and_release(&session.commands());
+    crate::test_event_pressure::saturate_control(&session.commands());
+    let changed_color = Rgb {
+        r: 0x12,
+        g: 0x34,
+        b: 0x56,
+    };
+    let mut reloaded = settings.clone();
+    reloaded.colors.foreground = Some(changed_color);
+    reloaded.cursor.blink = Some(false);
+    view.update_in(cx, |view, window, cx| {
+        view.session = SessionState::Running(session);
+        view.applied_settings = settings.clone();
+        view.apply_settings(&reloaded, window, cx);
+        assert!(
+            view.status
+                .as_ref()
+                .is_some_and(|status| status.contains(BUSY_STATUS))
         );
         assert_eq!(
-            changed.render.cursor.blinking, accept_colors,
-            "accepted cursor state survives refusal of the other group"
+            view.applied_settings.colors, settings.colors,
+            "nothing was admitted"
         );
-        view.update_in(cx, |view, window, cx| {
-            view.apply_settings(&settings, window, cx);
-            assert!(view.submit(TerminalCommand::Input(b"restored\n".to_vec())));
-        });
-        let restored = wait_for_text("RESULT:restored");
+        assert_eq!(view.applied_settings.cursor.blink, settings.cursor.blink);
         assert_eq!(
-            restored.render.default_foreground,
-            theme::session_defaults(&settings).fallback_colors.0,
-            "return to A reconciles the accepted B defaults after the prior A submission refused"
+            view.pending.settings.as_ref(),
+            Some(&reloaded),
+            "the reload is kept whole"
         );
-        assert!(restored.render.cursor.blinking);
-        ready_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("complete child response");
-        let commands = view.update(cx, |view, _| match &view.session {
-            SessionState::Running(session) => session.commands(),
-            _ => panic!("probe session ended"),
-        });
-        submit_probe(
-            commands.clone(),
-            TerminalCommand::CaptureHistory {
-                ticket: sprite_term::Ticket::new(0),
-                lines: sprite_term::HistoryLines::new(0),
-            },
+        view.apply_settings(&settings, window, cx);
+        assert!(
+            view.pending.settings.is_none(),
+            "reverting to what is applied owes nothing"
         );
-        let settled = history_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-        view.update_in(cx, |view, window, cx| {
-            view.apply_settings(&settings, window, cx);
-        });
-        submit_probe(
-            commands,
-            TerminalCommand::CaptureHistory {
-                ticket: sprite_term::Ticket::new(0),
-                lines: sprite_term::HistoryLines::new(0),
-            },
-        );
-        let unchanged = history_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-        assert_eq!(
-            unchanged.generation, settled.generation,
-            "unchanged reload must not reset terminal defaults"
-        );
-        let handle = view.update(cx, |view, _| view.begin_shutdown().unwrap());
-        handle.wait().unwrap();
-        drop(rx);
-        drop(history_rx);
-        snapshot_drain.join().unwrap();
-        event_drain.join().unwrap();
-    }
+    });
+    let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let event_drain = std::thread::spawn(move || {
+        while let Ok(event) = events.next_blocking() {
+            if matches!(&event, sprite_term::TerminalEvent::TitleChanged(Some(title)) if title == "RESTORED_READY")
+            {
+                let _ = ready_tx.send(());
+            }
+            if let sprite_term::TerminalEvent::History {
+                snapshot: history, ..
+            } = event
+                && history_tx.send(history).is_err()
+            {
+                break;
+            }
+        }
+    });
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let snapshot_drain = std::thread::spawn(move || {
+        while let Ok(bundle) = snapshots.next_blocking() {
+            if tx.send(bundle).is_err() {
+                break;
+            }
+        }
+    });
+    let wait_for_text = |text: &str| {
+        let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
+        loop {
+            let bundle = rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("snapshot deadline");
+            if bundle.pane.rows.iter().any(|row| row.text.contains(text)) {
+                break bundle;
+            }
+        }
+    };
+    let unreached = wait_for_text("INPUT_READY");
+    assert_eq!(
+        unreached.render.default_foreground, defaults.fallback_colors.0,
+        "the refused colors never reached the terminal"
+    );
+    assert!(
+        unreached.render.cursor.blinking,
+        "the refused cursor never reached the terminal"
+    );
+    view.update_in(cx, |view, window, cx| {
+        view.apply_settings(&settings, window, cx);
+        assert!(view.submit(TerminalCommand::Input(b"restored\n".to_vec())));
+    });
+    let restored = wait_for_text("RESULT:restored");
+    assert_eq!(
+        restored.render.default_foreground,
+        defaults.fallback_colors.0
+    );
+    assert!(restored.render.cursor.blinking);
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("complete child response");
+    let commands = view.update(cx, |view, _| match &view.session {
+        SessionState::Running(session) => session.commands(),
+        _ => panic!("probe session ended"),
+    });
+    submit_probe(
+        commands.clone(),
+        TerminalCommand::CaptureHistory {
+            ticket: sprite_term::Ticket::new(0),
+            lines: sprite_term::HistoryLines::new(0),
+        },
+    );
+    let settled = history_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    view.update_in(cx, |view, window, cx| {
+        view.apply_settings(&settings, window, cx);
+    });
+    submit_probe(
+        commands,
+        TerminalCommand::CaptureHistory {
+            ticket: sprite_term::Ticket::new(0),
+            lines: sprite_term::HistoryLines::new(0),
+        },
+    );
+    let unchanged = history_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(
+        unchanged.generation, settled.generation,
+        "unchanged reload must not reset terminal defaults"
+    );
+    let handle = view.update(cx, |view, _| view.begin_shutdown().unwrap());
+    handle.wait().unwrap();
+    drop(rx);
+    drop(history_rx);
+    snapshot_drain.join().unwrap();
+    event_drain.join().unwrap();
 }
 
 #[gpui::test]
@@ -419,7 +413,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
+    crate::test_event_pressure::saturate_control(&session.commands());
     let initial = snapshots.next_blocking().unwrap();
     let allocated = gpui::size(px(800.0), px(480.0));
     let mut reloaded = settings.clone();
@@ -440,7 +434,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
         assert!(
             view.status
                 .as_ref()
-                .is_some_and(|status| status.contains("queue is full"))
+                .is_some_and(|status| status.contains(BUSY_STATUS))
         );
         assert_ne!(
             view.size,
@@ -463,7 +457,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
         }
     });
     let wait_for_text = |text: &str| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             let bundle = rx
@@ -532,7 +526,7 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
     let sprite_term::Spawned {
         session,
         events,
-        mut snapshots,
+        snapshots: _snapshots,
     } = TerminalSession::spawn(SessionConfig::command(
         "/bin/sh",
         vec![
@@ -542,8 +536,7 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_blocking_wait::pause(std::time::Duration::from_millis(300));
-    snapshots.next_blocking().unwrap();
+    crate::test_event_pressure::saturate_control(&session.commands());
     let guard = std::thread::spawn(move || {
         crate::test_blocking_wait::pause(std::time::Duration::from_secs(1));
         drop(events);
@@ -562,7 +555,7 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
         assert!(
             view.status
                 .as_ref()
-                .is_some_and(|status| status.contains("queue is full"))
+                .is_some_and(|status| status.contains(BUSY_STATUS))
         );
         view.apply_settings(&reloaded, window, cx);
         assert_eq!(
@@ -572,7 +565,7 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
         assert!(
             view.status
                 .as_ref()
-                .is_some_and(|status| status.contains("queue is full"))
+                .is_some_and(|status| status.contains(BUSY_STATUS))
         );
         view.begin_shutdown();
     });

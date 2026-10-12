@@ -7,6 +7,7 @@
 mod geometry;
 mod input;
 mod list_view;
+mod pane_focus;
 mod placeholder;
 mod render;
 mod surfaces;
@@ -22,8 +23,8 @@ use gpui::{
     point, px,
 };
 use sprite_term::{
-    Rgb, SessionConfig, ShutdownHandle, SnapshotBundle, TerminalCommand, TerminalSession,
-    TerminalSize,
+    Admitted, ErrorKind, Rgb, SessionConfig, SessionError, ShutdownHandle, SnapshotBundle,
+    TerminalCommand, TerminalSession, TerminalSize,
 };
 
 use crate::grid::ScrollAccumulator;
@@ -38,6 +39,30 @@ use surfaces::HostedSurface;
 pub(crate) use theme::CellMetrics;
 use theme::{chosen_family, unpack};
 
+/// Shown when the worker's control lane is full and a command was refused.
+pub(crate) const BUSY_STATUS: &str = "the terminal is busy; the last command was not delivered";
+/// Shown when a command is offered to a worker that has gone.
+pub(crate) const ENDED_STATUS: &str = "the terminal has ended";
+
+/// What the worker could not take yet. Settings keep the whole reload,
+/// because its groups are admitted separately and a partial reload is
+/// reverted as one.
+#[derive(Default)]
+struct Pending {
+    settings: Option<crate::config::Settings>,
+    resize: Option<sprite_term::ValidTerminalSize>,
+}
+
+impl Pending {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.settings.is_none() && self.resize.is_none()
+    }
+}
+
 enum SessionState {
     NeverStarted,
     Running(TerminalSession),
@@ -46,14 +71,9 @@ enum SessionState {
 
 pub struct TerminalView {
     applied_settings: crate::config::Settings,
-    pending_settings: Option<crate::config::Settings>,
-    pending_resize: Option<sprite_term::ValidTerminalSize>,
-    /// The Pane Focus the worker still has to be told, kept while the command
-    /// queue refuses it so the latest value is delivered when room returns.
-    pending_focus: Option<bool>,
-    /// The Pane Focus the worker last accepted, so a change that is undone
-    /// before it was delivered sends nothing at all.
-    told_focus: bool,
+    /// What the worker could not take yet, kept so the latest value is
+    /// delivered when room returns.
+    pending: Pending,
     admission_closed: bool,
     admission_notice: bool,
     /// An ended pane keeps its worker handle until cleanup can join it.
@@ -147,9 +167,9 @@ pub struct TerminalView {
     /// and that window is the active one. The worker is told every change,
     /// because the same fact decides whether the child may write the clipboard
     /// and whether it hears focus reports.
-    pane_focused: bool,
+    pane_focus: pane_focus::PaneFocus,
     /// Keeps the focus and window-activation observers alive.
-    _pane_focus: [gpui::Subscription; 3],
+    _focus_observers: [gpui::Subscription; 3],
     /// Text an input method is composing.
     ///
     /// Shown at the cursor and deliberately *not* sent: the terminal learns
@@ -475,13 +495,10 @@ impl TerminalView {
 
         let (retry_task, retry_wake) = Self::spawn_retry(window, cx);
         let focus = cx.focus_handle();
-        let pane_focus = Self::observe_pane_focus(&focus, window, cx);
+        let focus_observers = Self::observe_pane_focus(&focus, window, cx);
         let mut view = Self {
             applied_settings,
-            pending_settings: None,
-            pending_resize: None,
-            pending_focus: None,
-            told_focus: false,
+            pending: Pending::default(),
             admission_closed: false,
             admission_notice: false,
             session: SessionState::Running(session),
@@ -524,8 +541,8 @@ impl TerminalView {
             unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
-            pane_focused: false,
-            _pane_focus: pane_focus,
+            pane_focus: pane_focus::PaneFocus::default(),
+            _focus_observers: focus_observers,
             _events: event_task,
             _snapshots: snapshot_task,
             _retry: retry_task,
@@ -563,13 +580,10 @@ impl TerminalView {
                 view.apply_settings(&settings, window, cx);
             });
         let focus = cx.focus_handle();
-        let pane_focus = Self::observe_pane_focus(&focus, window, cx);
+        let focus_observers = Self::observe_pane_focus(&focus, window, cx);
         Self {
             applied_settings: crate::config::Settings::default(),
-            pending_settings: None,
-            pending_resize: None,
-            pending_focus: None,
-            told_focus: false,
+            pending: Pending::default(),
             admission_closed: false,
             admission_notice: false,
             session: SessionState::NeverStarted,
@@ -616,8 +630,8 @@ impl TerminalView {
             unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
-            pane_focused: false,
-            _pane_focus: pane_focus,
+            pane_focus: pane_focus::PaneFocus::default(),
+            _focus_observers: focus_observers,
             _events: Task::ready(()),
             _snapshots: Task::ready(()),
             _retry: Task::ready(()),
@@ -683,7 +697,7 @@ impl TerminalView {
             // The worker accepted this while the pane had Pane Focus, but the
             // event may have waited in the channel while focus moved. Only
             // this thread knows whether the pane holds focus as it writes.
-            Effect::ChildClipboard(_) if !self.pane_focused => false,
+            Effect::ChildClipboard(_) if !self.pane_focus.held() => false,
             Effect::ChildClipboard(text) | Effect::Clipboard(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 true
@@ -733,17 +747,12 @@ impl TerminalView {
     }
 
     /// Recomputes Pane Focus from the window, and reports a change.
-    ///
-    /// The terminal's handle *containing* the focus is enough: a Surface the
-    /// pane hosts is part of the pane, and a person typing into one is still
-    /// working here.
     fn refresh_pane_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focused = window.is_window_active() && self.focus.contains_focused(window, cx);
-        if focused == self.pane_focused() {
+        let held = pane_focus::PaneFocus::compute(window, &self.focus, cx);
+        let Some(focused) = self.pane_focus.update(held) else {
             return;
-        }
-        self.pane_focused = focused;
-        self.admit_focus(focused);
+        };
+        self.admit_focus();
         // A pane gaining focus starts its blink from visible, and one losing
         // it shows a steady cursor from the next frame on.
         self.blink_on = true;
@@ -756,31 +765,29 @@ impl TerminalView {
     }
 
     /// Tells the worker the latest Pane Focus, or keeps it for the retry task
-    /// when the command queue is full. Losing it there would leave the child
-    /// allowed the clipboard, or deaf to focus reports, until the next change.
-    fn admit_focus(&mut self, focused: bool) {
-        self.pending_focus = None;
-        if focused == self.told_focus {
+    /// when the lane is full. Losing it there would leave the child allowed
+    /// the clipboard, or deaf to focus reports, until the next change.
+    fn admit_focus(&mut self) {
+        let Some(focused) = self.pane_focus.owed() else {
             return;
-        }
-        if self.submit(TerminalCommand::Focus(focused)) {
-            self.told_focus = focused;
-        } else if !self.admission_closed {
-            self.pending_focus = Some(focused);
+        };
+        match self.admit(TerminalCommand::Focus(focused)) {
+            Ok(Admitted::Accepted) => self.pane_focus.delivered(focused),
+            Ok(Admitted::Saturated(_)) => self.pane_focus.refused(focused),
+            Ok(Admitted::Closed(_)) | Err(_) => self.pane_focus.forget_pending(),
         }
     }
 
     /// Whether this pane has Pane Focus.
     pub(crate) fn pane_focused(&self) -> bool {
-        self.pane_focused
+        self.pane_focus.held()
     }
 
     /// Hands over the worker so the window can wait for it off the GPUI thread.
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
         self.admission_closed = true;
-        self.pending_settings = None;
-        self.pending_resize = None;
-        self.pending_focus = None;
+        self.pending.clear();
+        self.pane_focus.forget_pending();
         let _ = self.retry_wake.force_send(());
         // Retained view handles must not keep a closed pane reachable by commands.
         if let Some(link) = self.observation.take() {
@@ -797,36 +804,45 @@ impl TerminalView {
     }
 
     fn send(&mut self, command: TerminalCommand) {
-        let _ = self.submit(command);
+        let _accepted = self.submit(command);
     }
 
     fn submit(&mut self, command: TerminalCommand) -> bool {
+        matches!(self.admit(command), Ok(Admitted::Accepted))
+    }
+
+    /// Offers a command to the worker. A saturated or closed lane hands the
+    /// command back so the caller can keep what is worth keeping; an `Err`
+    /// is the command itself being refused.
+    fn admit(
+        &mut self,
+        command: TerminalCommand,
+    ) -> Result<Admitted<TerminalCommand>, SessionError> {
         let SessionState::Running(session) = &mut self.session else {
-            return true;
+            return Ok(Admitted::Accepted);
         };
-        match session.try_admit(command) {
-            Ok(sprite_term::Admitted::Accepted) => true,
-            Ok(sprite_term::Admitted::Saturated(_)) => {
-                self.status = Some("send: the terminal command queue is full".into());
-                self.admission_notice = true;
-                let _ = self.retry_wake.force_send(());
-                false
-            }
-            Ok(sprite_term::Admitted::Closed(_)) => {
+        let outcome = session.try_admit(command);
+        match &outcome {
+            Ok(Admitted::Accepted) => {}
+            Ok(Admitted::Saturated(_)) => self.refuse(BUSY_STATUS),
+            Ok(Admitted::Closed(_)) => {
                 self.admission_closed = true;
-                self.status = Some("send: the terminal worker ended".into());
-                self.admission_notice = true;
-                let _ = self.retry_wake.force_send(());
-                false
+                self.refuse(ENDED_STATUS);
             }
             Err(error) => {
-                self.admission_closed = error.kind == sprite_term::ErrorKind::Ended;
-                self.status = Some(error.to_string().into());
-                self.admission_notice = true;
-                let _ = self.retry_wake.force_send(());
-                false
+                self.admission_closed = error.kind == ErrorKind::Ended;
+                self.refuse(&error.to_string());
             }
         }
+        outcome
+    }
+
+    /// Shows why a command was not delivered, and wakes the retry task so the
+    /// refusal is painted and anything kept is offered again.
+    fn refuse(&mut self, status: &str) {
+        self.status = Some(status.to_owned().into());
+        self.admission_notice = true;
+        self.retry_wake.force_send(()).ok();
     }
 
     // One coalesced wake starts bounded latest-value recovery and paints refusal without another snapshot.
@@ -848,25 +864,20 @@ impl TerminalView {
                         if view.admission_closed
                             || !matches!(view.session, SessionState::Running(_))
                         {
-                            view.pending_settings = None;
-                            view.pending_resize = None;
-                            view.pending_focus = None;
+                            view.pending.clear();
+                            view.pane_focus.forget_pending();
                             return None;
                         }
-                        if let Some(settings) = view.pending_settings.take() {
+                        if let Some(settings) = view.pending.settings.take() {
                             view.apply_settings(&settings, window, cx);
                         }
-                        if let Some(size) = view.pending_resize {
+                        if let Some(size) = view.pending.resize {
                             view.admit_resize(size);
                         }
-                        if let Some(focused) = view.pending_focus {
-                            view.admit_focus(focused);
+                        if view.pane_focus.pending().is_some() {
+                            view.admit_focus();
                         }
-                        Some(
-                            view.pending_settings.is_some()
-                                || view.pending_resize.is_some()
-                                || view.pending_focus.is_some(),
-                        )
+                        Some(!view.pending.is_empty() || view.pane_focus.pending().is_some())
                     });
                     match pending {
                         Ok(Some(true)) => {}
