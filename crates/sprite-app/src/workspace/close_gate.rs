@@ -227,7 +227,7 @@ impl Workspace {
         // rather than in every route a close can arrive by.
         let confirmed = match &mut self.mode {
             Mode::ConfirmingClose(pending) => pending.confirmation.answer(&scope, is_held),
-            _ => false,
+            Mode::Idle | Mode::Renaming(_) | Mode::DraggingDivider(_) => false,
         };
         let running = if confirmed {
             Vec::new()

@@ -46,7 +46,17 @@ fn resolve_event(
         match events.next() {
             event @ TerminalEvent::Hyperlink { .. } => return event,
             TerminalEvent::Error(error) => panic!("resolve failed: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
     panic!("no hyperlink answer arrived");
@@ -58,10 +68,11 @@ fn resolve(
     snapshots: &SnapshotPump,
     column: u16,
 ) -> Option<String> {
-    match resolve_event(session, events, snapshots, column) {
-        TerminalEvent::Hyperlink { uri, .. } => uri,
-        _ => unreachable!("resolve_event returns a hyperlink event"),
-    }
+    let TerminalEvent::Hyperlink { uri, .. } = resolve_event(session, events, snapshots, column)
+    else {
+        unreachable!("resolve_event returns a hyperlink event");
+    };
+    uri
 }
 
 #[test]

@@ -245,7 +245,12 @@ impl Element {
     pub fn list(&self) -> Option<&ListConfig> {
         match self {
             Self::VirtualList { config } => Some(config),
-            _ => None,
+            Self::Box { .. }
+            | Self::List { .. }
+            | Self::Text { .. }
+            | Self::Button { .. }
+            | Self::Image { .. }
+            | Self::Grid { .. } => None,
         }
     }
 }
@@ -346,7 +351,13 @@ fn element(
                 "an image is not clickable; put it in a box with on_click".to_owned(),
             ));
         }
-        _ => {}
+        Kind::Box
+        | Kind::Text
+        | Kind::List
+        | Kind::Image
+        | Kind::Button
+        | Kind::Grid
+        | Kind::VirtualList => {}
     }
 
     let grid = if kind == Kind::Grid {

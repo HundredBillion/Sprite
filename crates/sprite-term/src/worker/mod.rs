@@ -470,7 +470,15 @@ impl Session {
                 }
                 Message::Command(TerminalCommand::CaptureHistory { ticket, lines })
             }
-            other => other,
+            other @ (Message::Command(_)
+            | Message::PtyOutput(_)
+            | Message::CaptureRequested
+            | Message::Wake
+            | Message::PumpStopped(_)
+            | Message::ChildExited(_)
+            | Message::Shutdown) => other,
+            #[cfg(test)]
+            other @ Message::HistoryGate { .. } => other,
         };
         let Self {
             owned:

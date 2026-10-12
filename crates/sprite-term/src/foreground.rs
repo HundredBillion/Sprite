@@ -50,7 +50,7 @@ impl ForegroundState {
     pub fn program(&self) -> Option<&str> {
         match self {
             Self::Busy(name) => name.as_deref(),
-            _ => None,
+            Self::Idle | Self::Unknown => None,
         }
     }
 }

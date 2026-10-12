@@ -91,7 +91,17 @@ fn shutdown_retains_accepted_clipboard_writes_without_consumer_progress() {
                 retained.push(text);
             }
             TerminalEvent::Exited(_) => exited = true,
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::Error(_) => {}
         }
     }
     assert!(
@@ -237,7 +247,17 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
                 received.push(text);
             }
             TerminalEvent::Exited(exit) => outcome = Some(exit),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::Error(_) => {}
         }
     }
     assert!(received.len() >= 32);

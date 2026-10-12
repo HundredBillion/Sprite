@@ -349,7 +349,7 @@ fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppConte
         .expect("complete child response");
     let commands = view.update(cx, |view, _| match &view.session {
         SessionState::Running(session) => session.commands(),
-        _ => panic!("probe session ended"),
+        SessionState::NeverStarted | SessionState::Ended(_) => panic!("probe session ended"),
     });
     submit_probe(
         commands.clone(),
@@ -484,7 +484,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
     }
     let commands = view.update(cx, |view, _| match &view.session {
         SessionState::Running(session) => session.commands(),
-        _ => panic!("probe session ended"),
+        SessionState::NeverStarted | SessionState::Ended(_) => panic!("probe session ended"),
     });
     submit_probe(commands, TerminalCommand::Input(b"report\n".to_vec()));
     let report = wait_for_text(&format!("PTY:{} {}", wanted.rows(), wanted.cols()));

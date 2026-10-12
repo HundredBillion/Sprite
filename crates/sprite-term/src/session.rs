@@ -251,7 +251,21 @@ fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
                 .saturating_add(key.text.as_ref().map_or(0, String::len)),
             MAX_INPUT_BYTES,
         ),
-        _ => (0, MAX_INPUT_BYTES),
+        TerminalCommand::Wheel(_)
+        | TerminalCommand::Resize(_)
+        | TerminalCommand::Scroll(_)
+        | TerminalCommand::Select { .. }
+        | TerminalCommand::BeginSelection { .. }
+        | TerminalCommand::ClearSelection
+        | TerminalCommand::CopySelection
+        | TerminalCommand::Mouse(_)
+        | TerminalCommand::Focus(_)
+        | TerminalCommand::ResolveHyperlink { .. }
+        | TerminalCommand::Capture
+        | TerminalCommand::CaptureHistory { .. }
+        | TerminalCommand::CaptureGraphics
+        | TerminalCommand::SetColors(_)
+        | TerminalCommand::SetCursor(_) => (0, MAX_INPUT_BYTES),
     };
     if bytes > limit {
         return Err(SessionError::invalid(
@@ -504,12 +518,10 @@ mod history_cancellation_tests {
         handle.cancel();
         drop(handle);
         let message = lane.try_recv().unwrap();
-        match &message {
-            worker::Message::HistoryRequest { cancelled, .. } => {
-                assert!(cancelled.load(Ordering::SeqCst))
-            }
-            _ => panic!("expected history"),
-        }
+        let worker::Message::HistoryRequest { cancelled, .. } = &message else {
+            panic!("expected history");
+        };
+        assert!(cancelled.load(Ordering::SeqCst));
         drop(message);
         assert!(
             state.upgrade().is_none(),

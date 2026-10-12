@@ -1613,7 +1613,7 @@ mod tests {
         let list = host.read_with(cx, |view, _| {
             match &view.surfaces.fill.as_ref().unwrap().body {
                 Body::List { view, .. } => view.downgrade(),
-                _ => panic!("expected a list"),
+                Body::Elements(_) | Body::Grid { .. } => panic!("expected a list"),
             }
         });
         let weak_host = host.downgrade();

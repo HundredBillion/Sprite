@@ -333,10 +333,16 @@ pub(crate) fn decorations(
         .max(1.0));
     let underline = match style.underline {
         UnderlineStyle::None => None,
-        kind => {
+        kind @ (UnderlineStyle::Single
+        | UnderlineStyle::Double
+        | UnderlineStyle::Curly
+        | UnderlineStyle::Dotted
+        | UnderlineStyle::Dashed) => {
             let color = match style.underline_color {
                 SnapshotColor::Default => foreground,
-                other => resolve(other, default_fg, palette),
+                other @ (SnapshotColor::Palette(_) | SnapshotColor::Rgb(_)) => {
+                    resolve(other, default_fg, palette)
+                }
             };
             Some(gpui::UnderlineStyle {
                 thickness,
@@ -506,7 +512,10 @@ impl GridPaint {
                 style: CursorStyle::BlockHollow,
                 ..cursor
             },
-            _ => cursor,
+            CursorStyle::Block
+            | CursorStyle::Bar
+            | CursorStyle::Underline
+            | CursorStyle::BlockHollow => cursor,
         });
         Self {
             rows: spec.rows,
@@ -618,7 +627,7 @@ impl GridPaint {
             // with a background of its own still covers the image, which is
             // what an explicit background means.
             RowPass::Background if !painted => None,
-            _ => Some(ground),
+            RowPass::Whole | RowPass::Background => Some(ground),
         };
 
         let foreground = if cell.style.invisible {

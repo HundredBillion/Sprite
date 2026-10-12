@@ -35,7 +35,15 @@ impl Workspace {
                 }
                 reply.send(answer.map(|_| ())).ok();
             }
-            request => {
+            request @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }) => {
                 let Some(pane) = request.pane() else {
                     request.refuse_with(Refusal::Ineligible);
                     return;

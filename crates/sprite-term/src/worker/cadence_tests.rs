@@ -214,7 +214,16 @@ fn sample(mode: Consumer, cols: u16, rows: u16, payload_bytes: usize, ordinal: u
                 TerminalEvent::Ready => ready = true,
                 TerminalEvent::Exited(_) => exited = true,
                 TerminalEvent::Error(error) => panic!("session error: {error}"),
-                _ => {}
+                TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::History { .. }
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::Graphics(_)
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::Hyperlink { .. }
+                | TerminalEvent::ClipboardWrite(_) => {}
             }
         }
         event_tx.send((ready, exited)).unwrap();

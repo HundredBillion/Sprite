@@ -115,7 +115,18 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
                     break;
                 }
                 TerminalEvent::History { .. } => break,
-                _ => {}
+                TerminalEvent::Ready
+                | TerminalEvent::Exited(_)
+                | TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::Graphics(_)
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::Hyperlink { .. }
+                | TerminalEvent::ClipboardWrite(_)
+                | TerminalEvent::Error(_) => {}
             }
         }
     }

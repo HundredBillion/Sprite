@@ -32,7 +32,17 @@ fn wait_for_graphics(events: &EventPump) -> GraphicsSnapshot {
         match events.next() {
             TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
             TerminalEvent::Error(error) => panic!("graphics probe failed: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::History { .. }
+            | TerminalEvent::HistoryFailed { .. }
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
     panic!(

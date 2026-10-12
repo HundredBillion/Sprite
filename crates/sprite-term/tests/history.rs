@@ -50,7 +50,16 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
                 panic!("history request failed: {error}")
             }
             TerminalEvent::Error(error) => panic!("the session reported an error: {error}"),
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_) => {}
         }
     }
     panic!(
@@ -521,7 +530,17 @@ fn every_answer_carries_the_ticket_it_was_asked_with() {
             TerminalEvent::HistoryFailed { ticket, error } => {
                 panic!("request {} failed: {error}", ticket.get())
             }
-            _ => {}
+            TerminalEvent::Ready
+            | TerminalEvent::Exited(_)
+            | TerminalEvent::SelectionCopied(_)
+            | TerminalEvent::UnsafePaste(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::TitleChanged(_)
+            | TerminalEvent::Graphics(_)
+            | TerminalEvent::WorkingDirectoryChanged(_)
+            | TerminalEvent::Hyperlink { .. }
+            | TerminalEvent::ClipboardWrite(_)
+            | TerminalEvent::Error(_) => {}
         }
     }
     assert_eq!(

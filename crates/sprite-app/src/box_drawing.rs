@@ -517,7 +517,7 @@ fn stroke_lines(centre: f32, weight: Option<Weight>, strokes: Strokes) -> Stroke
         Some(other) => {
             let half = match other {
                 Weight::Heavy => strokes.heavy,
-                _ => strokes.light,
+                Weight::Light | Weight::Double => strokes.light,
             } / 2.0;
             StrokeLines {
                 spans: [(centre - half, centre + half), (0.0, 0.0)],
@@ -622,7 +622,7 @@ fn dashes(
 
     let thickness = match weight {
         Weight::Heavy => strokes.heavy,
-        _ => strokes.light,
+        Weight::Light | Weight::Double => strokes.light,
     };
     let half = thickness / 2.0;
     let (start, end) = if vertical {

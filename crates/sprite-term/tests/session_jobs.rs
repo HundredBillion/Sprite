@@ -214,7 +214,20 @@ sleep 30
     if late {
         match events.next() {
             sprite_term::TerminalEvent::Exited(exit) => assert!(!exit.requested),
-            other => panic!("expected natural Exited, got {other:?}"),
+            other @ (sprite_term::TerminalEvent::Ready
+            | sprite_term::TerminalEvent::SelectionCopied(_)
+            | sprite_term::TerminalEvent::UnsafePaste(_)
+            | sprite_term::TerminalEvent::Bell
+            | sprite_term::TerminalEvent::TitleChanged(_)
+            | sprite_term::TerminalEvent::History { .. }
+            | sprite_term::TerminalEvent::HistoryFailed { .. }
+            | sprite_term::TerminalEvent::Graphics(_)
+            | sprite_term::TerminalEvent::WorkingDirectoryChanged(_)
+            | sprite_term::TerminalEvent::Hyperlink { .. }
+            | sprite_term::TerminalEvent::ClipboardWrite(_)
+            | sprite_term::TerminalEvent::Error(_)) => {
+                panic!("expected natural Exited, got {other:?}")
+            }
         }
     }
     let before = Instant::now();

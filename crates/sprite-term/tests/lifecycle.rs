@@ -40,7 +40,18 @@ fn child_exit_is_reported() {
             assert_eq!(exit.signal, None, "a plain exit invents no signal");
             assert!(!exit.requested, "the application did not request this exit");
         }
-        other => panic!("expected Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected Exited, got {other:?}"),
     }
 }
 
@@ -62,7 +73,18 @@ fn missing_executable_reports_spawn_error() {
                 "a launch failure explains itself: {error:?}"
             );
         }
-        other => panic!("expected Error, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::Exited(_)
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)) => panic!("expected Error, got {other:?}"),
     }
 
     let handle = session
@@ -358,7 +380,18 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
     // requested so its signal is never read as an unexpected child failure.
     match events.next() {
         TerminalEvent::Exited(exit) => assert!(exit.requested),
-        other => panic!("expected Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected Exited, got {other:?}"),
     }
 }
 
@@ -440,7 +473,18 @@ os._exit(7)
             assert_eq!(exit.code, Some(7));
             assert!(!exit.requested);
         }
-        other => panic!("expected natural Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
 }
 
@@ -473,7 +517,18 @@ os._exit(7)
     events.expect_ready();
     match events.next() {
         TerminalEvent::Exited(exit) => assert_eq!(exit.code, Some(7)),
-        other => panic!("expected natural Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
     let final_snapshot = final_rx
         .recv_timeout(support::watchdog())
@@ -554,7 +609,18 @@ os._exit(0)
     events.expect_ready();
     match events.next() {
         TerminalEvent::Exited(exit) => assert!(!exit.requested),
-        other => panic!("expected natural Exited, got {other:?}"),
+        other @ (TerminalEvent::Ready
+        | TerminalEvent::SelectionCopied(_)
+        | TerminalEvent::UnsafePaste(_)
+        | TerminalEvent::Bell
+        | TerminalEvent::TitleChanged(_)
+        | TerminalEvent::History { .. }
+        | TerminalEvent::HistoryFailed { .. }
+        | TerminalEvent::Graphics(_)
+        | TerminalEvent::WorkingDirectoryChanged(_)
+        | TerminalEvent::Hyperlink { .. }
+        | TerminalEvent::ClipboardWrite(_)
+        | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
     // `_session` is still alive here, as the application keeps an ended pane.
     support::wait_until("the descendant to release the terminal", || {

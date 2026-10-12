@@ -108,7 +108,9 @@ impl PaintBenchmark {
     ) -> (GridPaint, Option<GridPaint>) {
         let snapshot = match scenario {
             Scenario::OneRowChange => &self.changed,
-            _ => &self.snapshot,
+            Scenario::FirstFrame | Scenario::SameGenerationBlink | Scenario::Hover => {
+                &self.snapshot
+            }
         };
         let hover = (scenario == Scenario::Hover).then_some((
             snapshot.generation,

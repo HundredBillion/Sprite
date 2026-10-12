@@ -107,7 +107,7 @@ fn every_standard_colour_is_a_distinct_index() {
         .iter()
         .filter_map(|cell| match cell.style.foreground {
             SnapshotColor::Palette(index) => Some(index),
-            _ => None,
+            SnapshotColor::Default | SnapshotColor::Rgb(_) => None,
         })
         .collect();
     for index in 0..8_u8 {

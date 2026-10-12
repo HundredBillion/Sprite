@@ -156,7 +156,12 @@ fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
         }
         sprite_app::SurfaceRequest::Focus { .. } => true,
         sprite_app::SurfaceRequest::Closed { .. } => false,
-        other => panic!("unexpected {other:?}"),
+        other @ (sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
     });
     let credentials = surface_credentials(&endpoint, "4");
     let input = format!(
@@ -186,7 +191,15 @@ fn a_refused_surface_open_reports_the_reason_and_exits_five() {
                 .expect("reply");
             false
         }
-        _ => false,
+        sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::Closed { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. } => false,
     });
     let credentials = surface_credentials(&endpoint, "4");
     let outcome = run_with_input(
@@ -211,7 +224,14 @@ fn a_malformed_later_document_closes_the_surface_and_exits_two() {
             true
         }
         sprite_app::SurfaceRequest::Closed { .. } => false,
-        other => panic!("unexpected {other:?}"),
+        other @ (sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
     });
     let credentials = surface_credentials(&endpoint, "4");
     let input = format!("{DESCRIPTION}\nthis is not json\n");
@@ -262,7 +282,15 @@ fn a_token_registration_is_acknowledged() {
             reply.send(Ok(())).expect("reply");
             false
         }
-        _ => false,
+        sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Open { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::Closed { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. } => false,
     });
     let credentials = surface_credentials(&endpoint, "4");
     let outcome = run(
@@ -567,7 +595,14 @@ fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
                 true
             }
             sprite_app::SurfaceRequest::Closed { .. } => false,
-            _ => true,
+            sprite_app::SurfaceRequest::Capabilities { .. }
+            | sprite_app::SurfaceRequest::Update { .. }
+            | sprite_app::SurfaceRequest::Focus { .. }
+            | sprite_app::SurfaceRequest::Close { .. }
+            | sprite_app::SurfaceRequest::FocusPane { .. }
+            | sprite_app::SurfaceRequest::Grid { .. }
+            | sprite_app::SurfaceRequest::List { .. }
+            | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
         });
         let environment = surface_credentials(&endpoint, "4");
         let mut child = Command::new(SPRITE)
@@ -645,7 +680,13 @@ fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
                 true
             }
             sprite_app::SurfaceRequest::Closed { .. } => false,
-            _ => true,
+            sprite_app::SurfaceRequest::Capabilities { .. }
+            | sprite_app::SurfaceRequest::Update { .. }
+            | sprite_app::SurfaceRequest::Close { .. }
+            | sprite_app::SurfaceRequest::FocusPane { .. }
+            | sprite_app::SurfaceRequest::Grid { .. }
+            | sprite_app::SurfaceRequest::List { .. }
+            | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
         });
         let environment = surface_credentials(&endpoint, "4");
         let mut child = Command::new(SPRITE)
@@ -730,7 +771,14 @@ fn surface_stdin_eof_drains_the_windows_final_event() {
             assert!(live.take().unwrap().send(r#"{"type":"closed"}"#));
             false
         }
-        _ => true,
+        sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
     });
     let environment = surface_credentials(&endpoint, "4");
     let outcome = run_with_input(

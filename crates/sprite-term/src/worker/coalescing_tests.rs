@@ -133,10 +133,10 @@ impl Fixture {
 }
 
 fn title_of(event: TerminalEvent) -> String {
-    match event {
-        TerminalEvent::TitleChanged(Some(title)) => title,
-        other => panic!("expected a title, got {other:?}"),
-    }
+    let TerminalEvent::TitleChanged(Some(title)) = event else {
+        panic!("expected a title, got {event:?}");
+    };
+    title
 }
 
 /// Sixteen chunks already waiting are one pass: one snapshot and one title.
@@ -266,7 +266,18 @@ fn a_queued_command_is_applied_before_output_that_arrived_first() {
                     (expected, 0),
                     "a command waited behind output that was already queued"
                 ),
-                other => panic!("expected a hyperlink answer, got {other:?}"),
+                other @ (TerminalEvent::Ready
+                | TerminalEvent::Exited(_)
+                | TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::History { .. }
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::Graphics(_)
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::ClipboardWrite(_)
+                | TerminalEvent::Error(_)) => panic!("expected a hyperlink answer, got {other:?}"),
             }
         }
         assert_eq!(

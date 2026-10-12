@@ -106,10 +106,11 @@ impl EventPump {
 
     /// Waits for `Ready`, failing on any other event.
     pub fn expect_ready(&self) {
-        match self.next() {
-            TerminalEvent::Ready => {}
-            other => panic!("expected Ready, got {other:?}"),
-        }
+        let event = self.next();
+        assert!(
+            matches!(event, TerminalEvent::Ready),
+            "expected Ready, got {event:?}"
+        );
     }
 }
 
@@ -380,7 +381,17 @@ impl GraphicsSession {
             match self.events.next() {
                 TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
                 TerminalEvent::Error(error) => panic!("graphics probe failed: {error}"),
-                _ => {}
+                TerminalEvent::Ready
+                | TerminalEvent::Exited(_)
+                | TerminalEvent::SelectionCopied(_)
+                | TerminalEvent::UnsafePaste(_)
+                | TerminalEvent::Bell
+                | TerminalEvent::TitleChanged(_)
+                | TerminalEvent::History { .. }
+                | TerminalEvent::HistoryFailed { .. }
+                | TerminalEvent::WorkingDirectoryChanged(_)
+                | TerminalEvent::Hyperlink { .. }
+                | TerminalEvent::ClipboardWrite(_) => {}
             }
         }
         panic!("watchdog: no graphics answer arrived");

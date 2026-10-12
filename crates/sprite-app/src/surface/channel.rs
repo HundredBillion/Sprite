@@ -1498,7 +1498,13 @@ mod tests {
                     seen.send(description).unwrap();
                 }
                 SurfaceRequest::Close { .. } => return false,
-                other => panic!("unexpected request: {other:?}"),
+                other @ (SurfaceRequest::Capabilities { .. }
+                | SurfaceRequest::Focus { .. }
+                | SurfaceRequest::Closed { .. }
+                | SurfaceRequest::FocusPane { .. }
+                | SurfaceRequest::Grid { .. }
+                | SurfaceRequest::List { .. }
+                | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected request: {other:?}"),
             }
             true
         });
@@ -1553,7 +1559,17 @@ mod tests {
                 reply.send(Ok(capabilities(true))).expect("reply");
                 false
             }
-            other => panic!("discovery opened or changed a Surface: {other:?}"),
+            other @ (SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => {
+                panic!("discovery opened or changed a Surface: {other:?}")
+            }
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -1658,7 +1674,17 @@ mod tests {
                 reply.send(Err(refusal)).expect("reply");
                 true
             }
-            other => panic!("discovery opened or changed a Surface: {other:?}"),
+            other @ (SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => {
+                panic!("discovery opened or changed a Surface: {other:?}")
+            }
         });
 
         for (message, reason) in [
@@ -1715,7 +1741,12 @@ mod tests {
                 seen_tx.send("closed".to_owned()).expect("seen");
                 false
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -1810,7 +1841,15 @@ mod tests {
                 reply.send(Ok(())).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -1986,7 +2025,14 @@ mod tests {
                     closes.send(()).expect("close");
                     return false;
                 }
-                other => panic!("unexpected request: {other:?}"),
+                other @ (SurfaceRequest::Capabilities { .. }
+                | SurfaceRequest::Update { .. }
+                | SurfaceRequest::Focus { .. }
+                | SurfaceRequest::Closed { .. }
+                | SurfaceRequest::FocusPane { .. }
+                | SurfaceRequest::Grid { .. }
+                | SurfaceRequest::List { .. }
+                | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected request: {other:?}"),
             }
             true
         });
@@ -2091,7 +2137,15 @@ mod tests {
                 reply.send(Err(Refusal::PositionOccupied)).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -2125,10 +2179,10 @@ mod tests {
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
 
         let open = seen_rx.recv().expect("open");
-        let id = match &open {
-            SurfaceRequest::Open { id, .. } => *id,
-            other => panic!("unexpected {other:?}"),
+        let SurfaceRequest::Open { id, .. } = &open else {
+            panic!("unexpected {open:?}");
         };
+        let id = *id;
         // Losing the reply after claiming is still Applying, never abandonment.
         drop(open);
 
@@ -2144,7 +2198,15 @@ mod tests {
                 assert_eq!(closed_id, id);
                 assert_eq!(pane, PaneId(1));
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         }
     }
 
@@ -2157,7 +2219,15 @@ mod tests {
                 reply.send(Err(Refusal::PositionOccupied)).expect("reply");
                 true
             }
-            _ => true,
+            SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. } => true,
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -2212,7 +2282,14 @@ mod tests {
                 reply.send(Err(Refusal::UnknownPane)).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }) => panic!("unexpected {other:?}"),
         });
 
         let (mut stream, mut reader) = connect(&endpoint);
@@ -2330,7 +2407,13 @@ mod tests {
                 true
             }
             SurfaceRequest::Closed { .. } => false,
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("write");
@@ -2375,7 +2458,13 @@ mod tests {
                 true
             }
             SurfaceRequest::Closed { .. } => false,
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("write");
@@ -2418,7 +2507,15 @@ mod tests {
                 reply.send(answer).expect("reply");
                 true
             }
-            other => panic!("unexpected {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Open { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::Closed { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(
@@ -2483,7 +2580,14 @@ mod tests {
                 seen.send("close").unwrap();
                 false
             }
-            other => panic!("unexpected frame dispatch: {other:?}"),
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => {
+                panic!("unexpected frame dispatch: {other:?}")
+            }
         });
         let (mut stream, mut reader) = connect(&endpoint);
         writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).unwrap();
