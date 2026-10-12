@@ -332,12 +332,23 @@ fn apply_graphics_policy(
     Ok(())
 }
 
-/// Opens the PTY, launches the child, and hands the child to its waiter.
+/// A child inherits this process's environment except what another Sprite
+/// put there: a window's own endpoint variables are added back by
+/// `environment` when its endpoints are on, and must not leak from a parent
+/// window when they are off.
 fn configure_child_environment(
     command: &mut CommandBuilder,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
 ) {
     command.env_remove("NO_COLOR");
+    let inherited: Vec<String> = command
+        .iter_full_env_as_str()
+        .filter(|(key, _)| key.starts_with("SPRITE_"))
+        .map(|(key, _)| key.to_owned())
+        .collect();
+    for key in inherited {
+        command.env_remove(key);
+    }
     for (key, value) in environment {
         command.env(key, value);
     }
@@ -402,10 +413,28 @@ fn is_transient_openpty_failure(error: &str) -> bool {
     error.contains("Os { code: -6,")
 }
 
+type SpawnedChild = Box<dyn portable_pty::Child + Send + Sync>;
+
+/// Opens the PTY, launches the child, and hands the child to its waiter.
 pub(super) fn start(
     config: &SessionConfig,
     commands: &SyncSender<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
+) -> Result<Started, SessionError> {
+    start_with(config, commands, events, spawn_child_waiter)
+}
+
+/// `start`, with the waiter's spawn injectable so a test can make a step
+/// after the child exists fail.
+fn start_with(
+    config: &SessionConfig,
+    commands: &SyncSender<Message>,
+    events: Arc<crate::event_mailbox::Mailbox>,
+    spawn_waiter: impl FnOnce(
+        SpawnedChild,
+        SyncSender<Message>,
+        Arc<crate::event_mailbox::Mailbox>,
+    ) -> Result<JoinHandle<()>, (SpawnedChild, SessionError)>,
 ) -> Result<Started, SessionError> {
     let size = config.size;
     let pair = open_pty(PtySize {
@@ -429,10 +458,32 @@ pub(super) fn start(
         .spawn_command(command)
         .map_err(|error| SessionError::new("spawn_child", error))?;
 
+    // The parent's slave handle would otherwise hold the PTY open and hide the
+    // child's exit.
+    drop(pair.slave);
+
+    adopt_child(pair.master, child, commands, events, spawn_waiter)
+}
+
+/// Everything after the child exists. A failure here discards the child:
+/// hung up by closing the master, killed, and reaped, so no start-up error
+/// leaves a process running that nothing will ever wait for.
+fn adopt_child(
+    master: Box<dyn MasterPty + Send>,
+    child: SpawnedChild,
+    commands: &SyncSender<Message>,
+    events: Arc<crate::event_mailbox::Mailbox>,
+    spawn_waiter: impl FnOnce(
+        SpawnedChild,
+        SyncSender<Message>,
+        Arc<crate::event_mailbox::Mailbox>,
+    ) -> Result<JoinHandle<()>, (SpawnedChild, SessionError)>,
+) -> Result<Started, SessionError> {
     // Both identifiers must exist before the child is handed off: process-group
     // shutdown and pump cancellation depend on them, and discovering a missing
     // one later would mean weakening either guarantee.
     let Some(child_pid) = child.process_id() else {
+        discard(child, master);
         return Err(SessionError::new(
             "spawn_child",
             "the child reported no process id",
@@ -442,21 +493,24 @@ pub(super) fn start(
     // the session before the waiter can reap an already exited leader.
     let process_group = pty_unix::process_group_of(child_pid);
     let processes = pty_unix::SessionProcesses::capture(child_pid);
-    let Some(master_fd) = pair.master.as_raw_fd() else {
+    let Some(master_fd) = master.as_raw_fd() else {
+        discard(child, master);
         return Err(SessionError::new(
             "open_pty",
             "the PTY master exposed no file descriptor",
         ));
     };
 
-    // The parent's slave handle would otherwise hold the PTY open and hide the
-    // child's exit.
-    drop(pair.slave);
-
-    let waiter = spawn_child_waiter(child, commands.clone(), events)?;
+    let waiter = match spawn_waiter(child, commands.clone(), events) {
+        Ok(waiter) => waiter,
+        Err((child, error)) => {
+            discard(child, master);
+            return Err(error);
+        }
+    };
 
     Ok(Started {
-        master: pair.master,
+        master,
         master_fd,
         process_group,
         processes,
@@ -464,26 +518,52 @@ pub(super) fn start(
     })
 }
 
+/// A child that has no session to belong to. It is at most the shell and
+/// has had no time to start anything, so a hangup, KILL and reap are the
+/// whole escalation.
+fn discard(mut child: SpawnedChild, master: Box<dyn MasterPty + Send>) {
+    drop(master);
+    let _killed = child.kill();
+    let _reaped = child.wait();
+}
+
 /// Blocks in `Child::wait` off the worker so a quiet exit is reaped without a
 /// timer, and descendants holding the PTY open cannot mask it.
+///
+/// The child reaches the thread over a channel rather than in the closure, so
+/// that if the thread cannot be spawned the child is still here to hand back.
 fn spawn_child_waiter(
-    mut child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: SpawnedChild,
     commands: SyncSender<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
-) -> Result<JoinHandle<()>, SessionError> {
-    thread::Builder::new()
+) -> Result<JoinHandle<()>, (SpawnedChild, SessionError)> {
+    let (hand_over, handed_over) = std::sync::mpsc::sync_channel::<SpawnedChild>(1);
+    let spawned = thread::Builder::new()
         .name("sprite-term-child-waiter".to_owned())
         .stack_size(HELPER_STACK_BYTES)
         .spawn(move || {
+            let Ok(mut child) = handed_over.recv() else {
+                return;
+            };
             let status = child.wait().map_err(|error| error.to_string());
             events.begin_natural_drain();
             let _ = commands.send(Message::ChildExited(status));
-        })
-        .map_err(|error| SessionError::new("spawn_child_waiter", error))
+        });
+    match spawned {
+        Ok(waiter) => {
+            // The buffer holds one and the thread holds the receiver until it
+            // has taken the child, so this neither blocks nor fails.
+            let _ = hand_over.send(child);
+            Ok(waiter)
+        }
+        Err(error) => Err((child, SessionError::new("spawn_child_waiter", error))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{CommandBuilder, SessionConfig, SessionError};
+
     fn openpty_error(errno: i32) -> String {
         format!(
             "failed to openpty: {:?}",
@@ -552,5 +632,66 @@ mod tests {
         super::configure_child_environment(&mut command, &[]);
 
         assert_eq!(command.get_env("NO_COLOR"), None);
+    }
+
+    /// A window exports SPRITE_* endpoint variables to its children. A child
+    /// that is itself a Sprite with endpoints disabled must not pass the
+    /// parent's on to its own children.
+    #[test]
+    fn inherited_sprite_endpoint_variables_are_removed() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env("SPRITE_SURFACE_SOCKET", "/parent/surface.sock");
+        command.env("SPRITE_OBSERVATION_KEY", "deadbeef");
+        command.env("SPRITE_PANE", "3");
+        super::configure_child_environment(&mut command, &[]);
+        assert_eq!(command.get_env("SPRITE_SURFACE_SOCKET"), None);
+        assert_eq!(command.get_env("SPRITE_OBSERVATION_KEY"), None);
+        assert_eq!(command.get_env("SPRITE_PANE"), None);
+    }
+
+    #[test]
+    fn this_windows_endpoint_variables_still_reach_the_child() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env("SPRITE_PANE", "3");
+        let own = [(
+            std::ffi::OsString::from("SPRITE_PANE"),
+            std::ffi::OsString::from("7"),
+        )];
+        super::configure_child_environment(&mut command, &own);
+        assert_eq!(
+            command.get_env("SPRITE_PANE").map(|v| v.to_str()),
+            Some(Some("7"))
+        );
+    }
+
+    /// When a start-up step after the spawn fails, the child must be hung
+    /// up, killed and reaped before the error is returned, not left running
+    /// and unreaped.
+    #[test]
+    fn a_failed_start_up_step_discards_the_child() {
+        let (commands, _inbox) = std::sync::mpsc::sync_channel(1);
+        let (events, _receiver) = crate::event_mailbox::bounded(1);
+        let config = SessionConfig::command("/bin/sh", vec!["-c".into(), "sleep 30".into()]);
+        let pid = std::cell::Cell::new(None);
+        let started = super::start_with(&config, &commands, events, |child, _, _| {
+            pid.set(child.process_id());
+            Err((
+                child,
+                SessionError::new("spawn_child_waiter", "no thread for the test"),
+            ))
+        });
+        assert_eq!(
+            started.err().map(|error| error.operation),
+            Some("spawn_child_waiter")
+        );
+        let pid = nix::unistd::Pid::from_raw(pid.get().expect("the child had a pid") as i32);
+        let gone = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while nix::sys::signal::kill(pid, None).is_ok() {
+            assert!(
+                std::time::Instant::now() < gone,
+                "the child outlived its failed start-up"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
