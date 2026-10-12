@@ -91,7 +91,7 @@ fn shutdown_ignores_denied_metadata_of_proven_foreign_process() {
     // Only this isolated test process receives the fault; other tests keep their real procfs.
     let stdout = path.join("stdout");
     let stderr = path.join("stderr");
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "shutdown_ignores_denied_metadata_of_proven_foreign_process",
