@@ -98,6 +98,7 @@ fn close_with_signal_since(
             },
         mut pump,
         inbox,
+        control: _,
         events,
         shutdown,
         foreground,
@@ -304,6 +305,7 @@ mod tests {
             .openpty(portable_pty::PtySize::default())
             .unwrap();
         let (_, inbox) = std::sync::mpsc::sync_channel(1);
+        let (_, control) = std::sync::mpsc::sync_channel(1);
         let (events, _) = crate::event_mailbox::bounded(0);
         Runtime {
             started: Started {
@@ -315,6 +317,7 @@ mod tests {
             },
             pump: None,
             inbox,
+            control,
             events,
             shutdown: Arc::new(AtomicBool::new(false)),
             foreground: Arc::new(crate::ForegroundWatch::default()),

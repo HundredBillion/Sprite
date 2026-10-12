@@ -47,6 +47,7 @@ impl Fixture {
 
     fn start_with(queued: Vec<Message>) -> Self {
         let (commands, inbox) = std::sync::mpsc::sync_channel(crate::WORKER_QUEUE_CAPACITY);
+        let (_control, control_rx) = std::sync::mpsc::sync_channel(1);
         for message in queued {
             assert!(
                 commands.try_send(message).is_ok(),
@@ -65,6 +66,7 @@ impl Fixture {
                     SessionConfig::command("/bin/sh", vec!["-c".into(), "exec sleep 30".into()]),
                     commands,
                     inbox,
+                    control_rx,
                     events,
                     published,
                     shutdown,

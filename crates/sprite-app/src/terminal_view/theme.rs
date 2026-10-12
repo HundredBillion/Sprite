@@ -531,12 +531,12 @@ mod fallback_admission_tests {
                 // has certainly started taking from it.
                 let mut accepted = 0;
                 loop {
-                    match session.try_send(TerminalCommand::CopySelection) {
-                        Ok(()) => {
+                    match session.try_admit(TerminalCommand::CopySelection) {
+                        Ok(sprite_term::Admitted::Accepted) => {
                             accepted += 1;
                             full_since = None;
                         }
-                        Err(error) if error.message.contains("queue is full") => {
+                        Ok(sprite_term::Admitted::Saturated(_)) => {
                             if accepted > 40 {
                                 let since = full_since.get_or_insert_with(std::time::Instant::now);
                                 if since.elapsed() >= std::time::Duration::from_millis(100) {
@@ -544,7 +544,9 @@ mod fallback_admission_tests {
                                 }
                             }
                         }
-                        Err(error) => panic!("unexpected refusal: {error}"),
+                        Ok(sprite_term::Admitted::Closed(_)) | Err(_) => {
+                            panic!("unexpected refusal")
+                        }
                     }
                     assert!(
                         std::time::Instant::now() < deadline,

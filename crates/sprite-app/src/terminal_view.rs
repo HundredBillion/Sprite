@@ -804,13 +804,23 @@ impl TerminalView {
         let SessionState::Running(session) = &mut self.session else {
             return true;
         };
-        match session.try_send(command) {
-            Ok(()) => true,
+        match session.try_admit(command) {
+            Ok(sprite_term::Admitted::Accepted) => true,
+            Ok(sprite_term::Admitted::Saturated(_)) => {
+                self.status = Some("send: the terminal command queue is full".into());
+                self.admission_notice = true;
+                let _ = self.retry_wake.force_send(());
+                false
+            }
+            Ok(sprite_term::Admitted::Closed(_)) => {
+                self.admission_closed = true;
+                self.status = Some("send: the terminal worker ended".into());
+                self.admission_notice = true;
+                let _ = self.retry_wake.force_send(());
+                false
+            }
             Err(error) => {
-                self.admission_closed = matches!(
-                    error.message.as_str(),
-                    "the terminal worker ended" | "the terminal session is shutting down"
-                );
+                self.admission_closed = error.kind == sprite_term::ErrorKind::Ended;
                 self.status = Some(error.to_string().into());
                 self.admission_notice = true;
                 let _ = self.retry_wake.force_send(());

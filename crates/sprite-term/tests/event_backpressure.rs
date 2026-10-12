@@ -140,9 +140,9 @@ fn every_submission_method_bounds_variable_sized_input() {
     for command in oversized {
         for result in [
             session.send(command.clone()),
-            session.try_send(command.clone()),
+            session.try_admit(command.clone()).map(|_| ()),
             sender.send(command.clone()),
-            sender.try_send(command),
+            sender.try_admit(command).map(|_| ()),
         ] {
             let error = result.expect_err("oversized command must be refused before queuing");
             assert!(error.message.contains("limit"), "{error}");
@@ -208,9 +208,10 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
     focus_and_release(&mut session);
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
-        let ended = session
-            .try_send(TerminalCommand::Capture)
-            .is_err_and(|error| error.kind == sprite_term::ErrorKind::Ended);
+        let ended = matches!(
+            session.try_admit(TerminalCommand::Capture),
+            Ok(sprite_term::Admitted::Closed(_))
+        );
         if ended {
             break;
         }
@@ -242,5 +243,34 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
     let outcome = outcome.expect("reserved exit outcome");
     assert_eq!(outcome.code, Some(7));
     assert!(!outcome.requested);
+    session.begin_shutdown().unwrap().unwrap().wait().unwrap();
+}
+
+/// While every output permit is outstanding and the worker is stalled, a
+/// keystroke is still admitted. Before the control lane, the one spare inbox
+/// slot was shared with capture requests, so under a flood the second command
+/// was refused as "queue is full".
+#[test]
+fn input_is_admitted_while_every_output_permit_is_outstanding() {
+    let writes = clipboard_writes(100);
+    let sprite_term::Spawned {
+        mut session,
+        events: _events,
+        snapshots: _snapshots,
+    } = TerminalSession::spawn(on_cue(&writes, "yes")).unwrap();
+    focus_and_release(&mut session);
+    // Pressure: the events are never taken, so the worker stalls in publish
+    // and the pump fills every permit behind it. More time only means more
+    // pressure, never less, so this pause cannot make the assertion flaky.
+    std::thread::sleep(Duration::from_millis(300));
+    for n in 0..sprite_term::CONTROL_CAPACITY {
+        assert!(
+            session
+                .try_admit(TerminalCommand::Input(b"x".to_vec()))
+                .unwrap()
+                .is_accepted(),
+            "keystroke {n} refused under an output flood"
+        );
+    }
     session.begin_shutdown().unwrap().unwrap().wait().unwrap();
 }

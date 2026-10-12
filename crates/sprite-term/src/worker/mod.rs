@@ -10,7 +10,7 @@ use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -90,8 +90,9 @@ fn pump_failure(outcome: PumpOutcome) -> Option<SessionError> {
     }
 }
 
-/// Messages the worker accepts. Application commands and helper-thread reports
-/// share one queue so their order is defined.
+/// Messages the worker accepts. Helper-thread reports and output share the
+/// inbox, so their order is defined; commands and history requests wait on a
+/// separate control lane that the worker reads first.
 pub(crate) enum Message {
     Command(TerminalCommand),
     HistoryRequest {
@@ -108,9 +109,29 @@ pub(crate) enum Message {
     PtyOutput(crate::pty_unix::OutputChunk),
     /// The consumer took a snapshot and is ready for the next one.
     CaptureRequested,
+    /// A knock: something is waiting on the control lane. Carries nothing.
+    Wake,
     PumpStopped(PumpOutcome),
     ChildExited(Result<ExitStatus, String>),
     Shutdown,
+}
+
+impl Message {
+    /// The command a refused control message carried.
+    pub(crate) fn into_command(self) -> TerminalCommand {
+        match self {
+            Self::Command(command) => command,
+            Self::HistoryRequest { .. }
+            | Self::PtyOutput(_)
+            | Self::CaptureRequested
+            | Self::Wake
+            | Self::PumpStopped(_)
+            | Self::ChildExited(_)
+            | Self::Shutdown => unreachable!("only a command is offered through admit"),
+            #[cfg(test)]
+            Self::HistoryGate { .. } => unreachable!("only a command is offered through admit"),
+        }
+    }
 }
 
 /// The live PTY side of a session, owned solely by the worker.
@@ -223,6 +244,9 @@ struct Runtime {
     started: Started,
     pump: Option<Pump>,
     inbox: Receiver<Message>,
+    /// Commands and history requests, read before the inbox so input never
+    /// waits behind output.
+    control: Receiver<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
     shutdown: Arc<AtomicBool>,
     /// Detached when the session closes, so its duplicate of the master
@@ -258,10 +282,13 @@ fn emit(events: &Arc<crate::event_mailbox::Mailbox>, event: TerminalEvent) -> Fl
     }
 }
 
+// The worker's whole wiring arrives here once, from `spawn`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     config: SessionConfig,
     commands: SyncSender<Message>,
     inbox: Receiver<Message>,
+    control: Receiver<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
@@ -280,6 +307,7 @@ pub(crate) fn run(
         started,
         pump: None,
         inbox,
+        control,
         events,
         shutdown,
         foreground,
@@ -334,10 +362,16 @@ pub(crate) fn run(
         && session.capture().is_continue()
     {
         while !session.runtime.shutdown.load(Ordering::SeqCst) {
-            let message = match session.runtime.events.drain_remaining() {
-                Some(remaining) if remaining.is_zero() => break,
-                Some(remaining) => session.runtime.inbox.recv_timeout(remaining).ok(),
-                None => session.runtime.inbox.recv().ok(),
+            // Input first: a command never waits behind output.
+            let message = match session.runtime.control.try_recv() {
+                Ok(message) => Some(message),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                    match session.runtime.events.drain_remaining() {
+                        Some(remaining) if remaining.is_zero() => break,
+                        Some(remaining) => session.runtime.inbox.recv_timeout(remaining).ok(),
+                        None => session.runtime.inbox.recv().ok(),
+                    }
+                }
             };
             let Some(message) = message else { break };
             if session.handle(message).is_break() {
@@ -375,7 +409,14 @@ impl Session {
             if batch.is_full() || self.runtime.shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            next = self.runtime.inbox.try_recv().ok();
+            // Control first, then whatever output is already waiting. A
+            // control message counts against the batch like any other.
+            next = self
+                .runtime
+                .control
+                .try_recv()
+                .ok()
+                .or_else(|| self.runtime.inbox.try_recv().ok());
         }
         self.publish_notices()?;
         self.capture()
@@ -473,7 +514,7 @@ impl Session {
             // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
             // leaves `dirty` set with the loop blocked on `recv`. This gives
             // the gate below a second pass once the app has drained the slot.
-            Message::CaptureRequested => {}
+            Message::CaptureRequested | Message::Wake => {}
             Message::Command(command) => match command {
                 TerminalCommand::Input(bytes) => {
                     // Trusted, already-encoded bytes: one command, one write.
@@ -993,6 +1034,7 @@ mod closing_regressions {
         const CHILD: &str = "SPRITE_READY_CLOSE_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let (commands, inbox) = std::sync::mpsc::sync_channel(1);
+            let (_control, control_rx) = std::sync::mpsc::sync_channel(1);
             commands.send(Message::CaptureRequested).unwrap();
             let (events, receiver) = crate::event_mailbox::bounded(1);
             drop(receiver);
@@ -1001,6 +1043,7 @@ mod closing_regressions {
                 SessionConfig::command("/bin/sh", vec!["-c".into(), "exit 0".into()]),
                 commands,
                 inbox,
+                control_rx,
                 events,
                 snapshots,
                 Arc::new(AtomicBool::new(true)),
