@@ -20,8 +20,6 @@
 //! queue, the child blocked on an output queue the worker was no longer
 //! draining, and the pane froze for good (ADR 0015).
 
-#![deny(unsafe_code)]
-
 mod processes;
 pub(crate) use processes::SessionProcesses;
 
@@ -594,7 +592,7 @@ impl From<&GroupSignal> for Signal {
 /// so this adds no dependency.
 pub(crate) fn process_name(pid: i32) -> Option<String> {
     #[cfg(target_os = "macos")]
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, reason = "libproc FFI; see the SAFETY comments")]
     {
         use nix::libc;
 
@@ -629,7 +627,7 @@ pub(crate) fn process_name(pid: i32) -> Option<String> {
 /// number is reused the moment it is free — so asking a stale number what is
 /// running on it could answer for an unrelated file. Holding a duplicate means
 /// the question is always asked of this session's terminal or of nothing.
-#[allow(unsafe_code)]
+#[allow(unsafe_code, reason = "adopts a descriptor dup(2) just returned")]
 pub(crate) fn duplicate(fd: RawFd) -> Option<OwnedFd> {
     let copy = fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(0)).ok()?;
     // SAFETY: F_DUPFD_CLOEXEC returns a fresh descriptor that no other owner

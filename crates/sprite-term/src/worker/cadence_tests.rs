@@ -72,6 +72,10 @@ pub(super) struct Capture<'a> {
     cpu_started: u64,
 }
 
+#[allow(
+    unsafe_code,
+    reason = "reads the thread CPU clock; the out-param is a plain C struct"
+)]
 fn thread_cpu_ns() -> u64 {
     let mut time = nix::libc::timespec {
         tv_sec: 0,

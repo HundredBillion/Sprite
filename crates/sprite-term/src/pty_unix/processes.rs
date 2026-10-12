@@ -2,6 +2,17 @@ use super::{GroupSignal, signal_group};
 use nix::unistd::{getpgrp, getsid};
 use std::collections::HashSet;
 
+/// Why a scan or a reading could not finish. Disappearance is not an error: it is `Ok(None)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanError {
+    /// The kernel refused the question.
+    Denied,
+    /// The answer could not be read.
+    Unparsable,
+    /// The process changed identity between two readings.
+    Changed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Process {
     pid: i32,
@@ -50,21 +61,24 @@ impl SessionProcesses {
             && process.group != self.own_group
     }
 
-    fn members(&mut self) -> Result<Vec<Process>, ()> {
+    fn members(&mut self) -> Result<Vec<Process>, ScanError> {
         if self.retired {
             return Ok(vec![]);
         }
         self.select(scan(self.session))
     }
 
-    fn select(&mut self, snapshot: Result<Vec<Process>, ()>) -> Result<Vec<Process>, ()> {
+    fn select(
+        &mut self,
+        snapshot: Result<Vec<Process>, ScanError>,
+    ) -> Result<Vec<Process>, ScanError> {
         if self.retired {
             return Ok(vec![]);
         }
         let all = snapshot?;
         if let Some(leader) = all.iter().find(|p| p.pid == self.session) {
             let Some(birth) = self.leader_birth else {
-                return Err(());
+                return Err(ScanError::Unparsable);
             };
             if birth != leader.birth {
                 self.retired = true;
@@ -101,8 +115,8 @@ impl SessionProcesses {
     fn signal_members(
         &mut self,
         signal: &GroupSignal,
-        members: Result<Vec<Process>, ()>,
-        mut reread: impl FnMut(i32) -> Result<Option<Process>, ()>,
+        members: Result<Vec<Process>, ScanError>,
+        mut reread: impl FnMut(i32) -> Result<Option<Process>, ScanError>,
         mut send: impl FnMut(i32),
     ) -> bool {
         let Ok(members) = members else {
@@ -125,7 +139,7 @@ impl SessionProcesses {
                 // Gone, or a different process now: nothing of this session is
                 // left there to signal.
                 Ok(_) => {}
-                Err(()) => {
+                Err(ScanError::Denied | ScanError::Unparsable | ScanError::Changed) => {
                     unreadable.insert(member.group);
                 }
             }
@@ -149,33 +163,33 @@ fn same_member(before: Process, after: Process) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn parse_stat(pid: i32, stat: &str) -> Result<Process, ()> {
+fn parse_stat(pid: i32, stat: &str) -> Result<Process, ScanError> {
     let tail = stat.get(stat.rfind(')').ok_or(())? + 1..).ok_or(())?;
     let fields: Vec<_> = tail.split_whitespace().collect();
     let field = |index| fields.get(index).copied().ok_or(());
     Ok(Process {
         pid,
-        group: field(2)?.parse().map_err(|_| ())?,
-        session: field(3)?.parse().map_err(|_| ())?,
-        birth: field(19)?.parse().map_err(|_| ())?,
+        group: field(2)?.parse().map_err(|_| ScanError::Denied)?,
+        session: field(3)?.parse().map_err(|_| ScanError::Denied)?,
+        birth: field(19)?.parse().map_err(|_| ScanError::Denied)?,
         live: !matches!(field(0)?, "Z" | "X" | "x"),
     })
 }
 
 #[cfg(target_os = "linux")]
-fn read_process(pid: i32) -> Result<Option<Process>, ()> {
+fn read_process(pid: i32) -> Result<Option<Process>, ScanError> {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => parse_stat(pid, &stat).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(()),
+        Err(_) => Err(ScanError::Unparsable),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn scan(session: i32) -> Result<Vec<Process>, ()> {
+fn scan(session: i32) -> Result<Vec<Process>, ScanError> {
     let mut processes = Vec::new();
-    for entry in std::fs::read_dir("/proc").map_err(|_| ())? {
-        let entry = entry.map_err(|_| ())?;
+    for entry in std::fs::read_dir("/proc").map_err(|_| ScanError::Denied)? {
+        let entry = entry.map_err(|_| ScanError::Denied)?;
         let Some(pid) = entry
             .file_name()
             .to_str()
@@ -194,9 +208,9 @@ fn scan(session: i32) -> Result<Vec<Process>, ()> {
 fn scoped_record(
     pid: i32,
     session: i32,
-    mut sid: impl FnMut(i32) -> Result<Option<i32>, ()>,
-    mut metadata: impl FnMut(i32) -> Result<Option<Process>, ()>,
-) -> Result<Option<Process>, ()> {
+    mut sid: impl FnMut(i32) -> Result<Option<i32>, ScanError>,
+    mut metadata: impl FnMut(i32) -> Result<Option<Process>, ScanError>,
+) -> Result<Option<Process>, ScanError> {
     match sid(pid)? {
         Some(found) if found == session => metadata(pid),
         _ => Ok(None),
@@ -224,10 +238,10 @@ struct Reading {
 #[cfg(any(target_os = "macos", test))]
 fn sandwiched_record(
     pid: i32,
-    before: Result<Option<Reading>, ()>,
-    session: impl FnOnce() -> Result<Option<i32>, ()>,
-    after: impl FnOnce() -> Result<Option<Reading>, ()>,
-) -> Result<Option<Process>, ()> {
+    before: Result<Option<Reading>, ScanError>,
+    session: impl FnOnce() -> Result<Option<i32>, ScanError>,
+    after: impl FnOnce() -> Result<Option<Reading>, ScanError>,
+) -> Result<Option<Process>, ScanError> {
     let Some(before) = before? else {
         return Ok(None);
     };
@@ -238,7 +252,7 @@ fn sandwiched_record(
         return Ok(None);
     };
     if (before.pid, before.group, before.birth) != (after.pid, after.group, after.birth) {
-        return Err(());
+        return Err(ScanError::Changed);
     }
     Ok(Some(Process {
         pid,
@@ -250,10 +264,10 @@ fn sandwiched_record(
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn read_process(pid: i32) -> Result<Option<Process>, ()> {
+#[allow(unsafe_code, reason = "libproc FFI; see the SAFETY comments")]
+fn read_process(pid: i32) -> Result<Option<Process>, ScanError> {
     use nix::libc;
-    fn bsd(pid: i32) -> Result<Option<Reading>, ()> {
+    fn bsd(pid: i32) -> Result<Option<Reading>, ScanError> {
         // SAFETY: BSD info is a plain C output record and its exact byte size is supplied.
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of_val(&info) as i32;
@@ -282,38 +296,39 @@ fn read_process(pid: i32) -> Result<Option<Process>, ()> {
         if nix::errno::Errno::last() == nix::errno::Errno::ESRCH {
             Ok(None)
         } else {
-            Err(())
+            Err(ScanError::Denied)
         }
     }
     sandwiched_record(pid, bsd(pid), || process_session(pid), || bsd(pid))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn process_session(pid: i32) -> Result<Option<i32>, ()> {
+fn process_session(pid: i32) -> Result<Option<i32>, ScanError> {
     match getsid(Some(nix::unistd::Pid::from_raw(pid))) {
         Ok(session) => Ok(Some(session.as_raw())),
         Err(nix::errno::Errno::ESRCH) => Ok(None),
-        Err(_) => Err(()),
+        Err(_) => Err(ScanError::Denied),
     }
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn scan(session: i32) -> Result<Vec<Process>, ()> {
+#[allow(unsafe_code, reason = "libproc FFI; see the SAFETY comments")]
+fn scan(session: i32) -> Result<Vec<Process>, ScanError> {
     use nix::libc;
     // SAFETY: a null output asks libproc for a PID count without writing.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if count <= 0 {
-        return Err(());
+        return Err(ScanError::Denied);
     }
     let mut capacity = count as usize + 64;
     for _ in 0..4 {
         let mut pids = vec![0_i32; capacity];
-        let bytes = i32::try_from(capacity * std::mem::size_of::<i32>()).map_err(|_| ())?;
+        let bytes =
+            i32::try_from(capacity * std::mem::size_of::<i32>()).map_err(|_| ScanError::Denied)?;
         // SAFETY: the output buffer holds exactly the supplied byte capacity.
         let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
         if count <= 0 {
-            return Err(());
+            return Err(ScanError::Denied);
         }
         if count as usize >= capacity {
             capacity *= 2;
@@ -327,7 +342,7 @@ fn scan(session: i32) -> Result<Vec<Process>, ()> {
         }
         return Ok(processes);
     }
-    Err(())
+    Err(ScanError::Denied)
 }
 
 #[cfg(test)]
@@ -349,15 +364,19 @@ mod tests {
                 42,
                 |pid| Ok(Some(if pid == 1 { 1 } else { 42 })),
                 |pid| {
-                    if pid == 1 { Err(()) } else { Ok(Some(owned)) }
+                    if pid == 1 {
+                        Err(ScanError::Denied)
+                    } else {
+                        Ok(Some(owned))
+                    }
                 },
             )
             .expect("foreign protected metadata must not block owned jobs");
             records.extend(record);
         }
         assert_eq!(records, vec![owned]);
-        assert!(scoped_record(43, 42, |_| Err(()), |_| Ok(Some(owned))).is_err());
-        assert!(scoped_record(43, 42, |_| Ok(Some(42)), |_| Err(())).is_err());
+        assert!(scoped_record(43, 42, |_| Err(ScanError::Denied), |_| Ok(Some(owned))).is_err());
+        assert!(scoped_record(43, 42, |_| Ok(Some(42)), |_| Err(ScanError::Denied)).is_err());
     }
     #[test]
     fn capture_rejects_nonpositive_and_callers_session() {
@@ -433,7 +452,7 @@ mod tests {
             birth: 2,
             live: true,
         };
-        assert!(scope.select(Err(())).is_err());
+        assert!(scope.select(Err(ScanError::Denied)).is_err());
         assert!(!scope.retired);
         assert_eq!(scope.select(Ok(vec![member])).unwrap(), vec![member]);
         assert!(scope.select(Ok(vec![])).unwrap().is_empty());
@@ -485,15 +504,25 @@ mod tests {
                     }))
                 }
             ),
-            Err(())
+            Err(ScanError::Changed)
         );
         assert_eq!(
-            sandwiched_record(43, Ok(Some(reading)), || Err(()), || Ok(Some(reading))),
-            Err(())
+            sandwiched_record(
+                43,
+                Ok(Some(reading)),
+                || Err(ScanError::Denied),
+                || Ok(Some(reading))
+            ),
+            Err(ScanError::Denied)
         );
         assert_eq!(
-            sandwiched_record(43, Err(()), || Ok(Some(42)), || Ok(Some(reading))),
-            Err(())
+            sandwiched_record(
+                43,
+                Err(ScanError::Denied),
+                || Ok(Some(42)),
+                || Ok(Some(reading))
+            ),
+            Err(ScanError::Denied)
         );
     }
 
@@ -543,7 +572,7 @@ mod tests {
         let mut sent = Vec::new();
         assert!(!scope.signal_members(
             &GroupSignal::Kill,
-            Err(()),
+            Err(ScanError::Denied),
             |_| unreachable!(),
             |group| sent.push(group)
         ));
@@ -555,7 +584,7 @@ mod tests {
                 &GroupSignal::Kill,
                 Ok(vec![gone, present]),
                 |pid| if pid == gone.pid {
-                    Err(())
+                    Err(ScanError::Denied)
                 } else {
                     Ok(Some(present))
                 },
@@ -575,7 +604,7 @@ mod tests {
                 &GroupSignal::Kill,
                 Ok(vec![sibling, present]),
                 |pid| if pid == sibling.pid {
-                    Err(())
+                    Err(ScanError::Denied)
                 } else {
                     Ok(Some(present))
                 },
@@ -620,7 +649,7 @@ mod tests {
                 Ok(vec![first, second]),
                 |pid| {
                     if pid == second.pid && !second_readable {
-                        Err(())
+                        Err(ScanError::Denied)
                     } else {
                         readable(pid)
                     }

@@ -1,4 +1,8 @@
 //! Counts allocations on one measured test thread, excluding setup and other tests.
+#![allow(
+    unsafe_code,
+    reason = "a counting GlobalAlloc for tests and benches forwards to System"
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
