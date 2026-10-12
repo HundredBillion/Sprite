@@ -1770,10 +1770,10 @@ mod tests {
         }
         // The second Open is sent only once the first program's stream has
         // filled its lane, so the test cannot pass by winning a race.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_blocking_wait::watchdog();
         while !receivers.stream.is_full() {
             assert!(Instant::now() < deadline, "the stream lane never filled");
-            std::thread::sleep(Duration::from_millis(1));
+            crate::test_blocking_wait::pause(Duration::from_millis(1));
         }
         let (mut second, mut second_reader) = connect(&endpoint);
         writeln!(second, "{} {}", endpoint.key_hex(), open_message(1)).expect("write");
