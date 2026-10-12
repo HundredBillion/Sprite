@@ -470,7 +470,7 @@ id = "GAP-C02"
 title = "A nested Sprite with endpoints disabled inherits the parent's endpoint variables"
 status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-fixed_by = "fix/findings-ledger-and-admission"
+fixed_by = "#76"
 test = "inherited_sprite_endpoint_variables_are_removed"
 
 [[finding]]
@@ -492,7 +492,7 @@ id = "GAP-C05"
 title = "When the child-waiter thread cannot be spawned, the launched child is dropped unkilled and unreaped"
 status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-fixed_by = "fix/findings-ledger-and-admission"
+fixed_by = "#76"
 test = "a_failed_start_up_step_discards_the_child"
 
 [[finding]]
@@ -521,7 +521,7 @@ id = "GAP-C09"
 title = "A relayed request refused at admission is reported as 'did not answer in time'; ADR 0018 still describes a blocking enqueue"
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
-fixed_by = "fix/findings-ledger-and-admission"
+fixed_by = "#76"
 test = "a_refused_admission_says_the_window_is_busy_not_that_it_did_not_answer"
 
 [[finding]]
@@ -536,7 +536,7 @@ id = "GAP-C11"
 title = "A keystroke can be refused while a program floods output"
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
-fixed_by = "fix/findings-ledger-and-admission"
+fixed_by = "#76"
 test = "input_is_admitted_while_every_output_permit_is_outstanding"
 
 [[finding]]
@@ -544,7 +544,7 @@ id = "GAP-C12"
 title = "One Surface streaming updates starves every other program's one-shot request"
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
-fixed_by = "fix/findings-ledger-and-admission"
+fixed_by = "#76"
 test = "a_full_stream_lane_does_not_refuse_another_connections_open"
 
 [[finding]]
@@ -552,7 +552,7 @@ id = "GAP-C13"
 title = "The Surface and observation clients time out before the window's 'still applying' answer can arrive"
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
-fixed_by = "fix/findings-ledger-and-admission"
+fixed_by = "#76"
 test = [
   "an_observation_exchange_is_bounded_by_the_client_timeout",
   "a_surface_exchange_is_bounded_by_the_client_timeout",
