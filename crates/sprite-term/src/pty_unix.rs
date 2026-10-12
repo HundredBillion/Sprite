@@ -9,8 +9,8 @@
 //! readability, fills that token's buffer with whatever is already waiting, and
 //! dropping the resulting chunk returns its buffer and token.
 //! At most sixteen 16 KiB chunks can therefore
-//! occupy the 17-slot worker queue, which structurally reserves the last slot
-//! for input and lifecycle work.
+//! occupy the 17-slot worker queue. The spare slot carries wakes and lifecycle
+//! reports; it is not structurally reserved for them.
 //!
 //! Input the worker queues is written here as well, only when the PTY reports
 //! room and never through a call that can block. A kernel's input queue is

@@ -40,10 +40,6 @@ pub const DENIED: &str = "denied";
 /// A client sending more than this before a newline is not making a request.
 const MAX_REQUEST_BYTES: u64 = 8 * 1024;
 
-/// A connected client that never speaks must not hold its own thread for long.
-///
-/// A local client connects and writes immediately, so this only ever expires
-/// for something that is not making a request.
 /// How many requests may be in flight at once.
 ///
 /// Each connection is served on its own thread so that one silent client

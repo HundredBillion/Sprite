@@ -26,9 +26,7 @@ use crate::observation::client::PANE_VARIABLE;
 use crate::surface::channel::{KEY_VARIABLE, SOCKET_VARIABLE, VERSION};
 use crate::surface::wire::versioned;
 
-/// For the one-exchange commands. A Surface's own connection has no timeout:
-/// it lives as long as the Surface.
-use crate::timeouts::CLIENT_TIMEOUT;
+use crate::timeouts::bound_client;
 
 /// One line to the window, flushed, with the truth about whether it went.
 fn send_line(stream: &UnixStream, line: &str) -> bool {
@@ -318,8 +316,7 @@ fn one_exchange(
         Ok(stream) => stream,
         Err(exit) => return exit,
     };
-    stream.set_read_timeout(Some(CLIENT_TIMEOUT)).ok();
-    stream.set_write_timeout(Some(CLIENT_TIMEOUT)).ok();
+    bound_client(&stream).ok();
     let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
         writeln!(errors, "sprite: could not read from the surface channel").ok();
         return Exit::Unreachable;

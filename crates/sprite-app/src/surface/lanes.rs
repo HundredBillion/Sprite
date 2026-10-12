@@ -14,7 +14,8 @@ use crate::surface::channel::SurfaceRequest;
 pub(crate) const STREAM_CAPACITY: usize = 64;
 
 /// Handshakes in flight at once. Past this, a program is refused as busy
-/// and reconnects; it never waits.
+/// and never waits; the Surface Client exits through that refusal rather
+/// than reconnecting.
 pub(crate) const ONE_SHOT_CAPACITY: usize = 16;
 
 /// The connection threads' ends.

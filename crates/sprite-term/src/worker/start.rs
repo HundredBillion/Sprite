@@ -335,11 +335,10 @@ fn apply_graphics_policy(
 /// A child inherits this process's environment minus every `SPRITE_`
 /// variable, and then gets this window's own through `environment`.
 ///
-/// The prefix is the boundary because anything Sprite-named in the inherited
-/// environment was put there by a Sprite above this one, and this window
-/// re-adds what it owns. Stripping the whole prefix keeps a parent window's
-/// endpoints, including ones named later, from reaching a child of a window
-/// whose endpoints are off.
+/// The prefix is the boundary because the whole `SPRITE_` prefix is reserved
+/// for Sprite, and a child sees only what this window sets. Stripping all of
+/// it keeps a parent window's endpoints, including ones named later, from
+/// reaching a child of a window whose endpoints are off.
 fn configure_child_environment(
     command: &mut CommandBuilder,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
@@ -376,9 +375,7 @@ fn open_pty(size: PtySize) -> Result<portable_pty::PtyPair, SessionError> {
     static OPEN_PTY: std::sync::Mutex<()> = std::sync::Mutex::new(());
     retrying_transient_failures(
         || {
-            let _one_at_a_time = OPEN_PTY
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _one_at_a_time = crate::locked::locked(&OPEN_PTY);
             native_pty_system().openpty(size)
         },
         thread::sleep,
@@ -403,9 +400,10 @@ fn retrying_transient_failures<T, E: std::fmt::Debug + std::fmt::Display>(
     loop {
         match open() {
             Ok(opened) => return Ok(opened),
-            Err(error)
-                if attempt < ATTEMPTS && is_transient_openpty_failure(&format!("{error:?}")) =>
-            {
+            Err(error) if is_transient_openpty_failure(&format!("{error:?}")) => {
+                if attempt >= ATTEMPTS {
+                    return Err(SessionError::transient("open_pty", error));
+                }
                 pause(FIRST_PAUSE * 2u32.pow(attempt - 1));
                 attempt += 1;
             }
@@ -533,6 +531,9 @@ fn adopt_child(
 /// A child that has no session to belong to. It is at most the shell and
 /// has had no time to start anything, so a hangup, KILL and reap are the
 /// whole escalation.
+///
+/// `kill` reaps only a child that dies on the hangup; one that survives it is
+/// sent KILL and left unreaped, so `wait` is what reaps that one.
 fn discard(mut child: SpawnedChild, master: Box<dyn MasterPty + Send>) {
     drop(master);
     let _killed = child.kill();
@@ -612,10 +613,10 @@ mod tests {
                 },
                 |pause| pauses.push(pause),
             );
-            (opened.is_ok(), calls, pauses)
+            (opened, calls, pauses)
         };
         let (opened, calls, pauses) = open_after(7);
-        assert!(opened, "seven transient failures are ridden out");
+        assert!(opened.is_ok(), "seven transient failures are ridden out");
         assert_eq!((calls, pauses.len()), (8, 7));
         assert!(
             pauses.windows(2).all(|pair| pair[0] < pair[1]),
@@ -626,7 +627,11 @@ mod tests {
             "{pauses:?}"
         );
         let (opened, calls, _) = open_after(8);
-        assert!(!opened);
+        assert_eq!(
+            opened.map_err(|error| error.kind),
+            Err(crate::ErrorKind::Transient),
+            "exhausted retries still report a transient failure"
+        );
         assert_eq!(calls, 8);
 
         let mut calls = 0;
@@ -637,7 +642,10 @@ mod tests {
             },
             |_| {},
         );
-        assert!(opened.is_err());
+        assert_eq!(
+            opened.map_err(|error| error.kind),
+            Err(crate::ErrorKind::Other)
+        );
         assert_eq!(calls, 1, "a lasting failure is not retried");
     }
 

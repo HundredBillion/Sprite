@@ -85,7 +85,7 @@ impl Workspace {
                         // opened one.
                         gate.recv_blocking().ok();
                     }
-                    let cleanup = slot.lock().ok().and_then(|mut slot| slot.take());
+                    let cleanup = crate::locked::locked(&slot).take();
                     if let Some(cleanup) = cleanup {
                         cleanup();
                     }
@@ -109,7 +109,7 @@ impl Workspace {
                 // A machine that cannot start one more thread is better served
                 // by a slow cleanup on the shared executor than by a skipped
                 // one, which would leave the pane's children running.
-                let cleanup = slot.lock().ok().and_then(|mut slot| slot.take());
+                let cleanup = crate::locked::locked(&slot).take();
                 cx.background_executor().spawn(async move {
                     if let Some(cleanup) = cleanup {
                         cleanup();

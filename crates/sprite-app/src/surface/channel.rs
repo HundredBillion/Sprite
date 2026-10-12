@@ -476,10 +476,12 @@ fn write_events(shared: &Shared) {
     loop {
         let mut queue = crate::locked::locked(&shared.queue);
         while !queue.has_work() {
-            queue = match shared.changed.wait(queue) {
-                Ok(queue) => queue,
-                Err(_) => return,
-            };
+            // Recovered like every lock here (see `crate::locked`), so a
+            // poisoned wait still reaches `queue.finish()` below.
+            queue = shared
+                .changed
+                .wait(queue)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         if queue.dead || !queue.ready || queue.queued.is_empty() {
             // Dead, or closing with nothing left that may be sent. A

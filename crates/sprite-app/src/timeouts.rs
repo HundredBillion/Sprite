@@ -44,6 +44,12 @@ pub(crate) const CLIENT_TIMEOUT: Duration = REPLY_TIMEOUT
     .saturating_add(AFTER_CLAIM)
     .saturating_add(Duration::from_secs(1));
 
+/// Gives a one-exchange client socket `CLIENT_TIMEOUT` on every read and write.
+pub(crate) fn bound_client(stream: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CLIENT_TIMEOUT))
+}
+
 const fn longer(a: Duration, b: Duration) -> bool {
     a.as_millis() > b.as_millis()
 }
@@ -61,9 +67,15 @@ const _: () = assert!(longer(REPLY_TIMEOUT, SILENT_CLIENT_TIMEOUT));
 mod tests {
     use super::*;
 
-    /// The compile-time asserts above are the guard; this names it.
+    /// Both clients bound their sockets through `bound_client`, so this checks
+    /// the bound a client actually gets, not only the constants.
     #[test]
-    fn a_client_outlives_the_windows_reply_and_after_claim_waits() {
+    fn a_client_outlives_the_windows_reply_and_after_claim_waits() -> std::io::Result<()> {
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair()?;
+        bound_client(&stream)?;
+        assert_eq!(stream.read_timeout()?, Some(CLIENT_TIMEOUT));
+        assert_eq!(stream.write_timeout()?, Some(CLIENT_TIMEOUT));
         assert!(CLIENT_TIMEOUT > REPLY_TIMEOUT + AFTER_CLAIM);
+        Ok(())
     }
 }
