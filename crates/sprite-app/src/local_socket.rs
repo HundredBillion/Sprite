@@ -635,7 +635,6 @@ mod tests {
         }
     }
 
-    #[expect(clippy::disallowed_methods, reason = "a test's own pacing")]
     fn watchdog(test: &str, run: impl FnOnce(&Path)) {
         const CHILD: &str = "SPRITE_SOCKET_HOUSEKEEPING_CHILD";
         if let Some(directory) = std::env::var_os(CHILD) {
@@ -662,7 +661,7 @@ mod tests {
                 child.kill().unwrap();
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            crate::test_blocking_wait::pause(Duration::from_millis(10));
         }
         let output = child.wait_with_output().unwrap();
         println!(

@@ -75,7 +75,7 @@ fn main() -> ExitCode {
 
 #[expect(
     clippy::expect_used,
-    reason = "before the window exists there is nowhere else to report"
+    reason = "while the window is being opened there is nowhere else to report"
 )]
 fn open_window(args: WindowArgs) {
     // Read before the window exists, so a session never starts under one set of
