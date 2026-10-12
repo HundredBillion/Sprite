@@ -210,7 +210,14 @@ impl ShapeCache {
             Some(line) => Arc::clone(line),
             None => {
                 if self.shapes.len() >= MAX_DISTINCT_SHAPES {
-                    self.shapes.clear();
+                    // Only a shape no visible slot holds can go: one still
+                    // drawn would be shaped again on the next frame. Each
+                    // slot holds a clone, so the pool's own reference is the
+                    // only one left on an unused shape.
+                    self.shapes.retain(|_, line| Arc::strong_count(line) > 1);
+                    if self.shapes.len() >= MAX_DISTINCT_SHAPES {
+                        self.shapes.clear();
+                    }
                 }
                 let line = Arc::new(shape());
                 self.shapes.insert(key, Arc::clone(&line));
@@ -530,6 +537,21 @@ impl GridPaint {
     }
 }
 
+/// Where a decoration sits in a cell, which depends only on the font variant.
+#[derive(Clone, Copy)]
+struct DecorationMetrics {
+    baseline: Pixels,
+    descent: Pixels,
+    ascent: Pixels,
+}
+
+/// One slot per (bold, italic, enlarged), filled on first use in a pass.
+type DecorationMetricsCache = [Option<DecorationMetrics>; 8];
+
+fn decoration_slot(bold: bool, italic: bool, enlarged: bool) -> usize {
+    usize::from(bold) | usize::from(italic) << 1 | usize::from(enlarged) << 2
+}
+
 /// What one cell contributes to the frame, resolved once and used by both
 /// halves of the paint.
 struct Drawn {
@@ -804,6 +826,8 @@ impl Element for GridPaint {
         if self.pass != RowPass::Background {
             shapes.begin_frame(self.shape_context(scale), rows.len());
         }
+        // Per pass, not per element: the font and size, not the cell, decide it.
+        let mut decoration_metrics: DecorationMetricsCache = [None; 8];
         // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
             let top = row_edge(Row(index));
@@ -871,7 +895,7 @@ impl Element for GridPaint {
                     shapes: &mut shapes,
                 };
                 self.paint_glyph(target, &drawn, bounds, scale, window, cx);
-                self.paint_decorations(cell, &drawn, bounds, window);
+                self.paint_decorations(cell, &drawn, bounds, &mut decoration_metrics, window);
                 self.paint_cursor(&drawn, bounds, scale, window);
             }
         }
@@ -1022,19 +1046,29 @@ impl GridPaint {
         cell: &PositionedCell,
         drawn: &Drawn,
         bounds: CellBounds,
+        metrics: &mut DecorationMetricsCache,
         window: &mut Window,
     ) {
         if drawn.underline.is_none() && drawn.strikethrough.is_none() {
             return;
         }
-        // Decorations span the cell even when its glyph has no ink or uses geometry.
-        let font = terminal_font(&self.font_family, cell.style.bold, cell.style.italic);
-        let font_size = self.font_size + if cell.hovered_link { px(1.0) } else { px(0.0) };
-        let text = window.text_system();
-        let font_id = text.resolve_font(&font);
-        let baseline = text.baseline_offset(font_id, font_size, self.cell_height);
-        let descent = text.descent(font_id, font_size);
-        let ascent = text.ascent(font_id, font_size);
+        let slot = decoration_slot(cell.style.bold, cell.style.italic, cell.hovered_link);
+        let DecorationMetrics {
+            baseline,
+            descent,
+            ascent,
+        } = *metrics[slot].get_or_insert_with(|| {
+            // Decorations span the cell even when its glyph has no ink or uses geometry.
+            let font = terminal_font(&self.font_family, cell.style.bold, cell.style.italic);
+            let font_size = self.font_size + if cell.hovered_link { px(1.0) } else { px(0.0) };
+            let text = window.text_system();
+            let font_id = text.resolve_font(&font);
+            DecorationMetrics {
+                baseline: text.baseline_offset(font_id, font_size, self.cell_height),
+                descent: text.descent(font_id, font_size),
+                ascent: text.ascent(font_id, font_size),
+            }
+        });
         let left = bounds.left.pixels();
         let top = bounds.top.pixels();
         let width = bounds.right.pixels() - left;

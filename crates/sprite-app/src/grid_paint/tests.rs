@@ -49,6 +49,43 @@ fn shapes_anew(cache: &mut ShapeCache, cells: &Arc<Vec<PositionedCell>>, color: 
 }
 
 #[test]
+fn a_full_pool_keeps_the_shapes_rows_still_hold() {
+    let mut cache = ShapeCache::default();
+    let style = plain_style(SnapshotColor::Default, SnapshotColor::Default, false);
+    let color = Rgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    let row_of = |text: &str| {
+        let mut cell = positioned(style);
+        cell.text = text.into();
+        Arc::new(vec![cell])
+    };
+    // A visible row whose shape the pool must keep.
+    let kept = row_of("kept");
+    let _shaped = cache.shaped(0, &kept, 0, color, ShapedLine::default);
+    // Each filler replaces the previous one in row 1's slot, so only the
+    // newest is still held; the pool fills with shapes nothing draws.
+    for n in 0..MAX_DISTINCT_SHAPES {
+        let filler = row_of(&format!("f{n}"));
+        let _shaped = cache.shaped(1, &filler, 0, color, ShapedLine::default);
+    }
+    // Row 0 still holds its shape, so asking for the same cell from a row
+    // with no slot of its own must be answered by the pool.
+    let mut shaped_again = false;
+    let _shaped = cache.shaped(2, &row_of("kept"), 0, color, || {
+        shaped_again = true;
+        ShapedLine::default()
+    });
+    assert!(
+        !shaped_again,
+        "a shape a visible slot still holds was evicted"
+    );
+}
+
+#[test]
 fn benchmark_samples_prepare_real_blink_hover_and_one_row_transitions() {
     use crate::paint_benchmark::{PaintBenchmark, Scenario};
 
@@ -878,11 +915,11 @@ fn filling_the_shape_pool_empties_it() {
     ));
     assert_eq!(
         cache.shapes.len(),
-        1,
-        "going past the cap starts the pool again"
+        2,
+        "going past the cap drops every shape but the one the row still holds (rgb(0), last asked for)"
     );
     assert!(
-        shapes_anew(&mut cache, &cells, rgb(0)),
+        shapes_anew(&mut cache, &cells, rgb(1)),
         "a shape dropped with the pool is shaped again"
     );
 }
