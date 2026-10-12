@@ -196,6 +196,7 @@ pub(crate) mod tests {
         SessionError {
             operation,
             message: message.to_owned(),
+            kind: sprite_term::ErrorKind::Other,
         }
     }
 

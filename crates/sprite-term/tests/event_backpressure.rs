@@ -210,7 +210,7 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
     loop {
         let ended = session
             .try_send(TerminalCommand::Capture)
-            .is_err_and(|error| error.message == "the terminal worker ended");
+            .is_err_and(|error| error.kind == sprite_term::ErrorKind::Ended);
         if ended {
             break;
         }

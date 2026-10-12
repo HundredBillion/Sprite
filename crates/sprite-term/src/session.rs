@@ -64,7 +64,7 @@ impl SnapshotStream {
     }
 
     fn ended(_: async_channel::RecvError) -> SessionError {
-        SessionError::new("snapshot_stream", "the terminal session ended")
+        SessionError::ended("snapshot_stream", "the terminal session ended")
     }
 }
 
@@ -86,7 +86,7 @@ impl CommandSender {
         self.validate(&command)?;
         self.commands
             .send(worker::Message::Command(command))
-            .map_err(|_| SessionError::new("send", "the terminal worker ended"))
+            .map_err(|_| SessionError::ended("send", "the terminal worker ended"))
     }
 
     /// Submits without waiting; saturation is an explicit refusal.
@@ -94,12 +94,12 @@ impl CommandSender {
         self.validate(&command)?;
         match self.commands.try_send(worker::Message::Command(command)) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(SessionError::new(
+            Err(TrySendError::Full(_)) => Err(SessionError::transient(
                 "send",
                 "the terminal command queue is full",
             )),
             Err(TrySendError::Disconnected(_)) => {
-                Err(SessionError::new("send", "the terminal worker ended"))
+                Err(SessionError::ended("send", "the terminal worker ended"))
             }
         }
     }
@@ -121,12 +121,12 @@ impl CommandSender {
             cancelled,
         }) {
             Ok(()) => Ok(request),
-            Err(TrySendError::Full(_)) => Err(SessionError::new(
+            Err(TrySendError::Full(_)) => Err(SessionError::transient(
                 "send",
                 "the terminal command queue is full",
             )),
             Err(TrySendError::Disconnected(_)) => {
-                Err(SessionError::new("send", "the terminal worker ended"))
+                Err(SessionError::ended("send", "the terminal worker ended"))
             }
         }
     }
@@ -134,7 +134,7 @@ impl CommandSender {
     fn validate(&self, command: &TerminalCommand) -> Result<(), SessionError> {
         validate(command)?;
         if self.shutdown.load(Ordering::SeqCst) {
-            return Err(SessionError::new(
+            return Err(SessionError::ended(
                 "send",
                 "the terminal session is shutting down",
             ));
@@ -204,7 +204,7 @@ fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
         _ => (0, MAX_INPUT_BYTES),
     };
     if bytes > limit {
-        return Err(SessionError::new(
+        return Err(SessionError::invalid(
             "send",
             format!("input of {bytes} bytes exceeds the {limit} byte limit"),
         ));

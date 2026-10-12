@@ -71,18 +71,51 @@ pub enum TerminalEvent {
     Error(SessionError),
 }
 
+/// What class of failure a [`SessionError`] is, so a caller can act on it
+/// without reading the message.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorKind {
+    /// The request itself was refused: too large, or not allowed.
+    Invalid,
+    /// The session is over or ending; nothing will be accepted again.
+    Ended,
+    /// A retry may succeed.
+    Transient,
+    /// Anything else.
+    Other,
+}
+
 /// A failure attributed to the operation that produced it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionError {
     pub operation: &'static str,
     pub message: String,
+    pub kind: ErrorKind,
 }
 
 impl SessionError {
     pub(crate) fn new(operation: &'static str, message: impl fmt::Display) -> Self {
+        Self::of(ErrorKind::Other, operation, message)
+    }
+
+    pub(crate) fn invalid(operation: &'static str, message: impl fmt::Display) -> Self {
+        Self::of(ErrorKind::Invalid, operation, message)
+    }
+
+    pub(crate) fn ended(operation: &'static str, message: impl fmt::Display) -> Self {
+        Self::of(ErrorKind::Ended, operation, message)
+    }
+
+    pub(crate) fn transient(operation: &'static str, message: impl fmt::Display) -> Self {
+        Self::of(ErrorKind::Transient, operation, message)
+    }
+
+    fn of(kind: ErrorKind, operation: &'static str, message: impl fmt::Display) -> Self {
         Self {
             operation,
             message: message.to_string(),
+            kind,
         }
     }
 }
@@ -109,5 +142,29 @@ impl HyperlinkSpan {
         position.row == self.row
             && self.start_column <= position.column
             && position.column < self.end_column
+    }
+}
+
+#[cfg(test)]
+mod error_kind_tests {
+    use super::{ErrorKind, SessionError};
+
+    #[test]
+    fn constructors_set_the_kind_and_new_defaults_to_other() {
+        assert_eq!(SessionError::new("send", "x").kind, ErrorKind::Other);
+        assert_eq!(SessionError::invalid("send", "x").kind, ErrorKind::Invalid);
+        assert_eq!(SessionError::ended("send", "x").kind, ErrorKind::Ended);
+        assert_eq!(
+            SessionError::transient("open_pty", "x").kind,
+            ErrorKind::Transient
+        );
+    }
+
+    #[test]
+    fn display_is_unchanged_by_the_kind() {
+        assert_eq!(
+            SessionError::ended("send", "gone").to_string(),
+            "send: gone"
+        );
     }
 }
