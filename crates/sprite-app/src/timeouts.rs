@@ -52,17 +52,22 @@ pub(crate) fn bound_client(stream: &std::os::unix::net::UnixStream) -> std::io::
 
 /// The read and write timeouts a client's `open` gives a stream it connects
 /// to a fresh listening socket, which is removed before this returns.
+///
+/// The directory is named the way `local_socket`'s test scratch is, by pid
+/// and a per-process counter in hex, so the socket path stays far below
+/// macOS's 103-byte limit for a socket path.
 #[cfg(test)]
 pub(crate) fn exchange_timeouts(
     open: impl FnOnce(&std::path::Path) -> std::io::Result<std::os::unix::net::UnixStream>,
 ) -> std::io::Result<(Option<Duration>, Option<Duration>)> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
-    let directory =
-        std::env::temp_dir().join(format!("sprite-exchange-{}-{nanos}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let directory = std::env::temp_dir().join(format!(
+        "sx-{:x}-{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     std::fs::create_dir(&directory)?;
-    let socket = directory.join("window.sock");
+    let socket = directory.join("w.sock");
     let timeouts = std::os::unix::net::UnixListener::bind(&socket).and_then(|_listener| {
         let stream = open(&socket)?;
         Ok((stream.read_timeout()?, stream.write_timeout()?))
