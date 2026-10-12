@@ -77,6 +77,10 @@ pub(crate) struct OutputChunk {
 }
 
 impl OutputChunk {
+    #[expect(
+        clippy::expect_used,
+        reason = "a permit's buffer is taken only by its Drop"
+    )]
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.permit.buffer.as_ref().expect("live permit")[..self.len]
     }
@@ -292,6 +296,10 @@ struct Ends<'a> {
     commands: &'a SyncSender<Message>,
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "the pump reads only while it holds a permit, and a permit's buffer is taken only by its Drop"
+)]
 fn run(ends: Ends<'_>) -> PumpOutcome {
     let Ends {
         master,

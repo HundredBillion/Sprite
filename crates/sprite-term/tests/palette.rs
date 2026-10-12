@@ -4,6 +4,10 @@
 //! snapshot that carries the index without the palette leaves a renderer able
 //! to draw only the default foreground — which is how `ls --color`, git diffs
 //! and shell prompts all come out the same shade.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

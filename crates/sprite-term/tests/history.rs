@@ -1,5 +1,9 @@
 //! History extraction for observation: the active screen plus up to N lines of
 //! scrollback, answered once and never carried in the render bundle.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

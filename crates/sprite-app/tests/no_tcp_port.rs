@@ -4,6 +4,10 @@
 //! loopback, which is a far larger set of things than "processes this window
 //! started". The forbidden-state scan asserts this by inspection; this asserts
 //! it by measurement, against a process that actually has the endpoint open.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 use std::collections::HashSet;
 use std::fs;

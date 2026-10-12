@@ -1,3 +1,7 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession};
 use std::sync::mpsc;
 use std::time::Duration;

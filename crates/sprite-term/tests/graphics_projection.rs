@@ -1,5 +1,9 @@
 //! The owned graphics projection: what a renderer receives, what it costs, and
 //! what it is guaranteed to agree with.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

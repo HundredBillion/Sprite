@@ -1,5 +1,10 @@
 //! Terminal Session lifecycle: real PTY spawn, child exit, launch failure, and
 //! shutdown. Every assertion goes through the public interface.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

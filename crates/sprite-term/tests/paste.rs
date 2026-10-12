@@ -1,5 +1,10 @@
 //! Paste and focus reporting. Paste is where hostile content matters most: text
 //! from the clipboard must never be interpretable as a command.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

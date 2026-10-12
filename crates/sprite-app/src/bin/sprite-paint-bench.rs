@@ -1,4 +1,9 @@
 //! Allocation and time measurements of live terminal paint preparation/decisions.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a benchmark is a developer tool; a failed setup stops it with the cause"
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

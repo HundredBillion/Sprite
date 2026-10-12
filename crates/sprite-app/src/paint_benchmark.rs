@@ -141,6 +141,10 @@ impl PaintBenchmark {
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "a fixed 60×200 benchmark size is always valid"
+)]
 pub(crate) fn fixture() -> RenderSnapshot {
     let rows = (0..60)
         .map(|row| {

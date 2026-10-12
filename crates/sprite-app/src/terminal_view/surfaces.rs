@@ -102,10 +102,10 @@ impl Body {
             ));
         }
         match (self, parsed.description.root) {
-            (Self::List { root, view }, replacement @ Element::VirtualList { .. }) => {
-                let config = replacement.list().expect("virtual_list").clone();
-                *root = replacement;
-                view.update(cx, |view, cx| view.reconfigure(config, cx));
+            (Self::List { root, view }, Element::VirtualList { config }) => {
+                let reconfigured = (*config).clone();
+                *root = Element::VirtualList { config };
+                view.update(cx, |view, cx| view.reconfigure(reconfigured, cx));
             }
             (Self::Elements(elements), root) => elements.replace(Description { root }),
             (body, root) => unreachable!(

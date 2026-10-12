@@ -1,6 +1,10 @@
 //! Selection lives in Terminal Core because libghostty already models it over
 //! the whole screen including scrollback, and because the render iterator only
 //! reports a cell as selected when the terminal itself holds the selection.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

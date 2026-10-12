@@ -1,4 +1,8 @@
 //! Many sessions starting at the same moment must all come up.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

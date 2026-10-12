@@ -5,6 +5,11 @@
 //! cost of some internal call. Output is stable JSON written with the standard
 //! library alone: these values become committed regression budgets, so the
 //! report must not depend on a serialization crate's formatting choices.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a benchmark is a developer tool; a failed setup stops it with the cause"
+)]
 
 #[path = "../test_allocations.rs"]
 mod allocations;

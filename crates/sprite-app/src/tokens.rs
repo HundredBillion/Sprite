@@ -184,6 +184,10 @@ impl TokenRegistry {
         self.lookup(name).is_some()
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "both fallback names are entries in the constant BUILT_IN table, which lookup always consults last"
+    )]
     pub fn resolve(&self, name: &str, role: Role) -> Resolved {
         match self.lookup(name) {
             Some(color) => Resolved { color, known: true },

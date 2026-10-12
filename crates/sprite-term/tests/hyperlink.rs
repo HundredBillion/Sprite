@@ -1,6 +1,10 @@
 //! OSC 8 hyperlinks. Terminal text is untrusted data: a link's label is chosen
 //! by whatever wrote it, so what Sprite opens must come from the parsed URI and
 //! must survive a scheme policy first.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

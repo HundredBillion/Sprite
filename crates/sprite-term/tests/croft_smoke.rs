@@ -9,6 +9,10 @@
 //! Ignored by default because it needs an externally built binary. Run it
 //! through `scripts/test-croft-main.sh`, which supplies
 //! `SPRITE_CROFT_BIN`.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

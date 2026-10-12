@@ -1,6 +1,10 @@
 //! OSC 52 policy. A child can ask to put text on the clipboard; the secure
 //! defaults decide whether that is honoured, and they apply whenever
 //! configuration is absent.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

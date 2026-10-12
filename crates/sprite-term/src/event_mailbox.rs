@@ -1,7 +1,7 @@
 //! Ordered event ownership with one retained mutation batch and reserved outcomes.
 use crate::{SessionError, TerminalEvent};
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 const NATURAL_DRAIN: Duration = Duration::from_secs(2);
@@ -103,9 +103,16 @@ impl Mailbox {
                 if remaining.is_zero() {
                     return false;
                 }
-                state = self.space.wait_timeout(state, remaining).unwrap().0;
+                state = self
+                    .space
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             } else {
-                state = self.space.wait(state).unwrap();
+                state = self
+                    .space
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
         }
         !state.canceled && !state.consumer_gone

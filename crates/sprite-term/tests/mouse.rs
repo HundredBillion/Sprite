@@ -1,5 +1,9 @@
 //! Mouse routing. The single rule that matters: one event reaches the child or
 //! Sprite's selection, never both.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

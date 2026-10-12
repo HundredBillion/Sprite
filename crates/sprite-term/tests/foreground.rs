@@ -1,5 +1,9 @@
 //! Whether a pane is running something, which is what stands between a stray
 //! keystroke and somebody's unsaved work.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

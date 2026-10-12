@@ -7,6 +7,10 @@
 //! libghostty's built-in colour. That is the whole reason configured colours
 //! are written into the terminal's default slot instead of applied by the
 //! renderer.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

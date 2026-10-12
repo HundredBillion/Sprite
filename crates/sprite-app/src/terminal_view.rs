@@ -339,9 +339,12 @@ impl TerminalView {
 
         // A window told what to run gives every one of its panes the same
         // program; otherwise a pane is a login shell, as before.
-        let mut config = match command {
-            Some(command) => {
-                let (program, arguments) = command.split_first().expect("a program to run");
+        // An empty command list names no program, so it opens the shell too.
+        let mut config = match command
+            .as_deref()
+            .and_then(<[std::ffi::OsString]>::split_first)
+        {
+            Some((program, arguments)) => {
                 SessionConfig::terminal_command(program, arguments.to_vec())
             }
             // A preference that cannot be honoured falls back and says so

@@ -335,6 +335,7 @@ impl Settings {
     /// setting: it is generated per window by the endpoint, lives only in
     /// memory and in the environment of that window's own children, and no
     /// field of `Settings` has ever held it. Nor is the socket path.
+    #[expect(clippy::expect_used, reason = "a table of strings always serialises")]
     pub fn to_toml(&self) -> String {
         let mut out = String::new();
 

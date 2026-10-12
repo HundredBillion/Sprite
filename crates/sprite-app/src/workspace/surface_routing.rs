@@ -36,7 +36,10 @@ impl Workspace {
                 reply.send(answer.map(|_| ())).ok();
             }
             request => {
-                let pane = request.pane().expect("pane request");
+                let Some(pane) = request.pane() else {
+                    request.refuse_with(Refusal::Ineligible);
+                    return;
+                };
                 if let Some((_, _, handle)) = self
                     .tabs
                     .all_panes()

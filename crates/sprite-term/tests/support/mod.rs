@@ -4,7 +4,10 @@
 //! taken stream moves into a helper thread that blocks in `next_blocking` and
 //! forwards each item through `std::sync::mpsc`, so a hung worker fails the
 //! test on the watchdog instead of hanging the suite.
-
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 #![allow(dead_code)]
 
 use std::sync::Arc;

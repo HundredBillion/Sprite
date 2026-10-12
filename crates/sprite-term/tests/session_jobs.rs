@@ -1,4 +1,8 @@
 #![cfg(target_os = "linux")]
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 mod support;
 use sprite_term::{SessionConfig, TerminalSession};
 use std::{

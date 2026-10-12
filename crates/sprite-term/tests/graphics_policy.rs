@@ -4,6 +4,10 @@
 //! escape-sequence bytes from an arbitrary child, so "a program printed
 //! something" must not become "the terminal read a file nobody named" or "the
 //! terminal held a gigabyte".
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

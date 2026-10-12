@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

@@ -10,6 +10,10 @@
 //! the cost of a real capture belongs to `sprite-term`'s own budgets, and
 //! mixing it in would hide the broker's and the encoder's contribution behind
 //! it.
+#![expect(
+    clippy::expect_used,
+    reason = "a benchmark is a developer tool; a failed setup stops it with the cause"
+)]
 
 use std::fs;
 use std::io::{self, Write};

@@ -189,9 +189,12 @@ fn focus_target(message: &Value) -> Result<FocusTarget, Refusal> {
     match message.get("target") {
         None => Ok(FocusTarget::Terminal),
         Some(Value::String(name)) if name == "terminal" => Ok(FocusTarget::Terminal),
-        Some(Value::Number(number)) if number.as_u64().is_some() => Ok(FocusTarget::Surface(
-            SurfaceId(number.as_u64().expect("checked")),
-        )),
+        Some(Value::Number(number)) => match number.as_u64() {
+            Some(id) => Ok(FocusTarget::Surface(SurfaceId(id))),
+            None => Err(Refusal::Malformed(
+                "a focus target is \"terminal\" or a Surface id".to_owned(),
+            )),
+        },
         Some(_) => Err(Refusal::Malformed(
             "a focus target is \"terminal\" or a Surface id".to_owned(),
         )),

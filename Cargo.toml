@@ -11,6 +11,8 @@ license = "MIT OR Apache-2.0"
 
 [workspace.lints.clippy]
 let_underscore_must_use = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
 
 [workspace.dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }

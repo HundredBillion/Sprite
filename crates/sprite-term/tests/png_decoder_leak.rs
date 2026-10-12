@@ -3,6 +3,10 @@
 //! `set_png_decoder` keeps the decoder in thread-local storage but registers the
 //! callback with `ghostty_sys_set`, which is a library-wide option. Clearing it
 //! for a disabled pane therefore clears it for every pane in the process.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

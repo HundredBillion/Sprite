@@ -3,6 +3,10 @@
 //! Everything here comes from the terminal's own parsing of what the child
 //! emitted. Nothing is inferred from displayed text, so a Pane reports
 //! "unknown" rather than a guess.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

@@ -4,6 +4,10 @@
 //! promises being checked are about a command: what reaches standard output,
 //! what reaches standard error, what the exit status is, and that it always
 //! returns. None of that is observable from inside the crate.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 // Shared with the library's own tests; this binary uses only `pause`.
 #[allow(dead_code)]

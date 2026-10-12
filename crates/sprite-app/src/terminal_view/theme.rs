@@ -150,7 +150,9 @@ pub(super) fn chosen_family(
         let fallback = monospace_family(&names);
         cx.set_global(FontCatalog(Some(AvailableFonts { names, fallback })));
     }
-    let available = cx.global::<FontCatalog>().0.as_ref().unwrap();
+    let Some(available) = cx.global::<FontCatalog>().0.as_ref() else {
+        unreachable!("the font catalog was filled just above");
+    };
     if let Some(wanted) = configured {
         if available.names.iter().any(|name| name == wanted) {
             return (wanted.to_owned().into(), Vec::new());

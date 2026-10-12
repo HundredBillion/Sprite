@@ -21,7 +21,7 @@ use crate::surface::description::{GuideVisibility, ListBorderSide, ListConfig};
 use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
 #[cfg(test)]
 use crate::surface::render::render_svg;
-use crate::surface::render::{MAX_SURFACE_IMAGE_BYTES, render_svg_with_budget};
+use crate::surface::render::{MAX_SURFACE_IMAGE_BYTES, raster_bytes, render_svg_with_budget};
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -63,7 +63,7 @@ fn sync_image_cache(
     let mut retained_bytes: usize = cache
         .values()
         .flatten()
-        .map(|image| image.as_bytes(0).expect("raster frame").len())
+        .map(|image| raster_bytes(image))
         .sum();
     let mut images = (**cache).clone();
     for id in ids {
@@ -76,7 +76,7 @@ fn sync_image_cache(
                 MAX_SURFACE_IMAGE_BYTES - retained_bytes,
             );
             if let Some(picture) = &picture {
-                retained_bytes += picture.as_bytes(0).expect("raster frame").len();
+                retained_bytes += raster_bytes(picture);
             }
             images.insert(id, picture);
         }

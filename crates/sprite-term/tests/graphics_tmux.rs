@@ -9,6 +9,10 @@
 //!
 //! Skipped with a clear message when tmux is absent, in the same shape as the
 //! Croft gate: a machine without tmux should say so rather than fail.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 mod support;
 

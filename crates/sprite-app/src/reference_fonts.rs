@@ -1,4 +1,8 @@
 #[cfg(target_os = "linux")]
+#[expect(
+    clippy::expect_used,
+    reason = "the faces are compiled into the binary; a text system that refuses them cannot draw the window"
+)]
 pub fn install(cx: &mut gpui::App) {
     cx.text_system()
         .add_fonts(vec![

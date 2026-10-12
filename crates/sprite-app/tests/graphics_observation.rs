@@ -4,6 +4,10 @@
 //! filenames. Graphics are the first feature that could breach it by accident,
 //! so this drives a real terminal, transmits a recognisable picture, and
 //! searches the finished JSON for it.
+#![expect(
+    clippy::expect_used,
+    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
+)]
 
 use std::path::PathBuf;
 use std::sync::Arc;
