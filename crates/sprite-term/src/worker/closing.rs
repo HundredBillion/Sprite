@@ -111,7 +111,7 @@ fn close_with_signal_since(
         mut pump_stopped,
         mut fatal,
     } = runtime;
-    // The pump may be parked on a PTY that a descendant keeps open forever, so
+    // The pump may be parked on a PTY that an Ordinary Session Job keeps open forever, so
     // it is woken now rather than waited on.
     if let Some(pump) = &pump {
         pump.cancel();
@@ -148,7 +148,7 @@ fn close_with_signal_since(
         let hangup_pending = processes.is_some() && escalation == Escalation::Hangup;
         // Natural exit retries an incomplete HUP before publishing its outcome.
         // Explicit shutdown also waits for owned jobs to exit.
-        let descendants_gone = if requested {
+        let jobs_gone = if requested {
             processes
                 .as_mut()
                 .is_none_or(|processes| !processes.is_alive())
@@ -161,7 +161,7 @@ fn close_with_signal_since(
             Some(since) => since.elapsed() >= GIVE_UP_AFTER,
             None => closing_started.elapsed() >= GIVE_UP_AFTER,
         };
-        if (settled && descendants_gone) || exhausted {
+        if (settled && jobs_gone) || exhausted {
             break;
         }
 
@@ -217,7 +217,7 @@ fn close_with_signal_since(
         let _ = waiter.join();
     }
 
-    // Only now, with every helper thread finished and the descendant policy
+    // Only now, with every helper thread finished and the Ordinary Session Job policy
     // complete, does the application hear how the session ended.
     let mut outcomes = Vec::with_capacity(2);
     if let Some(error) = fatal {
@@ -238,7 +238,7 @@ fn close_with_signal_since(
     }
     // Every descriptor this session holds on the PTY master closes before the
     // outcome is published: the worker's own and the duplicate kept for
-    // foreground questions. A descendant still holding the terminal then sees
+    // foreground questions. An Ordinary Session Job still holding the terminal then sees
     // it hang up, and whoever is told the session ended can rely on that.
     drop(master);
     foreground.detach();

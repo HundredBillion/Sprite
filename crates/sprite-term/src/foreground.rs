@@ -98,7 +98,7 @@ impl ForegroundWatch {
     /// Closes the private duplicate once the session has ended.
     ///
     /// Held any longer, it keeps the PTY master open after the worker has
-    /// closed its own, and a descendant still holding the terminal is never
+    /// closed its own, and an Ordinary Session Job still holding the terminal is never
     /// told it hung up. Afterwards the pane answers `Unknown`, which is all an
     /// ended session can honestly say.
     pub(crate) fn detach(&self) {

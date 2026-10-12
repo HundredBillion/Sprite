@@ -108,11 +108,11 @@ impl Body {
                 view.update(cx, |view, cx| view.reconfigure(config, cx));
             }
             (Self::Elements(elements), root) => elements.replace(Description { root }),
-            _ => {
-                return Err(Refusal::Malformed(
-                    "an update must preserve the Surface body kind".to_owned(),
-                ));
-            }
+            (body, root) => unreachable!(
+                "the guards above refused a {:?} body for a {:?} Surface",
+                root.body_kind(),
+                body.kind()
+            ),
         }
         Ok(parsed.warnings)
     }

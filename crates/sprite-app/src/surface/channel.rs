@@ -648,6 +648,7 @@ impl SurfaceRequest {
     /// False only when its connection has already given up and told its
     /// program so; such a request must be dropped unapplied. A request nobody
     /// waits on is always the window's.
+    #[must_use = "a false claim means the request must be dropped unapplied"]
     pub(crate) fn claim(&self) -> bool {
         match self {
             Self::Capabilities { reply, .. } => reply.claim(),

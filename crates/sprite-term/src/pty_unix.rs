@@ -1,7 +1,7 @@
 //! The audited Unix PTY I/O pump.
 //!
 //! This module owns the pump descriptor and never touches libghostty. The pump blocks in `poll` on the PTY, a wake socket and a
-//! cancellation socket, so it is always joinable even when a descendant keeps
+//! cancellation socket, so it is always joinable even when an Ordinary Session Job keeps
 //! the PTY open — no periodic wake-up, no async runtime, and no detached thread.
 //!
 //! It carries both directions. Output is read under a permit scheme rather than
@@ -643,7 +643,7 @@ pub(crate) fn foreground_group(master: &OwnedFd) -> Option<i32> {
     nix::unistd::tcgetpgrp(master).ok().map(Pid::as_raw)
 }
 
-/// The process group a child belongs to, recorded so descendants that outlive
+/// The process group a child belongs to, recorded so Ordinary Session Jobs that outlive
 /// the child can still be reached.
 pub(crate) fn process_group_of(pid: u32) -> Option<i32> {
     let pid = Pid::from_raw(i32::try_from(pid).ok()?);

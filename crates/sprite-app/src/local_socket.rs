@@ -497,7 +497,7 @@ fn authenticate(
 }
 
 /// Removes abandoned socket files without entering a live listener's accept queue.
-#[allow(dead_code)] // Retained for endpoint test fixtures; production sweeps incrementally.
+#[cfg(test)]
 pub(crate) fn sweep_dead_sockets(directory: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;

@@ -204,6 +204,7 @@ impl<Answer> Relayed<Answer> {
     /// False when the asker has already given up and told its caller that
     /// nothing changed: the request must then be dropped without being
     /// applied.
+    #[must_use = "a false claim means the request must be dropped unapplied"]
     pub(crate) fn claim(&self) -> bool {
         self.claim.claim()
     }

@@ -138,7 +138,7 @@ impl Message {
 struct Started {
     master: Box<dyn MasterPty + Send>,
     master_fd: RawFd,
-    /// Recorded at spawn so descendants can still be reached after the child
+    /// Recorded at spawn so the session's Ordinary Session Jobs can still be reached after the child
     /// itself is gone and its own process id means nothing.
     process_group: Option<i32>,
     processes: Option<pty_unix::SessionProcesses>,
@@ -829,7 +829,7 @@ impl Session {
                 }
             },
             Message::ChildExited(status) => {
-                // Recorded, not published: Exited is only sent once descendant
+                // Recorded, not published: Exited is only sent once Ordinary Session Job
                 // cleanup has finished, so its signal is never presented as an
                 // unexpected failure.
                 *exit_status = Some(status);

@@ -540,7 +540,7 @@ fn discard(mut child: SpawnedChild, master: Box<dyn MasterPty + Send>) {
 }
 
 /// Blocks in `Child::wait` off the worker so a quiet exit is reaped without a
-/// timer, and descendants holding the PTY open cannot mask it.
+/// timer, and Ordinary Session Jobs holding the PTY open cannot mask it.
 ///
 /// The child reaches the thread over a channel rather than in the closure, so
 /// that if the thread cannot be spawned the child is still here to hand back.

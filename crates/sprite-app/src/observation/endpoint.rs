@@ -55,9 +55,11 @@ pub(crate) const MAX_CONNECTIONS: usize = 16;
 pub use crate::local_socket::ObservationKey;
 #[cfg(test)]
 use crate::local_socket::bind_private;
+#[cfg(test)]
+pub(crate) use crate::local_socket::sweep_dead_sockets;
 use crate::local_socket::{Authenticated, LocalSocket, TransportPolicy};
 #[allow(unused_imports)]
-pub(crate) use crate::local_socket::{MAX_SOCKET_PATH, runtime_directory, sweep_dead_sockets};
+pub(crate) use crate::local_socket::{MAX_SOCKET_PATH, runtime_directory};
 
 /// What an authenticated caller asked for.
 ///

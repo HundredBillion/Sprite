@@ -32,6 +32,7 @@ impl<T: PartialEq> Confirmation<T> {
     /// Only a fresh press aimed at the same subject does, and answering uses
     /// the question up, so a third press asks again instead of acting twice.
     /// Anything else leaves the question exactly as it was.
+    #[must_use = "the answer says whether the subject was confirmed"]
     pub(crate) fn answer(&mut self, subject: &T, is_held: bool) -> bool {
         if is_held || self.armed.as_ref() != Some(subject) {
             return false;
