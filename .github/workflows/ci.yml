@@ -30,7 +30,7 @@ jobs:
       - name: Install shell integration test dependencies
         run: sudo apt-get update && sudo apt-get install -y fish zsh
       - name: Test release, packaging and optional shell integration
-        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration scripts.test_ci_policy -v
+        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration scripts.test_ci_policy scripts.test_findings -v
 
   arch:
     name: arch linux

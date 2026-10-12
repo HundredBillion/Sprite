@@ -93,6 +93,16 @@ class FindingsLedgerTests(unittest.TestCase):
         """
         self.assertEqual(len(check_findings(fixture(ledger))), 2)
 
+    def test_ci_runs_the_findings_suite(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        line = next(l for l in workflow.splitlines() if "python3 -m unittest scripts.test_release_automation" in l)
+        self.assertIn("scripts.test_findings", line)
+
+    def test_the_pull_request_template_carries_a_findings_table(self):
+        template = (ROOT / ".github/pull_request_template.md").read_text()
+        self.assertIn("| ID | Status after this PR | Guarding test or issue |", template)
+        self.assertIn("docs/reviews/findings.toml", template)
+
 
 if __name__ == "__main__":
     unittest.main()
