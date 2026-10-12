@@ -443,13 +443,21 @@ impl SurfaceConnection {
     #[cfg(test)]
     pub(crate) fn settle(&self) {
         let shared = &self.handle.shared;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let mut queue = shared.queue.lock().unwrap();
-        while !queue.dead && queue.ready && (!queue.queued.is_empty() || queue.in_flight > 0) {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            assert!(!left.is_zero(), "the writer did not drain its queue in 5 s");
-            queue = shared.changed.wait_timeout(queue, left).unwrap().0;
-        }
+        let waited = shared
+            .changed
+            .wait_timeout_while(
+                shared.queue.lock().unwrap(),
+                Duration::from_secs(5),
+                |queue| {
+                    !queue.dead && queue.ready && (!queue.queued.is_empty() || queue.in_flight > 0)
+                },
+            )
+            .unwrap()
+            .1;
+        assert!(
+            !waited.timed_out(),
+            "the writer did not drain its queue in 5 s"
+        );
     }
 
     /// A view of this connection's writer that, unlike a clone, does not
@@ -520,16 +528,13 @@ pub(crate) struct WriterProbe(Arc<Shared>);
 impl WriterProbe {
     /// Whether the writer thread returned within `limit`.
     pub(crate) fn finished_within(&self, limit: Duration) -> bool {
-        let deadline = std::time::Instant::now() + limit;
-        let mut queue = self.0.queue.lock().unwrap();
-        while !queue.finished {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                return false;
-            }
-            queue = self.0.changed.wait_timeout(queue, left).unwrap().0;
-        }
-        true
+        let waited = self
+            .0
+            .changed
+            .wait_timeout_while(self.0.queue.lock().unwrap(), limit, |queue| !queue.finished)
+            .unwrap()
+            .1;
+        !waited.timed_out()
     }
 }
 

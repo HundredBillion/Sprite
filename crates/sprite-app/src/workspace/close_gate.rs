@@ -887,15 +887,17 @@ mod tests {
         /// arrive together, so they time out instead of hanging the test.
         fn arrive(&self) {
             let current = std::thread::current();
-            let mut arrived = self.arrived.lock().unwrap();
-            arrived.push((current.name().map(str::to_owned), current.id()));
-            self.everyone.notify_all();
-            let (_arrived, waited) = self
-                .everyone
-                .wait_timeout_while(arrived, std::time::Duration::from_secs(5), |arrived| {
-                    arrived.len() < self.expected
-                })
-                .unwrap();
+            let waited = {
+                let mut arrived = self.arrived.lock().unwrap();
+                arrived.push((current.name().map(str::to_owned), current.id()));
+                self.everyone.notify_all();
+                self.everyone
+                    .wait_timeout_while(arrived, std::time::Duration::from_secs(5), |arrived| {
+                        arrived.len() < self.expected
+                    })
+                    .unwrap()
+                    .1
+            };
             if !waited.timed_out() {
                 self.met.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }

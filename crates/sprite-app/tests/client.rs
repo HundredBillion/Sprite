@@ -453,8 +453,12 @@ fn the_request_carries_the_options_the_command_was_given() {
     );
     assert_eq!(outcome.status, 0);
 
-    let requests = seen.lock().expect("lock");
-    let request = requests.first().expect("the window was asked");
+    let request = seen
+        .lock()
+        .expect("lock")
+        .first()
+        .expect("the window was asked")
+        .clone();
     assert!(request.contains("sprite-observation/1"), "{request}");
     assert!(request.contains("--from 3"), "its own pane: {request}");
     assert!(request.contains("--window"));

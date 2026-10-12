@@ -30,13 +30,17 @@ pub(super) struct Metrics {
 }
 
 pub(super) fn metrics_for(config: &SessionConfig) -> Option<Arc<Metrics>> {
-    let active = ACTIVE.lock().unwrap();
-    let (key, metrics) = active.as_ref()?;
-    config
-        .environment
-        .iter()
-        .any(|(name, value)| name == METRICS_KEY && value == key.as_str())
-        .then(|| Arc::clone(metrics))
+    ACTIVE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(key, _)| {
+            config
+                .environment
+                .iter()
+                .any(|(name, value)| name == METRICS_KEY && value == key.as_str())
+        })
+        .map(|(_, metrics)| Arc::clone(metrics))
 }
 
 impl Metrics {

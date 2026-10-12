@@ -58,17 +58,19 @@ pub(crate) struct CompletionGuard(Arc<Mailbox>);
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         let mut state = crate::locked::locked(&self.0.state);
-        if !state.sealed {
-            state
-                .outcomes
-                .push_back(TerminalEvent::Error(SessionError::new(
-                    "worker",
-                    "the terminal worker ended before cleanup completed",
-                )));
-            state.sealed = true;
-            self.0.wake.close();
-            self.0.space.notify_all();
+        if state.sealed {
+            return;
         }
+        state
+            .outcomes
+            .push_back(TerminalEvent::Error(SessionError::new(
+                "worker",
+                "the terminal worker ended before cleanup completed",
+            )));
+        state.sealed = true;
+        drop(state);
+        self.0.wake.close();
+        self.0.space.notify_all();
     }
 }
 
@@ -160,6 +162,7 @@ impl Mailbox {
         }
         state.outcomes = outcomes.into();
         state.sealed = true;
+        drop(state);
         self.wake.close();
         self.space.notify_all();
     }
@@ -173,11 +176,13 @@ impl Receiver {
             .pop_front()
             .or_else(|| state.pending.pop_front())
             .or_else(|| state.outcomes.pop_front());
+        let sealed = state.sealed;
+        drop(state);
         if event.is_some() {
             self.mailbox.space.notify_all();
             return Ok(event);
         }
-        if state.sealed {
+        if sealed {
             return Err(SessionError::new(
                 "event_stream",
                 "the terminal session ended",
@@ -212,6 +217,7 @@ impl Drop for Receiver {
         state.normal.clear();
         state.pending.clear();
         state.outcomes.clear();
+        drop(state);
         self.mailbox.space.notify_all();
     }
 }

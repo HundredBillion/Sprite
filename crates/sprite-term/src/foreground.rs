@@ -112,14 +112,19 @@ impl ForegroundWatch {
 
     /// Asks the kernel what is in the foreground of this pane, right now.
     pub fn state(&self) -> ForegroundState {
-        let attached = self.lock();
-        let Some(attached) = attached.as_ref() else {
+        // The master is asked under the lock, which is what keeps `detach`
+        // from closing it mid-call; what follows needs only the answer.
+        let (group, shell_group) = match self.lock().as_ref() {
+            Some(attached) => (
+                pty_unix::foreground_group(&attached.master),
+                attached.shell_group,
+            ),
+            None => return ForegroundState::Unknown,
+        };
+        let Some(group) = group else {
             return ForegroundState::Unknown;
         };
-        let Some(group) = pty_unix::foreground_group(&attached.master) else {
-            return ForegroundState::Unknown;
-        };
-        if group == attached.shell_group {
+        if group == shell_group {
             return ForegroundState::Idle;
         }
         // A group the terminal still names but nothing is left in belongs to a
@@ -133,9 +138,8 @@ impl ForegroundWatch {
 
     /// Returns the process group when `pid` owns this pane's foreground.
     pub fn owner_group(&self, pid: u32) -> Option<i32> {
-        let attached = self.lock();
-        let attached = attached.as_ref()?;
-        let foreground = pty_unix::foreground_group(&attached.master)?;
+        // Asked under the lock, so `detach` cannot close the master mid-call.
+        let foreground = pty_unix::foreground_group(&self.lock().as_ref()?.master)?;
         let candidate = pty_unix::process_group_of(pid)?;
         (foreground == candidate).then_some(candidate)
     }

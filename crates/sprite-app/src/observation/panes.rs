@@ -188,8 +188,7 @@ impl WindowPanes {
 
 impl PaneSource for WindowPanes {
     fn panes(&self) -> Vec<PaneAddress> {
-        let entries = crate::locked::locked(&self.entries);
-        let mut addresses: Vec<PaneAddress> = entries
+        let mut addresses: Vec<PaneAddress> = crate::locked::locked(&self.entries)
             .iter()
             .map(|(pane, entry)| PaneAddress {
                 tab: entry.tab,
@@ -242,6 +241,7 @@ impl PaneSource for WindowPanes {
                 _request: request,
             },
         );
+        drop(entries);
         // A caller that stops waiting takes its ticket back, so the registry
         // holds nothing for a request nobody will read. Weak, so an
         // outstanding request does not keep a closed window's registry alive.
@@ -321,8 +321,11 @@ mod tests {
 
     /// The tickets a pane is still waiting on, oldest first.
     fn waiting(panes: &WindowPanes, pane: PaneId) -> Vec<Ticket> {
-        let entries = panes.entries.lock().unwrap();
-        let mut tickets: Vec<Ticket> = entries[&pane].waiting.keys().copied().collect();
+        let mut tickets: Vec<Ticket> = panes.entries.lock().unwrap()[&pane]
+            .waiting
+            .keys()
+            .copied()
+            .collect();
         tickets.sort_unstable();
         tickets
     }
@@ -510,11 +513,8 @@ mod tests {
             .expect("observation submission must release the UI registry promptly")
             .expect_err("saturated queue refuses observation");
         assert!(refusal.contains("queue is full"));
-        let entries = panes.entries.lock().unwrap();
-        assert!(
-            entries[&PaneId(0)].waiting.is_empty(),
-            "a refused request leaves no waiter"
-        );
+        let nothing_waiting = panes.entries.lock().unwrap()[&PaneId(0)].waiting.is_empty();
+        assert!(nothing_waiting, "a refused request leaves no waiter");
     }
 
     #[test]
