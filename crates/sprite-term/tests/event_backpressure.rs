@@ -160,6 +160,7 @@ fn every_submission_method_bounds_variable_sized_input() {
         ] {
             let error = result.expect_err("oversized command must be refused before queuing");
             assert!(error.message.contains("limit"), "{error}");
+            assert_eq!(error.kind, sprite_term::ErrorKind::Invalid, "{error}");
         }
     }
     session.begin_shutdown().unwrap().unwrap().wait().unwrap();
@@ -284,8 +285,8 @@ fn input_is_admitted_while_every_output_permit_is_outstanding() {
     } = TerminalSession::spawn(on_cue(&writes, "yes")).unwrap();
     focus_and_release(&mut session);
     // Pressure: the events are never taken, so the worker stalls in publish
-    // and the pump fills every permit behind it. More time only means more
-    // pressure, never less, so this pause cannot make the assertion flaky.
+    // and the pump fills every permit behind it. `yes` never exits, so no
+    // drain deadline starts and nothing releases the stall before shutdown.
     std::thread::sleep(Duration::from_millis(300));
     for n in 0..sprite_term::CONTROL_CAPACITY {
         assert!(
@@ -296,5 +297,14 @@ fn input_is_admitted_while_every_output_permit_is_outstanding() {
             "keystroke {n} refused under an output flood"
         );
     }
+    // The evidence that the stall held throughout: a worker that took even
+    // one of those keystrokes would have left room for another.
+    assert!(
+        matches!(
+            session.try_admit(TerminalCommand::Input(b"x".to_vec())),
+            Ok(sprite_term::Admitted::Saturated(_))
+        ),
+        "the worker took a keystroke, so it was not stalled behind the flood"
+    );
     session.begin_shutdown().unwrap().unwrap().wait().unwrap();
 }

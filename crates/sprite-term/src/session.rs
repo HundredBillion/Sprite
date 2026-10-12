@@ -508,13 +508,11 @@ mod history_cancellation_tests {
             .request_history(Ticket::new(1), HistoryLines::default())
             .unwrap();
         let state = Arc::downgrade(&handle.cancelled);
-        assert!(
-            sender
-                .request_history(Ticket::new(2), HistoryLines::default())
-                .unwrap_err()
-                .to_string()
-                .contains("queue is full")
-        );
+        let full = sender
+            .request_history(Ticket::new(2), HistoryLines::default())
+            .unwrap_err();
+        assert!(full.to_string().contains("queue is full"), "{full}");
+        assert_eq!(full.kind, crate::ErrorKind::Transient, "{full}");
         handle.cancel();
         drop(handle);
         let message = lane.try_recv().unwrap();

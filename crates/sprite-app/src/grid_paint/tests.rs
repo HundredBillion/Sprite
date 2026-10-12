@@ -885,9 +885,10 @@ fn cells_differing_only_in_weight_slant_or_link_hover_never_share_a_shape() {
 }
 
 /// The pool holds at most `MAX_DISTINCT_SHAPES`; the shape that would go
-/// past it empties the pool, so what was pooled before is shaped again.
+/// past it drops every shape the row does not hold, so what was pooled
+/// before is shaped again.
 #[test]
-fn filling_the_shape_pool_empties_it() {
+fn filling_the_shape_pool_drops_only_unheld_shapes() {
     let context = ShapeContext {
         family: "monospace".into(),
         font_size: px(14.0),
@@ -916,7 +917,7 @@ fn filling_the_shape_pool_empties_it() {
     assert_eq!(
         cache.shapes.len(),
         2,
-        "going past the cap drops every shape but the one the row still holds (rgb(0), last asked for)"
+        "going past the cap drops every shape the row does not hold"
     );
     assert!(
         shapes_anew(&mut cache, &cells, rgb(1)),
