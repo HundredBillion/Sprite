@@ -13,7 +13,7 @@
 - Toolchain 1.97.1; every cargo command is `PATH="$HOME/.cargo/bin:$PATH" cargo +1.97.1 … --locked --offline`.
 - No new crates. No async runtime. No new threads beyond ADR 0029's Surface writers and pane cleanups.
 - One libghostty-owning worker thread per Terminal Session (ADR 0008).
-- Surface Channel wire protocol version 1 and the observation grammar are unchanged on the wire; refusal reasons are free text today, and the only new text is "this window is busy; nothing was changed".
+- Surface Channel wire protocol version 1 and the observation grammar are unchanged on the wire; refusal reasons are free text today, and the only new wire text is "this window is busy; nothing was changed". The pane's status line gains one new text, "the terminal is busy; the last command was not delivered" (decided 2026-10-12 while grilling the TSP; Task 14 records it in the PRD).
 - Linux and macOS source compatibility.
 - Work happens on branch `fix/findings-ledger-and-admission` in `/Users/davidlee/Projects/Sprite/.worktrees/findings-ledger-and-admission`. Never `cd` out of it; use absolute paths. The main checkout stays untouched. No release, no version bump.
 - Every fix is test-first: write the regression, see it fail, make it pass. Tests cross the real seam (worker, socket, GPUI view).
@@ -1426,8 +1426,8 @@ Migration, test by test. The rule: wherever a test *filled the output queue by p
 
 `submission_regressions.rs`:
 - `rejected_link_requests_recover_after_event_pressure` (15): after `focus_and_release`, replace `pause(300)` + `snapshots.next_blocking()` with `saturate_control(&session.commands());`. Keep the rest.
-- `partially_refused_reload_reverts_actual_local_state` (151): same replacement; `"queue is full"` → `BUSY_STATUS`.
-- `accepted_colors_revert_after_the_other_reload_groups_refuse` (235): the "reserved slot accepts one group" mechanics no longer exist. Rewrite its first block so that, with the lane saturated, a reload leaves `applied_settings` as before and keeps the reload pending, then once pressure clears the retry delivers it:
+- `partially_refused_reload_reverts_actual_local_state` (151): same replacement; `"queue is full"` → `BUSY_STATUS`. Its intent (renderer state applied locally while the worker refused) holds under full saturation, so nothing else changes.
+- `accepted_colors_revert_after_the_other_reload_groups_refuse` (235): the "reserved slot accepts one group" mechanics no longer exist, and the one-group case (exactly one free lane slot when the reload runs) cannot be produced on purpose: a free slot is only observable by taking it. It remains reachable in production under a race, which is why `apply_settings` keeps its per-group `admitted` bookkeeping. Rewrite the test's first block so that, with the lane saturated, a reload leaves `applied_settings` as before and keeps the reload whole and pending, then once pressure clears the retry delivers it:
   ```rust
         crate::test_event_pressure::saturate_control(&session.commands());
         let mut reloaded = settings.clone();
@@ -2569,7 +2569,7 @@ In `docs/reviews/findings.toml`, change the six entries this PR fixes to `status
 
 If the ledger's schema requires `fixed_by` to be an integer, make it accept a string here and change it in Step 5. Run `python3 scripts/check_findings.py && python3 -m unittest scripts.test_findings -v`; expected: green.
 
-In the PRD, under R-S4 change `{ Denied, Unparsable, Gone }` to `{ Denied, Unparsable, Changed }` with "(disappearance is already `Ok(None)`)"; under R-T2 change the invariant to `TERM_AFTER < KILL_AFTER < GIVE_UP_AFTER`; under R-K3 remove `std::thread::JoinHandle::join` and add the sentence "`JoinHandle::join` is not listed: the GPUI-thread rule it stood for is the one `local_socket` close path, which is already a named site, and the test suites join their helper threads twenty-five times." Under R-W1 change "sprite-app's GPUI waits use the same value" to "sprite-app's test deadlines read the same variable; GPUI's own `condition` timer is the vendored crate's and stays."
+In the PRD, under R-S4 change `{ Denied, Unparsable, Gone }` to `{ Denied, Unparsable, Changed }` with "(disappearance is already `Ok(None)`)"; under R-T2 change the invariant to `TERM_AFTER < KILL_AFTER < GIVE_UP_AFTER`; under R-K3 remove `std::thread::JoinHandle::join` and add the sentence "`JoinHandle::join` is not listed: the GPUI-thread rule it stood for is the one `local_socket` close path, which is already a named site, and the test suites join their helper threads twenty-five times." Under R-W1 change "sprite-app's GPUI waits use the same value" to "sprite-app's test deadlines read the same variable; GPUI's own `condition` timer is the vendored crate's and stays." Under Constraints, after the relay-wording sentence, add: "The pane's status line also gains one text for a saturated lane: 'the terminal is busy; the last command was not delivered' (R-A3), replacing the error's Display 'send: the terminal command queue is full'."
 
 Commit: `docs: ADR 0030, ADR 0031, and the ledger's six new resolutions`.
 
