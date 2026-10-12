@@ -2605,9 +2605,18 @@ mod tests {
             frame.extend_from_slice(b"{\"type\":\"close\"}\n");
         }
         stream.write_all(&frame).ok();
-        stream.shutdown(Shutdown::Write).unwrap();
+        // The window closes an oversized connection on its own, so the peer may already be gone.
+        if let Err(error) = stream.shutdown(Shutdown::Write) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotConnected,
+                "shutdown: {error}"
+            );
+        }
         assert_eq!(
-            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            received
+                .recv_timeout(crate::test_blocking_wait::watchdog())
+                .unwrap(),
             "closed"
         );
         window.join().unwrap();
