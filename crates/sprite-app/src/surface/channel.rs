@@ -292,9 +292,7 @@ struct Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        if let Ok(mut queue) = self.shared.queue.lock() {
-            queue.closing = true;
-        }
+        crate::locked::locked(&self.shared.queue).closing = true;
         self.shared.changed.notify_all();
     }
 }
@@ -385,9 +383,7 @@ impl SurfaceConnection {
     /// kills the connection, and the iterator is not consumed past it.
     pub fn send_batch<'a>(&self, lines: impl IntoIterator<Item = &'a str>) -> bool {
         let shared = &self.handle.shared;
-        let Ok(mut queue) = shared.queue.lock() else {
-            return false;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         if queue.dead {
             return false;
         }
@@ -411,9 +407,7 @@ impl SurfaceConnection {
     /// queued before it had already reached the pending bound.
     pub(crate) fn establish(&self, line: &str) -> bool {
         let shared = &self.handle.shared;
-        let Ok(mut queue) = shared.queue.lock() else {
-            return false;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         if queue.dead {
             return false;
         }
@@ -439,18 +433,11 @@ impl SurfaceConnection {
     /// writes next.
     fn abandon(&self) {
         let shared = &self.handle.shared;
-        if let Ok(queue) = shared.queue.lock() {
-            shared.kill(queue, false);
-        }
+        shared.kill(crate::locked::locked(&shared.queue), false);
     }
 
     pub(crate) fn is_dead(&self) -> bool {
-        self.handle
-            .shared
-            .queue
-            .lock()
-            .map(|queue| queue.dead)
-            .unwrap_or(true)
+        crate::locked::locked(&self.handle.shared.queue).dead
     }
 
     /// Bytes queued or being written; zero once the connection is dead.
@@ -489,9 +476,7 @@ impl SurfaceConnection {
 fn write_events(shared: &Shared) {
     let mut outgoing = Vec::new();
     loop {
-        let Ok(mut queue) = shared.queue.lock() else {
-            return;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         while !queue.has_work() {
             queue = match shared.changed.wait(queue) {
                 Ok(queue) => queue,
@@ -521,9 +506,7 @@ fn write_events(shared: &Shared) {
         if outgoing.capacity() > KEPT_WRITE_BUFFER_BYTES {
             outgoing = Vec::new();
         }
-        let Ok(mut queue) = shared.queue.lock() else {
-            return;
-        };
+        let mut queue = crate::locked::locked(&shared.queue);
         queue.in_flight = 0;
         if written.is_err() {
             // The write timed out or failed: the program is not reading, or

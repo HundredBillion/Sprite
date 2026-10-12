@@ -13,7 +13,7 @@
 //! shell asks itself, and it needs nothing from the worker thread.
 
 use std::os::fd::{OwnedFd, RawFd};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::pty_unix;
 
@@ -107,7 +107,7 @@ impl ForegroundWatch {
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Attached>> {
-        self.attached.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::locked::locked(&self.attached)
     }
 
     /// Asks the kernel what is in the foreground of this pane, right now.

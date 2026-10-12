@@ -14,6 +14,7 @@ pub mod capture_benchmark;
 mod event_mailbox;
 mod foreground;
 mod graphics;
+mod locked;
 mod png_decoder;
 mod pty_unix;
 mod shell;

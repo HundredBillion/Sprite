@@ -96,10 +96,7 @@ impl WindowPanes {
 
     /// Records a pane, so requests can reach it.
     pub fn register(&self, pane: PaneId, tab: TabId, commands: CommandSender) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         entries.insert(
             pane,
             Entry {
@@ -128,10 +125,7 @@ impl WindowPanes {
         #[cfg(test)]
         self.layout_publications
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         for (pane, placement) in placements {
             if let Some(entry) = entries.get_mut(pane) {
                 entry.placement = *placement;
@@ -145,10 +139,7 @@ impl WindowPanes {
     /// pane is known to be gone, so making a caller wait out the deadline for
     /// it would be a lie about what is happening.
     pub fn forget(&self, pane: PaneId) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.remove(&pane) {
             for waiter in entry.waiting.into_values() {
                 let _ = waiter
@@ -164,10 +155,7 @@ impl WindowPanes {
     /// rather than at the deadline. The pane stays listed, because it is still
     /// on screen; asking it again is refused when the request cannot be sent.
     pub fn fail_all(&self, pane: PaneId, reason: String) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.get_mut(&pane) {
             for (_, waiter) in entry.waiting.drain() {
                 let _ = waiter.answer.send(Err(reason.clone()));
@@ -188,10 +176,7 @@ impl WindowPanes {
         ticket: Ticket,
         answer: Result<Arc<HistorySnapshot>, String>,
     ) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         if let Some(entry) = entries.get_mut(&pane)
             && let Some(waiter) = entry.waiting.remove(&ticket)
         {
@@ -202,10 +187,7 @@ impl WindowPanes {
 
 impl PaneSource for WindowPanes {
     fn panes(&self) -> Vec<PaneAddress> {
-        let entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let entries = crate::locked::locked(&self.entries);
         let mut addresses: Vec<PaneAddress> = entries
             .iter()
             .map(|(pane, entry)| PaneAddress {
@@ -230,10 +212,7 @@ impl PaneSource for WindowPanes {
     }
 
     fn begin(&self, pane: PaneId, lines: HistoryLines) -> Result<Pending, String> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut entries = crate::locked::locked(&self.entries);
         let entry = entries
             .get_mut(&pane)
             .ok_or_else(|| "the pane closed before it could be asked".to_owned())?;
@@ -271,7 +250,7 @@ impl PaneSource for WindowPanes {
             answer,
             withdraw: Withdraw::new(move || {
                 if let Some(entries) = registry.upgrade() {
-                    let mut entries = entries.lock().unwrap_or_else(|error| error.into_inner());
+                    let mut entries = crate::locked::locked(&entries);
                     if let Some(entry) = entries.get_mut(&pane) {
                         entry.waiting.remove(&ticket);
                     }

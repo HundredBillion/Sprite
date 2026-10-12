@@ -182,7 +182,7 @@ pub(crate) struct ConnectionSlot {
 
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
-        self.connections.lock().unwrap().remove(&self.id);
+        crate::locked::locked(&self.connections).remove(&self.id);
     }
 }
 
@@ -289,7 +289,7 @@ impl LocalSocket {
                         let id = next_id;
                         next_id += 1;
                         let deadline = Instant::now() + policy.handshake_timeout;
-                        let mut live = connections.lock().unwrap();
+                        let mut live = crate::locked::locked(&connections);
                         if live.len() >= policy.max_connections {
                             continue;
                         }
@@ -380,7 +380,7 @@ impl LocalSocket {
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
         }
-        for (id, stream) in self.connections.lock().unwrap().iter() {
+        for (id, stream) in crate::locked::locked(&self.connections).iter() {
             let finishing_reply = reply.is_some_and(|reply| {
                 Arc::ptr_eq(&reply.connections, &self.connections) && reply.id == *id
             });
