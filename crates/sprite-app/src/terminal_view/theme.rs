@@ -522,8 +522,9 @@ mod fallback_admission_tests {
                 // Installed receivers stay paused while the real worker reaches sustained event pressure.
                 // Every accepted copy is one lossless event the paused UI does
                 // not take; past the mailbox's thirty-two the worker stalls and
-                // the lane stays full. A full lane only counts once more copies
-                // were accepted than the mailbox holds.
+                // the lane stays full. The floor only proves the loop admitted
+                // more than a trivial number before saturating; the 1 ms pacing
+                // is what lets the worker take some of them first.
                 let mut accepted = 0;
                 loop {
                     match session.try_admit(TerminalCommand::CopySelection) {

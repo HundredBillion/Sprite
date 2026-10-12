@@ -71,7 +71,9 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
     std::fs::write(&gate, b"go").unwrap();
     crate::test_blocking_wait::pause(std::time::Duration::from_millis(750));
     view.update(cx, |view, _| {
-        assert!(saturate(view), "the fixture never filled the lane")
+        assert!(saturate(view), "the fixture never filled the lane");
+        // The reload below must earn its own refusal status.
+        view.status = None;
     });
     let mut changed = settings.clone();
     changed.colors.foreground = Some(Rgb { r: 1, g: 2, b: 3 });
@@ -272,6 +274,8 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
         // is refused.
         let refused = saturate(view);
         assert!(refused, "the fixture never filled the control lane");
+        // The Focus below must earn its own refusal status.
+        view.status = None;
         window.focus(&view.focus);
         view.refresh_pane_focus(window, cx);
         assert!(view.pane_focused());
@@ -495,6 +499,8 @@ fn selection_admission_pressure_child(cx: &mut gpui::TestAppContext) {
                 }
             }
             assert!(saturate(view), "fixture must fill the real control lane");
+            // The press below must earn its own refusal status.
+            view.status = None;
         });
         cx.simulate_mouse_down(new_start, MouseButton::Left, Modifiers::default());
         view.read_with(cx, |view, _| {

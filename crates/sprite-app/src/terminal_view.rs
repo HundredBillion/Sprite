@@ -830,7 +830,7 @@ impl TerminalView {
                 self.refuse(ENDED_STATUS);
             }
             Err(error) => {
-                self.admission_closed = error.kind == ErrorKind::Ended;
+                self.admission_closed |= error.kind == ErrorKind::Ended;
                 self.refuse(&error.to_string());
             }
         }

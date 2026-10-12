@@ -46,9 +46,8 @@ pub(crate) fn focus_and_release(commands: &CommandSender) {
 /// hoping.
 ///
 /// One refusal is not proof of a stall: this thread fills the lane faster
-/// than a running worker wakes to drain it. A worker that is not stalled
-/// empties the whole lane between messages, so a lane still full after
-/// [`STALL_PROOF`] is held by a stalled worker.
+/// than a running worker wakes to drain it. So a refusal only counts when no
+/// slot has freed after [`STALL_PROOF`]; that is taken as a stall.
 pub(crate) fn saturate_control(commands: &CommandSender) {
     let refused = || {
         matches!(
@@ -74,6 +73,9 @@ pub(crate) fn saturate_control(commands: &CommandSender) {
     }
 }
 
-/// Longer than a running worker takes to reach the end of one message and
-/// empty the control lane, even in a debug build.
+/// How long a full lane must stay full to count as a stall. An assumption,
+/// not a guarantee: a worker stuck in one long pass (a debug build can spend
+/// about 150 ms on a pass under a flood) is mistaken for stalled. These
+/// fixtures tolerate that, because their clipboard burst stalls the worker
+/// anyway.
 const STALL_PROOF: std::time::Duration = std::time::Duration::from_millis(100);
