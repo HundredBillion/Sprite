@@ -1237,18 +1237,21 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_open_refused_admission_finishes_with_the_queue_still_full() {
+    fn a_surface_open_refused_admission_finishes_with_the_lane_still_full() {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
         let handle = connection.clone();
         let (lanes, receivers) = surface_lanes_with(1, 1);
+        // Another program's handshake, unanswered, holds the one slot.
         lanes
             .one_shot
-            .try_send(SurfaceRequest::Close {
-                id: SurfaceId(99),
-                pane: PaneId(1),
+            .try_send(SurfaceRequest::Capabilities {
+                pane: PaneId(2),
+                owner_pid: 1,
+                return_target: ReturnTarget::Terminal,
+                reply: std::sync::mpsc::sync_channel(1).0.into(),
             })
             .unwrap();
         let (done, finished) = mpsc::channel();

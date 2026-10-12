@@ -9,8 +9,8 @@
 
 use crate::surface::channel::SurfaceRequest;
 
-/// One wave of streaming programs; a connection past it blocks, which is
-/// its own thread's problem and nobody else's.
+/// One wave of streaming programs. Past it a connection blocks, and every
+/// streaming program shares that backpressure; handshakes do not.
 pub(crate) const STREAM_CAPACITY: usize = 64;
 
 /// Handshakes in flight at once. Past this, a program is refused as busy

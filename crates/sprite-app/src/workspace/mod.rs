@@ -17,6 +17,7 @@ use reload::*;
 mod pane_factory;
 use pane_factory::*;
 mod clock;
+mod lane_drain;
 mod surface_routing;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -285,11 +286,13 @@ impl Workspace {
             }
         });
 
-        // One task per lane, so a handshake never waits behind a stream.
+        // One task per lane. Each yields after every request it serves (see
+        // `drain_lane`), so a handshake is served between a busy stream's
+        // requests instead of after the stream runs dry.
         let crate::surface::lanes::SurfaceReceivers { stream, one_shot } = surface_receivers;
         let surface_tasks = [
-            Self::drain_surface_lane(stream, window, cx),
-            Self::drain_surface_lane(one_shot, window, cx),
+            lane_drain::drain_lane(stream, window, cx, Self::serve_surface_request),
+            lane_drain::drain_lane(one_shot, window, cx, Self::serve_surface_request),
         ];
 
         let bounds = cx.observe_window_bounds(window, |workspace, window, cx| {
@@ -345,24 +348,6 @@ impl Workspace {
         };
         workspace.refresh_layout(cx);
         workspace
-    }
-
-    /// Serves one lane of Surface requests until the window or the lane ends.
-    fn drain_surface_lane(
-        lane: async_channel::Receiver<SurfaceRequest>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Task<()> {
-        cx.spawn_in(window, async move |workspace, cx| {
-            while let Ok(request) = lane.recv().await {
-                let served = workspace.update_in(cx, |workspace, window, cx| {
-                    workspace.serve_surface_request(request, window, cx);
-                });
-                if served.is_err() {
-                    break;
-                }
-            }
-        })
     }
 
     fn refresh_layout(&mut self, cx: &mut Context<Self>) {
