@@ -7,3 +7,6 @@
 /packaging/pkg/
 /packaging/src/
 /packaging/*.pkg.tar.zst
+
+# Python bytecode from scripts/
+__pycache__/

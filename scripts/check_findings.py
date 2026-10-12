@@ -19,22 +19,89 @@ LEDGER = Path("docs/reviews/findings.toml")
 ID_RE = re.compile(r"\b(?:SPR-\d{3}|BCA-\d{2}|GAP-C\d{2})\b")
 FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<(]", re.MULTILINE)
 PY_TEST_RE = re.compile(r"^\s*def\s+(test_[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
+# `#[test]` or a path ending in `test`, such as `#[gpui::test]`, with or
+# without arguments. `#[cfg(test)]` is not one.
+TEST_ATTR_RE = re.compile(r"^#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*test\s*(?:\(.*\))?\s*\]$", re.DOTALL)
 STATUSES = {"open", "resolved", "deferred", "wontfix"}
 TRACKED = {"open", "deferred"}
 
 
-def test_names(root: Path) -> set[str]:
-    """Every Rust `fn` under crates/ and every Python test under scripts/.
+def bracket_depth(text: str, depth: int) -> int:
+    """`depth` after `text`, counting square brackets outside string literals."""
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+    return depth
+
+
+def rust_fns(source: str) -> tuple[set[str], set[str]]:
+    """Every `fn` name in `source`, and the subset marked as a test.
+
+    A fn is a test when the attribute block directly above it (comments and
+    other attributes, such as `#[cfg(...)]` or `#[ignore]`, may sit between)
+    holds `#[test]` or `#[<path>::test]`.
+    """
+    fns: set[str] = set()
+    tests: set[str] = set()
+    attributes: list[str] = []
+    pending = ""
+    depth = 0
+    for line in source.splitlines():
+        if pending:
+            pending += "\n" + line
+            depth = bracket_depth(line, depth)
+            if depth <= 0:
+                attributes.append(pending.strip())
+                pending = ""
+            continue
+        stripped = line.strip()
+        if stripped.startswith("#[") and not stripped.startswith("#!["):
+            depth = bracket_depth(stripped, 0)
+            if depth > 0:
+                pending = stripped
+            else:
+                attributes.append(stripped)
+            continue
+        if not stripped or stripped.startswith("//"):
+            continue
+        found = FN_RE.match(line)
+        if found:
+            fns.add(found.group(1))
+            if any(TEST_ATTR_RE.match(attribute) for attribute in attributes):
+                tests.add(found.group(1))
+        attributes = []
+    return fns, tests
+
+
+def test_names(root: Path) -> tuple[set[str], set[str]]:
+    """Every test under crates/ and scripts/, and every plain Rust `fn`.
 
     Packaging, release and shell-integration findings are guarded by the
-    Python suites, so those names count too.
+    Python suites, so those names count too. The plain fns are returned so a
+    citation of one can be told apart from a name that does not exist.
     """
-    names: set[str] = set()
+    tests: set[str] = set()
+    fns: set[str] = set()
     for path in (root / "crates").rglob("*.rs"):
-        names.update(FN_RE.findall(path.read_text(errors="replace")))
+        found, marked = rust_fns(path.read_text(errors="replace"))
+        fns.update(found)
+        tests.update(marked)
     for path in (root / "scripts").glob("test_*.py"):
-        names.update(PY_TEST_RE.findall(path.read_text(errors="replace")))
-    return names
+        tests.update(PY_TEST_RE.findall(path.read_text(errors="replace")))
+    return tests, fns - tests
 
 
 def ids_in_docs(docs: Path) -> set[str]:
@@ -51,7 +118,7 @@ def check_findings(root: Path) -> list[str]:
     findings = ledger.get("finding", [])
     complaints: list[str] = []
     seen: dict[str, int] = {}
-    known_tests = test_names(root)
+    known_tests, plain_fns = test_names(root)
 
     for index, finding in enumerate(findings, start=1):
         where = f"{LEDGER} finding #{index}"
@@ -81,7 +148,14 @@ def check_findings(root: Path) -> list[str]:
                 complaints.append(f"{where}: resolved without a test; name the regression that guards it")
             else:
                 for test in tests:
-                    if test not in known_tests:
+                    if test in known_tests:
+                        continue
+                    if test in plain_fns:
+                        complaints.append(
+                            f"{where}: {test!r} is a Rust fn under crates/ but not a test; "
+                            "it needs #[test] or #[<path>::test] above it"
+                        )
+                    else:
                         complaints.append(
                             f"{where}: test {test!r} is not a Rust fn under crates/ "
                             "or a Python test under scripts/"

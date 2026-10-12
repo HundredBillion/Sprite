@@ -11,7 +11,7 @@ from scripts.check_findings import check_findings
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def fixture(ledger: str, rust: str = "fn guards_it() {}", doc: str = "") -> Path:
+def fixture(ledger: str, rust: str = "#[test]\nfn guards_it() {}", doc: str = "") -> Path:
     directory = Path(tempfile.mkdtemp())
     (directory / "docs/reviews").mkdir(parents=True)
     (directory / "docs/reviews/findings.toml").write_text(textwrap.dedent(ledger))
@@ -44,6 +44,12 @@ class FindingsLedgerTests(unittest.TestCase):
         self.assertIn("is not a Rust fn", "\n".join(check_findings(fixture(missing))))
         absent = RESOLVED.replace('test = "guards_it"\n', "")
         self.assertIn("without a test", "\n".join(check_findings(fixture(absent))))
+
+    def test_a_resolved_finding_cannot_cite_a_plain_fn(self):
+        complaints = check_findings(fixture(RESOLVED, rust="fn guards_it() {}"))
+        self.assertEqual(len(complaints), 1, complaints)
+        self.assertIn("BCA-01", complaints[0])
+        self.assertIn("not a test", complaints[0])
 
     def test_a_python_test_under_scripts_also_guards(self):
         directory = fixture(RESOLVED.replace('test = "guards_it"', 'test = "test_recipe"'))
