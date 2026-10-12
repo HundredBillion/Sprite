@@ -1,9 +1,29 @@
 use super::*;
 
 /// Takes every control-lane slot a stalled worker left, so the next command
-/// is refused. True when it was.
+/// is refused. True once the lane stays full; false only if it never does
+/// within the watchdog.
+///
+/// One refusal is not proof of a stall: this thread fills the lane faster
+/// than a running worker wakes to drain it, and a worker that is merely
+/// behind frees a slot right after. So a refusal only counts when another
+/// offer is still refused after [`STALL_PROOF`], as in `saturate_control`.
+///
+/// [`STALL_PROOF`]: crate::test_event_pressure::STALL_PROOF
 fn saturate(view: &mut TerminalView) -> bool {
-    (0..=sprite_term::CONTROL_CAPACITY).any(|_| !view.submit(TerminalCommand::Capture))
+    let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
+    loop {
+        if (0..=sprite_term::CONTROL_CAPACITY).any(|_| !view.submit(TerminalCommand::Capture)) {
+            crate::test_blocking_wait::pause(crate::test_event_pressure::STALL_PROOF);
+            if !view.submit(TerminalCommand::Capture) {
+                return true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
+    }
 }
 
 #[test]

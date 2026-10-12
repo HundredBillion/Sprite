@@ -78,4 +78,4 @@ pub(crate) fn saturate_control(commands: &CommandSender) {
 /// about 150 ms on a pass under a flood) is mistaken for stalled. These
 /// fixtures tolerate that, because their clipboard burst stalls the worker
 /// anyway.
-const STALL_PROOF: std::time::Duration = std::time::Duration::from_millis(100);
+pub(crate) const STALL_PROOF: std::time::Duration = std::time::Duration::from_millis(100);
