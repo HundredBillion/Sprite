@@ -41,7 +41,9 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
   (ADR 0029).
 - Surface Channel wire protocol version 1 and the observation grammar are
   unchanged on the wire. The only user-visible text change is the refusal
-  wording in R-A5.
+  wording in R-A5. The pane's status line also gains one text for a saturated
+  lane: "the terminal is busy; the last command was not delivered" (R-A3),
+  replacing the error's Display "send: the terminal command queue is full".
 - Linux and macOS source compatibility.
 - Work happens on `fix/findings-ledger-and-admission` in
   `.worktrees/findings-ledger-and-admission`; the original checkout stays
@@ -89,8 +91,11 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
   their variants. A per-site `#[allow]` is permitted only with a reason and
   only where the lint is wrong, never for convenience.
 - R-K3 `crates/sprite-app/clippy.toml` lists `disallowed-methods` for
-  `std::thread::sleep`, `std::thread::JoinHandle::join`, `gpui::Timer::after`
-  and `request_animation_frame`, each with the reason the CI guard gave. The
+  `std::thread::sleep`, `gpui::Timer::after` and `request_animation_frame`, each
+  with the reason the CI guard gave. `JoinHandle::join` is not listed: the
+  GPUI-thread rule it stood for is the one `local_socket` close path, which is
+  already a named site, and the test suites join their helper threads
+  twenty-five times. The
   two sanctioned sites (`local_socket.rs` failed-poll rest, the
   `cfg(test)` blocking helper) carry `#[allow(clippy::disallowed_methods)]`
   with that reason. The matching grep lines leave `ci.yml`; the dependency
@@ -162,7 +167,7 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
   test-child and bench deadlines stay where they are. The Surface and
   observation clients import `CLIENT_TIMEOUT` (closing GAP-C13).
 - R-T2 In sprite-term, `closing.rs` asserts
-  `TERM_AFTER + KILL_AFTER <= GIVE_UP_AFTER`, and `event_mailbox.rs`
+  `TERM_AFTER < KILL_AFTER < GIVE_UP_AFTER`, and `event_mailbox.rs`
   references `GIVE_UP_AFTER` instead of a 6 s literal.
 
 ## R-F. One owner for Pane Focus
@@ -179,7 +184,8 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
 
 - R-W1 sprite-term `tests/support` gains `wait_until(what, poll) -> T`;
   `WATCHDOG` reads `SPRITE_TEST_WATCHDOG_SECS` (default 5). The nine ad hoc
-  wait helpers call it. sprite-app's GPUI waits use the same value.
+  wait helpers call it. sprite-app's test deadlines read the same variable; GPUI's own `condition`
+  timer is the vendored crate's and stays.
 - R-W2 The six tests in #57 wait on their condition: in particular
   `a_running_program_is_reported_by_name` waits for `program() == Some("sleep")`.
 - R-W3 Evidence: each of the six passes 20 consecutive runs under full CPU
@@ -198,7 +204,8 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
 - R-S3 `#![deny(unsafe_code)]` moves to the sprite-term crate root with the one
   libproc FFI module allowed; the per-module deny goes.
 - R-S4 `pty_unix/processes.rs` unit errors become
-  `enum ScanError { Denied, Unparsable, Gone }`.
+  `enum ScanError { Denied, Unparsable, Changed }` (disappearance is already
+  `Ok(None)`).
 - R-S5 GAP-C05: when a start-up step after spawn fails, the child is hung up,
   killed and reaped through the existing escalation before the error is
   sealed. GAP-C02: when endpoints are disabled, the child environment removes
@@ -206,8 +213,12 @@ change. GAP-C01, GAP-C03 and GAP-C04 stay open as issues.
 - R-S6 Housekeeping: `nix` declared once in sprite-app's `Cargo.toml`; the
   unreachable refusal arm in `surfaces.rs` removed; `sweep_dead_sockets`
   under `cfg(test)`; `descendant` comments reworded to the glossary's terms;
-  `#[must_use]` on `Relayed::claim`, `SurfaceRequest::claim`,
-  `Confirmation::answer` and `send_batch`.
+  `#[must_use]` on `Relayed::claim`, `SurfaceRequest::claim` and
+  `Confirmation::answer`, but not on the Surface handle's `send`/`send_batch`:
+  nineteen call sites (`surfaces.rs` x16, `input.rs`, `render.rs`, one
+  `channel.rs` test) send fire-and-forget events to a client that may already
+  be gone and legitimately discard the bool, and the `let _ =` idiom is denied
+  by R-K.
 
 ## Explicitly out of scope
 
