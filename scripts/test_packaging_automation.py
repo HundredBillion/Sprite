@@ -49,6 +49,18 @@ class LocalPackagingTests(unittest.TestCase):
             self.assertIn('zig', metadata.stdout.splitlines())
 
 
+class DistributionRecipeTests(unittest.TestCase):
+    def test_distribution_pkgbuild_pins_the_release_tag(self):
+        # Sourced, not grepped: the assertion is about what makepkg will fetch
+        # once `url` and `pkgver` are expanded.
+        result = subprocess.run(
+            ['bash', '-c', '. ./PKGBUILD; printf "%s\\n" "$url" "$pkgver" "${source[@]}"'],
+            cwd=REPO / 'packaging', capture_output=True, text=True, check=True,
+        )
+        url, pkgver, *sources = result.stdout.splitlines()
+        self.assertEqual(sources, [f'git+{url}.git#tag=v{pkgver}'])
+
+
 class MacosInstallTests(unittest.TestCase):
     def install(self, failure='', existing=True):
         directory = tempfile.TemporaryDirectory(prefix="sprite install ; '$ ")
