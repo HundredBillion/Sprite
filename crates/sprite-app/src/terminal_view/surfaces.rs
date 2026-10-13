@@ -1127,7 +1127,11 @@ impl TerminalView {
         }
         let body = match &mut surface.body {
             Body::Elements(elements) => {
-                elements.render(registry, &surface.connection, Some(cx.entity()))
+                let body = elements.render(registry, &surface.connection, Some(cx.entity()));
+                // After the frame is built, since the frame decides which
+                // images are wanted.
+                elements.start_decodes(cx);
+                body
             }
             Body::Grid { grid, shapes, .. } => {
                 crate::surface::render::render_grid(grid, highlights, metrics, shapes)
@@ -1663,39 +1667,21 @@ mod tests {
             )
             .unwrap();
         });
-        let (first, again) = host.update(cx, |view, _| {
-            let surface = view.surfaces.fill.as_mut().unwrap();
-            let connection = surface.connection.clone();
-            let Body::Elements(elements) = &mut surface.body else {
-                panic!("expected elements")
-            };
-            let registry = TokenRegistry::new(&settings.colors);
-            let _ = elements.render(&registry, &connection, None);
-            let first = elements.images().image_for(&svg("blue")).unwrap().id;
-            let _ = elements.render(&registry, &connection, None);
-            (first, elements.images().image_for(&svg("blue")).unwrap().id)
-        });
+        let registry = TokenRegistry::new(&settings.colors);
+        settle_fill_images(&host, cx, &registry);
+        let first = host.read_with(cx, |view, _| fill_image(view, &svg("blue")).unwrap().id);
+        settle_fill_images(&host, cx, &registry);
+        let again = host.read_with(cx, |view, _| fill_image(view, &svg("blue")).unwrap().id);
         assert_eq!(first, again);
         host.update(cx, |view, cx| {
             view.update_surface(SurfaceId(2), document("red"), cx);
-            let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
-                panic!("expected elements")
-            };
-            let images = elements.images();
             assert!(
-                images.image_for(&svg("blue")).is_none(),
+                fill_image(view, &svg("blue")).is_none(),
                 "blue is no longer drawn, so its decode was released"
             );
         });
-        let replacement = host.update(cx, |view, _| {
-            let surface = view.surfaces.fill.as_mut().unwrap();
-            let connection = surface.connection.clone();
-            let Body::Elements(elements) = &mut surface.body else {
-                panic!("expected elements")
-            };
-            let _ = elements.render(&TokenRegistry::new(&settings.colors), &connection, None);
-            elements.images().image_for(&svg("red")).unwrap().id
-        });
+        settle_fill_images(&host, cx, &registry);
+        let replacement = host.read_with(cx, |view, _| fill_image(view, &svg("red")).unwrap().id);
         assert_ne!(first, replacement);
         host.update_in(cx, |view, window, cx| {
             view.close_surface(SurfaceId(2), window, cx)
@@ -1749,26 +1735,27 @@ mod tests {
             .unwrap();
         });
         let registry = TokenRegistry::new(&settings.colors);
-        // Builds the Surface's elements as a frame does, then reports how many
-        // SVGs its cache has decoded in all and what it holds for each colour.
-        let frame = |view: &mut TerminalView, colors: &[&str]| {
-            let surface = view.surfaces.fill.as_mut().unwrap();
-            let connection = surface.connection.clone();
-            let Body::Elements(elements) = &mut surface.body else {
-                panic!("expected elements")
-            };
-            let _ = elements.render(&registry, &connection, None);
-            let images = elements.images();
-            (
-                images.decodes(),
-                colors
-                    .iter()
-                    .map(|color| images.image_for(&svg(color)))
-                    .collect::<Vec<_>>(),
-            )
+        // Draws the Surface as a frame does and lets its decodes finish, then
+        // reports how many SVGs its cache has decoded in all and what it holds
+        // for each colour.
+        let frame = |cx: &mut gpui::VisualTestContext, colors: &[&str]| {
+            settle_fill_images(&host, cx, &registry);
+            host.read_with(cx, |view, _| {
+                let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
+                    panic!("expected elements")
+                };
+                let images = elements.images();
+                (
+                    images.decodes(),
+                    colors
+                        .iter()
+                        .map(|color| images.image_for(&svg(color)))
+                        .collect::<Vec<_>>(),
+                )
+            })
         };
 
-        let (decodes, first) = host.update(cx, |view, _| frame(view, &["blue", "green"]));
+        let (decodes, first) = frame(cx, &["blue", "green"]);
         assert_eq!(decodes, 2);
         let blue = first[0].clone().expect("blue decoded");
         let green = first[1].clone().expect("green decoded");
@@ -1776,7 +1763,7 @@ mod tests {
         host.update(cx, |view, cx| {
             view.update_surface(id, document("blue", "green"), cx)
         });
-        let (decodes, again) = host.update(cx, |view, _| frame(view, &["blue", "green"]));
+        let (decodes, again) = frame(cx, &["blue", "green"]);
         assert_eq!(decodes, 2, "an identical update decoded its SVGs again");
         assert!(std::sync::Arc::ptr_eq(&blue, again[0].as_ref().unwrap()));
         assert!(std::sync::Arc::ptr_eq(&green, again[1].as_ref().unwrap()));
@@ -1784,7 +1771,7 @@ mod tests {
         host.update(cx, |view, cx| {
             view.update_surface(id, document("blue", "red"), cx)
         });
-        let (decodes, changed) = host.update(cx, |view, _| frame(view, &["blue", "green", "red"]));
+        let (decodes, changed) = frame(cx, &["blue", "green", "red"]);
         assert_eq!(decodes, 3, "only the changed SVG is decoded");
         assert!(std::sync::Arc::ptr_eq(&blue, changed[0].as_ref().unwrap()));
         assert!(
@@ -1803,6 +1790,80 @@ mod tests {
                 "the budget counts only the images the description draws"
             );
         });
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
+    #[gpui::test]
+    fn an_svg_is_decoded_off_the_ui_thread_and_its_view_told_when_it_is_ready(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        // The shape that once took seconds to decode: differently named flood
+        // results, all merged by one feMerge.
+        let floods: String = (0..4)
+            .map(|n| format!("<feFlood flood-color='#{:06x}' result='r{n}'/>", n * 0x40))
+            .collect();
+        let merges: String = (0..4)
+            .map(|n| format!("<feMergeNode in='r{n}'/>"))
+            .collect();
+        let svg = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'>\
+             <filter id='f' x='0' y='0' width='1' height='1'>{floods}<feMerge>{merges}</feMerge></filter>\
+             <rect width='64' height='64' filter='url(#f)'/></svg>"
+        );
+        host.update_in(cx, |view, window, cx| {
+            view.open_surface(
+                SurfaceId(5),
+                open_description(serde_json::json!({"version":1,"root":{
+                    "kind":"image","style":"w_16 h_16","svg":svg
+                }})),
+                connection,
+                window,
+                cx,
+            )
+            .unwrap();
+        });
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = notified.clone();
+        let _observer =
+            cx.update(|_, cx| cx.observe(&host, move |_, _| counter.set(counter.get() + 1)));
+        let drawn = |cx: &mut gpui::VisualTestContext| {
+            host.read_with(cx, |view, _| {
+                let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
+                    panic!("expected elements")
+                };
+                elements.images().image_for(&svg)
+            })
+        };
+
+        draw_test_window(cx);
+        assert!(
+            drawn(cx).is_none(),
+            "the frame decoded the SVG on the UI thread"
+        );
+        let before = notified.get();
+        cx.run_until_parked();
+        assert!(
+            notified.get() > before,
+            "the finished decode told the view to draw again"
+        );
+        assert!(
+            drawn(cx).is_some(),
+            "the decode finished on the background executor"
+        );
         cx.update(|window, _| window.remove_window());
         drop(host);
     }
@@ -1877,6 +1938,34 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
+    }
+
+    /// Builds the fill Surface's elements as a frame does, starts the
+    /// decodes that frame asked for, and lets them all finish.
+    fn settle_fill_images(
+        host: &Entity<TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+        registry: &TokenRegistry,
+    ) {
+        host.update(cx, |view, cx| {
+            let surface = view.surfaces.fill.as_mut().unwrap();
+            let connection = surface.connection.clone();
+            let Body::Elements(elements) = &mut surface.body else {
+                panic!("expected elements")
+            };
+            let _ = elements.render(registry, &connection, None);
+            elements.start_decodes(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// The picture the fill Surface's cache holds for `svg`, once its decode
+    /// is ready.
+    fn fill_image(view: &TerminalView, svg: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
+            panic!("expected elements")
+        };
+        elements.images().image_for(svg)
     }
 
     fn events(peer: &mut Peer) -> Vec<serde_json::Value> {

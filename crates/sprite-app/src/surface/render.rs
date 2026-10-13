@@ -1,8 +1,10 @@
 //! Draws a Surface Description: one GPUI element per described element,
 //! built fresh on every frame the way GPUI's own views are. Decoded SVGs are
 //! kept by their SVG text, so updates that keep an SVG reuse its decode, and
-//! an update releases the ones it no longer draws. Redraws find each decode by
-//! its place in the tree, without touching the text.
+//! an update releases the ones it no longer draws. A frame only asks for a
+//! decode; it runs on the background executor, and until it is ready the
+//! image draws nothing. Redraws find each decode by its place in the tree,
+//! without touching the text.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -10,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
+    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
     RenderImage, SharedString, Size, StatefulInteractiveElement, Styled, div, img, px, rgb,
 };
 use sprite_term::Rgb;
@@ -22,7 +24,7 @@ use crate::surface::channel::{SurfaceConnection, event_click};
 use crate::surface::description::{Description, Element};
 use crate::surface::grid::GridSurface;
 use crate::surface::style;
-use crate::surface::svg_decode::{self, MAX_SURFACE_IMAGE_BYTES, raster_bytes};
+use crate::surface::svg_decode::{SvgDecodes, SvgState};
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -34,82 +36,75 @@ use crate::tokens::{Role, TokenRegistry};
 /// picture. Elements that draw the same SVG share one decode, and an update
 /// that keeps an SVG keeps its decode wherever in the tree it moved.
 ///
-/// The text is looked up once per description. A description may carry
-/// megabytes of SVG, so each image's picture is then kept by its tree-order
-/// index and every later frame finds it there.
+/// The text is looked up once per description, and once more after any
+/// decode finishes. A description may carry megabytes of SVG, so in between,
+/// each image's state is kept by its tree-order index and every frame finds
+/// it there.
 #[derive(Default)]
 pub(crate) struct ElementImageCache {
-    images: HashMap<Arc<str>, Option<Arc<RenderImage>>>,
-    /// What each image of the current description resolved to, by its index
-    /// in tree order: `None` until that image is first drawn, then the
-    /// picture, or `Some(None)` for one that failed or did not fit. Emptied by
-    /// `retain_drawn_by`, which `ElementBody::replace` calls with every new
-    /// description.
-    placed: Vec<Option<Option<Arc<RenderImage>>>>,
-    retained_bytes: usize,
-    #[cfg(test)]
-    decodes: usize,
+    decodes: SvgDecodes<Arc<str>>,
+    /// What each image of the current description had come to when it was
+    /// last looked up, by its index in tree order. `None` until that image is
+    /// drawn. Emptied by `retain_drawn_by`, which `ElementBody::replace`
+    /// calls with every new description, and whenever a decode has settled
+    /// since `placed_at`.
+    placed: Vec<Option<SvgState>>,
+    placed_at: u64,
     #[cfg(test)]
     text_lookups: usize,
 }
 
 impl ElementImageCache {
-    /// The picture for the image at tree-order `index`, drawing `svg`. Only the
-    /// first frame of a description looks the text up; later frames take what
-    /// that lookup found.
+    /// The picture for the image at tree-order `index`, drawing `svg`. `None`
+    /// while its decode is pending or once it was refused.
     fn picture(&mut self, index: u64, svg: &str) -> Option<Arc<RenderImage>> {
-        let index = index as usize;
-        if let Some(Some(picture)) = self.placed.get(index) {
-            return picture.clone();
+        let settled = self.decodes.settled();
+        if self.placed_at != settled {
+            self.placed.clear();
+            self.placed_at = settled;
         }
-        let picture = self.lookup(svg);
+        let index = index as usize;
+        if let Some(Some(state)) = self.placed.get(index) {
+            return state.picture();
+        }
+        let state = self.lookup(svg);
         if self.placed.len() <= index {
             self.placed.resize(index + 1, None);
         }
-        self.placed[index] = Some(picture.clone());
+        let picture = state.picture();
+        self.placed[index] = Some(state);
         picture
     }
 
-    /// The picture for one SVG, decoded only if no earlier frame or
-    /// description already did. A decode is bounded by what the Surface's
-    /// budget has left, so the pictures it holds never pass 64 MiB together.
-    fn lookup(&mut self, svg: &str) -> Option<Arc<RenderImage>> {
+    /// What one SVG has come to. Its decode is queued the first time any
+    /// frame or description draws it.
+    fn lookup(&mut self, svg: &str) -> SvgState {
         #[cfg(test)]
         {
             self.text_lookups += 1;
         }
-        if let Some(picture) = self.images.get(svg) {
-            return picture.clone();
-        }
-        #[cfg(test)]
-        {
-            self.decodes += 1;
-        }
-        let available = MAX_SURFACE_IMAGE_BYTES - self.retained_bytes;
-        let picture = svg_decode::decode(svg, None, available).ok();
-        if let Some(picture) = &picture {
-            self.retained_bytes += raster_bytes(picture);
-        }
-        self.images.insert(Arc::from(svg), picture.clone());
-        picture
+        self.decodes.want(svg, || {
+            let text: Arc<str> = Arc::from(svg);
+            (Arc::clone(&text), text)
+        })
+    }
+
+    /// Starts the decodes the frames so far asked for. `cx` is the view that
+    /// draws this cache; it is told to draw again as each one finishes.
+    pub(crate) fn start_decodes<T: 'static>(&self, cx: &mut Context<T>) {
+        self.decodes.start(cx);
     }
 
     /// Keeps the decodes `description` still draws and releases the rest, so
-    /// the budget counts only images on screen. A decode that failed or did
-    /// not fit is forgotten too: the next frame tries it again against
-    /// whatever the update freed.
+    /// the budget counts only images on screen. A decode refused for lack of
+    /// budget is forgotten too, and the next frame tries it again against
+    /// whatever the update freed. A document that does not parse, or has too
+    /// many filters, stays refused while the description draws it.
     fn retain_drawn_by(&mut self, description: &Description) {
         self.placed.clear();
         let mut drawn = HashSet::new();
         drawn_images(&description.root, &mut drawn);
-        self.images
-            .retain(|svg, picture| picture.is_some() && drawn.contains(&**svg));
-        self.retained_bytes = self
-            .images
-            .values()
-            .flatten()
-            .map(|picture| raster_bytes(picture))
-            .sum();
+        self.decodes.retain(|svg| drawn.contains(&**svg));
     }
 }
 
@@ -134,18 +129,28 @@ fn drawn_images<'a>(node: &'a Element, drawn: &mut HashSet<&'a str>) {
 #[cfg(test)]
 impl ElementImageCache {
     pub(crate) fn image_for(&self, svg: &str) -> Option<Arc<RenderImage>> {
-        self.images.get(svg).cloned().flatten()
+        self.decodes.state(svg).and_then(|state| state.picture())
+    }
+
+    pub(crate) fn state_for(&self, svg: &str) -> Option<SvgState> {
+        self.decodes.state(svg)
     }
 
     /// The SVG texts the cache holds entries for, sorted.
-    pub(crate) fn cached_texts(&self) -> Vec<&str> {
-        let mut texts: Vec<&str> = self.images.keys().map(|svg| &**svg).collect();
+    pub(crate) fn cached_texts(&self) -> Vec<String> {
+        let mut texts: Vec<String> = self
+            .decodes
+            .keys()
+            .iter()
+            .map(|svg| svg.to_string())
+            .collect();
         texts.sort_unstable();
         texts
     }
 
+    /// How many decodes this cache has started.
     pub(crate) fn decodes(&self) -> usize {
-        self.decodes
+        self.decodes.started().len()
     }
 
     pub(crate) fn text_lookups(&self) -> usize {
@@ -153,7 +158,11 @@ impl ElementImageCache {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        self.retained_bytes
+        self.decodes.retained_bytes()
+    }
+
+    pub(crate) fn queue(&self) -> &SvgDecodes<Arc<str>> {
+        &self.decodes
     }
 }
 
@@ -202,6 +211,13 @@ impl ElementBody {
             host,
             &mut self.images,
         )
+    }
+
+    /// Starts the decodes the last `render` asked for, on the background
+    /// executor. `cx` is the view that draws this body; it is told to draw
+    /// again as each one finishes.
+    pub(crate) fn start_decodes<T: 'static>(&self, cx: &mut Context<T>) {
+        self.images.start_decodes(cx);
     }
 }
 
@@ -561,7 +577,39 @@ mod tests {
 
     use crate::config::Colors;
     use crate::surface::description;
-    use crate::surface::svg_decode::render_svg;
+    use crate::surface::svg_decode::{
+        self, MAX_CONCURRENT_SVG_DECODES, MAX_FILTER_PRIMITIVE_USES, RefusalKind, SvgState,
+        merged_floods, render_svg,
+    };
+    use gpui::AppContext as _;
+
+    /// Stands in for the view that draws a Surface: a finished decode tells
+    /// this entity to draw again.
+    struct Owner;
+
+    /// One frame of `description`, as a view draws it: builds the elements,
+    /// then starts the decodes that frame asked for.
+    fn draw_frame(
+        cx: &mut gpui::TestAppContext,
+        owner: &Entity<Owner>,
+        cache: &mut ElementImageCache,
+        description: &Description,
+        registry: &TokenRegistry,
+        connection: &SurfaceConnection,
+    ) {
+        owner.update(cx, |_, cx| {
+            let _ = render(
+                description,
+                &[],
+                SurfaceId(1),
+                registry,
+                connection,
+                None,
+                cache,
+            );
+            cache.start_decodes(cx);
+        });
+    }
 
     #[test]
     fn svg_raster_refuses_oversized_dimensions_and_bytes() {
@@ -590,8 +638,8 @@ mod tests {
         assert_eq!(image.as_bytes(0).unwrap().len(), 3 * 5 * 4);
     }
 
-    #[test]
-    fn element_image_cache_bounds_retained_pixels_and_resets() {
+    #[gpui::test]
+    fn element_image_cache_bounds_retained_pixels_and_resets(cx: &mut gpui::TestAppContext) {
         let (ours, _peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
@@ -610,34 +658,36 @@ mod tests {
         )
         .unwrap()
         .description;
+        let owner = cx.new(|_| Owner);
         let mut cache = ElementImageCache::default();
-        let _ = render(
-            &document,
-            &[],
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut cache,
-        );
+        draw_frame(cx, &owner, &mut cache, &document, &registry, &connection);
+        cx.run_until_parked();
         let retained: usize = (0..5)
             .filter_map(|n| cache.image_for(&svg(n)))
             .map(|image| image.as_bytes(0).unwrap().len())
             .sum();
         assert_eq!(retained, 64 * 1024 * 1024);
-        assert!(cache.image_for(&svg(4)).is_none());
-        let first = cache.image_for(&svg(0)).unwrap().id;
-        let _ = render(
-            &document,
-            &[],
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut cache,
+        assert_eq!(cache.retained_bytes(), 64 * 1024 * 1024);
+        // Two decodes run at once and either may finish first, so which of
+        // the five misses out is not fixed; that exactly one does is.
+        let refused: Vec<usize> = (0..5)
+            .filter(|n| {
+                matches!(
+                    cache.state_for(&svg(*n)),
+                    Some(SvgState::Refused(RefusalKind::OverBudget))
+                )
+            })
+            .collect();
+        assert_eq!(refused.len(), 1, "exactly one image is over the budget");
+        let kept = (0..5).find(|n| !refused.contains(n)).unwrap();
+        let first = cache.image_for(&svg(kept)).unwrap().id;
+        draw_frame(cx, &owner, &mut cache, &document, &registry, &connection);
+        cx.run_until_parked();
+        assert_eq!(cache.image_for(&svg(kept)).unwrap().id, first);
+        assert!(
+            cache.image_for(&svg(refused[0])).is_none(),
+            "redrawing the same description does not retry it"
         );
-        assert_eq!(cache.image_for(&svg(0)).unwrap().id, first);
-        assert!(cache.image_for(&svg(4)).is_none());
         cache = ElementImageCache::default();
         let fresh = description::parse(
             &json!({"version":1,"root":{"kind":"image","svg":svg(4)}}),
@@ -645,20 +695,15 @@ mod tests {
         )
         .unwrap()
         .description;
-        let _ = render(
-            &fresh,
-            &[],
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut cache,
-        );
+        draw_frame(cx, &owner, &mut cache, &fresh, &registry, &connection);
+        cx.run_until_parked();
         assert!(cache.image_for(&svg(4)).is_some());
     }
 
-    #[test]
-    fn retaining_a_new_description_releases_what_it_does_not_draw_and_retries_what_did_not_fit() {
+    #[gpui::test]
+    fn retaining_a_new_description_releases_what_it_does_not_draw_and_retries_what_did_not_fit(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (ours, _peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
@@ -679,42 +724,44 @@ mod tests {
             .unwrap()
             .description
         };
+        let owner = cx.new(|_| Owner);
         let mut cache = ElementImageCache::default();
-        let _ = render(
+        draw_frame(
+            cx,
+            &owner,
+            &mut cache,
             &document(&[0, 1, 2, 3, 4]),
-            &[],
-            SurfaceId(1),
             &registry,
             &connection,
-            None,
-            &mut cache,
         );
-        assert!(
-            cache.image_for(&svg(4)).is_none(),
-            "the fifth image is over the budget"
-        );
-        let kept = cache.image_for(&svg(1)).unwrap();
+        cx.run_until_parked();
+        let refused = (0..5)
+            .find(|n| cache.image_for(&svg(*n)).is_none())
+            .expect("one image is over the budget");
+        let kept_number = (0..5).find(|n| *n != refused).unwrap();
+        let kept = cache.image_for(&svg(kept_number)).unwrap();
         let decodes = cache.decodes();
 
-        let next = document(&[1, 4]);
+        let next = document(&[kept_number, refused]);
         cache.retain_drawn_by(&next);
         assert_eq!(cache.retained_bytes(), 16 * 1024 * 1024);
-        assert!(cache.image_for(&svg(0)).is_none());
-        let _ = render(
-            &next,
-            &[],
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut cache,
+        assert!(
+            cache.state_for(&svg(refused)).is_none(),
+            "a refusal for lack of budget is forgotten with the old description"
         );
+        draw_frame(cx, &owner, &mut cache, &next, &registry, &connection);
+        cx.run_until_parked();
         // Entries hold the full SVG text and a lookup compares it, so the
         // cache holds exactly the two texts drawn, each under its own text.
-        assert_eq!(cache.cached_texts(), [svg(1).as_str(), svg(4).as_str()]);
-        assert!(Arc::ptr_eq(&kept, &cache.image_for(&svg(1)).unwrap()));
+        let mut drawn = vec![svg(kept_number), svg(refused)];
+        drawn.sort_unstable();
+        assert_eq!(cache.cached_texts(), drawn);
+        assert!(Arc::ptr_eq(
+            &kept,
+            &cache.image_for(&svg(kept_number)).unwrap()
+        ));
         assert!(
-            cache.image_for(&svg(4)).is_some(),
+            cache.image_for(&svg(refused)).is_some(),
             "the update freed room for it"
         );
         assert_eq!(cache.decodes(), decodes + 1);
@@ -722,10 +769,11 @@ mod tests {
     }
 
     /// A description may carry megabytes of SVG text. It is looked up by that
-    /// text once per description; every later frame finds each picture by its
-    /// place in the tree, so a repaint never hashes or compares the text.
-    #[test]
-    fn an_unchanged_description_never_looks_its_svg_text_up_again() {
+    /// text once per description and once more after decodes finish; every
+    /// other frame finds each image by its place in the tree, so a repaint
+    /// never hashes or compares the text.
+    #[gpui::test]
+    fn an_unchanged_description_never_looks_its_svg_text_up_again(cx: &mut gpui::TestAppContext) {
         let (ours, _peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
@@ -745,29 +793,26 @@ mod tests {
             .unwrap()
             .description
         };
-        let frame = |description: &Description, cache: &mut ElementImageCache| {
-            let _ = render(
-                description,
-                &[],
-                SurfaceId(1),
-                &registry,
-                &connection,
-                None,
-                cache,
-            );
-        };
+        let owner = cx.new(|_| Owner);
         let mut cache = ElementImageCache::default();
         let first = document(&[0, 1, 0]);
-        frame(&first, &mut cache);
+        draw_frame(cx, &owner, &mut cache, &first, &registry, &connection);
         assert_eq!(cache.text_lookups(), 3, "the first frame finds each image");
         assert_eq!(cache.decodes(), 2, "the repeated SVG shares one decode");
+        cx.run_until_parked();
+        draw_frame(cx, &owner, &mut cache, &first, &registry, &connection);
+        assert_eq!(
+            cache.text_lookups(),
+            6,
+            "the frame after the decodes finished finds each image once more"
+        );
         let shown = cache.image_for(&svg(1)).unwrap();
         for _ in 0..5 {
-            frame(&first, &mut cache);
+            draw_frame(cx, &owner, &mut cache, &first, &registry, &connection);
         }
         assert_eq!(
             cache.text_lookups(),
-            3,
+            6,
             "later frames find every picture by position"
         );
         assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
@@ -776,9 +821,12 @@ mod tests {
         // draws wherever they moved in the tree.
         let moved = document(&[1, 2]);
         cache.retain_drawn_by(&moved);
-        frame(&moved, &mut cache);
-        frame(&moved, &mut cache);
-        assert_eq!(cache.text_lookups(), 5);
+        draw_frame(cx, &owner, &mut cache, &moved, &registry, &connection);
+        assert_eq!(cache.text_lookups(), 8);
+        cx.run_until_parked();
+        draw_frame(cx, &owner, &mut cache, &moved, &registry, &connection);
+        draw_frame(cx, &owner, &mut cache, &moved, &registry, &connection);
+        assert_eq!(cache.text_lookups(), 10);
         assert_eq!(cache.decodes(), 3, "only the new SVG is decoded");
         assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
     }
@@ -875,8 +923,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_image_redraw_reuses_decode_and_new_cache_decodes_changed_svg() {
+    #[gpui::test]
+    fn legacy_image_redraw_reuses_decode_and_new_cache_decodes_changed_svg(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (ours, _theirs) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
@@ -893,41 +943,21 @@ mod tests {
             .unwrap()
             .description
         };
+        let owner = cx.new(|_| Owner);
         let blue = document("blue");
         let mut cache = ElementImageCache::default();
-        let _ = render(
-            &blue,
-            &[],
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut cache,
-        );
+        draw_frame(cx, &owner, &mut cache, &blue, &registry, &connection);
+        cx.run_until_parked();
         let first = cache.image_for(&svg("blue")).unwrap();
-        let _ = render(
-            &blue,
-            &[],
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut cache,
-        );
+        draw_frame(cx, &owner, &mut cache, &blue, &registry, &connection);
+        cx.run_until_parked();
         assert!(Arc::ptr_eq(&first, &cache.image_for(&svg("blue")).unwrap()));
         let first_id = first.id;
         drop(first);
         let red = document("red");
         cache = ElementImageCache::default();
-        let _ = render(
-            &red,
-            &[],
-            SurfaceId(1),
-            &registry,
-            &connection,
-            None,
-            &mut cache,
-        );
+        draw_frame(cx, &owner, &mut cache, &red, &registry, &connection);
+        cx.run_until_parked();
         let second = cache.image_for(&svg("red")).unwrap();
         assert_eq!(&second.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
         assert_ne!(second.id, first_id);
@@ -1134,5 +1164,180 @@ mod tests {
         assert_eq!(wheel_turns(-3, "up", "down"), Some(("up", 3)));
         assert_eq!(wheel_turns(2, "up", "down"), Some(("down", 2)));
         assert_eq!(wheel_turns(0, "up", "down"), None);
+    }
+
+    #[gpui::test]
+    fn a_pending_image_draws_nothing_and_nothing_is_rasterised_until_the_executor_runs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let svg = merged_floods(4, 64);
+        let document = description::parse(
+            &json!({"version":1,"root":{"kind":"image","svg":svg}}),
+            &registry,
+        )
+        .unwrap()
+        .description;
+        let owner = cx.new(|_| Owner);
+        let notified = Rc::new(std::cell::Cell::new(0usize));
+        let counter = Rc::clone(&notified);
+        let _observer =
+            cx.update(|cx| cx.observe(&owner, move |_, _| counter.set(counter.get() + 1)));
+        let rasterised = svg_decode::rasterised();
+        let mut cache = ElementImageCache::default();
+
+        draw_frame(cx, &owner, &mut cache, &document, &registry, &connection);
+        assert!(matches!(cache.state_for(&svg), Some(SvgState::Pending)));
+        assert!(
+            cache.image_for(&svg).is_none(),
+            "a pending image draws nothing"
+        );
+        assert_eq!(cache.queue().in_flight(), 1);
+        assert_eq!(
+            svg_decode::rasterised(),
+            rasterised,
+            "the frame rasterised nothing"
+        );
+
+        cx.run_until_parked();
+        assert!(matches!(cache.state_for(&svg), Some(SvgState::Ready(_))));
+        assert_eq!(svg_decode::rasterised(), rasterised + 1);
+        assert!(
+            notified.get() > 0,
+            "the view that drew the image was told it is ready"
+        );
+    }
+
+    #[gpui::test]
+    fn a_document_over_the_filter_cap_is_refused_never_rasterised_and_not_tried_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        // That many flood results plus the merge: one use past the cap.
+        let svg = merged_floods(MAX_FILTER_PRIMITIVE_USES, 64);
+        let document = description::parse(
+            &json!({"version":1,"root":{"kind":"image","svg":svg}}),
+            &registry,
+        )
+        .unwrap()
+        .description;
+        let owner = cx.new(|_| Owner);
+        let rasterised = svg_decode::rasterised();
+        let mut cache = ElementImageCache::default();
+
+        draw_frame(cx, &owner, &mut cache, &document, &registry, &connection);
+        cx.run_until_parked();
+        assert!(matches!(
+            cache.state_for(&svg),
+            Some(SvgState::Refused(RefusalKind::TooComplex))
+        ));
+        assert_eq!(
+            svg_decode::rasterised(),
+            rasterised,
+            "the refused document was never rasterised"
+        );
+
+        // An update that still draws it keeps the refusal instead of
+        // decoding it again.
+        cache.retain_drawn_by(&document);
+        draw_frame(cx, &owner, &mut cache, &document, &registry, &connection);
+        cx.run_until_parked();
+        assert!(matches!(
+            cache.state_for(&svg),
+            Some(SvgState::Refused(RefusalKind::TooComplex))
+        ));
+        assert_eq!(cache.decodes(), 1, "a refused document is decoded once");
+    }
+
+    #[gpui::test]
+    fn a_cache_decodes_at_most_two_images_at_a_time_in_the_order_they_were_drawn(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = description::parse(
+            &json!({"version":1,"root":{"kind":"box","children":(0..5)
+                .map(|n| json!({"kind":"image","svg":svg(n)}))
+                .collect::<Vec<_>>()}}),
+            &registry,
+        )
+        .unwrap()
+        .description;
+        let in_order = |count: usize| {
+            (0..count)
+                .map(|n| Arc::<str>::from(svg(n)))
+                .collect::<Vec<_>>()
+        };
+        let owner = cx.new(|_| Owner);
+        let mut cache = ElementImageCache::default();
+
+        draw_frame(cx, &owner, &mut cache, &document, &registry, &connection);
+        assert_eq!(cache.queue().in_flight(), MAX_CONCURRENT_SVG_DECODES);
+        assert_eq!(
+            cache.queue().started(),
+            in_order(2),
+            "the first two drawn start first"
+        );
+        assert!((0..5).all(|n| matches!(cache.state_for(&svg(n)), Some(SvgState::Pending))));
+
+        cx.run_until_parked();
+        assert_eq!(
+            cache.queue().started(),
+            in_order(5),
+            "the rest started oldest first"
+        );
+        assert_eq!(cache.queue().peak_in_flight(), MAX_CONCURRENT_SVG_DECODES);
+        assert_eq!(cache.queue().in_flight(), 0);
+        assert!((0..5).all(|n| cache.image_for(&svg(n)).is_some()));
+    }
+
+    #[gpui::test]
+    fn a_decode_that_finishes_after_its_image_left_the_description_is_discarded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = |n: usize| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"image","svg":svg(n)}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let owner = cx.new(|_| Owner);
+        let mut cache = ElementImageCache::default();
+
+        draw_frame(cx, &owner, &mut cache, &document(0), &registry, &connection);
+        assert_eq!(cache.queue().in_flight(), 1);
+        let next = document(1);
+        cache.retain_drawn_by(&next);
+        cx.run_until_parked();
+        assert!(
+            cache.state_for(&svg(0)).is_none(),
+            "the finished decode of an image no longer drawn was discarded"
+        );
+        assert_eq!(cache.retained_bytes(), 0, "and charged nothing");
+
+        draw_frame(cx, &owner, &mut cache, &next, &registry, &connection);
+        cx.run_until_parked();
+        assert!(cache.image_for(&svg(1)).is_some());
+        assert_eq!(cache.retained_bytes(), 4 * 4 * 4);
     }
 }

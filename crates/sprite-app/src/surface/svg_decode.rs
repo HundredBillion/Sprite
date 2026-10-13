@@ -1,10 +1,20 @@
-//! Turns SVG text into a picture: parses it, refuses a document whose
-//! filters would cost too much, and rasterises the rest within the Surface
-//! raster bounds. Element images and list assets both come through here.
+//! Turns SVG text into a picture, off the UI thread.
+//!
+//! A cache asks for an SVG and gets `Pending` until a decode on GPUI's
+//! background executor finishes. The decode parses the text, refuses a
+//! document whose filters would cost too much, and rasterises the rest
+//! within the Surface raster bounds. Each cache runs at most
+//! `MAX_CONCURRENT_SVG_DECODES` at once, oldest request first. A finished
+//! picture is charged to the cache's budget when it is installed, and the
+//! view that asked is told to draw again.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
-use gpui::RenderImage;
+use gpui::{Context, RenderImage};
 use resvg::usvg;
 
 /// Decoded pixels one Surface cache keeps at once.
@@ -30,6 +40,12 @@ const MAX_SVG_RASTER_DIMENSION: f32 = 4096.0;
 /// conservative.
 pub(crate) const MAX_FILTER_PRIMITIVE_USES: usize = 161;
 
+/// Decodes one cache runs at the same time. The rest wait in the order they
+/// were asked for, so the memory filter intermediates take is bounded per
+/// cache by this many capped decodes, not by how many images a description
+/// holds.
+pub(crate) const MAX_CONCURRENT_SVG_DECODES: usize = 2;
+
 /// Why an SVG was not drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RefusalKind {
@@ -43,6 +59,284 @@ pub(crate) enum RefusalKind {
     Unrasterisable,
     /// The raster fits one image but not what the cache's budget has left.
     OverBudget,
+}
+
+/// What one SVG a cache asked for has come to.
+#[derive(Clone, Debug)]
+pub(crate) enum SvgState {
+    /// Waiting for, or in, its decode. Draws nothing.
+    Pending,
+    Ready(Arc<RenderImage>),
+    Refused(RefusalKind),
+}
+
+impl SvgState {
+    /// The picture to draw, if the decode is ready.
+    pub(crate) fn picture(&self) -> Option<Arc<RenderImage>> {
+        match self {
+            Self::Ready(picture) => Some(Arc::clone(picture)),
+            Self::Pending | Self::Refused(_) => None,
+        }
+    }
+}
+
+/// The decodes of one cache: what each SVG it asked for has come to, and the
+/// decodes still waiting for a turn.
+///
+/// Shared with the tasks running its decodes. A task holds it weakly, so a
+/// cache that is dropped (its Surface closed) drops whatever finishes after.
+pub(crate) struct SvgDecodes<K> {
+    queue: Rc<RefCell<Queue<K>>>,
+}
+
+struct Queue<K> {
+    entries: HashMap<K, Entry>,
+    /// Asked for and not yet started, oldest first.
+    waiting: VecDeque<Job<K>>,
+    in_flight: usize,
+    /// Pixels the ready pictures hold, at most `MAX_SURFACE_IMAGE_BYTES`.
+    retained_bytes: usize,
+    /// How many entries have settled. A cache that remembers what it found
+    /// compares this to know when to look again.
+    settled: u64,
+    /// Stamped on each entry, so a decode finishing for an entry that has
+    /// been dropped, or dropped and asked for again, is told apart.
+    next_ticket: u64,
+    target_width: Option<f32>,
+    #[cfg(test)]
+    started: Vec<K>,
+    #[cfg(test)]
+    peak_in_flight: usize,
+}
+
+struct Entry {
+    state: SvgState,
+    ticket: u64,
+}
+
+struct Job<K> {
+    key: K,
+    ticket: u64,
+    svg: Arc<str>,
+}
+
+impl<K> Default for SvgDecodes<K> {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl<K> SvgDecodes<K> {
+    /// The decodes of a cache that draws each SVG `target_width` pixels wide,
+    /// or at its own size.
+    pub(crate) fn new(target_width: Option<f32>) -> Self {
+        Self {
+            queue: Rc::new(RefCell::new(Queue {
+                entries: HashMap::new(),
+                waiting: VecDeque::new(),
+                in_flight: 0,
+                retained_bytes: 0,
+                settled: 0,
+                next_ticket: 0,
+                target_width,
+                #[cfg(test)]
+                started: Vec::new(),
+                #[cfg(test)]
+                peak_in_flight: 0,
+            })),
+        }
+    }
+
+    /// Goes up each time a decode is installed or refused.
+    pub(crate) fn settled(&self) -> u64 {
+        self.queue.borrow().settled
+    }
+}
+
+impl<K: Clone + Eq + Hash + 'static> SvgDecodes<K> {
+    /// What `key` has come to. The first time it is asked for, `job` names it
+    /// and its SVG text, its decode joins the end of the queue, and it is
+    /// `Pending`. Nothing is decoded here: `start` does that.
+    pub(crate) fn want<Q>(&self, key: &Q, job: impl FnOnce() -> (K, Arc<str>)) -> SvgState
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let mut queue = self.queue.borrow_mut();
+        if let Some(entry) = queue.entries.get(key) {
+            return entry.state.clone();
+        }
+        let (key, svg) = job();
+        let ticket = queue.next_ticket;
+        queue.next_ticket += 1;
+        queue.entries.insert(
+            key.clone(),
+            Entry {
+                state: SvgState::Pending,
+                ticket,
+            },
+        );
+        queue.waiting.push_back(Job { key, ticket, svg });
+        SvgState::Pending
+    }
+
+    /// Starts waiting decodes, oldest first, until `MAX_CONCURRENT_SVG_DECODES`
+    /// are running. `cx` is the view that draws this cache: as each decode
+    /// finishes, the view is told to draw again.
+    pub(crate) fn start<T: 'static>(&self, cx: &mut Context<T>) {
+        start_waiting(&self.queue, cx);
+    }
+
+    /// Keeps the entries `keep` accepts and drops the rest. A decode still
+    /// running for a dropped entry is discarded when it finishes. A refusal
+    /// for lack of budget is dropped too, so the next frame asks again
+    /// against whatever this freed. Every other refusal stays for as long as
+    /// it is kept.
+    pub(crate) fn retain(&self, keep: impl Fn(&K) -> bool) {
+        let mut queue = self.queue.borrow_mut();
+        let Queue {
+            entries,
+            waiting,
+            retained_bytes,
+            ..
+        } = &mut *queue;
+        entries.retain(|key, entry| {
+            keep(key) && !matches!(entry.state, SvgState::Refused(RefusalKind::OverBudget))
+        });
+        waiting.retain(|job| {
+            entries
+                .get(&job.key)
+                .is_some_and(|entry| entry.ticket == job.ticket)
+        });
+        *retained_bytes = entries
+            .values()
+            .filter_map(|entry| entry.state.picture())
+            .map(|picture| raster_bytes(&picture))
+            .sum();
+    }
+}
+
+impl<K: Clone + Eq + Hash> Queue<K> {
+    /// The next decode to start, with the width to draw it at and the budget
+    /// it may use, if a slot is free and one is waiting.
+    fn next_job(&mut self) -> Option<(Job<K>, Option<f32>, usize)> {
+        while self.in_flight < MAX_CONCURRENT_SVG_DECODES {
+            let job = self.waiting.pop_front()?;
+            if !self
+                .entries
+                .get(&job.key)
+                .is_some_and(|entry| entry.ticket == job.ticket)
+            {
+                continue;
+            }
+            self.in_flight += 1;
+            #[cfg(test)]
+            {
+                self.started.push(job.key.clone());
+                self.peak_in_flight = self.peak_in_flight.max(self.in_flight);
+            }
+            let available = MAX_SURFACE_IMAGE_BYTES.saturating_sub(self.retained_bytes);
+            return Some((job, self.target_width, available));
+        }
+        None
+    }
+
+    /// Installs a finished decode, charging its pixels to the budget, unless
+    /// its entry was dropped since it started. A picture the budget can no
+    /// longer hold is refused for lack of budget.
+    fn finish(&mut self, key: &K, ticket: u64, outcome: Result<Arc<RenderImage>, RefusalKind>) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        let Some(entry) = self.entries.get_mut(key) else {
+            return;
+        };
+        if entry.ticket != ticket {
+            return;
+        }
+        entry.state = match outcome {
+            Ok(picture) => {
+                let bytes = raster_bytes(&picture);
+                if bytes > MAX_SURFACE_IMAGE_BYTES.saturating_sub(self.retained_bytes) {
+                    SvgState::Refused(RefusalKind::OverBudget)
+                } else {
+                    self.retained_bytes += bytes;
+                    SvgState::Ready(picture)
+                }
+            }
+            Err(refusal) => SvgState::Refused(refusal),
+        };
+        self.settled += 1;
+    }
+}
+
+/// Starts waiting decodes until the queue is full or empty. Each one parses
+/// and rasterises on the background executor. Then, back on the view's
+/// thread, its result is installed, the next decode starts, and the view is
+/// told to draw again.
+fn start_waiting<K, T>(queue: &Rc<RefCell<Queue<K>>>, cx: &mut Context<T>)
+where
+    K: Clone + Eq + Hash + 'static,
+    T: 'static,
+{
+    loop {
+        let next = queue.borrow_mut().next_job();
+        let Some((Job { key, ticket, svg }, target_width, available_bytes)) = next else {
+            return;
+        };
+        let decoding = cx
+            .background_executor()
+            .spawn(async move { decode(&svg, target_width, available_bytes) });
+        let weak = Rc::downgrade(queue);
+        cx.spawn(async move |view, cx| {
+            let outcome = decoding.await;
+            let Some(queue) = weak.upgrade() else {
+                return;
+            };
+            queue.borrow_mut().finish(&key, ticket, outcome);
+            view.update(cx, |_, cx| {
+                start_waiting(&queue, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+#[cfg(test)]
+impl<K: Clone + Eq + Hash> SvgDecodes<K> {
+    /// What `key` has come to, without asking for it.
+    pub(crate) fn state<Q>(&self, key: &Q) -> Option<SvgState>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.queue
+            .borrow()
+            .entries
+            .get(key)
+            .map(|entry| entry.state.clone())
+    }
+
+    pub(crate) fn keys(&self) -> Vec<K> {
+        self.queue.borrow().entries.keys().cloned().collect()
+    }
+
+    /// Every key whose decode has started, in the order they started.
+    pub(crate) fn started(&self) -> Vec<K> {
+        self.queue.borrow().started.clone()
+    }
+
+    pub(crate) fn in_flight(&self) -> usize {
+        self.queue.borrow().in_flight
+    }
+
+    pub(crate) fn peak_in_flight(&self) -> usize {
+        self.queue.borrow().peak_in_flight
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.queue.borrow().retained_bytes
+    }
 }
 
 /// The picture `svg` draws, `target_width` pixels wide or at its own size,
