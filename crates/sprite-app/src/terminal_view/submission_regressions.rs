@@ -36,7 +36,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_event_pressure::saturate_control(&session.commands());
+    crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
     let position = sprite_term::CellPosition { row: 0, column: 0 };
     view.update(cx, |view, _| {
         view.request_hover_link(position);
@@ -167,7 +167,7 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_event_pressure::saturate_control(&session.commands());
+    crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
     let image = sprite_term::ImagePixels {
         id: 88,
         generation: 1,
@@ -255,7 +255,7 @@ fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppConte
         mut snapshots,
     } = TerminalSession::spawn(config).unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_event_pressure::saturate_control(&session.commands());
+    crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
     let changed_color = Rgb {
         r: 0x12,
         g: 0x34,
@@ -413,7 +413,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_event_pressure::saturate_control(&session.commands());
+    crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
     let initial = snapshots.next_blocking().unwrap();
     let allocated = gpui::size(px(800.0), px(480.0));
     let mut reloaded = settings.clone();
@@ -536,7 +536,7 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
     ))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
-    crate::test_event_pressure::saturate_control(&session.commands());
+    crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
     let guard = std::thread::spawn(move || {
         crate::test_blocking_wait::pause(std::time::Duration::from_secs(1));
         drop(events);

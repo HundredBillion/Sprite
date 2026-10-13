@@ -1,29 +1,25 @@
 use super::*;
 
 /// Takes every control-lane slot a stalled worker left, so the next command
-/// is refused. True once the lane stays full; false only if it never does
-/// within the watchdog.
+/// is refused and stays refused until the view takes events again. True once
+/// a command is refused; false if the worker never stalls within the
+/// watchdog.
 ///
-/// One refusal is not proof of a stall: this thread fills the lane faster
-/// than a running worker wakes to drain it, and a worker that is merely
-/// behind frees a slot right after. So a refusal only counts when another
-/// offer is still refused after [`STALL_PROOF`], as in `saturate_control`.
-///
-/// [`STALL_PROOF`]: crate::test_event_pressure::STALL_PROOF
+/// The stall is read from the session, as in `saturate_control`, not inferred
+/// from how long a full lane stays full: under CPU load a worker that is
+/// merely descheduled, or in one long pass, keeps its lane full for as long
+/// as any pause, then drains it and only stalls afterwards. The GPUI test
+/// executor does not run while this holds the view, so the view's event task
+/// takes nothing meanwhile.
 fn saturate(view: &mut TerminalView) -> bool {
     let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
-    loop {
-        if (0..=sprite_term::CONTROL_CAPACITY).any(|_| !view.submit(TerminalCommand::Capture)) {
-            crate::test_blocking_wait::pause(crate::test_event_pressure::STALL_PROOF);
-            if !view.submit(TerminalCommand::Capture) {
-                return true;
-            }
-        }
+    while !view.worker_stalled_for_test() {
         if std::time::Instant::now() >= deadline {
             return false;
         }
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
     }
+    (0..=sprite_term::CONTROL_CAPACITY).any(|_| !view.submit(TerminalCommand::Capture))
 }
 
 #[test]

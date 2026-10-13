@@ -15,6 +15,7 @@ PATCHES = (
     "gpui-0.2.2-native-text.patch",
     "gpui-0.2.2-should-terminate.patch",
     "gpui-0.2.2-test-scale-factor.patch",
+    "gpui-0.2.2-test-block-wakeup.patch",
 )
 
 

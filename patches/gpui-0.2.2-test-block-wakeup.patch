@@ -1,0 +1,16 @@
+--- a/src/executor.rs
++++ b/src/executor.rs
+@@ -309,6 +309,13 @@ impl BackgroundExecutor {
+                             )
+                         }
+                         dispatcher.set_unparker(unparker.clone());
++                        // A task woken from another thread after the empty
++                        // tick above, but before the unparker was registered,
++                        // found nothing to unpark. Look again now that a wake
++                        // will reach this thread, or that task waits forever.
++                        if dispatcher.tick(background_only) {
++                            continue;
++                        }
+                         parker.park();
+                     }
+                 }

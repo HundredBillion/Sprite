@@ -185,6 +185,10 @@ pub struct TerminalView {
     /// nothing about a composition until the person commits it.
     preedit: Option<String>,
     _events: Task<()>,
+    /// Whether the worker is stalled behind the event stream `_events` owns,
+    /// for tests that fill the control lane only once it is.
+    #[cfg(test)]
+    stall_probe: Option<sprite_term::StallProbe>,
     _snapshots: Task<()>,
     _retry: Task<()>,
     retry_wake: async_channel::Sender<()>,
@@ -416,6 +420,8 @@ impl TerminalView {
             link.panes.register(link.pane, link.tab, session.commands());
         }
 
+        #[cfg(test)]
+        let stall_probe = Some(events.stall_probe());
         let event_task = cx.spawn(async move |view, cx| {
             loop {
                 let decision = crate::terminal_events::decide(events.next().await);
@@ -559,6 +565,8 @@ impl TerminalView {
             pane_focus: pane_focus::PaneFocus::default(),
             _focus_observers: focus_observers,
             _events: event_task,
+            #[cfg(test)]
+            stall_probe,
             _snapshots: snapshot_task,
             _retry: retry_task,
             retry_wake,
@@ -650,6 +658,8 @@ impl TerminalView {
             pane_focus: pane_focus::PaneFocus::default(),
             _focus_observers: focus_observers,
             _events: Task::ready(()),
+            #[cfg(test)]
+            stall_probe: None,
             _snapshots: Task::ready(()),
             _retry: Task::ready(()),
             retry_wake: async_channel::bounded(1).0,
@@ -971,6 +981,15 @@ impl TerminalView {
     #[cfg(test)]
     pub(crate) fn bundle_for_test(&self) -> Option<Arc<SnapshotBundle>> {
         self.bundle.clone()
+    }
+
+    /// Whether this view's worker is stalled behind its event stream. False
+    /// for a view that never started a session of its own.
+    #[cfg(test)]
+    pub(crate) fn worker_stalled_for_test(&self) -> bool {
+        self.stall_probe
+            .as_ref()
+            .is_some_and(sprite_term::StallProbe::worker_stalled)
     }
 
     #[cfg(test)]
