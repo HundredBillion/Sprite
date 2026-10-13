@@ -29,6 +29,7 @@ pub(crate) struct TestWindowState {
     moved_callback: Option<Box<dyn FnMut()>>,
     input_handler: Option<PlatformInputHandler>,
     is_fullscreen: bool,
+    scale_factor: f32,
 }
 
 #[derive(Clone)]
@@ -74,6 +75,7 @@ impl TestWindow {
             moved_callback: None,
             input_handler: None,
             is_fullscreen: false,
+            scale_factor: 2.0,
         })))
     }
 
@@ -84,6 +86,21 @@ impl TestWindow {
             return;
         };
         lock.bounds.size = size;
+        drop(lock);
+        callback(size, scale_factor);
+        self.0.lock().resize_callback = Some(callback);
+    }
+
+    /// Moves the window to a display with another scale factor. As macOS does
+    /// when the window's backing properties change, the resize callback hears
+    /// the unchanged content size with the new scale.
+    pub fn simulate_scale_factor(&mut self, scale_factor: f32) {
+        let mut lock = self.0.lock();
+        lock.scale_factor = scale_factor;
+        let Some(mut callback) = lock.resize_callback.take() else {
+            return;
+        };
+        let size = lock.bounds.size;
         drop(lock);
         callback(size, scale_factor);
         self.0.lock().resize_callback = Some(callback);
@@ -134,7 +151,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn scale_factor(&self) -> f32 {
-        2.0
+        self.0.lock().scale_factor
     }
 
     fn appearance(&self) -> WindowAppearance {

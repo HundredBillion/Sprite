@@ -10,7 +10,9 @@ metadata, are preserved. Exact `=0.2.2` and existing features remain unchanged.
 
 `patches/gpui-0.2.2-native-text.patch` is the complete additive input-origin
 patch. `patches/gpui-0.2.2-should-terminate.patch` follows it (see "Should-terminate
-hook" below); `PATCHES` in the checker lists both in application order.
+hook" below), and `patches/gpui-0.2.2-test-scale-factor.patch` follows that (see
+"Test window scale factor" below); `PATCHES` in the checker lists all three in
+application order.
 `python3 scripts/check_gpui_patch.py` verifies every byte of the local
 tree against the checksum-verified archive after replaying each unified hunk at its exact lines and context, without
 offset/fuzz, including additions and unexpected files. The checker uses Python 3.9+
@@ -89,6 +91,26 @@ It edits published files only and adds none.
 The delegate method runs only on a macOS desktop. Hosted macOS CI compiles it;
 the manual Dock-quit check recorded in the PR evidence executes it. Tests drive
 the test platform, not AppKit.
+
+## Test window scale factor
+
+`patches/gpui-0.2.2-test-scale-factor.patch` applies to the tree the
+should-terminate patch produces; its line numbers are that tree's. It changes
+the test platform only, so no shipped code path changes.
+
+- test `window.rs`: the test window keeps its scale factor in its state,
+  starting at the 2.0 it always reported, and
+  `TestWindow::simulate_scale_factor` sets it and calls the resize callback
+  with the unchanged content size and the new scale. That is what the macOS
+  window does when its backing properties change
+  (`view_did_change_backing_properties`), and GPUI answers both with
+  `Window::bounds_changed`, which reads the new scale and refreshes the window.
+- `test_context.rs`: `TestAppContext::simulate_window_scale_factor` and
+  `VisualTestContext::simulate_scale_factor`, beside the existing resize
+  simulations.
+
+Sprite uses it to test that Kitty placeholder tiles stay on their cells when a
+window moves between displays of different scale.
 
 ## Execution limits
 

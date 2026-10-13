@@ -249,10 +249,12 @@ than the no-op backend. Sprite's development dependency also enables
 
 **Local patches.** The exact published 0.2.2 archive is retained in
 `vendor/gpui`, with its Apache license, a narrow recorded native-commit/key-
-fallback patch, and a macOS should-terminate hook (ADR 0032).
-`scripts/check_gpui_patch.py` verifies the complete source against the
-SHA256-pinned archive plus `patches/gpui-0.2.2-native-text.patch` and then
-`patches/gpui-0.2.2-should-terminate.patch`;
+fallback patch, a macOS should-terminate hook (ADR 0032), and a test-platform
+scale-factor simulation. `scripts/check_gpui_patch.py` verifies the complete
+source against the SHA256-pinned archive plus, in order,
+`patches/gpui-0.2.2-native-text.patch`,
+`patches/gpui-0.2.2-should-terminate.patch` and
+`patches/gpui-0.2.2-test-scale-factor.patch`;
 CI runs this and its tamper-negative/source trace tests. Cargo.lock changes only
 GPUI's registry source/checksum removal for the local path. Existing versions
 and features remain unchanged. See ADR0027 and `vendor/gpui.provenance.md` for

@@ -1,0 +1,76 @@
+--- a/src/app/test_context.rs
++++ b/src/app/test_context.rs
+@@ -331,6 +331,12 @@
+         self.test_window(window_handle).simulate_resize(size);
+     }
+ 
++    /// Simulates the window moving to a display with another scale factor.
++    pub fn simulate_window_scale_factor(&self, window_handle: AnyWindowHandle, scale_factor: f32) {
++        self.test_window(window_handle)
++            .simulate_scale_factor(scale_factor);
++    }
++
+     /// Causes the given sources to be returned if the application queries for screen
+     /// capture sources.
+     pub fn set_screen_capture_sources(&self, sources: Vec<TestScreenCaptureSource>) {
+@@ -810,6 +816,11 @@
+     /// Simulates the user resizing the window to the new size.
+     pub fn simulate_resize(&self, size: Size<Pixels>) {
+         self.simulate_window_resize(self.window, size)
++    }
++
++    /// Simulates the window moving to a display with another scale factor.
++    pub fn simulate_scale_factor(&self, scale_factor: f32) {
++        self.simulate_window_scale_factor(self.window, scale_factor)
+     }
+ 
+     /// debug_bounds returns the bounds of the element with the given selector.
+--- a/src/platform/test/window.rs
++++ b/src/platform/test/window.rs
+@@ -29,6 +29,7 @@
+     moved_callback: Option<Box<dyn FnMut()>>,
+     input_handler: Option<PlatformInputHandler>,
+     is_fullscreen: bool,
++    scale_factor: f32,
+ }
+ 
+ #[derive(Clone)]
+@@ -74,6 +75,7 @@
+             moved_callback: None,
+             input_handler: None,
+             is_fullscreen: false,
++            scale_factor: 2.0,
+         })))
+     }
+ 
+@@ -89,6 +91,21 @@
+         self.0.lock().resize_callback = Some(callback);
+     }
+ 
++    /// Moves the window to a display with another scale factor. As macOS does
++    /// when the window's backing properties change, the resize callback hears
++    /// the unchanged content size with the new scale.
++    pub fn simulate_scale_factor(&mut self, scale_factor: f32) {
++        let mut lock = self.0.lock();
++        lock.scale_factor = scale_factor;
++        let Some(mut callback) = lock.resize_callback.take() else {
++            return;
++        };
++        let size = lock.bounds.size;
++        drop(lock);
++        callback(size, scale_factor);
++        self.0.lock().resize_callback = Some(callback);
++    }
++
+     pub(crate) fn simulate_active_status_change(&self, active: bool) {
+         let mut lock = self.0.lock();
+         let Some(mut callback) = lock.active_status_change_callback.take() else {
+@@ -134,7 +151,7 @@
+     }
+ 
+     fn scale_factor(&self) -> f32 {
+-        2.0
++        self.0.lock().scale_factor
+     }
+ 
+     fn appearance(&self) -> WindowAppearance {

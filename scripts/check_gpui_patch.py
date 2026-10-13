@@ -11,7 +11,11 @@ CHECKSUM = "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707"
 ROOT = Path(__file__).resolve().parents[1]
 # Applied in this order; each patch's line numbers are those of the tree the
 # patches before it produce.
-PATCHES = ("gpui-0.2.2-native-text.patch", "gpui-0.2.2-should-terminate.patch")
+PATCHES = (
+    "gpui-0.2.2-native-text.patch",
+    "gpui-0.2.2-should-terminate.patch",
+    "gpui-0.2.2-test-scale-factor.patch",
+)
 
 
 def archive_path(fetch=False):
