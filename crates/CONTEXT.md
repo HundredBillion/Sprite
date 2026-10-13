@@ -97,6 +97,14 @@ cleanup after a Pane leaves the layout; its last window stays alive until
 removed and present Pane cleanup completes.
 _Avoid_: workspace, session, terminal window
 
+**Quit Request**:
+Any request to end Sprite: the quit key, Quit from the Dock or the menu bar,
+or the system ending the session at logout, restart or shutdown. Every Quit
+Request gets the same answer: when a Pane is running a program, the question
+goes on screen and this request is refused, so the next Quit Request answers
+it; otherwise Sprite ends once present Pane cleanup completes.
+_Avoid_: close (that ends a Pane, tab or window), terminate, exit
+
 **Pane Observation**:
 Protected, local, read-only access by a process launched inside Sprite to Pane
 content in the same Sprite Window. It never grants control of a Pane or its

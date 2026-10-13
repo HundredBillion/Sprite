@@ -63,7 +63,9 @@ entry afterwards.
     logout is never left waiting on an unanswered question. The next quit
     request, from the Dock or the key, answers the question.
 
-  Linux behaviour is unchanged.
+  A logout, restart or shutdown is a Quit Request like any other: with a busy
+  pane, it is cancelled and the question shown, as Terminal.app does. The quit
+  reason is not inspected. Linux behaviour is unchanged.
 - R-Q5 Tests:
   - A GPUI test simulates the request with an idle pane and a cleanup gate
     held. It asserts the request has no answer while the gate is held, and is
@@ -82,10 +84,18 @@ entry afterwards.
   or `Refused(reason)`. A pending entry draws nothing. A finished decode
   notifies the view that asked for it. The UI thread never parses or
   rasterises SVG.
+- R-V1a Each cache runs at most `MAX_CONCURRENT_SVG_DECODES` (2) decodes at a
+  time. Further lookups queue in FIFO order. Peak memory for filter
+  intermediates is therefore bounded per cache by two capped decodes, not by
+  the number of images in a description.
 - R-V2 The pixel budgets of ADR 0022 are charged when a decoded image is
   installed. A decode whose result no longer fits the budget is dropped, as
   today. A decode whose entry is no longer wanted (the description changed) is
   discarded when it finishes.
+- R-V2a A document refused by the filter cap (R-V3), or one that does not parse,
+  stays refused for as long as a description draws it, so it is not decoded
+  again on every update. A decode refused only for lack of budget is retried
+  when the next description arrives, as today.
 - R-V3 The background task walks the parsed `usvg` tree before rasterising. It
   counts filter primitives once for every group that applies them, so a shared
   filter counts once per use. A document above `MAX_FILTER_PRIMITIVE_USES` is
