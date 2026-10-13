@@ -1811,19 +1811,7 @@ mod tests {
         });
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
-        // The shape that once took seconds to decode: differently named flood
-        // results, all merged by one feMerge.
-        let floods: String = (0..4)
-            .map(|n| format!("<feFlood flood-color='#{:06x}' result='r{n}'/>", n * 0x40))
-            .collect();
-        let merges: String = (0..4)
-            .map(|n| format!("<feMergeNode in='r{n}'/>"))
-            .collect();
-        let svg = format!(
-            "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'>\
-             <filter id='f' x='0' y='0' width='1' height='1'>{floods}<feMerge>{merges}</feMerge></filter>\
-             <rect width='64' height='64' filter='url(#f)'/></svg>"
-        );
+        let svg = crate::surface::svg_decode::merged_floods(4, 64);
         host.update_in(cx, |view, window, cx| {
             view.open_surface(
                 SurfaceId(5),

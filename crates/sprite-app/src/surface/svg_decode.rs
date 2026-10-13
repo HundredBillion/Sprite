@@ -243,19 +243,35 @@ impl<K: Clone + Eq + Hash> Queue<K> {
 
     /// Installs a finished decode, charging its pixels to the budget, unless
     /// its entry was dropped since it started. A picture the budget can no
-    /// longer hold is refused for lack of budget.
-    fn finish(&mut self, key: &K, ticket: u64, outcome: Result<Arc<RenderImage>, RefusalKind>) {
+    /// longer hold is refused for lack of budget. A decode refused for lack
+    /// of the `given_bytes` it started with goes back to the front of the
+    /// queue if an update has since left more than that free, since the
+    /// refusal describes a budget that no longer applies.
+    fn finish(
+        &mut self,
+        job: Job<K>,
+        given_bytes: usize,
+        outcome: Result<Arc<RenderImage>, RefusalKind>,
+    ) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        let Some(entry) = self.entries.get_mut(key) else {
+        let available = MAX_SURFACE_IMAGE_BYTES.saturating_sub(self.retained_bytes);
+        let Some(entry) = self.entries.get_mut(&job.key) else {
             return;
         };
-        if entry.ticket != ticket {
+        if entry.ticket != job.ticket {
             return;
         }
         entry.state = match outcome {
+            Err(RefusalKind::OverBudget) if available > given_bytes => {
+                let ticket = self.next_ticket;
+                self.next_ticket += 1;
+                entry.ticket = ticket;
+                self.waiting.push_front(Job { ticket, ..job });
+                return;
+            }
             Ok(picture) => {
                 let bytes = raster_bytes(&picture);
-                if bytes > MAX_SURFACE_IMAGE_BYTES.saturating_sub(self.retained_bytes) {
+                if bytes > available {
                     SvgState::Refused(RefusalKind::OverBudget)
                 } else {
                     self.retained_bytes += bytes;
@@ -279,9 +295,10 @@ where
 {
     loop {
         let next = queue.borrow_mut().next_job();
-        let Some((Job { key, ticket, svg }, target_width, available_bytes)) = next else {
+        let Some((job, target_width, available_bytes)) = next else {
             return;
         };
+        let svg = Arc::clone(&job.svg);
         let decoding = cx
             .background_executor()
             .spawn(async move { decode(&svg, target_width, available_bytes) });
@@ -291,7 +308,7 @@ where
             let Some(queue) = weak.upgrade() else {
                 return;
             };
-            queue.borrow_mut().finish(&key, ticket, outcome);
+            queue.borrow_mut().finish(job, available_bytes, outcome);
             view.update(cx, |_, cx| {
                 start_waiting(&queue, cx);
                 cx.notify();

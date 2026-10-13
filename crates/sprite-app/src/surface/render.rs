@@ -1340,4 +1340,94 @@ mod tests {
         assert!(cache.image_for(&svg(1)).is_some());
         assert_eq!(cache.retained_bytes(), 4 * 4 * 4);
     }
+
+    #[gpui::test]
+    fn a_decode_refused_for_a_budget_an_update_has_since_freed_is_tried_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        // Each one is a distinct 16 MiB raster: four fill the 64 MiB budget.
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2048' height='2048'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = |numbers: &[usize]| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"box","children":numbers
+                    .iter()
+                    .map(|n| json!({"kind":"image","svg":svg(*n)}))
+                    .collect::<Vec<_>>()}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let owner = cx.new(|_| Owner);
+        let mut cache = ElementImageCache::default();
+        let full = document(&[0, 1, 2, 3]);
+        draw_frame(cx, &owner, &mut cache, &full, &registry, &connection);
+        cx.run_until_parked();
+        assert_eq!(cache.retained_bytes(), 64 * 1024 * 1024);
+
+        // The fifth image starts with no budget left...
+        let crowded = document(&[0, 1, 2, 3, 4]);
+        cache.retain_drawn_by(&crowded);
+        draw_frame(cx, &owner, &mut cache, &crowded, &registry, &connection);
+        assert_eq!(cache.queue().in_flight(), 1);
+        // ...and an update frees the whole budget before it finishes.
+        cache.retain_drawn_by(&document(&[4]));
+        assert_eq!(cache.retained_bytes(), 0);
+        cx.run_until_parked();
+        assert!(
+            matches!(cache.state_for(&svg(4)), Some(SvgState::Ready(_))),
+            "the refusal came from a budget that is no longer the one left: {:?}",
+            cache.state_for(&svg(4))
+        );
+        assert_eq!(cache.retained_bytes(), 16 * 1024 * 1024);
+    }
+
+    #[gpui::test]
+    fn a_decode_for_an_image_dropped_and_drawn_again_is_installed_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (ours, _peer) = UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&ours).unwrap();
+        let registry = TokenRegistry::new(&Colors::default());
+        let svg = |n: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><desc>{n}</desc></svg>"
+            )
+        };
+        let document = |n: usize| {
+            description::parse(
+                &json!({"version":1,"root":{"kind":"image","svg":svg(n)}}),
+                &registry,
+            )
+            .unwrap()
+            .description
+        };
+        let owner = cx.new(|_| Owner);
+        let mut cache = ElementImageCache::default();
+        let drawn = document(0);
+
+        draw_frame(cx, &owner, &mut cache, &drawn, &registry, &connection);
+        cache.retain_drawn_by(&document(1));
+        cache.retain_drawn_by(&drawn);
+        draw_frame(cx, &owner, &mut cache, &drawn, &registry, &connection);
+        assert_eq!(
+            cache.queue().in_flight(),
+            2,
+            "the dropped decode and the new one both run"
+        );
+        cx.run_until_parked();
+        assert!(cache.image_for(&svg(0)).is_some());
+        assert_eq!(
+            cache.retained_bytes(),
+            4 * 4 * 4,
+            "only the decode the entry is waiting for was installed"
+        );
+    }
 }
