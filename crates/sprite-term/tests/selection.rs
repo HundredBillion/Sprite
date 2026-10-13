@@ -462,9 +462,8 @@ fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
         ]),
     );
     // The smallest nonzero budget: libghostty keeps scrollback in whole pages
-    // and prunes the oldest, which is what evicts the anchored line. (A zero
-    // budget rotates rows in place, reusing the anchored line rather than
-    // evicting it, so a pin there would silently re-anchor.)
+    // and prunes the oldest, which is what evicts the anchored line. A zero
+    // budget rotates rows in place instead; the rotation tests below cover it.
     config.scrollback_bytes = 4 * 1024;
     let sprite_term::Spawned {
         mut session,
@@ -501,6 +500,164 @@ fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
         .send(TerminalCommand::CopySelection)
         .expect("copy the selection");
     assert_eq!(copied(&events), "", "an evicted anchor selects nothing");
+}
+
+/// Drives one gesture across a stream of output. It presses on `ANCHOR-TEXT`
+/// once `ready` is on screen, releases the child to stream until
+/// `STREAM-DONE`, then extends the gesture to `head` and copies.
+/// Returns the row the press landed on and what the copy carried.
+fn press_then_stream(config: SessionConfig, ready: &str, head: CellPosition) -> (u16, String) {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+
+    let before = snapshots.wait_for("the anchor line", |bundle| row_of(bundle, ready).is_some());
+    let pressed = at(row_of(&before, "ANCHOR-TEXT").expect("anchor row"), 0);
+    session
+        .send(TerminalCommand::BeginSelection { anchor: pressed })
+        .expect("press");
+    session
+        .send(TerminalCommand::Input(b"go\n".to_vec()))
+        .expect("release the child");
+    let after = snapshots.wait_for("the end of the stream", |bundle| {
+        row_of(bundle, "STREAM-DONE").is_some()
+    });
+    assert_eq!(
+        row_of(&after, "ANCHOR-TEXT"),
+        None,
+        "the anchor line scrolled out of the pane"
+    );
+
+    session
+        .send(TerminalCommand::Select {
+            anchor: pressed,
+            head,
+            mode: SelectionMode::Character,
+            rectangle: false,
+        })
+        .expect("extend the gesture");
+    session
+        .send(TerminalCommand::CopySelection)
+        .expect("copy the selection");
+    (pressed.row, copied(&events))
+}
+
+/// A pane that keeps no history scrolls by rotating rows in place: the
+/// anchored row is reused, not evicted, so its pin keeps a value. The gesture
+/// still selects nothing rather than extending from whatever rotated in.
+#[test]
+fn a_gesture_whose_anchor_was_rotated_out_with_zero_scrollback_selects_nothing() {
+    let mut config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
+             seq 1 100; printf 'STREAM-DONE'; sleep 30",
+        ]),
+    );
+    config.scrollback_bytes = 0;
+    let (_, text) = press_then_stream(config, "READY", at(0, 3));
+    assert_eq!(text, "", "a rotated-out anchor selects nothing");
+}
+
+/// The alternate screen never keeps history, so it always scrolls by rotation;
+/// a gesture there must notice its row was reused just as a primary screen
+/// without scrollback does.
+#[test]
+fn a_gesture_whose_anchor_was_rotated_out_on_the_alternate_screen_selects_nothing() {
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf '\\033[?1049h\\033[HANCHOR-TEXT\\nREADY'; IFS= read -r go; \
+             seq 1 100; printf 'STREAM-DONE'; sleep 30",
+        ]),
+    );
+    let (_, text) = press_then_stream(config, "READY", at(0, 3));
+    assert_eq!(text, "", "a rotated-out anchor selects nothing");
+}
+
+/// A press on the bottom row has no row below it to watch, so its rotation is
+/// detected from the row above. That clears the selection one scroll early,
+/// while the anchored content is still on the top row, and never lets the
+/// gesture extend from a reused row.
+#[test]
+fn a_gesture_anchored_on_the_last_row_is_cleared_before_it_drifts() {
+    let mut config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; seq 1 30; printf 'ANCHOR-TEXT'; IFS= read -r go; \
+             echo; seq 1 100; printf 'STREAM-DONE'; sleep 30",
+        ]),
+    );
+    config.scrollback_bytes = 0;
+    let (pressed, text) = press_then_stream(config, "ANCHOR-TEXT", at(0, 3));
+    assert_eq!(
+        pressed,
+        sprite_term::ValidTerminalSize::DEFAULT.rows() - 1,
+        "the press landed on the bottom row"
+    );
+    assert_eq!(text, "", "a rotated-out anchor selects nothing");
+}
+
+/// A press on the middle row of a wrapped line, on a pane without history.
+/// The stream stops one scroll after the anchored row was rotated out, while
+/// the line's last row sits where the anchor's row was. The gesture must not
+/// extend from that row, even though it belongs to the same line.
+#[test]
+fn a_gesture_anchored_mid_way_down_a_wrapped_line_is_cleared_when_its_row_rotates_out() {
+    // Three rows at 80 columns: 80 `x`s, then `ANCHOR-TEXT` padded to a full
+    // row so it wraps, then `TAIL-OF-THE-LINE`.
+    let line = format!(
+        "{}ANCHOR-TEXT{}TAIL-OF-THE-LINE",
+        "x".repeat(80),
+        " ".repeat(69)
+    );
+    // 30 numbers push the line to rows 20-22 with READY on row 23. `echo`
+    // plus `seq 1 21` is 22 line feeds: 21 bring the anchor's row to row 0,
+    // the 22nd rotates it out and leaves the line's last row there.
+    let mut config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            &format!(
+                "stty -echo; seq 1 30; printf '{line}\\nREADY'; IFS= read -r go; \
+                 echo; seq 1 21; printf 'STREAM-DONE'; sleep 30"
+            ),
+        ]),
+    );
+    config.scrollback_bytes = 0;
+    let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
+    assert_eq!(pressed, 21, "the press landed on the line's middle row");
+    assert_eq!(text, "", "a rotated-out anchor selects nothing");
+}
+
+/// A scroll region with a top margin erases its top row by moving that row's
+/// pin onto the row above the region, so a pressed anchor there would land on
+/// content outside the region. The gesture selects nothing instead.
+#[test]
+fn a_gesture_inside_a_scroll_region_is_cleared_when_its_row_rotates_out() {
+    // Rows 0-1 stay outside the region; the region is rows 2-19 (DECSTBM
+    // 3;20). The cursor waits on the region's bottom row, so the one line
+    // feed after `go` scrolls the region once and erases ANCHOR-TEXT's row.
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf '\\033[1;1HHEADER\\033[2;1HABOVE-REGION\\033[3;1HANCHOR-TEXT\
+             \\033[4;1HREADY\\033[3;20r\\033[20;1H'; IFS= read -r go; \
+             printf '\\nSTREAM-DONE'; sleep 30",
+        ]),
+    );
+    let (pressed, text) = press_then_stream(config, "READY", at(1, 11));
+    assert_eq!(pressed, 2, "the press landed on the region's top row");
+    assert_eq!(text, "", "a rotated-out anchor selects nothing");
 }
 
 /// A pin belongs to the screen that was active when it was taken, so a gesture

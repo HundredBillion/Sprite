@@ -654,8 +654,9 @@ impl Session {
                         None => SelectionAnchor::Cell(anchor),
                     };
                     match apply_selection(terminal, anchor, head, mode, rectangle) {
-                        // `false`: the anchored content was evicted, and the
-                        // selection was cleared rather than moved.
+                        // `false`: the anchored content is gone (evicted, or
+                        // its row rotated away) or the other screen is showing,
+                        // and the selection was cleared rather than moved.
                         Ok(installed) => {
                             *has_selection = installed;
                             pending.mutated();
