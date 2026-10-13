@@ -621,6 +621,15 @@ fn selection_admission_pressure_child(cx: &mut gpui::TestAppContext) {
 /// completes no pass at all is wedged, and the busy status is for that (PRD
 /// R-A3). 128 keystrokes are twice the control lane, so a lane that never
 /// drains is still caught.
+///
+/// Every wait here lasts until a worker pass ends, and a pass may parse
+/// 16 KiB of output first. A debug build of libghostty checks a whole page's
+/// integrity each time a row scrolls, so a pass costs in proportion to its
+/// rows. `yes`'s two-byte lines made eight thousand of them, and on a loaded
+/// runner that outlasted the watchdog: on macOS sixteen 1 KiB reads make up
+/// the pass before the flood's first frame, and on Linux a single 16 KiB read
+/// does. Thirty-two-byte lines make five hundred. The worker still parses far
+/// slower than `yes` writes, so the output permits stay outstanding.
 #[gpui::test]
 fn no_keystroke_is_refused_under_a_sustained_output_flood(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
@@ -629,7 +638,11 @@ fn no_keystroke_is_refused_under_a_sustained_output_flood(cx: &mut gpui::TestApp
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), "yes".into()]),
+            Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("yes {}", "y".repeat(31)).into(),
+            ]),
             settings.clone(),
             Vec::new(),
             None,
