@@ -263,7 +263,17 @@ entry afterwards.
   of after six hours.
 - R-W3 `completed_removed_cleanup_is_pruned_before_shutdown`, which hung CI
   for six hours before #76, is looped under load with the others. If it hangs,
-  it is fixed here.
+  it is fixed here. It hung 2 of 100 runs: GPUI's test-only executor parked
+  after an empty tick without looking again once its unparker was registered,
+  so a task woken from another thread in between never ran. The fix is the
+  recorded patch `patches/gpui-0.2.2-test-block-wakeup.patch`; the shipped
+  executor is unchanged.
+- R-W3a `refused_resize_and_font_reload_retry_the_identical_layout` failed 2 of
+  100 runs under load: its helper took a control lane that stayed full for
+  100 ms as proof of a stalled worker, and a worker that was only descheduled
+  then drained it. The helpers (`saturate_control`, and `saturate` in the
+  view's pressure tests) now read the stall from the session's event mailbox
+  through a test-only probe.
 - R-W4 #57's "done when" is replaced by:
   - each listed test (with `a_refused_reload_is_kept_whole_and_reverted_whole`
     standing in for the deleted `accepted_colors_revert…`) passes 100 looped
@@ -322,6 +332,6 @@ entry afterwards.
   - `scripts/check_findings.py`
   - `scripts/check_gpui_patch.py`
 - Each new regression test, seen to fail at `03b4929` before its fix.
-- The R-W4 loops on Linux under load (Docker `rust:1.97.1-bookworm`).
+- The R-W4 loops on Linux under load, in CI's Arch image (amd64, emulated).
 - The manual Dock-quit check (R-Q5).
 - The PR's hosted Arch and macOS runs, plus five `workflow_dispatch` Arch runs.
