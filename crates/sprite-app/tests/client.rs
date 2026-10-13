@@ -14,6 +14,9 @@
 #[path = "../src/test_blocking_wait.rs"]
 mod test_blocking_wait;
 
+#[path = "../src/test_child.rs"]
+mod test_child;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -668,6 +671,20 @@ fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
 
 #[test]
 fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
+    // The client learns stdout is gone only when its one event write fails.
+    // A child that a parallel test spawns while this test's pipes are made can
+    // inherit the read end: on macOS std marks a new pipe close-on-exec in a second
+    // step, and on Linux every spawned child holds a copy of the pipe until exec.
+    // That write then succeeds and the client rightly waits for more, so this runs
+    // in a process where no other test spawns anything.
+    if std::env::var_os("SPRITE_SURFACE_OUTPUT_FAILURE_CHILD").is_none() {
+        test_child::run_child_test(
+            "surface_output_failure_interrupts_open_stdin_and_partial_json",
+            &[("SPRITE_SURFACE_OUTPUT_FAILURE_CHILD", "1".as_ref())],
+            "the stdout-failure subprocess",
+        );
+        return;
+    }
     use std::io::{BufRead, BufReader, Write};
     for after_opened in [false, true] {
         let mut live = None;
