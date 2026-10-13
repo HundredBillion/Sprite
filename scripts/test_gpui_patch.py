@@ -4,7 +4,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from scripts.check_gpui_patch import ROOT, archive_path, verify
+from unittest import mock
+from scripts.check_gpui_patch import PATCHES, ROOT, archive_path, verify
 
 
 def rust_test(source):
@@ -26,6 +27,12 @@ class GpuiPatchTests(unittest.TestCase):
             (tree / "LICENSE-APACHE").write_text("tampered")
             with self.assertRaisesRegex(ValueError, "LICENSE-APACHE"):
                 verify(tree, archive)
+
+    def test_every_recorded_patch_is_required(self):
+        # Without the should-terminate patch, the files it changes no longer match.
+        with mock.patch("scripts.check_gpui_patch.PATCHES", PATCHES[:1]):
+            with self.assertRaisesRegex(ValueError, "src/platform/mac/platform.rs"):
+                verify(ROOT / "vendor/gpui", archive_path())
 
     def test_cocoa_scope_policy_from_production_source(self):
         helper = ROOT / "vendor/gpui/src/platform/key_text_scope.rs"

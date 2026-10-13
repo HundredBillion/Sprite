@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the local GPUI tree is the published archive plus the recorded patch."""
+"""Verify the local GPUI tree is the published archive plus the recorded patches."""
 import argparse
 import hashlib
 import re
@@ -9,6 +9,9 @@ from pathlib import Path
 
 CHECKSUM = "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707"
 ROOT = Path(__file__).resolve().parents[1]
+# Applied in this order; each patch's line numbers are those of the tree the
+# patches before it produce.
+PATCHES = ("gpui-0.2.2-native-text.patch", "gpui-0.2.2-should-terminate.patch")
 
 
 def archive_path(fetch=False):
@@ -78,7 +81,8 @@ def verify(tree, archive):
     with tarfile.open(archive) as source:
         expected = {member.name.removeprefix("gpui-0.2.2/"): source.extractfile(member).read()
                     for member in source.getmembers() if member.isfile()}
-    expected = apply_exact_patch(expected, (ROOT / "patches/gpui-0.2.2-native-text.patch").read_text())
+    for name in PATCHES:
+        expected = apply_exact_patch(expected, (ROOT / "patches" / name).read_text())
     actual = {str(p.relative_to(tree)): p.read_bytes() for p in tree.rglob("*") if p.is_file()}
     changed = sorted(p for p in expected.keys() | actual.keys() if expected.get(p) != actual.get(p))
     if changed:

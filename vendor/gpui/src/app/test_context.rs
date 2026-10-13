@@ -337,6 +337,13 @@ impl TestAppContext {
         self.test_platform.set_screen_capture_sources(sources);
     }
 
+    /// Simulates the platform asking whether the application may terminate,
+    /// as macOS does for Quit from the Dock or the menu bar, or at logout.
+    /// The returned request records the application's answer.
+    pub fn simulate_should_terminate(&self) -> crate::TestTerminateRequest {
+        self.test_platform.simulate_should_terminate()
+    }
+
     /// Returns all windows open in the test.
     pub fn windows(&self) -> Vec<AnyWindowHandle> {
         self.app.borrow().windows()

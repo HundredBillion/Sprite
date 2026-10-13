@@ -9,7 +9,9 @@ All published files, including `LICENSE-APACHE`, Cargo manifests and source
 metadata, are preserved. Exact `=0.2.2` and existing features remain unchanged.
 
 `patches/gpui-0.2.2-native-text.patch` is the complete additive input-origin
-patch. `python3 scripts/check_gpui_patch.py` verifies every byte of the local
+patch. `patches/gpui-0.2.2-should-terminate.patch` follows it (see "Should-terminate
+hook" below); `PATCHES` in the checker lists both in application order.
+`python3 scripts/check_gpui_patch.py` verifies every byte of the local
 tree against the checksum-verified archive after replaying each unified hunk at its exact lines and context, without
 offset/fuzz, including additions and unexpected files. The checker uses Python 3.9+
 standard-library reads only, without archive extraction or system patch tools. `--fetch` obtains the exact
@@ -57,6 +59,36 @@ were read, including compatibility-only Windows (Sprite supports Unix only).
   retain ordinary replace/default behavior. Windows native origin distinction
   is outside Sprite's supported platforms; no Windows provenance claim is made.
 - `key_dispatch.rs`: test-only existing input handler remains default-compatible.
+
+## Should-terminate hook
+
+`patches/gpui-0.2.2-should-terminate.patch` applies to the tree the native-text
+patch produces; its line numbers are that tree's. It lets the application
+answer macOS before a quit it did not request ends it: Quit from the Dock or
+the menu bar, or the session ending at logout, restart or shutdown (ADR 0032).
+It edits published files only and adds none.
+
+- `platform.rs`: `TerminateReply`, a one-shot allow/cancel answer. It is not
+  `Send`, so it is answered on the main thread. Dropped unanswered, it allows
+  termination, which is the behaviour without the hook. `Platform::on_should_terminate`
+  defaults to doing nothing, so Linux and Windows are unchanged.
+- `app.rs`: `App::on_should_terminate` reaches the app through its weak handle,
+  as `Application::on_reopen` does.
+- macOS `platform.rs`: the delegate implements `applicationShouldTerminate:`.
+  It answers `NSTerminateNow` when no callback is registered or when the app
+  asked to quit through `Platform::quit`, `NSTerminateCancel` while a reply is
+  still unanswered, and otherwise calls the callback and answers
+  `NSTerminateLater`. The reply reaches `replyToApplicationShouldTerminate:`
+  from the main queue, as `quit` sends `terminate:`, so termination never runs
+  inside a borrow of the app state and never precedes `NSTerminateLater`.
+- test `test.rs`, `platform.rs` and `test_context.rs`:
+  `TestAppContext::simulate_should_terminate` makes the delegate's decision
+  and returns a `TestTerminateRequest` whose `answer()` is `Pending`, `Allowed`
+  or `Cancelled`. `TestPlatform::quit` records that the app asked to quit.
+
+The delegate method runs only on a macOS desktop. Hosted macOS CI compiles it;
+the manual Dock-quit check recorded in the PR evidence executes it. Tests drive
+the test platform, not AppKit.
 
 ## Execution limits
 

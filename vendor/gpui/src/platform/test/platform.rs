@@ -10,7 +10,7 @@ use collections::VecDeque;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
@@ -39,6 +39,36 @@ pub(crate) struct TestPlatform {
     #[cfg(target_os = "windows")]
     bitmap_factory: std::mem::ManuallyDrop<IWICImagingFactory>,
     weak: Weak<Self>,
+    should_terminate: RefCell<Option<Box<dyn FnMut(crate::TerminateReply)>>>,
+    terminate_reply_outstanding: Rc<Cell<bool>>,
+    quit_requested: Cell<bool>,
+}
+
+/// How the application answered a should-terminate request from the test
+/// platform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminateAnswer {
+    /// Not answered yet.
+    #[default]
+    Pending,
+    /// The application may terminate.
+    Allowed,
+    /// The application keeps running.
+    Cancelled,
+}
+
+/// A should-terminate request made by
+/// [`TestAppContext::simulate_should_terminate`](crate::TestAppContext::simulate_should_terminate).
+#[derive(Clone, Debug, Default)]
+pub struct TestTerminateRequest {
+    answer: Rc<Cell<TerminateAnswer>>,
+}
+
+impl TestTerminateRequest {
+    /// The application's answer so far.
+    pub fn answer(&self) -> TerminateAnswer {
+        self.answer.get()
+    }
 }
 
 #[derive(Clone)]
@@ -120,7 +150,42 @@ impl TestPlatform {
             #[cfg(target_os = "windows")]
             bitmap_factory,
             text_system,
+            should_terminate: Default::default(),
+            terminate_reply_outstanding: Default::default(),
+            quit_requested: Default::default(),
         })
+    }
+
+    /// Asks the application whether it may terminate, deciding as the macOS
+    /// delegate's `applicationShouldTerminate:` does.
+    pub(crate) fn simulate_should_terminate(&self) -> TestTerminateRequest {
+        let request = TestTerminateRequest::default();
+        if self.quit_requested.get() {
+            request.answer.set(TerminateAnswer::Allowed);
+            return request;
+        }
+        if self.terminate_reply_outstanding.get() {
+            request.answer.set(TerminateAnswer::Cancelled);
+            return request;
+        }
+        let callback = self.should_terminate.borrow_mut().take();
+        let Some(mut callback) = callback else {
+            request.answer.set(TerminateAnswer::Allowed);
+            return request;
+        };
+        self.terminate_reply_outstanding.set(true);
+        let outstanding = self.terminate_reply_outstanding.clone();
+        let answer = request.answer.clone();
+        callback(crate::TerminateReply::new(move |allow| {
+            outstanding.set(false);
+            answer.set(if allow {
+                TerminateAnswer::Allowed
+            } else {
+                TerminateAnswer::Cancelled
+            });
+        }));
+        self.should_terminate.borrow_mut().get_or_insert(callback);
+        request
     }
 
     pub(crate) fn simulate_new_path_selection(
@@ -248,7 +313,9 @@ impl Platform for TestPlatform {
         unimplemented!()
     }
 
-    fn quit(&self) {}
+    fn quit(&self) {
+        self.quit_requested.set(true);
+    }
 
     fn restart(&self, _: Option<PathBuf>) {
         //
@@ -362,6 +429,10 @@ impl Platform for TestPlatform {
     }
 
     fn on_quit(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn on_should_terminate(&self, callback: Box<dyn FnMut(crate::TerminateReply)>) {
+        *self.should_terminate.borrow_mut() = Some(callback);
+    }
 
     fn on_reopen(&self, _callback: Box<dyn FnMut()>) {
         unimplemented!()
