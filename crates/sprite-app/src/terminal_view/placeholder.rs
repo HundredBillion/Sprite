@@ -308,16 +308,45 @@ const DIACRITICS: &[char] = &[
     '\u{1d244}',
 ];
 
-pub(super) fn coordinates(text: &str) -> Option<(u32, u32)> {
+const PLACEHOLDER: char = '\u{10eeee}';
+
+/// What one placeholder cell's diacritics say. Each mark is optional: one that
+/// is missing, or is not in the table, is taken from the cell to the left.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Marks {
+    row: Option<u32>,
+    column: Option<u32>,
+    /// The top eight bits of the image ID.
+    image_high: Option<u8>,
+}
+
+fn diacritic_index(mark: char) -> Option<u32> {
+    DIACRITICS
+        .iter()
+        .position(|candidate| *candidate == mark)
+        .and_then(|index| u32::try_from(index).ok())
+}
+
+/// Reads a placeholder cell's row, column and image-ID high byte marks, in
+/// that order, or `None` when the cell is not a placeholder. Marks after the
+/// third are ignored, and a high-byte mark whose index does not fit in a byte
+/// counts as missing.
+fn placeholder_marks(text: &str) -> Option<Marks> {
     let mut chars = text.chars();
-    if chars.next()? != '\u{10eeee}' {
+    if chars.next()? != PLACEHOLDER {
         return None;
     }
-    let row_mark = chars.next()?;
-    let col_mark = chars.next()?;
-    let row = DIACRITICS.iter().position(|mark| *mark == row_mark)?;
-    let col = DIACRITICS.iter().position(|mark| *mark == col_mark)?;
-    Some((row as u32, col as u32))
+    let row = chars.next().and_then(diacritic_index);
+    let column = chars.next().and_then(diacritic_index);
+    let image_high = chars
+        .next()
+        .and_then(diacritic_index)
+        .and_then(|high| u8::try_from(high).ok());
+    Some(Marks {
+        row,
+        column,
+        image_high,
+    })
 }
 
 pub(super) struct ImageCell<'a> {
@@ -406,11 +435,78 @@ pub(super) fn tile_geometry(
     }
 }
 
-fn rgb_id(color: SnapshotColor) -> Option<u32> {
-    let SnapshotColor::Rgb(color) = color else {
-        return None;
-    };
-    Some((u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b))
+/// The ID a placeholder colour carries: an RGB colour's 24 bits, or a
+/// 256-colour palette index as it is. The default colour carries 0, which as a
+/// placement ID means "none named".
+fn color_id(color: SnapshotColor) -> u32 {
+    match color {
+        SnapshotColor::Default => 0,
+        SnapshotColor::Palette(index) => u32::from(index),
+        SnapshotColor::Rgb(color) => {
+            (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+        }
+    }
+}
+
+/// A stretch of placeholder cells on one row, each continuing the one before
+/// it: Kitty lets a cell leave out marks its left neighbour implies.
+struct Run {
+    /// The image ID's low 24 bits, from the foreground colour.
+    image_low: u32,
+    image_high: Option<u8>,
+    /// From the underline colour; 0 when none is named.
+    placement: u32,
+    row: u32,
+    /// The image column of the run's first cell.
+    column: u32,
+    /// How many cells the run holds so far.
+    width: u32,
+    /// The grid column a cell must sit in to continue the run.
+    next_grid_column: u32,
+}
+
+impl Run {
+    fn start(grid_column: u32, image_low: u32, placement: u32, marks: Marks) -> Self {
+        Self {
+            image_low,
+            image_high: marks.image_high,
+            placement,
+            row: marks.row.unwrap_or(0),
+            column: marks.column.unwrap_or(0),
+            width: 1,
+            next_grid_column: grid_column + 1,
+        }
+    }
+
+    /// Whether a cell continues this run: it must sit right after the run's
+    /// last cell, name the same image and placement, and give no mark that
+    /// disagrees with where the run has reached.
+    fn continues(&self, grid_column: u32, image_low: u32, placement: u32, marks: Marks) -> bool {
+        grid_column == self.next_grid_column
+            && image_low == self.image_low
+            && placement == self.placement
+            && marks.row.is_none_or(|row| row == self.row)
+            && marks
+                .column
+                .is_none_or(|column| column == self.column + self.width)
+            && marks
+                .image_high
+                .is_none_or(|high| Some(high) == self.image_high)
+    }
+
+    fn extend(&mut self) {
+        self.width += 1;
+        self.next_grid_column += 1;
+    }
+
+    /// The image column of the run's newest cell.
+    fn image_column(&self) -> u32 {
+        self.column + self.width - 1
+    }
+
+    fn image_id(&self) -> u32 {
+        self.image_low | (u32::from(self.image_high.unwrap_or(0)) << 24)
+    }
 }
 
 pub(super) fn image_cells<'a>(
@@ -432,29 +528,45 @@ pub(super) fn image_cells<'a>(
         .collect();
     let mut result = Vec::new();
     for (row, cells) in rows.iter().enumerate() {
+        // A run never crosses a row.
+        let mut run: Option<Run> = None;
         for cell in cells.iter() {
-            let Some((image_row, image_column)) = coordinates(&cell.text) else {
+            let Some(marks) = placeholder_marks(&cell.text) else {
+                run = None;
                 continue;
             };
-            let Some(image_id) = rgb_id(cell.style.foreground) else {
-                continue;
+            let grid_column = u32::from(cell.column);
+            let image_low = color_id(cell.style.foreground);
+            let placement_id = color_id(cell.style.underline_color);
+            let current = match run
+                .take()
+                .filter(|previous| previous.continues(grid_column, image_low, placement_id, marks))
+            {
+                Some(mut continued) => {
+                    continued.extend();
+                    continued
+                }
+                None => Run::start(grid_column, image_low, placement_id, marks),
             };
-            let placement_id = rgb_id(cell.style.underline_color).unwrap_or(0);
-            let placement = exact.get(&(image_id, placement_id)).copied().or_else(|| {
-                (placement_id == 0)
-                    .then(|| defaults.get(&image_id).copied())
-                    .flatten()
-            });
-            let Some(placement) = placement else {
-                continue;
-            };
-            result.push(ImageCell {
-                placement,
-                column: cell.column,
-                row,
-                image_column,
-                image_row,
-            });
+            let image_id = current.image_id();
+            let placement = exact
+                .get(&(image_id, current.placement))
+                .copied()
+                .or_else(|| {
+                    (current.placement == 0)
+                        .then(|| defaults.get(&image_id).copied())
+                        .flatten()
+                });
+            if let Some(placement) = placement {
+                result.push(ImageCell {
+                    placement,
+                    column: cell.column,
+                    row,
+                    image_column: current.image_column(),
+                    image_row: current.row,
+                });
+            }
+            run = Some(current);
         }
     }
     result
@@ -495,26 +607,79 @@ mod tests {
         }
     }
 
-    fn row(fg: u32, placement_id: Option<u32>) -> RenderRow {
-        let cell = |text: &str| RenderCell {
+    use std::sync::Arc;
+
+    // Diacritic indexes used below: U+0305 is 0, U+030D is 1, U+030E is 2,
+    // U+0310 is 3.
+    const BARE: &str = "\u{10eeee}";
+
+    fn style(foreground: SnapshotColor, underline_color: SnapshotColor) -> CellStyle {
+        CellStyle {
+            foreground,
+            background: SnapshotColor::Default,
+            underline_color,
+            bold: false,
+            italic: false,
+            faint: false,
+            blink: false,
+            inverse: false,
+            invisible: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+        }
+    }
+
+    fn render_cell(
+        text: &str,
+        width: CellWidth,
+        foreground: SnapshotColor,
+        underline_color: SnapshotColor,
+    ) -> RenderCell {
+        RenderCell {
             text: text.into(),
-            width: CellWidth::Narrow,
+            width,
             selected: false,
-            style: CellStyle {
-                foreground: color(fg),
-                background: SnapshotColor::Default,
-                underline_color: placement_id.map(color).unwrap_or(SnapshotColor::Default),
-                bold: false,
-                italic: false,
-                faint: false,
-                blink: false,
-                inverse: false,
-                invisible: false,
-                strikethrough: false,
-                overline: false,
-                underline: UnderlineStyle::None,
-            },
-        };
+            style: style(foreground, underline_color),
+        }
+    }
+
+    /// A narrow cell with no placement colour.
+    fn narrow(text: &str, foreground: SnapshotColor) -> RenderCell {
+        render_cell(text, CellWidth::Narrow, foreground, SnapshotColor::Default)
+    }
+
+    fn laid_out(cells: Vec<RenderCell>) -> Arc<Vec<PositionedCell>> {
+        lay_out_row(&RenderRow {
+            cells,
+            wrapped: false,
+        })
+        .into()
+    }
+
+    /// Each decoded cell as (grid column, image row, image column, image ID,
+    /// placement ID).
+    fn decoded(
+        rows: &[Arc<Vec<PositionedCell>>],
+        placements: &[Placement],
+    ) -> Vec<(u16, u32, u32, u32, u32)> {
+        image_cells(rows, placements)
+            .iter()
+            .map(|cell| {
+                (
+                    cell.column,
+                    cell.image_row,
+                    cell.image_column,
+                    cell.placement.image,
+                    cell.placement.placement,
+                )
+            })
+            .collect()
+    }
+
+    fn row(fg: u32, placement_id: Option<u32>) -> RenderRow {
+        let underline = placement_id.map(color).unwrap_or(SnapshotColor::Default);
+        let cell = |text: &str| render_cell(text, CellWidth::Narrow, color(fg), underline);
         RenderRow {
             cells: vec![
                 cell("text"),
@@ -526,10 +691,38 @@ mod tests {
     }
 
     #[test]
-    fn decodes_image_placeholder_coordinates() {
-        assert_eq!(coordinates("\u{10eeee}\u{0305}\u{030d}"), Some((0, 1)));
-        assert_eq!(coordinates("ordinary text"), None);
-        assert_eq!(coordinates("\u{10eeee}\u{0305}"), None);
+    fn decodes_whichever_placeholder_diacritics_are_present() {
+        let marks = |row, column, image_high| {
+            Some(Marks {
+                row,
+                column,
+                image_high,
+            })
+        };
+        assert_eq!(
+            placeholder_marks("\u{10eeee}\u{0305}\u{030d}"),
+            marks(Some(0), Some(1), None)
+        );
+        assert_eq!(placeholder_marks("ordinary text"), None);
+        assert_eq!(
+            placeholder_marks("\u{10eeee}\u{0305}"),
+            marks(Some(0), None, None)
+        );
+        assert_eq!(placeholder_marks("\u{10eeee}"), Some(Marks::default()));
+        assert_eq!(
+            placeholder_marks("\u{10eeee}\u{0305}\u{0305}\u{030e}"),
+            marks(Some(0), Some(0), Some(2))
+        );
+        // A mark outside the table counts as missing, not as the end.
+        assert_eq!(
+            placeholder_marks("\u{10eeee}x\u{030d}"),
+            marks(None, Some(1), None)
+        );
+        // Index 296 does not fit the high byte.
+        assert_eq!(
+            placeholder_marks("\u{10eeee}\u{0305}\u{0305}\u{1d244}"),
+            marks(Some(0), Some(0), None)
+        );
     }
 
     #[test]
@@ -552,6 +745,237 @@ mod tests {
         assert_eq!(
             image_cells(&[lay_out_row(&row(1001, Some(3))).into()], &placements).len(),
             2
+        );
+    }
+
+    #[test]
+    fn bare_placeholders_start_at_the_images_corner_and_run_on() {
+        let fg = color(1001);
+        let cells = laid_out(vec![narrow(BARE, fg), narrow(BARE, fg), narrow(BARE, fg)]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(0, 0, 0, 1001, 3), (1, 0, 1, 1001, 3), (2, 0, 2, 1001, 3)]
+        );
+    }
+
+    #[test]
+    fn a_placeholder_without_diacritics_continues_its_left_neighbour() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{030d}\u{0310}", fg),
+            narrow(BARE, fg),
+            narrow(BARE, fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(0, 1, 3, 1001, 3), (1, 1, 4, 1001, 3), (2, 1, 5, 1001, 3)]
+        );
+    }
+
+    #[test]
+    fn a_placeholder_with_only_a_row_diacritic_continues_its_left_neighbour() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{030d}\u{030e}", fg),
+            narrow("\u{10eeee}\u{030d}", fg),
+            narrow("\u{10eeee}\u{030d}", fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(0, 1, 2, 1001, 3), (1, 1, 3, 1001, 3), (2, 1, 4, 1001, 3)]
+        );
+    }
+
+    #[test]
+    fn a_row_diacritic_that_differs_from_its_neighbours_starts_a_new_run() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{0305}\u{030e}", fg),
+            narrow("\u{10eeee}\u{030d}", fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(0, 0, 2, 1001, 3), (1, 1, 0, 1001, 3)]
+        );
+    }
+
+    #[test]
+    fn explicit_neighbours_with_contiguous_columns_form_one_run() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{0305}\u{0305}", fg),
+            narrow("\u{10eeee}\u{0305}\u{030d}", fg),
+            narrow("\u{10eeee}\u{0305}\u{030e}", fg),
+            narrow(BARE, fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![
+                (0, 0, 0, 1001, 3),
+                (1, 0, 1, 1001, 3),
+                (2, 0, 2, 1001, 3),
+                (3, 0, 3, 1001, 3)
+            ]
+        );
+    }
+
+    /// The second cell jumps from column 0 to column 2, so it starts its own
+    /// run; the bare cell after it continues that run, not the first.
+    #[test]
+    fn a_column_jump_starts_a_new_run() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{0305}\u{0305}", fg),
+            narrow("\u{10eeee}\u{0305}\u{030e}", fg),
+            narrow(BARE, fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(0, 0, 0, 1001, 3), (1, 0, 2, 1001, 3), (2, 0, 3, 1001, 3)]
+        );
+    }
+
+    #[test]
+    fn text_between_placeholders_ends_the_run() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{0305}\u{030e}", fg),
+            narrow("A", fg),
+            narrow(BARE, fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(0, 0, 2, 1001, 3), (2, 0, 0, 1001, 3)]
+        );
+    }
+
+    #[test]
+    fn a_run_can_start_after_text() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("A", fg),
+            narrow("B", fg),
+            narrow(BARE, fg),
+            narrow(BARE, fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(2, 0, 0, 1001, 3), (3, 0, 1, 1001, 3)]
+        );
+    }
+
+    /// A wide cell's second column is a spacer, which is not a placeholder,
+    /// so the cell after it starts afresh.
+    #[test]
+    fn a_wide_placeholder_ends_its_run_at_its_spacer() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            render_cell(
+                "\u{10eeee}\u{0305}\u{0305}",
+                CellWidth::Wide,
+                fg,
+                SnapshotColor::Default,
+            ),
+            render_cell("", CellWidth::SpacerTail, fg, SnapshotColor::Default),
+            narrow(BARE, fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3)]),
+            vec![(0, 0, 0, 1001, 3), (2, 0, 0, 1001, 3)]
+        );
+    }
+
+    #[test]
+    fn a_placeholder_for_a_different_image_starts_a_new_run() {
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{030d}\u{030e}", color(1001)),
+            narrow(BARE, color(2002)),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3), placement(2002, 5)]),
+            vec![(0, 1, 2, 1001, 3), (1, 0, 0, 2002, 5)]
+        );
+    }
+
+    #[test]
+    fn a_placeholder_for_a_different_placement_starts_a_new_run() {
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            render_cell(
+                "\u{10eeee}\u{030d}\u{030e}",
+                CellWidth::Narrow,
+                fg,
+                color(3),
+            ),
+            render_cell(BARE, CellWidth::Narrow, fg, color(4)),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3), placement(1001, 4)]),
+            vec![(0, 1, 2, 1001, 3), (1, 0, 0, 1001, 4)]
+        );
+    }
+
+    #[test]
+    fn a_palette_foreground_names_the_image() {
+        let cells = laid_out(vec![narrow(
+            "\u{10eeee}\u{0305}\u{0305}",
+            SnapshotColor::Palette(42),
+        )]);
+        assert_eq!(
+            decoded(&[cells], &[placement(42, 7)]),
+            vec![(0, 0, 0, 42, 7)]
+        );
+    }
+
+    /// Placement 7 is listed last, so it is the image's default; only a
+    /// decoded underline reaches placement 21.
+    #[test]
+    fn a_palette_underline_names_the_placement() {
+        let cells = laid_out(vec![render_cell(
+            "\u{10eeee}\u{0305}\u{0305}",
+            CellWidth::Narrow,
+            SnapshotColor::Palette(42),
+            SnapshotColor::Palette(21),
+        )]);
+        assert_eq!(
+            decoded(&[cells], &[placement(42, 21), placement(42, 7)]),
+            vec![(0, 0, 0, 42, 21)]
+        );
+    }
+
+    #[test]
+    fn the_third_diacritic_is_the_image_ids_high_byte() {
+        let cells = laid_out(vec![narrow(
+            "\u{10eeee}\u{0305}\u{0305}\u{030e}",
+            SnapshotColor::Palette(42),
+        )]);
+        assert_eq!(
+            decoded(&[cells], &[placement(42, 7), placement(33_554_474, 9)]),
+            vec![(0, 0, 0, 33_554_474, 9)]
+        );
+    }
+
+    /// The bare cell and the column-only cell take the first cell's high
+    /// byte; the last cell names high byte 0, which differs, so it starts a
+    /// run of its own and names the plain image.
+    #[test]
+    fn a_placeholder_inherits_its_neighbours_high_byte() {
+        const HIGH: u32 = (2 << 24) | 1001;
+        let fg = color(1001);
+        let cells = laid_out(vec![
+            narrow("\u{10eeee}\u{0305}\u{0305}\u{030e}", fg),
+            narrow(BARE, fg),
+            narrow("\u{10eeee}\u{0305}\u{030e}", fg),
+            narrow("\u{10eeee}\u{0305}\u{0310}\u{0305}", fg),
+        ]);
+        assert_eq!(
+            decoded(&[cells], &[placement(1001, 3), placement(HIGH, 9)]),
+            vec![
+                (0, 0, 0, HIGH, 9),
+                (1, 0, 1, HIGH, 9),
+                (2, 0, 2, HIGH, 9),
+                (3, 0, 3, 1001, 3)
+            ]
         );
     }
 
