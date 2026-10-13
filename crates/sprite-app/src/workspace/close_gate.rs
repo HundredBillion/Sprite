@@ -864,6 +864,33 @@ mod tests {
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
     }
 
+    /// A Quit Request that arrives while the quit key's shutdown is already
+    /// running is answered by that shutdown's quit, never sooner.
+    #[gpui::test]
+    fn a_platform_quit_request_during_an_in_flight_shutdown_waits_for_its_cleanup(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (workspace, cx) = test_workspace(cx);
+        let (completed, gates) = gated_panes(&workspace, cx);
+        cx.update(|_, cx| Workspace::answer_platform_quit_requests(&workspace, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.quit(false, window, cx)
+        });
+        let request = cx.simulate_should_terminate();
+        cx.run_until_parked();
+        assert_eq!(
+            request.answer(),
+            gpui::TerminateAnswer::Pending,
+            "allowed while cleanup was still running"
+        );
+        release(&workspace, cx, &gates, 0);
+        release(&workspace, cx, &gates, 1);
+        cx.run_until_parked();
+        assert_eq!(completed.lock().unwrap().len(), 2);
+        assert_eq!(request.answer(), gpui::TerminateAnswer::Allowed);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
     #[gpui::test]
     fn waiting_for_shutdown_refuses_new_tabs_and_splits(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
