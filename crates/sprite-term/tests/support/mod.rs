@@ -372,12 +372,15 @@ impl GraphicsSession {
     }
 
     /// Asks what the pane is holding, without any image data.
+    ///
+    /// Each event has the watchdog; `PROGRESS_CEILING` bounds a pane that keeps
+    /// sending other events and never answers.
     pub fn probe(&mut self) -> GraphicsSnapshot {
         self.session
             .send(TerminalCommand::CaptureGraphics)
             .expect("request graphics");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
+        let started = Instant::now();
+        loop {
             match self.events.next() {
                 TerminalEvent::Graphics(graphics) => return (*graphics).clone(),
                 TerminalEvent::Error(error) => panic!("graphics probe failed: {error}"),
@@ -393,7 +396,10 @@ impl GraphicsSession {
                 | TerminalEvent::Hyperlink { .. }
                 | TerminalEvent::ClipboardWrite(_) => {}
             }
+            assert!(
+                started.elapsed() < PROGRESS_CEILING,
+                "watchdog: no graphics answer arrived over {PROGRESS_CEILING:?}"
+            );
         }
-        panic!("watchdog: no graphics answer arrived");
     }
 }

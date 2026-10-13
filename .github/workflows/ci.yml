@@ -25,6 +25,7 @@ jobs:
   release-automation:
     name: release version automation
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Install shell integration test dependencies
@@ -35,6 +36,9 @@ jobs:
   arch:
     name: arch linux
     runs-on: ubuntu-latest
+    # About twice the longest recent successful run (11.8 min), so a hang
+    # fails in minutes instead of holding the runner for six hours.
+    timeout-minutes: 25
     container:
       # Pinned by digest: a moving tag would silently change the toolchain
       # underneath a build whose whole point is reproducibility.
@@ -161,6 +165,8 @@ jobs:
   macos:
     name: macos
     runs-on: macos-latest
+    # About twice the longest recent successful run (17.8 min).
+    timeout-minutes: 40
     steps:
       - name: Record the runner image
         run: |

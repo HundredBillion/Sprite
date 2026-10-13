@@ -5,7 +5,7 @@ fn submit_probe(commands: sprite_term::CommandSender, command: TerminalCommand) 
     let sender = std::thread::spawn(move || {
         tx.send(commands.send(command)).ok();
     });
-    rx.recv_timeout(std::time::Duration::from_secs(5))
+    rx.recv_timeout(crate::test_blocking_wait::watchdog())
         .expect("probe admission deadline")
         .expect("probe command accepted");
     sender.join().unwrap();
@@ -84,7 +84,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
     while writes < 100 {
         if matches!(
             events_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(crate::test_blocking_wait::watchdog())
                 .unwrap(),
             sprite_term::TerminalEvent::ClipboardWrite(_)
         ) {
@@ -93,7 +93,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
     }
     let bundle = loop {
         let bundle = snapshots_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(crate::test_blocking_wait::watchdog())
             .unwrap();
         if bundle.pane.rows.iter().any(|row| row.text.contains("LINK")) {
             break bundle;
@@ -114,7 +114,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
         uri,
         span,
     } = events_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(crate::test_blocking_wait::watchdog())
         .unwrap()
     else {
         panic!("expected real terminal link resolution");
@@ -345,7 +345,7 @@ fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppConte
     );
     assert!(restored.render.cursor.blinking);
     ready_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(crate::test_blocking_wait::watchdog())
         .expect("complete child response");
     let commands = view.update(cx, |view, _| match &view.session {
         SessionState::Running(session) => session.commands(),
@@ -359,7 +359,7 @@ fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppConte
         },
     );
     let settled = history_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(crate::test_blocking_wait::watchdog())
         .unwrap();
     view.update_in(cx, |view, window, cx| {
         view.apply_settings(&settings, window, cx);
@@ -372,7 +372,7 @@ fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppConte
         },
     );
     let unchanged = history_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(crate::test_blocking_wait::watchdog())
         .unwrap();
     assert_eq!(
         unchanged.generation, settled.generation,
@@ -469,7 +469,7 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
         }
     };
     wait_for_text("INPUT_READY");
-    let retry_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let retry_deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
     while !view.update_in(cx, |view, window, _| {
         view.set_allocated(allocated);
         view.synchronise_size(window);
