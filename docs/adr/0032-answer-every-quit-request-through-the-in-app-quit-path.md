@@ -18,6 +18,12 @@ quit that Sprite itself requests after its cleanup is not intercepted a second
 time. A logout, restart or shutdown is treated like any other Quit Request:
 Sprite does not inspect the quit reason, which is how Terminal.app behaves.
 
+A reply dropped without an answer allows the quit, which is how Sprite behaved
+before this hook. Cancelling on drop was rejected because a lost reply would
+then refuse every later Dock Quit and block logout until the user forced Sprite
+to quit. While a reply is unanswered, a further request is cancelled at once,
+so Sprite holds at most one.
+
 Rejected: GPUI's `on_app_quit` with a longer `SHUTDOWN_TIMEOUT`. Shutdown
 cannot be cancelled once it has begun, so Sprite could not ask about a busy
 Pane. The wait would also block the main thread for up to `GIVE_UP_AFTER`
