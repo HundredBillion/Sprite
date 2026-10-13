@@ -77,47 +77,95 @@ fn placement_element(
     )
 }
 
-fn placeholder_element(
-    cell: &super::placeholder::ImageCell<'_>,
+/// One placeholder tile as render finds it: the image, the cell it fills and
+/// which part of the picture shows there. Where that lands in the window is
+/// decided when it is painted, against the grid's corner in that frame.
+pub(super) struct PlaceholderTile {
     texture: Arc<gpui::RenderImage>,
-    image: &sprite_term::ImagePixels,
-    grid_origin: gpui::Point<Pixels>,
+    placement: sprite_term::Placement,
+    column: u16,
+    row: usize,
+    image_column: u32,
+    image_row: u32,
+    fit: super::placeholder::ImageFit,
+}
+
+impl PlaceholderTile {
+    /// The tile's bounds, which clip the picture, and the picture's own, in
+    /// window coordinates, for a grid whose corner is at `grid_origin`.
+    fn bounds(
+        &self,
+        grid_origin: gpui::Point<Pixels>,
+        cell_width: Pixels,
+        cell_height: Pixels,
+        scale: f32,
+    ) -> (gpui::Bounds<Pixels>, gpui::Bounds<Pixels>) {
+        let cell = super::placeholder::ImageCell {
+            placement: &self.placement,
+            column: self.column,
+            row: self.row,
+            image_column: self.image_column,
+            image_row: self.image_row,
+        };
+        let tile = super::placeholder::tile_geometry(
+            &cell,
+            &self.fit,
+            grid_origin,
+            cell_width,
+            cell_height,
+            scale,
+        );
+        let corner = grid_origin + gpui::point(tile.left, tile.top);
+        (
+            gpui::Bounds::new(corner, gpui::size(tile.width, tile.height)),
+            gpui::Bounds::new(
+                corner + gpui::point(tile.image_left, tile.image_top),
+                gpui::size(px(self.fit.width), px(self.fit.height)),
+            ),
+        )
+    }
+}
+
+/// Paints placeholder tiles against the grid's corner as this frame laid it
+/// out, the way `GridPaint` snaps the cells beside them. The element covers
+/// the grid box from its corner, so its bounds' origin is that corner, at
+/// whatever scale this frame is drawn. Whole device pixels throughout: a tile
+/// can neither leave a seam against its neighbour nor sit half a pixel off
+/// its cell.
+fn placeholder_tiles(
+    tiles: Vec<PlaceholderTile>,
     cell_width: Pixels,
     cell_height: Pixels,
-    scale: f32,
-) -> Option<gpui::Div> {
-    let placement = cell.placement;
-    if cell.image_column >= placement.columns || cell.image_row >= placement.rows {
-        return None;
-    }
-    let fit = super::placeholder::fit_image(
-        image.width,
-        image.height,
-        placement.columns as f32 * f32::from(cell_width),
-        placement.rows as f32 * f32::from(cell_height),
-    )?;
-    // Whole device pixels throughout, on the grid the cells are painted on:
-    // taffy then has nothing to round, and a tile can neither leave a seam
-    // against its neighbour nor sit half a pixel off its cell.
-    let tile =
-        super::placeholder::tile_geometry(cell, &fit, grid_origin, cell_width, cell_height, scale);
-    Some(
-        div()
-            .absolute()
-            .left(tile.left)
-            .top(tile.top)
-            .w(tile.width)
-            .h(tile.height)
-            .overflow_hidden()
-            .child(
-                img(ImageSource::Render(texture))
-                    .absolute()
-                    .left(tile.image_left)
-                    .top(tile.image_top)
-                    .w(px(fit.width))
-                    .h(px(fit.height)),
-            ),
+    #[cfg(test)] painted: TileLog,
+) -> impl IntoElement {
+    canvas(
+        |_bounds, _window, _cx| {},
+        move |bounds, (), window, _cx| {
+            let scale = window.scale_factor();
+            for tile in &tiles {
+                let (clip, picture) = tile.bounds(bounds.origin, cell_width, cell_height, scale);
+                #[cfg(test)]
+                painted.borrow_mut().push((tile.column, tile.row, clip));
+                window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
+                    // A texture the sprite atlas cannot take leaves its tile
+                    // blank, as GPUI's own image element does.
+                    window
+                        .paint_image(
+                            picture,
+                            gpui::Corners::default(),
+                            Arc::clone(&tile.texture),
+                            0,
+                            false,
+                        )
+                        .ok();
+                });
+            }
+        },
     )
+    .absolute()
+    .left(px(0.0))
+    .top(px(0.0))
+    .size_full()
 }
 
 impl TerminalView {
@@ -170,21 +218,24 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The images to draw, grouped by the band they belong to.
+    /// The images to draw, grouped by the band they belong to, and the
+    /// placeholder tiles, which sit below the text after that band's fixed
+    /// placements.
     ///
     /// Virtual placements draw only where a matching Unicode placeholder cell
-    /// appears; fixed placements retain their own viewport coordinates.
+    /// appears; fixed placements retain their own viewport coordinates. A
+    /// tile is described in cells here and placed in the window when it is
+    /// painted, because only layout knows where the grid's corner is.
     pub(super) fn image_layers(
         &self,
         rows: &[std::sync::Arc<Vec<PositionedCell>>],
-        grid_origin: gpui::Point<Pixels>,
         cell_width: Pixels,
         cell_height: Pixels,
-        scale: f32,
-    ) -> [Vec<gpui::Div>; 3] {
+    ) -> ([Vec<gpui::Div>; 3], Vec<PlaceholderTile>) {
         let mut layers = [Vec::new(), Vec::new(), Vec::new()];
+        let mut tiles = Vec::new();
         let Some(frame) = self.bundle.as_ref().and_then(|b| b.graphics.as_ref()) else {
-            return layers;
+            return (layers, tiles);
         };
 
         for placement in &frame.placements {
@@ -218,25 +269,35 @@ impl TerminalView {
             layers[band].push(element);
         }
         for cell in super::placeholder::image_cells(rows, &frame.placements) {
-            let Some(image) = frame.image(cell.placement.image) else {
+            let placement = cell.placement;
+            if cell.image_column >= placement.columns || cell.image_row >= placement.rows {
+                continue;
+            }
+            let Some(image) = frame.image(placement.image) else {
                 continue;
             };
             let Some(texture) = self.textures.get(image.id, image.generation) else {
                 continue;
             };
-            if let Some(element) = placeholder_element(
-                &cell,
+            let Some(fit) = super::placeholder::fit_image(
+                image.width,
+                image.height,
+                placement.columns as f32 * f32::from(cell_width),
+                placement.rows as f32 * f32::from(cell_height),
+            ) else {
+                continue;
+            };
+            tiles.push(PlaceholderTile {
                 texture,
-                image.as_ref(),
-                grid_origin,
-                cell_width,
-                cell_height,
-                scale,
-            ) {
-                layers[1].push(element);
-            }
+                placement: *placement,
+                column: cell.column,
+                row: cell.row,
+                image_column: cell.image_column,
+                image_row: cell.image_row,
+                fit,
+            });
         }
-        layers
+        (layers, tiles)
     }
 
     /// Builds textures for the images this generation shows, and lets go of the
@@ -340,22 +401,25 @@ impl Render for TerminalView {
 
         // Images first, because whether any belong below the text decides how
         // the rows themselves are drawn.
-        // Placeholder tiles snap against the grid's corner in the window, as
-        // the painter snaps cells. Layout has not run yet, so that is where
-        // the last frame put it; before the first frame, the pane's own
-        // offset stands in.
-        let grid_origin = self.content_origin.unwrap_or(origin);
-        let [below_background, below_text, above_text] = self.image_layers(
-            &rows,
-            grid_origin,
-            cell_width,
-            cell_height,
-            window.scale_factor(),
-        );
+        let ([below_background, below_text, above_text], tiles) =
+            self.image_layers(&rows, cell_width, cell_height);
         // The split costs an extra pass over the cells, so it is taken only
         // when something actually needs to sit between them. The Kitty default
         // is above the text, so the common case never pays for it.
-        let split = !below_background.is_empty() || !below_text.is_empty();
+        let split = !below_background.is_empty() || !below_text.is_empty() || !tiles.is_empty();
+        #[cfg(test)]
+        self.painted_tiles.borrow_mut().clear();
+        #[cfg(test)]
+        let tiles = (!tiles.is_empty()).then(|| {
+            placeholder_tiles(
+                tiles,
+                cell_width,
+                cell_height,
+                std::rc::Rc::clone(&self.painted_tiles),
+            )
+        });
+        #[cfg(not(test))]
+        let tiles = (!tiles.is_empty()).then(|| placeholder_tiles(tiles, cell_width, cell_height));
 
         let (background_grid, text_grid) =
             GridPaint::prepare(snapshot, rows, &metrics, split, &self.shape_cache);
@@ -400,6 +464,7 @@ impl Render for TerminalView {
             .children(below_background)
             .child(background_grid)
             .children(below_text)
+            .children(tiles)
             .children(text_grid)
             .children(above_text)
             // Composition is drawn at the cursor and nowhere else. It is

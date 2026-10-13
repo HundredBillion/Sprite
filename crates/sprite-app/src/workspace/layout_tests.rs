@@ -477,3 +477,125 @@ fn placement_matching_scales_linearly(cx: &mut gpui::TestAppContext) {
         "{results:?}"
     );
 }
+
+/// A workspace in which every pane draws one Kitty image through two Unicode
+/// placeholder cells, row 0 columns 0 and 1, and then waits.
+fn image_workspace(
+    cx: &mut gpui::TestAppContext,
+) -> (gpui::Entity<super::Workspace>, &mut gpui::VisualTestContext) {
+    // A 1x1 RGBA image as a virtual placement two cells wide. Then its two
+    // placeholder cells: U+10EEEE followed by the row and column diacritics
+    // (U+0305 is 0, U+030D is 1), in the foreground colour that names
+    // image 1.
+    let script = r"printf '\033_Ga=T,U=1,f=32,s=1,v=1,i=1,c=2,r=1,q=2;/////w==\033\\\033[38;2;0;0;1m\364\216\273\256\314\205\314\205\364\216\273\256\314\205\314\215\033[39m'; exec sleep 30";
+    cx.add_window_view(|window, cx| {
+        let mut settings = crate::config::Settings::default();
+        settings.pane_observation.enabled = false;
+        super::Workspace::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            None,
+            window,
+            cx,
+        )
+    })
+}
+
+/// Placeholder tiles land on the cells the frame after a display-scale
+/// change paints. In a 1000x700 window split once, each pane's grid sits
+/// (699 - 42 rows of 16) / 2 = 13.5 logical pixels down. That is a whole
+/// device pixel at 2x but not at 1x, where layout rounds it to 14. The
+/// window moves to a 1x display, and GPUI draws once, as it does when macOS
+/// reports the change. The pane without Pane Focus gets no blink to repaint
+/// it, so that one frame is what stays on screen.
+#[gpui::test]
+fn placeholder_tiles_land_on_this_frames_cells_after_a_scale_change(cx: &mut gpui::TestAppContext) {
+    let (workspace, cx) = image_workspace(cx);
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.split(Orientation::Horizontal, window, cx)
+    });
+    cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+    draw_workspace(cx);
+    let (focused, panes) = workspace.read_with(cx, |workspace, _| {
+        (
+            workspace
+                .tabs
+                .active()
+                .and_then(|tree| tree.focus())
+                .unwrap(),
+            workspace
+                .tabs
+                .all_panes()
+                .into_iter()
+                .map(|(_, pane, _)| pane)
+                .collect::<Vec<_>>(),
+        )
+    });
+    let unfocused = panes.into_iter().find(|pane| *pane != focused).unwrap();
+    let view = terminal_view(&workspace, unfocused, cx);
+    let executor = cx.executor();
+    executor.allow_parking();
+    executor.block_test(view.condition::<()>(cx, |view, _| {
+        view.bundle_for_test().is_some_and(|bundle| {
+            bundle.graphics.as_ref().is_some_and(|frame| {
+                frame
+                    .placements
+                    .iter()
+                    .any(|placement| placement.image == 1 && placement.is_virtual)
+            }) && bundle.render.rows.iter().any(|row| {
+                row.cells
+                    .iter()
+                    .any(|cell| cell.text.starts_with('\u{10eeee}'))
+            })
+        })
+    }));
+    draw_workspace(cx);
+    assert!(
+        !view
+            .read_with(cx, |view, _| view.painted_tiles_for_test())
+            .is_empty(),
+        "the unfocused pane painted no placeholder tiles"
+    );
+    let at_two = view
+        .read_with(cx, |view, _| view.content_origin_for_test())
+        .unwrap();
+    assert_eq!(
+        f32::from(at_two.y).fract(),
+        0.5,
+        "the layout no longer puts the grid's corner on a half pixel at 2x: {at_two:?}"
+    );
+
+    // The scale change draws its own frame; the test draws none.
+    cx.simulate_scale_factor(1.0);
+    let (at_one, painted, cells) = view.read_with(cx, |view, _| {
+        let painted = view.painted_tiles_for_test();
+        let cells = painted
+            .iter()
+            .map(|(column, row, _)| view.cell_bounds_for_test(*column, *row, 1.0))
+            .collect::<Vec<_>>();
+        (view.content_origin_for_test(), painted, cells)
+    });
+    let at_one = at_one.unwrap();
+    assert_eq!(
+        f32::from(at_one.y).fract(),
+        0.0,
+        "no frame was drawn at 1x: the grid's corner is still {at_one:?}"
+    );
+    assert!(
+        painted
+            .iter()
+            .any(|(column, row, _)| (*column, *row) == (0, 0)),
+        "the tile at the grid's corner was painted: {painted:?}"
+    );
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (f32::from(a) - f32::from(b)).abs() < 1e-3;
+    for ((column, row, tile), cell) in painted.iter().zip(cells) {
+        let cell = cell.unwrap();
+        assert!(
+            close(tile.origin.x, cell.origin.x)
+                && close(tile.origin.y, cell.origin.y)
+                && close(tile.size.width, cell.size.width)
+                && close(tile.size.height, cell.size.height),
+            "tile ({column}, {row}) painted at {tile:?}, but this frame's cell is {cell:?}"
+        );
+    }
+}
