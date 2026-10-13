@@ -53,19 +53,26 @@ entry afterwards.
   `NSTerminateNow` for it.
 - R-Q3 The GPUI test platform can simulate the platform's should-terminate
   request, so a test crosses the same callback the Cocoa delegate calls.
-- R-Q4 Sprite registers the callback at start-up. It runs the same flow as the
-  quit key: the same busy-pane confirmation, and then `shutdown_and_quit`'s
-  wait on every pending cleanup with the HUP → TERM → KILL escalation. A
-  cancelled confirmation answers cancel. Otherwise the answer is allow, sent
-  once every cleanup has finished. Linux behaviour is unchanged.
+- R-Q4 Sprite registers the callback at start-up. It runs the same decision as
+  the quit key (`Workspace::quit` → `may_close(CloseScope::Quit, …)`):
+  - When no pane is busy, or the request answers an open quit question, the
+    answer is allow. It is sent after `shutdown_and_quit` has waited for every
+    pending cleanup, with the HUP → TERM → KILL escalation.
+  - When a pane is busy and no question is open, the question is put on screen
+    as it is for the quit key, and the answer is cancel, sent at once, so a
+    logout is never left waiting on an unanswered question. The next quit
+    request, from the Dock or the key, answers the question.
+
+  Linux behaviour is unchanged.
 - R-Q5 Tests:
-  - A GPUI test simulates the request with a cleanup gate held. It asserts the
-    request has no answer while the gate is held, and is allowed once the gate
-    is released.
-  - A second GPUI test asserts that a cancelled confirmation answers cancel and
-    leaves the panes running.
+  - A GPUI test simulates the request with an idle pane and a cleanup gate
+    held. It asserts the request has no answer while the gate is held, and is
+    allowed once the gate is released.
+  - A second GPUI test, with a busy pane, asserts that the first request is
+    cancelled with the question on screen, and that a second request is allowed
+    after cleanup.
   - Manual evidence on a macOS desktop: with `sleep 1000` in a pane, Dock →
-    Quit, then `ps` shows the process is gone.
+    Quit twice, then `ps` shows the process is gone.
 
 ## R-V. SVG decoding leaves the UI thread, and filter work is capped (GAP-C03, #63)
 
@@ -82,20 +89,23 @@ entry afterwards.
 - R-V3 The background task walks the parsed `usvg` tree before rasterising. It
   counts filter primitives once for every group that applies them, so a shared
   filter counts once per use. A document above `MAX_FILTER_PRIMITIVE_USES` is
-  refused with a reason. The cap is chosen from measured decode times so that a
+  refused with a reason. The cap is chosen from measured release-build decode times so that a
   document at the cap decodes in under 250 ms on the development machine; the
-  value and that measurement are recorded in the code and in ADR 0022.
+  value and that measurement are recorded in the code and in ADR 0022, not
+  asserted by a test.
 - R-V4 The font database's first load happens in the background task too, not
   on the UI thread.
 - R-V5 ADR 0022 is amended. Decoding is asynchronous, and filter work is
   bounded by counting the uses of filter primitives. Parse cost is bounded by
   the existing message and asset byte limits.
-- R-V6 Tests:
-  - A document rebuilt from round 10 (N named `feFlood` results merged by one
-    `feMerge`) is looked up on the UI thread. The test asserts the call returns
-    in under one frame budget (16 ms) with the entry `Pending`, and the image
-    arrives later. It fails today.
-  - A 128-result document ends up `Refused`.
+- R-V6 Tests. No test asserts on wall-clock time:
+  - A GPUI test looks up a document rebuilt from round 10 (N named `feFlood`
+    results merged by one `feMerge`). Before the test executor runs background
+    work, the entry is `Pending` and nothing has been decoded. After
+    `run_until_parked`, the image is `Ready` and the view was notified. This
+    fails today, because the lookup decodes synchronously.
+  - A 128-result document ends up `Refused`, and the test counter shows it was
+    never rasterised.
   - The existing cache and list-view tests wait for decodes to finish.
 
 ## R-S. A sentinel pin detects a rotated-out anchor (GAP-C06, #66)
