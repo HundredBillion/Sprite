@@ -461,9 +461,13 @@ test = "pane_cleanups_run_together_on_their_own_named_threads"
 [[finding]]
 id = "GAP-C01"
 title = "Dock or system termination may bypass the window cleanup gate"
-status = "open"
+status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-issue = 61
+fixed_by = "fix/close-open-findings"
+test = [
+  "a_platform_quit_request_is_allowed_only_after_pane_cleanup",
+  "a_platform_quit_request_with_a_busy_pane_asks_then_the_next_one_quits",
+]
 
 [[finding]]
 id = "GAP-C02"
@@ -476,16 +480,21 @@ test = "inherited_sprite_endpoint_variables_are_removed"
 [[finding]]
 id = "GAP-C03"
 title = "Small SVG filter documents cost seconds of synchronous decoder work on the UI thread"
-status = "open"
+status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-issue = 63
+fixed_by = "fix/close-open-findings"
+test = [
+  "an_svg_is_decoded_off_the_ui_thread_and_its_view_told_when_it_is_ready",
+  "a_document_over_the_filter_cap_is_refused_never_rasterised_and_not_tried_again",
+]
 
 [[finding]]
 id = "GAP-C04"
 title = "The distribution PKGBUILD labels a fixed version but fetches unpinned git HEAD"
-status = "open"
+status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-issue = 64
+fixed_by = "fix/close-open-findings"
+test = "test_distribution_pkgbuild_pins_the_release_tag"
 
 [[finding]]
 id = "GAP-C05"
@@ -498,23 +507,29 @@ test = "a_failed_start_up_step_discards_the_child"
 [[finding]]
 id = "GAP-C06"
 title = "BCA-26's zero-scrollback anchor drift is reachable: ScrollbackBytes accepts 0"
-status = "open"
+status = "resolved"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
-issue = 66
+fixed_by = "fix/close-open-findings"
+test = [
+  "a_gesture_whose_anchor_was_rotated_out_with_zero_scrollback_selects_nothing",
+  "a_gesture_whose_anchor_was_rotated_out_on_the_alternate_screen_selects_nothing",
+]
 
 [[finding]]
 id = "GAP-C07"
 title = "A slowly draining Surface writer keeps one of the 64 connection slots"
-status = "deferred"
+status = "resolved"
 source = "docs/reviews/pr-58-follow-up.md"
-issue = 67
+fixed_by = "fix/close-open-findings"
+test = "a_reader_slower_than_the_drain_floor_loses_its_slot"
 
 [[finding]]
 id = "GAP-C08"
 title = "Placeholder tiles snap against the previous frame's origin"
-status = "open"
+status = "resolved"
 source = "docs/reviews/pr-58-follow-up.md"
-issue = 68
+fixed_by = "fix/close-open-findings"
+test = "placeholder_tiles_land_on_this_frames_cells_after_a_scale_change"
 
 [[finding]]
 id = "GAP-C09"
@@ -527,9 +542,13 @@ test = "a_refused_admission_says_the_window_is_busy_not_that_it_did_not_answer"
 [[finding]]
 id = "GAP-C10"
 title = "Arch CI fails intermittently on timing-sensitive tests"
-status = "open"
+status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
-issue = 57
+fixed_by = "fix/close-open-findings"
+test = [
+  "a_running_program_is_reported_by_name",
+  "natural_exit_deadline_is_not_renewed_by_continuous_output",
+]
 
 [[finding]]
 id = "GAP-C11"
@@ -561,20 +580,21 @@ test = [
 [[finding]]
 id = "GAP-C14"
 title = "Cached GPUI views per pane"
-status = "deferred"
+status = "wontfix"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
-issue = 73
+reason = "An unchanged pane prepares in about 0.3 ms with no allocations and no shaping (docs/performance/bug-class-audit.md), and shaping_happens_only_for_cells_whose_drawn_text_changed guards that. Caching views would also make a pane miss resizes, because set_allocated does not notify."
 
 [[finding]]
 id = "GAP-C15"
 title = "Divider-drag per-move layout work"
-status = "deferred"
+status = "wontfix"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
-issue = 74
+reason = "The work per move is linear and test-bounded (placement_matching_scales_linearly, title_membership_reconciliation_scales_linearly), and PTY resizes happen only when the drag crosses a cell boundary. The earlier claim that docs/performance/ holds divider-drag numbers was wrong; this reason replaces it."
 
 [[finding]]
 id = "GAP-C16"
 title = "Kitty Unicode-placeholder implicit row and column inheritance"
-status = "deferred"
+status = "resolved"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
-issue = 75
+fixed_by = "fix/close-open-findings"
+test = "a_placeholder_without_diacritics_continues_its_left_neighbour"
