@@ -698,7 +698,7 @@ fn a_gesture_whose_anchor_row_was_deleted_selects_nothing() {
         args(&[
             "-c",
             "stty -echo; printf '\\033[2J\\033[1;1HANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-             printf '\\033[1;1H\\033[MSTREAM-DONE'; sleep 30",
+             printf '\\033[1;1H\\033[M\\033[6;1HSTREAM-DONE'; sleep 30",
         ]),
     );
     let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
@@ -755,7 +755,7 @@ fn a_gesture_whose_anchor_row_was_scrolled_by_scroll_up_in_a_region_selects_noth
         args(&[
             "-c",
             "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[3;1HANCHOR-TEXT\\033[3;20r'; \
-             IFS= read -r go; printf '\\033[3;1H\\033[S\\033[3;1HSTREAM-DONE'; sleep 30",
+             IFS= read -r go; printf '\\033[3;1H\\033[S\\033[6;1HSTREAM-DONE'; sleep 30",
         ]),
     );
     let (pressed, text) = press_then_stream(config, "READY", at(0, 3));

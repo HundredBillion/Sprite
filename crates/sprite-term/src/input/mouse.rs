@@ -249,16 +249,19 @@ pub(crate) fn encode_mouse(
 /// and also the rotation and region-hopping cases the sentinels miss.
 ///
 /// Accepted limits, because a cleared selection is never a wrong one:
-/// - A sentinel pinned on page row 0 stays there when that row is erased, so a
-///   gesture on a screen without history is cleared one scroll before its
-///   own row is erased.
+/// - libghostty keeps a pin on page row 0 in place when that row is erased,
+///   so a sentinel there stays while the anchor moves onto it. That happens on
+///   a screen without history, and also on one with history when a region's
+///   top lands on a page's first row. The gesture is cleared one scroll
+///   before its own row is erased.
 /// - A gesture pressed on the row directly above a scroll region is cleared at
 ///   that region's first scroll and stays cleared.
 /// - A program that redraws the anchor's row in place, such as a progress bar
 ///   or a status line, clears the gesture, and so does a resize that rewraps
 ///   the row.
-/// - Text replaced by identical text goes unnoticed, which is harmless: the
-///   copy is the same.
+/// - Only the anchor's own row is compared, so a row that ends up with the
+///   same text as the anchor's (a blank row, say) goes unnoticed even though
+///   the anchor's real content may have moved elsewhere.
 pub(crate) struct PinnedAnchor {
     tracked: TrackedGridRef,
     /// The row directly above the anchor's; `None` on the top screen row.
