@@ -148,7 +148,10 @@ fn placeholder_tiles(
                 painted.borrow_mut().push((tile.column, tile.row, clip));
                 window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                     // A texture the sprite atlas cannot take leaves its tile
-                    // blank, as GPUI's own image element does.
+                    // blank. GPUI's own image element also logs the error,
+                    // but this crate has no logger, and printing from a
+                    // paint would repeat on every frame, so the error is
+                    // dropped.
                     window
                         .paint_image(
                             picture,
