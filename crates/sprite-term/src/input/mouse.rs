@@ -248,6 +248,13 @@ pub(crate) fn encode_mouse(
 /// under them. The text of the anchor's row, taken at the press, catches that
 /// and also the rotation and region-hopping cases the sentinels miss.
 ///
+/// The sentinels stay alongside the row text because the text alone misses a
+/// rotation when neighbouring rows hold the same text, such as repeated output
+/// lines or blank rows: the row that rotates in under the anchor's pin matches
+/// the text taken at the press, so the anchor would be kept on content it was
+/// never pressed on. The sentinel landing on the anchor's row still shows it
+/// is lost.
+///
 /// Accepted limits, because a cleared selection is never a wrong one:
 /// - libghostty keeps a pin on page row 0 in place when that row is erased,
 ///   so a sentinel there stays while the anchor moves onto it. That happens on
