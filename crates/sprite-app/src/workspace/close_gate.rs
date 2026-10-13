@@ -6,10 +6,15 @@ thread_local! {
     static QUIT_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn quit_app(cx: &mut gpui::App) {
+/// Ends Sprite once pane cleanup has finished: by allowing the platform's
+/// Quit Request when one is waiting, otherwise by asking the platform to quit.
+fn quit_app(reply: Option<gpui::TerminateReply>, cx: &mut gpui::App) {
     #[cfg(test)]
     QUIT_REQUESTS.with(|requests| requests.set(requests.get() + 1));
-    cx.quit();
+    match reply {
+        Some(reply) => reply.allow(),
+        None => cx.quit(),
+    }
 }
 
 /// What each pane cleanup thread is called, so a stuck one can be found by
@@ -128,7 +133,8 @@ impl Workspace {
         }
         let cleanups = self.begin_shutdown(cx);
         if cleanups.is_empty() {
-            quit_app(cx);
+            let reply = self.quit_request.take();
+            quit_app(reply, cx);
             return;
         }
         let finished = cx.background_executor().spawn(async move {
@@ -136,9 +142,15 @@ impl Workspace {
                 cleanup.await;
             }
         });
-        cx.spawn(async move |_workspace, cx| {
+        cx.spawn(async move |workspace, cx| {
             finished.await;
-            cx.update(quit_app).ok();
+            // Taken only now: a Quit Request that arrived while cleanup ran
+            // is answered by this quit.
+            let reply = workspace
+                .update(cx, |workspace, _| workspace.quit_request.take())
+                .ok()
+                .flatten();
+            cx.update(|cx| quit_app(reply, cx)).ok();
         })
         .detach();
     }
@@ -203,6 +215,50 @@ impl Workspace {
     pub(super) fn quit(&mut self, is_held: bool, _window: &mut Window, cx: &mut Context<Self>) {
         if self.may_close(CloseScope::Quit, is_held, cx) {
             self.shutdown_and_quit(cx);
+        }
+    }
+
+    /// Sends every Quit Request the platform asks about through the quit
+    /// key's decision, so a Quit from the Dock or the menu bar, or the session
+    /// ending, asks about running programs and waits for pane cleanup.
+    ///
+    /// Public because start-up lives in the `sprite` binary rather than in
+    /// this library.
+    pub fn answer_platform_quit_requests(workspace: &gpui::Entity<Self>, cx: &mut gpui::App) {
+        let workspace = workspace.downgrade();
+        cx.on_should_terminate(move |reply, cx| {
+            // A window already gone has no panes left to clean up. Its reply
+            // is dropped unanswered, which lets the quit go ahead.
+            workspace
+                .update(cx, |workspace, cx| workspace.answer_quit_request(reply, cx))
+                .ok();
+        });
+    }
+
+    /// Answers one Quit Request from the platform.
+    ///
+    /// With nothing running, or when this request answers the quit question
+    /// already on screen, the reply allows the quit once every pane cleanup
+    /// has finished. With a program running and no question yet, the
+    /// question goes on screen and the reply refuses at once: a logout is
+    /// never left waiting on a question nobody has seen, and the next Quit
+    /// Request answers it.
+    fn answer_quit_request(&mut self, reply: gpui::TerminateReply, cx: &mut Context<Self>) {
+        if self.stopping {
+            // Cleanup is already under way and ends in a quit, which answers
+            // this request. GPUI hands out one reply at a time; were there an
+            // earlier one, refusing it keeps it from ending Sprite first.
+            if let Some(earlier) = self.quit_request.replace(reply) {
+                earlier.cancel();
+            }
+            return;
+        }
+        // A click in the Dock or the menu bar, or the system, is never a held key.
+        if self.may_close(CloseScope::Quit, false, cx) {
+            self.quit_request = Some(reply);
+            self.shutdown_and_quit(cx);
+        } else {
+            reply.cancel();
         }
     }
     /// Whether a close may go ahead now, or must be asked about first.
@@ -344,7 +400,7 @@ impl CloseScope {
         match self {
             Self::Pane | Self::Tab => "press the same keys again",
             Self::Window => "click close again",
-            Self::Quit => "press the same keys again",
+            Self::Quit => "quit again",
         }
     }
 }
@@ -557,7 +613,7 @@ mod tests {
         assert_eq!(CloseScope::Pane.again(), "press the same keys again");
         assert_eq!(CloseScope::Tab.again(), "press the same keys again");
         assert_eq!(CloseScope::Window.again(), "click close again");
-        assert_eq!(CloseScope::Quit.again(), "press the same keys again");
+        assert_eq!(CloseScope::Quit.again(), "quit again");
     }
     /// The quit shortcut asks like any close, and holding it down cannot
     /// answer its own question.
@@ -731,6 +787,80 @@ mod tests {
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
         release(&workspace, cx, &gates, 0);
         assert_eq!(completed.lock().unwrap().len(), 2);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    /// A Quit from the Dock, the menu bar or logout, with nothing running,
+    /// lets the platform end Sprite only once every pane cleanup has finished.
+    #[gpui::test]
+    fn a_platform_quit_request_is_allowed_only_after_pane_cleanup(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let (completed, gates) = gated_panes(&workspace, cx);
+        cx.update(|_, cx| Workspace::answer_platform_quit_requests(&workspace, cx));
+        let request = cx.simulate_should_terminate();
+        cx.run_until_parked();
+        assert_eq!(
+            request.answer(),
+            gpui::TerminateAnswer::Pending,
+            "allowed before cleanup"
+        );
+        release(&workspace, cx, &gates, 0);
+        assert_eq!(
+            request.answer(),
+            gpui::TerminateAnswer::Pending,
+            "allowed with a cleanup still running"
+        );
+        release(&workspace, cx, &gates, 1);
+        assert_eq!(completed.lock().unwrap().len(), 2);
+        assert_eq!(request.answer(), gpui::TerminateAnswer::Allowed);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    /// With a program running, a Quit Request from the platform puts the quit
+    /// question on screen and is refused at once, so a logout never waits on
+    /// a question nobody has seen. The next request answers the question and
+    /// is allowed once pane cleanup has finished.
+    #[gpui::test]
+    fn a_platform_quit_request_with_a_busy_pane_asks_then_the_next_one_quits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let (workspace, cx) = test_workspace(cx);
+        let (completed, gates) = gated_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs.split(Orientation::Horizontal, |_, _| {
+                Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            });
+            workspace.refresh_layout(cx);
+        });
+        cx.update(|_, cx| Workspace::answer_platform_quit_requests(&workspace, cx));
+        let first = cx.simulate_should_terminate();
+        cx.run_until_parked();
+        assert_eq!(
+            first.answer(),
+            gpui::TerminateAnswer::Cancelled,
+            "a busy pane must refuse the first request"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                matches!(workspace.mode, Mode::ConfirmingClose(_)),
+                "the quit question is not on screen"
+            );
+            assert!(!workspace.stopping, "cleanup began before the answer");
+        });
+        let second = cx.simulate_should_terminate();
+        cx.run_until_parked();
+        assert_eq!(
+            second.answer(),
+            gpui::TerminateAnswer::Pending,
+            "allowed before cleanup"
+        );
+        release(&workspace, cx, &gates, 0);
+        release(&workspace, cx, &gates, 1);
+        assert_eq!(completed.lock().unwrap().len(), 2);
+        assert_eq!(second.answer(), gpui::TerminateAnswer::Allowed);
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
     }
 

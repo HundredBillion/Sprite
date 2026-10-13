@@ -122,11 +122,12 @@ fn open_window(args: WindowArgs) {
         window
             .update(cx, |_view, window, cx| {
                 let view = cx.entity();
+                Workspace::answer_platform_quit_requests(&view, cx);
                 window.on_window_should_close(cx, move |_window, cx| {
                     view.update(cx, |view, cx| view.close_window(cx))
                 });
             })
-            .expect("install the close handler");
+            .expect("install the close and quit handlers");
 
         cx.activate(true);
     });
