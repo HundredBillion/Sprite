@@ -20,8 +20,8 @@ use crate::surface::channel::{
 use crate::surface::description::{GuideVisibility, ListBorderSide, ListConfig};
 use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
 #[cfg(test)]
-use crate::surface::render::render_svg;
-use crate::surface::render::{MAX_SURFACE_IMAGE_BYTES, raster_bytes, render_svg_with_budget};
+use crate::surface::svg_decode::render_svg;
+use crate::surface::svg_decode::{MAX_SURFACE_IMAGE_BYTES, decode, raster_bytes};
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -70,11 +70,12 @@ fn sync_image_cache(
         if !images.contains_key(&id)
             && let Some(svg) = assets.get(&id)
         {
-            let picture = render_svg_with_budget(
+            let picture = decode(
                 svg,
                 Some(raster_width),
                 MAX_SURFACE_IMAGE_BYTES - retained_bytes,
-            );
+            )
+            .ok();
             if let Some(picture) = &picture {
                 retained_bytes += raster_bytes(picture);
             }

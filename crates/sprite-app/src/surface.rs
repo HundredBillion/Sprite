@@ -10,6 +10,7 @@ pub(crate) mod lanes;
 pub mod list;
 pub mod render;
 pub mod style;
+pub(crate) mod svg_decode;
 mod wire;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

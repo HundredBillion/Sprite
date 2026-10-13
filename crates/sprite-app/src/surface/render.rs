@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
@@ -22,6 +22,7 @@ use crate::surface::channel::{SurfaceConnection, event_click};
 use crate::surface::description::{Description, Element};
 use crate::surface::grid::GridSurface;
 use crate::surface::style;
+use crate::surface::svg_decode::{self, MAX_SURFACE_IMAGE_BYTES, raster_bytes};
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -85,11 +86,7 @@ impl ElementImageCache {
             self.decodes += 1;
         }
         let available = MAX_SURFACE_IMAGE_BYTES - self.retained_bytes;
-        let picture = if available >= MAX_SVG_RASTER_BYTES {
-            render_svg(svg, None)
-        } else {
-            render_svg_with_budget(svg, None, available)
-        };
+        let picture = svg_decode::decode(svg, None, available).ok();
         if let Some(picture) = &picture {
             self.retained_bytes += raster_bytes(picture);
         }
@@ -304,87 +301,6 @@ thread_local! {
     /// The event name and id of each clickable element this thread has drawn,
     /// in drawing order, so a test can see which id each element was handed.
     static CLICKS_DRAWN: RefCell<Vec<(String, ElementId)>> = const { RefCell::new(Vec::new()) };
-}
-
-/// What a decoded picture holds against the image budget.
-pub(crate) fn raster_bytes(picture: &RenderImage) -> usize {
-    picture.as_bytes(0).map_or(0, <[u8]>::len)
-}
-
-pub(crate) const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_SVG_RASTER_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SVG_RASTER_DIMENSION: f32 = 4096.0;
-
-pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<RenderImage>> {
-    render_svg_with_budget(svg, target_width, MAX_SVG_RASTER_BYTES)
-}
-
-pub(crate) fn render_svg_with_budget(
-    svg: &str,
-    target_width: Option<f32>,
-    available_bytes: usize,
-) -> Option<Arc<RenderImage>> {
-    static FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
-        let mut db = resvg::usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        db.load_font_data(include_bytes!("../../assets/fonts/AdwaitaSans-Regular.ttf").to_vec());
-        db.load_font_data(include_bytes!("../../assets/fonts/AdwaitaSans-Bold.ttf").to_vec());
-        db.set_sans_serif_family("Adwaita Sans");
-        Arc::new(db)
-    });
-    static OPTIONS: LazyLock<resvg::usvg::Options<'static>> = LazyLock::new(|| {
-        let select = resvg::usvg::FontResolver::default_font_selector();
-        resvg::usvg::Options {
-            font_resolver: resvg::usvg::FontResolver {
-                select_font: Box::new(move |font, db| {
-                    if db.is_empty() {
-                        *db = FONT_DB.clone();
-                    }
-                    select(font, db)
-                }),
-                select_fallback: resvg::usvg::FontResolver::default_fallback_selector(),
-            },
-            ..Default::default()
-        }
-    });
-    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &OPTIONS).ok()?;
-    let size = tree.size();
-    let scale = target_width.map_or(1.0, |target| target / size.width());
-    let width = (size.width() * scale).ceil();
-    let height = (size.height() * scale).ceil();
-    if [width, height].iter().any(|dimension| {
-        !dimension.is_finite() || *dimension <= 0.0 || *dimension > MAX_SVG_RASTER_DIMENSION
-    }) {
-        return None;
-    }
-    let width = width as u32;
-    let height = height as u32;
-    let bytes = (width as usize)
-        .checked_mul(height as usize)?
-        .checked_mul(4)?;
-    if bytes > available_bytes.min(MAX_SVG_RASTER_BYTES) {
-        return None;
-    }
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    let width = pixmap.width();
-    let height = pixmap.height();
-    let mut pixels = pixmap.take();
-    for pixel in pixels.chunks_exact_mut(4) {
-        let alpha = pixel[3] as u16;
-        if alpha > 0 && alpha < 255 {
-            for channel in &mut pixel[..3] {
-                *channel = ((*channel as u16 * 255 + alpha / 2) / alpha).min(255) as u8;
-            }
-        }
-        pixel.swap(0, 2);
-    }
-    let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
-    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
 /// What a grid borrows from the pane it lives in, so it is drawn with the same
@@ -645,6 +561,7 @@ mod tests {
 
     use crate::config::Colors;
     use crate::surface::description;
+    use crate::surface::svg_decode::render_svg;
 
     #[test]
     fn svg_raster_refuses_oversized_dimensions_and_bytes() {
