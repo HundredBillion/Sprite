@@ -505,8 +505,13 @@ fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
 /// Drives one gesture across a stream of output. It presses on `ANCHOR-TEXT`
 /// once `ready` is on screen, releases the child to stream until
 /// `STREAM-DONE`, then extends the gesture to `head` and copies.
-/// Returns the row the press landed on and what the copy carried.
-fn press_then_stream(config: SessionConfig, ready: &str, head: CellPosition) -> (u16, String) {
+/// Returns the row the press landed on, the row `ANCHOR-TEXT` ended on (if it
+/// is still on screen) and what the copy carried.
+fn stream_gesture(
+    config: SessionConfig,
+    ready: &str,
+    head: CellPosition,
+) -> (u16, Option<u16>, String) {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -527,11 +532,7 @@ fn press_then_stream(config: SessionConfig, ready: &str, head: CellPosition) -> 
     let after = snapshots.wait_for("the end of the stream", |bundle| {
         row_of(bundle, "STREAM-DONE").is_some()
     });
-    assert_eq!(
-        row_of(&after, "ANCHOR-TEXT"),
-        None,
-        "the anchor line scrolled out of the pane"
-    );
+    let anchor_after = row_of(&after, "ANCHOR-TEXT");
 
     session
         .send(TerminalCommand::Select {
@@ -544,7 +545,35 @@ fn press_then_stream(config: SessionConfig, ready: &str, head: CellPosition) -> 
     session
         .send(TerminalCommand::CopySelection)
         .expect("copy the selection");
-    (pressed.row, copied(&events))
+    (pressed.row, anchor_after, copied(&events))
+}
+
+/// A gesture whose anchored text leaves the pane: see [`stream_gesture`].
+/// Returns the row the press landed on and what the copy carried.
+fn press_then_stream(config: SessionConfig, ready: &str, head: CellPosition) -> (u16, String) {
+    let (pressed, anchor_after, text) = stream_gesture(config, ready, head);
+    assert_eq!(
+        anchor_after, None,
+        "the anchor line scrolled out of the pane"
+    );
+    (pressed, text)
+}
+
+/// A gesture whose anchored text stays on screen at `anchor_row` after the
+/// stream. Returns what the copy carried.
+fn press_then_stream_keeping_anchor(
+    config: SessionConfig,
+    ready: &str,
+    head: CellPosition,
+    anchor_row: u16,
+) -> String {
+    let (_, anchor_after, text) = stream_gesture(config, ready, head);
+    assert_eq!(
+        anchor_after,
+        Some(anchor_row),
+        "the anchor line moved to the expected row"
+    );
+    text
 }
 
 /// A pane that keeps no history scrolls by rotating rows in place: the
@@ -658,6 +687,119 @@ fn a_gesture_inside_a_scroll_region_is_cleared_when_its_row_rotates_out() {
     let (pressed, text) = press_then_stream(config, "READY", at(1, 11));
     assert_eq!(pressed, 2, "the press landed on the region's top row");
     assert_eq!(text, "", "a rotated-out anchor selects nothing");
+}
+
+/// Deleting the anchor's line shifts the lines below it up without moving any
+/// pin, so the pin silently names the text that took its place.
+#[test]
+fn a_gesture_whose_anchor_row_was_deleted_selects_nothing() {
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf '\\033[2J\\033[1;1HANCHOR-TEXT\\nREADY'; IFS= read -r go; \
+             printf '\\033[1;1H\\033[MSTREAM-DONE'; sleep 30",
+        ]),
+    );
+    let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
+    assert_eq!(pressed, 0, "the press landed on the top row");
+    assert_eq!(text, "", "a deleted anchor row selects nothing");
+}
+
+/// Inserting a line above the anchor pushes its text down a row without moving
+/// any pin, so the anchor's row now holds the line that was above it.
+#[test]
+fn a_gesture_whose_anchor_row_was_pushed_down_by_an_inserted_line_selects_nothing() {
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[999;1HANCHOR-TEXT'; \
+             IFS= read -r go; printf '\\033[1;1H\\033[LSTREAM-DONE'; sleep 30",
+        ]),
+    );
+    let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
+    assert_eq!(
+        pressed,
+        sprite_term::ValidTerminalSize::DEFAULT.rows() - 1,
+        "the press landed on the bottom row"
+    );
+    assert_eq!(text, "", "a pushed-down anchor row selects nothing");
+}
+
+/// Reverse index at the top of a scroll region shifts the region down by
+/// copying rows, so the pin stays on a row that now holds other text.
+#[test]
+fn a_gesture_whose_anchor_row_was_scrolled_by_reverse_index_selects_nothing() {
+    // The region is rows 2-19 (DECSTBM 3;20) and the anchor sits on its last
+    // row, which reverse index at the region's top pushes out.
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[20;1HANCHOR-TEXT\\033[3;20r'; \
+             IFS= read -r go; printf '\\033[3;1H\\033MSTREAM-DONE'; sleep 30",
+        ]),
+    );
+    let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
+    assert_eq!(pressed, 19, "the press landed on the region's last row");
+    assert_eq!(text, "", "a scrolled-down anchor row selects nothing");
+}
+
+/// Scroll up inside a region with a top margin deletes the region's top line,
+/// which moves no pin, so the pin stays on a row that holds other text.
+#[test]
+fn a_gesture_whose_anchor_row_was_scrolled_by_scroll_up_in_a_region_selects_nothing() {
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[3;1HANCHOR-TEXT\\033[3;20r'; \
+             IFS= read -r go; printf '\\033[3;1H\\033[S\\033[3;1HSTREAM-DONE'; sleep 30",
+        ]),
+    );
+    let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
+    assert_eq!(pressed, 2, "the press landed on the region's top row");
+    assert_eq!(text, "", "a scrolled-up anchor row selects nothing");
+}
+
+/// Rotation that keeps the anchor's text on screen must not clear the gesture:
+/// the sentinels and the pin move together.
+#[test]
+fn a_gesture_whose_anchor_stays_on_screen_after_scrolling_keeps_its_text() {
+    let mut config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; seq 1 15; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
+             seq 1 12; printf 'STREAM-DONE'; sleep 30",
+        ]),
+    );
+    config.scrollback_bytes = 0;
+    let text = press_then_stream_keeping_anchor(config, "READY", at(10, 10), 10);
+    assert_eq!(
+        text, "ANCHOR-TEXT",
+        "the anchor followed its text up the pane"
+    );
+}
+
+/// A scroll below a region's top margin moves the anchor's text up inside the
+/// region; it stays on screen, so the gesture keeps it.
+#[test]
+fn a_gesture_below_a_scrolled_region_top_keeps_its_text() {
+    let config = SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[10;1HANCHOR-TEXT\\033[3;20r\\033[20;1H'; \
+             IFS= read -r go; printf '\\nSTREAM-DONE'; sleep 30",
+        ]),
+    );
+    let text = press_then_stream_keeping_anchor(config, "READY", at(8, 10), 8);
+    assert_eq!(
+        text, "ANCHOR-TEXT",
+        "the anchor followed its text up the region"
+    );
 }
 
 /// A pin belongs to the screen that was active when it was taken, so a gesture

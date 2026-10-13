@@ -230,22 +230,45 @@ pub(crate) fn encode_mouse(
 /// active when it was pinned: a pin belongs to that screen, so it means
 /// nothing once the other one is showing.
 ///
-/// A pin alone cannot always tell that its content is gone. A scroll that
-/// keeps no history (the alternate screen, a pane with no scrollback budget,
-/// or any scroll region with a top margin) rotates rows in place. The pin on
-/// the erased row is not dropped. It stays put, or moves to the row above the
-/// region, and silently names whatever is there now. The sentinels are pins
-/// on the rows directly above and below the anchor. Rotating the anchor's row
-/// away is exactly what lands one of them on the anchor's row, so a shared
-/// row means the anchor is lost.
+/// A pin alone cannot always tell that its content is gone, and two checks
+/// cover the two ways it goes wrong.
+///
+/// Rotation: a scroll that keeps no history (the alternate screen, a pane with
+/// no scrollback budget, or any scroll region with a top margin) rotates rows
+/// in place. The pin on the erased row is not dropped. It stays put, or moves
+/// to the row above the region, and silently names whatever is there now. The
+/// sentinels are pins on the rows directly above and below the anchor.
+/// Rotating the anchor's row away is exactly what lands one of them on the
+/// anchor's row, so a shared row means the anchor is lost.
+///
+/// Shifted content: line insertion and deletion, and scrolls that go through
+/// them (a region scroll with a top margin or left/right margins, reverse
+/// index at the region top), copy row contents and move no pins. The anchor
+/// and both sentinels then stay where they were while different text sits
+/// under them. The text of the anchor's row, taken at the press, catches that
+/// and also the rotation and region-hopping cases the sentinels miss.
+///
+/// Accepted limits, because a cleared selection is never a wrong one:
+/// - A sentinel pinned on page row 0 stays there when that row is erased, so a
+///   gesture on a screen without history is cleared one scroll before its
+///   own row is erased.
+/// - A gesture pressed on the row directly above a scroll region is cleared at
+///   that region's first scroll and stays cleared.
+/// - A program that redraws the anchor's row in place, such as a progress bar
+///   or a status line, clears the gesture, and so does a resize that rewraps
+///   the row.
+/// - Text replaced by identical text goes unnoticed, which is harmless: the
+///   copy is the same.
 pub(crate) struct PinnedAnchor {
     tracked: TrackedGridRef,
     /// The row directly above the anchor's; `None` on the top screen row.
     above: Option<TrackedGridRef>,
     /// The row directly below the anchor's; `None` on the bottom screen row.
     /// With neither sentinel (a one-row screen without history) the anchor
-    /// is checked only for eviction and screen switches.
+    /// is checked only for eviction, screen switches and its row text.
     below: Option<TrackedGridRef>,
+    /// The anchor's row text when it was pressed.
+    row_text: String,
     screen: Screen,
 }
 
@@ -278,7 +301,14 @@ pub(crate) fn track_selection_anchor(
     let tracked = terminal
         .track_grid_ref(viewport_point(anchor))
         .map_err(|error| SessionError::new("selection_anchor", error))?;
-    let row = tracked.point(PointSpace::Screen).map_err(sentinel_error)?;
+    let anchor_error = |error: libghostty_vt::Error| SessionError::new("selection_anchor", error);
+    // A press with no screen row yet gets no sentinels and an empty row text,
+    // so the first check against it finds a mismatch and clears the gesture.
+    let row = tracked.point(PointSpace::Screen).map_err(anchor_error)?;
+    let row_text = match row {
+        Some(at) => row_text(terminal, at.y).map_err(anchor_error)?,
+        None => String::new(),
+    };
     let total = u32::try_from(terminal.total_rows().map_err(sentinel_error)?).unwrap_or(u32::MAX);
     let above = track_row(terminal, row.and_then(|at| at.y.checked_sub(1)))?;
     let below = track_row(
@@ -290,8 +320,28 @@ pub(crate) fn track_selection_anchor(
         tracked,
         above,
         below,
+        row_text,
         screen,
     })
+}
+
+/// The text of one screen-space row, one entry per cell with blanks as empty,
+/// so equal rows give equal strings.
+fn row_text(terminal: &Terminal<'_, '_>, y: u32) -> Result<String, libghostty_vt::Error> {
+    let mut text = String::new();
+    let mut graphemes = ['\0'; 16];
+    for x in 0..terminal.cols()? {
+        let cell = terminal.grid_ref(Point::Screen(PointCoordinate { x, y }))?;
+        match cell.graphemes(&mut graphemes) {
+            Ok(count) => text.extend(graphemes.iter().take(count)),
+            // A cluster longer than the buffer still differs from the cells
+            // around it; a marker keeps the comparison deterministic.
+            Err(libghostty_vt::Error::OutOfSpace { .. }) => text.push('\u{FFFD}'),
+            Err(error) => return Err(error),
+        }
+        text.push('\u{1F}');
+    }
+    Ok(text)
 }
 
 /// Pins column 0 of screen-space row `y`, where row 0 is the oldest line of
@@ -313,8 +363,9 @@ fn sentinel_error(error: libghostty_vt::Error) -> SessionError {
 }
 
 /// The cell a pinned press still names. `None` once it names something else:
-/// the other screen is showing, its content was evicted, or its row was
-/// rotated away, which shows as a sentinel lost or on the anchor's row.
+/// the other screen is showing, its content was evicted, its row was rotated
+/// away (a sentinel lost or on the anchor's row), or other text was shifted
+/// under it (the row's text changed).
 fn pinned_anchor<'t>(
     terminal: &'t Terminal<'_, '_>,
     pin: &PinnedAnchor,
@@ -329,6 +380,9 @@ fn pinned_anchor<'t>(
     let Some(anchor_at) = pin.tracked.point(PointSpace::Screen).map_err(lost)? else {
         return Ok(None);
     };
+    if row_text(terminal, anchor_at.y).map_err(lost)? != pin.row_text {
+        return Ok(None);
+    }
     for sentinel in pin.above.iter().chain(pin.below.iter()) {
         let Some(sentinel_at) = sentinel.point(PointSpace::Screen).map_err(lost)? else {
             return Ok(None);
