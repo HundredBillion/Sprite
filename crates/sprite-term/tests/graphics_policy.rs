@@ -121,11 +121,7 @@ fn session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump)
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
     session
-        // Long graphics commands exceed the Linux canonical input line limit.
-        // Acknowledge only after stty succeeds; split READY so input echo cannot match it.
-        .send(TerminalCommand::Input(
-            b"stty -icanon -echo min 1 time 0 && printf 'RE%sADY\\n' ''\n".to_vec(),
-        ))
+        .send(TerminalCommand::Input(support::PLAIN_SHELL_SETUP.to_vec()))
         .expect("ask the shell to announce itself");
     snapshots.wait_for("the shell to start", |bundle| {
         pane_text(bundle).contains("READY")
