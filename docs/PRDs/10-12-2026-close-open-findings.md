@@ -141,12 +141,14 @@ entry afterwards.
     erased exactly when the sentinel below lands on it.
   - In a scroll region, the anchor's pin moves onto the static row above the
     region, where the sentinel above sits.
-  - When a sentinel's own row is erased, the gap stays one row and nothing is
-    cleared.
+  - When the row below the anchor is erased, the gap stays one row and nothing
+    is cleared.
 - R-S3a Accepted imprecision. Each case clears a selection; none leaves one on
   the wrong text:
-  - A gesture pressed on the last row has only the sentinel above, so it is
-    cleared one scroll early.
+  - On a screen with no history, libghostty leaves an erased pin on row 0. A
+    gesture anchored below row 0 is therefore cleared one scroll early: when
+    its text reaches row 0, not when that text leaves the screen.
+  - A one-row screen has no sentinels and keeps today's behaviour.
   - A widening reflow during a gesture can merge the anchor's row with an
     adjacent wrapped row, which clears the selection.
 - R-S4 This covers the primary screen with zero scrollback, the alternate
