@@ -246,9 +246,14 @@ impl Workspace {
     fn answer_quit_request(&mut self, reply: gpui::TerminateReply, cx: &mut Context<Self>) {
         if self.stopping {
             // Cleanup is already under way and ends in a quit, which answers
-            // this request. GPUI hands out one reply at a time; were there an
-            // earlier one, refusing it keeps it from ending Sprite first.
-            if let Some(earlier) = self.quit_request.replace(reply) {
+            // this request. GPUI refuses further requests itself while a
+            // reply is unanswered, so none is held here yet. Should one ever
+            // be, it is refused rather than dropped: a dropped reply allows
+            // the quit, which would end Sprite before its panes are cleaned
+            // up.
+            let earlier = self.quit_request.replace(reply);
+            debug_assert!(earlier.is_none(), "GPUI hands out one quit reply at a time");
+            if let Some(earlier) = earlier {
                 earlier.cancel();
             }
             return;
