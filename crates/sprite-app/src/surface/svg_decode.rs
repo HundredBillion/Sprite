@@ -23,10 +23,12 @@ const MAX_SVG_RASTER_DIMENSION: f32 = 4096.0;
 /// the largest measured count whose document decodes in under 250 ms in a
 /// release build (`measure_filter_cap`).
 ///
-/// Measured: a 512x512 document of 32 merged flood results (33 uses) decodes
-/// in 51 ms (median of 5, release build, macos/aarch64). Medians for 2, 3, 5,
-/// 9, 17 and 33 uses were 6, 6, 9, 15, 27 and 51 ms (median of 3 runs).
-pub(crate) const MAX_FILTER_PRIMITIVE_USES: usize = 33;
+/// Measured: a 512x512 document of 160 merged flood results (161 uses)
+/// decodes in 229 ms (median of 3 runs of 5, release build, macos/aarch64).
+/// Medians for 33, 65, 97, 129, 161, 193 and 257 uses were 47, 92, 139, 178,
+/// 229, 277 and 359 ms. The machine was under background load, so the cap is
+/// conservative.
+pub(crate) const MAX_FILTER_PRIMITIVE_USES: usize = 161;
 
 /// Why an SVG was not drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,7 +262,12 @@ mod tests {
     fn a_document_over_the_filter_cap_is_refused_before_it_is_rasterised() {
         let before = rasterised();
         assert_eq!(
-            decode(&merged_floods(128, 64), None, MAX_SVG_RASTER_BYTES).map(|_| ()),
+            decode(
+                &merged_floods(MAX_FILTER_PRIMITIVE_USES * 2, 64),
+                None,
+                MAX_SVG_RASTER_BYTES
+            )
+            .map(|_| ()),
             Err(RefusalKind::TooComplex)
         );
         assert_eq!(
@@ -268,7 +275,7 @@ mod tests {
             before,
             "a refused document is never rasterised"
         );
-        let at_cap = merged_floods(MAX_FILTER_PRIMITIVE_USES - 1, 64);
+        let at_cap = merged_floods(MAX_FILTER_PRIMITIVE_USES - 1, 8);
         assert!(
             decode(&at_cap, None, MAX_SVG_RASTER_BYTES).is_ok(),
             "a document at the cap is drawn"
@@ -318,7 +325,7 @@ mod tests {
             "the warm-up decode builds the parser options"
         );
         let mut chosen = None;
-        for results in [1usize, 2, 4, 8, 16, 32] {
+        for results in [32usize, 64, 96, 128, 160, 192, 256] {
             let svg = merged_floods(results, 512);
             let uses = count_filter_primitive_uses(&parse(&svg).unwrap());
             let mut times: Vec<f64> = (0..5)
