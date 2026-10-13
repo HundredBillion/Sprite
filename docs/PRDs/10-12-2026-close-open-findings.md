@@ -119,40 +119,46 @@ entry afterwards.
     never rasterised.
   - The existing cache and list-view tests wait for decodes to finish.
 
-## R-S. A sentinel pin detects a rotated-out anchor (GAP-C06, #66)
+## R-S. Two sentinel pins detect a rotated-out anchor (GAP-C06, #66)
 
-- R-S1 When a gesture starts, `track_selection_anchor` also tracks a sentinel
-  `TrackedGridRef`. By preference it sits on the first row of the next logical
-  line below the anchor. If the anchor's logical line runs to the bottom of the
-  screen, it sits on the last row of the logical line above. A logical line is
-  a row plus its wrap continuations; rows from different logical lines never
-  merge on reflow.
+- R-S1 When a gesture starts, `track_selection_anchor` also tracks up to two
+  sentinel `TrackedGridRef`s: one on the screen row directly above the anchor,
+  and one on the row directly below it. A sentinel is absent when the anchor
+  is on the first or last screen row.
 - R-S2 `apply_selection` treats the anchor as lost when any of these holds,
   and then clears the selection exactly as BCA-26 does:
   - The anchor's snapshot is `None`.
-  - The sentinel's snapshot is `None`.
-  - The two pins report the same row in screen coordinates.
+  - A present sentinel's snapshot is `None`.
+  - The anchor and a present sentinel report the same row in screen
+    coordinates.
   - The other screen is now active (today's check).
-- R-S2a When no sentinel can be placed (the anchor's logical line covers every
-  row of the screen, scrollback included), the gesture keeps today's
-  behaviour. A code comment records this limit.
-- R-S3 Why this works: libghostty's row rotation (`eraseRow`) leaves a pin on
-  the erased row in place and shifts the pins below it up by one. A sentinel
-  below the anchor therefore lands on the anchor's row exactly when the
-  anchor's row is erased. A sentinel above the anchor collapses one row before
-  the anchor's row is erased. That clears the selection one line early, which
-  is accepted: a cleared selection is never a wrong one.
+- R-S3 Why this works: when libghostty rotates rows out instead of evicting a
+  page (no scrollback: `Terminal.index` → `Screen.cursorScrollRegionUp`), the
+  pin on the erased row is left in place, or moved one row above the scroll
+  region when the region's top margin is not row 0, and the pins below it
+  shift up by one.
+  - In a full-screen scroll the erased row is row 0, and the anchor's row is
+    erased exactly when the sentinel below lands on it.
+  - In a scroll region, the anchor's pin moves onto the static row above the
+    region, where the sentinel above sits.
+  - When a sentinel's own row is erased, the gap stays one row and nothing is
+    cleared.
+- R-S3a Accepted imprecision. Each case clears a selection; none leaves one on
+  the wrong text:
+  - A gesture pressed on the last row has only the sentinel above, so it is
+    cleared one scroll early.
+  - A widening reflow during a gesture can merge the anchor's row with an
+    adjacent wrapped row, which clears the selection.
 - R-S4 This covers the primary screen with zero scrollback, the alternate
   screen (always created without scrollback) and scroll regions. Scrollback
   configuration is unchanged.
 - R-S5 Tests in `crates/sprite-term/tests/selection.rs`, next to
-  `a_gesture_whose_anchor_was_evicted_selects_nothing`:
+  `a_gesture_whose_anchor_was_evicted_selects_nothing`, all failing today:
   - `a_gesture_whose_anchor_was_rotated_out_with_zero_scrollback_selects_nothing`
   - `a_gesture_whose_anchor_was_rotated_out_on_the_alternate_screen_selects_nothing`
   - `a_gesture_anchored_on_the_last_row_is_cleared_before_it_drifts`
-  - `widening_reflow_during_a_gesture_keeps_the_selection`
-
-  The first three fail today.
+  - `a_gesture_anchored_mid_way_down_a_wrapped_line_is_cleared_when_its_row_rotates_out`
+  - `a_gesture_inside_a_scroll_region_is_cleared_when_its_row_rotates_out`
 
 ## R-D. A slow reader cannot keep a writer slot indefinitely (GAP-C07, #67)
 
