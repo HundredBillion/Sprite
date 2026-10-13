@@ -598,3 +598,10 @@ status = "resolved"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
 fixed_by = "fix/close-open-findings"
 test = "a_placeholder_without_diacritics_continues_its_left_neighbour"
+
+[[finding]]
+id = "GAP-C17"
+title = "Some tests outside #57 still fail intermittently under load"
+status = "open"
+source = "docs/PRDs/10-12-2026-close-open-findings.md"
+issue = 77

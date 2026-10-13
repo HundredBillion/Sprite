@@ -5,8 +5,9 @@
 PR #76 left ten findings tracked by GitHub issues: six open, four deferred.
 This PR closes all ten. Eight are fixed, each guarded by a regression test that
 fails against `03b4929`. The other two are recorded as `wontfix` with a reason
-that the existing measurements support. The ledger has no `open` or `deferred`
-entry afterwards.
+that the existing measurements support. None of the ten is left `open` or
+`deferred`. One new entry is open: GAP-C17 (#77), for tests outside #57's list
+that still fail now and then under load (R-W5).
 
 | ID | Issue | Defect | Disposition here |
 |---|---|---|---|
@@ -280,6 +281,14 @@ entry afterwards.
     runs under CPU load (one `yes` per core) on Linux;
   - this PR's Arch job passes;
   - five `workflow_dispatch` Arch runs on the branch pass.
+- R-W5 `no_keystroke_is_refused_under_a_sustained_output_flood`, outside #57's
+  list but seen failing on Arch CI, is fixed here too. A debug build of
+  libghostty checks a page's integrity on every scrolled row, so `yes`'s 2-byte
+  lines made one worker pass outlast the watchdog under load. The test now
+  floods with 32-byte lines. A release build refused no keystroke under the same
+  flood. The remaining intermittent tests outside #57's list (the `client.rs`
+  output-failure test and some `terminal_view` tests seen only under heavy
+  load) are tracked as GAP-C17, #77.
 
 ## R-P. The PKGBUILD builds the version it names (GAP-C04, #64)
 
