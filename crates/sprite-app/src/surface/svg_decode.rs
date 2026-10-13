@@ -18,7 +18,7 @@ use gpui::{Context, RenderImage};
 use resvg::usvg;
 
 /// Decoded pixels one Surface cache keeps at once.
-pub(crate) const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 /// Pixels one decoded SVG may hold.
 const MAX_SVG_RASTER_BYTES: usize = 16 * 1024 * 1024;
 /// The longest side, in pixels, of one decoded SVG.
@@ -214,6 +214,16 @@ impl<K: Clone + Eq + Hash + 'static> SvgDecodes<K> {
             .map(|picture| raster_bytes(&picture))
             .sum();
     }
+
+    /// Forgets every entry and waiting decode, to draw from now on at
+    /// `target_width`. A decode still running is discarded when it finishes.
+    pub(crate) fn reset(&self, target_width: Option<f32>) {
+        let mut queue = self.queue.borrow_mut();
+        queue.entries.clear();
+        queue.waiting.clear();
+        queue.retained_bytes = 0;
+        queue.target_width = target_width;
+    }
 }
 
 impl<K: Clone + Eq + Hash> Queue<K> {
@@ -357,8 +367,9 @@ impl<K: Clone + Eq + Hash> SvgDecodes<K> {
 }
 
 /// The picture `svg` draws, `target_width` pixels wide or at its own size,
-/// holding no more than `available_bytes` of pixels.
-pub(crate) fn decode(
+/// holding no more than `available_bytes` of pixels. Only a decode task
+/// calls this, never a frame.
+fn decode(
     svg: &str,
     target_width: Option<f32>,
     available_bytes: usize,
@@ -476,7 +487,7 @@ fn rasterise(
 }
 
 /// What a decoded picture holds against the image budget.
-pub(crate) fn raster_bytes(picture: &RenderImage) -> usize {
+fn raster_bytes(picture: &RenderImage) -> usize {
     picture.as_bytes(0).map_or(0, <[u8]>::len)
 }
 
