@@ -463,7 +463,7 @@ id = "GAP-C01"
 title = "Dock or system termination may bypass the window cleanup gate"
 status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = [
   "a_platform_quit_request_is_allowed_only_after_pane_cleanup",
   "a_platform_quit_request_with_a_busy_pane_asks_then_the_next_one_quits",
@@ -482,7 +482,7 @@ id = "GAP-C03"
 title = "Small SVG filter documents cost seconds of synchronous decoder work on the UI thread"
 status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = [
   "an_svg_is_decoded_off_the_ui_thread_and_its_view_told_when_it_is_ready",
   "a_document_over_the_filter_cap_is_refused_never_rasterised_and_not_tried_again",
@@ -493,7 +493,7 @@ id = "GAP-C04"
 title = "The distribution PKGBUILD labels a fixed version but fetches unpinned git HEAD"
 status = "resolved"
 source = "docs/reviews/sprite-gap-audit.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = "test_distribution_pkgbuild_pins_the_release_tag"
 
 [[finding]]
@@ -509,7 +509,7 @@ id = "GAP-C06"
 title = "BCA-26's zero-scrollback anchor drift is reachable: ScrollbackBytes accepts 0"
 status = "resolved"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = [
   "a_gesture_whose_anchor_was_rotated_out_with_zero_scrollback_selects_nothing",
   "a_gesture_whose_anchor_was_rotated_out_on_the_alternate_screen_selects_nothing",
@@ -520,7 +520,7 @@ id = "GAP-C07"
 title = "A slowly draining Surface writer keeps one of the 64 connection slots"
 status = "resolved"
 source = "docs/reviews/pr-58-follow-up.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = "a_reader_slower_than_the_drain_floor_loses_its_slot"
 
 [[finding]]
@@ -528,7 +528,7 @@ id = "GAP-C08"
 title = "Placeholder tiles snap against the previous frame's origin"
 status = "resolved"
 source = "docs/reviews/pr-58-follow-up.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = "placeholder_tiles_land_on_this_frames_cells_after_a_scale_change"
 
 [[finding]]
@@ -544,7 +544,7 @@ id = "GAP-C10"
 title = "Arch CI fails intermittently on timing-sensitive tests"
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = [
   "a_running_program_is_reported_by_name",
   "natural_exit_deadline_is_not_renewed_by_continuous_output",
@@ -596,7 +596,7 @@ id = "GAP-C16"
 title = "Kitty Unicode-placeholder implicit row and column inheritance"
 status = "resolved"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
-fixed_by = "fix/close-open-findings"
+fixed_by = "#78"
 test = "a_placeholder_without_diacritics_continues_its_left_neighbour"
 
 [[finding]]
