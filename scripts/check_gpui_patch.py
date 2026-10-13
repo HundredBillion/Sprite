@@ -91,7 +91,7 @@ def verify(tree, archive):
     actual = {str(p.relative_to(tree)): p.read_bytes() for p in tree.rglob("*") if p.is_file()}
     changed = sorted(p for p in expected.keys() | actual.keys() if expected.get(p) != actual.get(p))
     if changed:
-        raise ValueError("local GPUI differs from exact archive + patch: " + ", ".join(changed))
+        raise ValueError("local GPUI differs from exact archive + patches: " + ", ".join(changed))
 
 
 def main():
