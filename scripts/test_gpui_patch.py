@@ -1,10 +1,12 @@
 """Exact-source integrity and portable native dispatch policy regressions."""
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from scripts.check_gpui_patch import ROOT, archive_path, verify
+from unittest import mock
+from scripts.check_gpui_patch import PATCHES, ROOT, archive_path, verify
 
 
 def rust_test(source):
@@ -26,6 +28,19 @@ class GpuiPatchTests(unittest.TestCase):
             (tree / "LICENSE-APACHE").write_text("tampered")
             with self.assertRaisesRegex(ValueError, "LICENSE-APACHE"):
                 verify(tree, archive)
+
+    def test_every_recorded_patch_is_required(self):
+        # Each patch applies to the tree the ones before it produce, so a patch
+        # can only be dropped with every later one. Then each file it changes
+        # no longer matches.
+        for count, name in enumerate(PATCHES):
+            changed = re.findall(r"^\+\+\+ b/(\S+)$", (ROOT / "patches" / name).read_text(), re.M)
+            with self.subTest(dropped=name), mock.patch("scripts.check_gpui_patch.PATCHES", PATCHES[:count]):
+                self.assertTrue(changed)
+                with self.assertRaises(ValueError) as raised:
+                    verify(ROOT / "vendor/gpui", archive_path())
+                differing = set(str(raised.exception).split(": ", 1)[1].split(", "))
+                self.assertLessEqual(set(changed), differing)
 
     def test_cocoa_scope_policy_from_production_source(self):
         helper = ROOT / "vendor/gpui/src/platform/key_text_scope.rs"

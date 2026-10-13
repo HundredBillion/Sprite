@@ -750,6 +750,28 @@ impl App {
         self.platform.quit();
     }
 
+    /// Registers the answer to the platform asking whether the application may
+    /// terminate now, for a quit it did not request through [`App::quit`]: on
+    /// macOS, Quit from the Dock or the menu bar, or the session ending at
+    /// logout, restart or shutdown. Without a callback the platform terminates
+    /// at once.
+    ///
+    /// The callback answers the [`TerminateReply`], at once or later. While
+    /// one reply is unanswered, a further request is refused without calling
+    /// the callback. A quit requested through [`App::quit`] is never put to
+    /// it. Registering again replaces the previous callback.
+    pub fn on_should_terminate(
+        &self,
+        mut callback: impl FnMut(crate::TerminateReply, &mut App) + 'static,
+    ) {
+        let this = self.this.clone();
+        self.platform.on_should_terminate(Box::new(move |reply| {
+            if let Some(app) = this.upgrade() {
+                callback(reply, &mut app.borrow_mut());
+            }
+        }));
+    }
+
     /// Schedules all windows in the application to be redrawn. This can be called
     /// multiple times in an update cycle and still result in a single redraw.
     pub fn refresh_windows(&mut self) {

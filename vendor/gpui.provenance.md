@@ -9,7 +9,12 @@ All published files, including `LICENSE-APACHE`, Cargo manifests and source
 metadata, are preserved. Exact `=0.2.2` and existing features remain unchanged.
 
 `patches/gpui-0.2.2-native-text.patch` is the complete additive input-origin
-patch. `python3 scripts/check_gpui_patch.py` verifies every byte of the local
+patch. `patches/gpui-0.2.2-should-terminate.patch` follows it (see "Should-terminate
+hook" below), `patches/gpui-0.2.2-test-scale-factor.patch` follows that (see
+"Test window scale factor" below), and `patches/gpui-0.2.2-test-block-wakeup.patch`
+follows that (see "Test executor wake-up" below); `PATCHES` in the checker lists
+all four in application order.
+`python3 scripts/check_gpui_patch.py` verifies every byte of the local
 tree against the checksum-verified archive after replaying each unified hunk at its exact lines and context, without
 offset/fuzz, including additions and unexpected files. The checker uses Python 3.9+
 standard-library reads only, without archive extraction or system patch tools. `--fetch` obtains the exact
@@ -57,6 +62,80 @@ were read, including compatibility-only Windows (Sprite supports Unix only).
   retain ordinary replace/default behavior. Windows native origin distinction
   is outside Sprite's supported platforms; no Windows provenance claim is made.
 - `key_dispatch.rs`: test-only existing input handler remains default-compatible.
+
+## Should-terminate hook
+
+`patches/gpui-0.2.2-should-terminate.patch` applies to the tree the native-text
+patch produces; its line numbers are that tree's. It lets the application
+answer macOS before a quit it did not request ends it: Quit from the Dock or
+the menu bar, or the session ending at logout, restart or shutdown (ADR 0032).
+It edits published files only and adds none.
+
+- `platform.rs`: `TerminateReply`, a one-shot allow/cancel answer. It is not
+  `Send`, so it is answered on the main thread. Dropped unanswered, it allows
+  termination, which is the behaviour without the hook. `Platform::on_should_terminate`
+  defaults to doing nothing, so Linux and Windows are unchanged.
+- `app.rs`: `App::on_should_terminate` reaches the app through its weak handle,
+  as `Application::on_reopen` does.
+- macOS `platform.rs`: the delegate implements `applicationShouldTerminate:`.
+  It answers `NSTerminateNow` when no callback is registered or when the app
+  asked to quit through `Platform::quit`, `NSTerminateCancel` while a reply is
+  still unanswered, and otherwise calls the callback and answers
+  `NSTerminateLater`. The reply reaches `replyToApplicationShouldTerminate:`
+  from the main queue, as `quit` sends `terminate:`, so termination never runs
+  inside a borrow of the app state and never precedes `NSTerminateLater`.
+- test `test.rs`, `platform.rs` and `test_context.rs`:
+  `TestAppContext::simulate_should_terminate` makes the delegate's decision
+  and returns a `TestTerminateRequest` whose `answer()` is `Pending`, `Allowed`
+  or `Cancelled`. `TestPlatform::quit` records that the app asked to quit.
+
+The delegate method runs only on a macOS desktop. Hosted macOS CI compiles it;
+the manual Dock-quit check recorded in the PR evidence executes it. Tests drive
+the test platform, not AppKit.
+
+## Test window scale factor
+
+`patches/gpui-0.2.2-test-scale-factor.patch` applies to the tree the
+should-terminate patch produces; its line numbers are that tree's. It changes
+the test platform only, so no shipped code path changes.
+
+- test `window.rs`: the test window keeps its scale factor in its state,
+  starting at the 2.0 it always reported, and
+  `TestWindow::simulate_scale_factor` sets it and calls the resize callback
+  with the unchanged content size and the new scale. That is what the macOS
+  window does when its backing properties change
+  (`view_did_change_backing_properties`), and GPUI answers both with
+  `Window::bounds_changed`, which reads the new scale and refreshes the window.
+- `test_context.rs`: `TestAppContext::simulate_window_scale_factor` and
+  `VisualTestContext::simulate_scale_factor`, beside the existing resize
+  simulations.
+
+Sprite uses it to test that Kitty placeholder tiles stay on their cells when a
+window moves between displays of different scale.
+
+## Test executor wake-up
+
+`patches/gpui-0.2.2-test-block-wakeup.patch` applies to the tree the
+test-scale-factor patch produces; its line numbers are that tree's. It changes
+the `test-support` `BackgroundExecutor::block_internal` only. The shipped
+`block_internal` (without `test-support`) parks on its own waker and is
+unchanged.
+
+The test executor ran every queued task, found none left, registered its
+unparker with the `TestDispatcher` and parked. A task woken from another
+thread between that empty tick and the registration was queued by
+`TestDispatcher::dispatch`, whose `unpark_last` found no unparker yet, so
+nothing woke the parked thread and the task never ran. After registering, the
+executor now ticks once more and parks only if that tick found nothing: a wake
+before the registration is in the queue by then, and one after it reaches the
+registered unparker.
+
+Sprite's pane cleanup reports from its own thread, so a test that releases a
+cleanup and then calls `block_test` hit this window under CPU load:
+`completed_removed_cleanup_is_pruned_before_shutdown` parked forever with no
+other thread left alive. A one-millisecond sleep placed before the
+registration made 38 of 50 runs hang; with this patch and the same sleep, 200
+of 200 passed.
 
 ## Execution limits
 

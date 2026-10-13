@@ -95,14 +95,23 @@ fn a_shell_at_its_prompt_is_idle() {
 fn a_running_program_is_reported_by_name() {
     let (mut session, _snapshots) = interactive_shell();
 
+    // Far longer than any wait below, so the program cannot finish before it
+    // is sampled; the test interrupts it instead of waiting it out.
     session
-        .send(TerminalCommand::Input(b"sleep 4\n".to_vec()))
+        .send(TerminalCommand::Input(b"sleep 600\n".to_vec()))
         .expect("send input");
 
     let state = wait_for(&session, "sleep to be in the foreground", |state| {
         state.program() == Some("sleep")
     });
     assert_eq!(state.program(), Some("sleep"));
+
+    session
+        .send(TerminalCommand::Input(vec![0x03]))
+        .expect("interrupt the program");
+    wait_for(&session, "the interrupted program to leave", |state| {
+        *state == ForegroundState::Idle
+    });
 }
 
 /// The other half: a pane that *was* busy must go back to idle, or every pane

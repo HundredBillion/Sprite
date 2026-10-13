@@ -99,6 +99,10 @@ unsafe fn build_classes() {
                 will_terminate as extern "C" fn(&mut Object, Sel, id),
             );
             decl.add_method(
+                sel!(applicationShouldTerminate:),
+                should_terminate as extern "C" fn(&mut Object, Sel, id) -> NSUInteger,
+            );
+            decl.add_method(
                 sel!(handleGPUIMenuItem:),
                 handle_menu_item as extern "C" fn(&mut Object, Sel, id),
             );
@@ -168,6 +172,11 @@ pub(crate) struct MacPlatformState {
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     quit: Option<Box<dyn FnMut()>>,
+    should_terminate: Option<Box<dyn FnMut(crate::TerminateReply)>>,
+    /// Whether a reply handed to `should_terminate` is still unanswered.
+    terminate_reply_outstanding: Rc<Cell<bool>>,
+    /// Whether the application asked to quit through `Platform::quit`.
+    quit_requested: bool,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
@@ -209,6 +218,9 @@ impl MacPlatform {
             metadata_pasteboard_type: unsafe { ns_string("zed-metadata") },
             reopen: None,
             quit: None,
+            should_terminate: None,
+            terminate_reply_outstanding: Rc::default(),
+            quit_requested: false,
             menu_command: None,
             validate_menu_command: None,
             will_open_menu: None,
@@ -501,6 +513,10 @@ impl Platform for MacPlatform {
     }
 
     fn quit(&self) {
+        // The application has decided; `applicationShouldTerminate:` lets
+        // this quit through without asking it again.
+        self.0.lock().quit_requested = true;
+
         // Quitting the app causes us to close windows, which invokes `Window::on_close` callbacks
         // synchronously before this method terminates. If we call `Platform::quit` while holding a
         // borrow of the app state (which most of the time we will do), we will end up
@@ -877,6 +893,10 @@ impl Platform for MacPlatform {
 
     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
         self.0.lock().reopen = Some(callback);
+    }
+
+    fn on_should_terminate(&self, callback: Box<dyn FnMut(crate::TerminateReply)>) {
+        self.0.lock().should_terminate = Some(callback);
     }
 
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
@@ -1425,6 +1445,67 @@ extern "C" fn will_terminate(this: &mut Object, _: Sel, _: id) {
         drop(lock);
         callback();
         platform.0.lock().quit.get_or_insert(callback);
+    }
+}
+
+// `NSApplicationTerminateReply` values.
+const NS_TERMINATE_CANCEL: NSUInteger = 0;
+const NS_TERMINATE_NOW: NSUInteger = 1;
+const NS_TERMINATE_LATER: NSUInteger = 2;
+
+extern "C" fn should_terminate(this: &mut Object, _: Sel, _: id) -> NSUInteger {
+    let platform = unsafe { get_mac_platform(this) };
+    let mut lock = platform.0.lock();
+    if lock.quit_requested {
+        return NS_TERMINATE_NOW;
+    }
+    if lock.terminate_reply_outstanding.get() {
+        // The reply already handed out answers AppKit's pending request.
+        return NS_TERMINATE_CANCEL;
+    }
+    let Some(mut callback) = lock.should_terminate.take() else {
+        return NS_TERMINATE_NOW;
+    };
+    let outstanding = lock.terminate_reply_outstanding.clone();
+    outstanding.set(true);
+    drop(lock);
+    callback(crate::TerminateReply::new(move |allow| {
+        outstanding.set(false);
+        reply_to_terminate(allow);
+    }));
+    platform.0.lock().should_terminate.get_or_insert(callback);
+    NS_TERMINATE_LATER
+}
+
+/// Sends the answer from the main queue, as `MacPlatform::quit` sends
+/// `terminate:`. Allowing termination closes the windows and runs the quit
+/// callbacks synchronously, which must not happen while the caller holds a
+/// borrow of the app state. It also keeps an answer given inside the callback
+/// from arriving before `NSTerminateLater` has been returned.
+fn reply_to_terminate(allow: bool) {
+    use super::dispatcher::{dispatch_get_main_queue, dispatch_sys::dispatch_async_f};
+
+    unsafe extern "C" fn allow_termination(_: *mut c_void) {
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            let _: () = msg_send![app, replyToApplicationShouldTerminate: YES];
+        }
+    }
+
+    unsafe extern "C" fn cancel_termination(_: *mut c_void) {
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            let _: () = msg_send![app, replyToApplicationShouldTerminate: NO];
+        }
+    }
+
+    let answer: unsafe extern "C" fn(*mut c_void) = if allow {
+        allow_termination
+    } else {
+        cancel_termination
+    };
+    unsafe {
+        dispatch_async_f(dispatch_get_main_queue(), ptr::null_mut(), Some(answer));
     }
 }
 

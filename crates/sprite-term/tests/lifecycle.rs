@@ -405,6 +405,11 @@ fn natural_exit_deadline_is_not_renewed_by_continuous_output() {
     retained_descendant_exits(true);
 }
 
+/// How long the worker drains output after a natural exit before it publishes
+/// the exit anyway: the crate-private `GIVE_UP_AFTER` in
+/// `src/worker/closing.rs`. Change both together.
+const NATURAL_EXIT_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(6);
+
 fn retained_descendant_exits(writes: bool) {
     let pid_file = std::env::temp_dir().join(format!(
         "sprite-exit-descendant-{}-{}.pid",
@@ -466,9 +471,9 @@ os._exit(7)
     .expect("spawn parent and retained-descriptor descendant");
     let events = EventPump::new(events);
     events.expect_ready();
-    // Natural exit permits six seconds of output draining without another event.
-    // Allow scheduling overhead while still detecting a deadline renewed by output.
-    match events.next_with_timeout(std::time::Duration::from_secs(10)) {
+    // A deadline that output renewed would never publish the exit, so the
+    // wait is the drain period plus the watchdog's allowance for a slow runner.
+    match events.next_with_timeout(NATURAL_EXIT_GIVE_UP + support::watchdog()) {
         TerminalEvent::Exited(exit) => {
             assert_eq!(exit.code, Some(7));
             assert!(!exit.requested);

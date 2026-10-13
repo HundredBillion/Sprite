@@ -116,6 +116,9 @@ pub struct Workspace {
     mode: Mode,
     pending_cleanups: Vec<PendingCleanup>,
     stopping: bool,
+    /// The platform's Quit Request this window answers when its pane cleanup
+    /// finishes: a Quit from the Dock or the menu bar, or the session ending.
+    quit_request: Option<gpui::TerminateReply>,
     #[cfg(test)]
     cleanup_gates: std::collections::VecDeque<async_channel::Receiver<()>>,
     /// Each pane cleanup thread, in the order it started, so a test can wait
@@ -323,6 +326,7 @@ impl Workspace {
             mode: Mode::Idle,
             pending_cleanups: Vec::new(),
             stopping: false,
+            quit_request: None,
             #[cfg(test)]
             cleanup_gates: Default::default(),
             #[cfg(test)]

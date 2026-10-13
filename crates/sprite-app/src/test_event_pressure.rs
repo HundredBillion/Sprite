@@ -3,7 +3,7 @@
 
 #![cfg(test)]
 
-use sprite_term::{CommandSender, TerminalCommand};
+use sprite_term::{Admitted, CommandSender, StallProbe, TerminalCommand};
 
 /// One OSC 52 clipboard write of `CLIP`, sixteen bytes.
 ///
@@ -39,43 +39,33 @@ pub(crate) fn focus_and_release(commands: &CommandSender) {
         .expect("release the child");
 }
 
-/// Fills the worker's control lane so the next command is refused, and
-/// returns once it stays refused. The lane only stays full while the worker
-/// is stalled by event pressure; until it is, the worker drains what this
-/// sends, so this keeps trying within the watchdog instead of pausing and
-/// hoping.
+/// Waits until `stall` reports the worker stalled behind its event stream,
+/// then fills its control lane, so the next command is refused and stays
+/// refused until that stream is read, cancelled or dropped.
 ///
-/// One refusal is not proof of a stall: this thread fills the lane faster
-/// than a running worker wakes to drain it. So a refusal only counts when no
-/// slot has freed after [`STALL_PROOF`]; that is taken as a stall.
-pub(crate) fn saturate_control(commands: &CommandSender) {
-    let refused = || {
-        matches!(
-            commands
-                .try_admit(TerminalCommand::Capture)
-                .expect("a capture is always valid"),
-            sprite_term::Admitted::Saturated(_)
-        )
-    };
+/// The stall is read from the session, not inferred from how long a full
+/// lane stays full: under CPU load a worker that is merely descheduled, or in
+/// one long pass, keeps its lane full for as long as any pause, then drains
+/// it once it runs and only stalls afterwards. Nothing drains a stalled
+/// worker's lane, so once the stall is seen the first refusal is final.
+pub(crate) fn saturate_control(commands: &CommandSender, stall: &StallProbe) {
     let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
-    loop {
-        if (0..=sprite_term::CONTROL_CAPACITY).any(|_| refused()) {
-            crate::test_blocking_wait::pause(STALL_PROOF);
-            if refused() {
-                return;
-            }
-        }
+    while !stall.worker_stalled() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the control lane never saturated: the worker is not stalled"
+            "the worker never stalled behind the clipboard burst"
         );
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
     }
+    for _ in 0..=sprite_term::CONTROL_CAPACITY {
+        match commands
+            .try_admit(TerminalCommand::Capture)
+            .expect("a capture is always valid")
+        {
+            Admitted::Accepted => {}
+            Admitted::Saturated(_) => return,
+            Admitted::Closed(_) => panic!("the session ended while its worker was stalled"),
+        }
+    }
+    panic!("a stalled worker's control lane took more than its capacity");
 }
-
-/// How long a full lane must stay full to count as a stall. An assumption,
-/// not a guarantee: a worker stuck in one long pass (a debug build can spend
-/// about 150 ms on a pass under a flood) is mistaken for stalled. These
-/// fixtures tolerate that, because their clipboard burst stalls the worker
-/// anyway.
-pub(crate) const STALL_PROOF: std::time::Duration = std::time::Duration::from_millis(100);

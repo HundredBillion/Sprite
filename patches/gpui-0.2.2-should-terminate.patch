@@ -1,0 +1,375 @@
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -750,6 +750,28 @@
+         self.platform.quit();
+     }
+ 
++    /// Registers the answer to the platform asking whether the application may
++    /// terminate now, for a quit it did not request through [`App::quit`]: on
++    /// macOS, Quit from the Dock or the menu bar, or the session ending at
++    /// logout, restart or shutdown. Without a callback the platform terminates
++    /// at once.
++    ///
++    /// The callback answers the [`TerminateReply`], at once or later. While
++    /// one reply is unanswered, a further request is refused without calling
++    /// the callback. A quit requested through [`App::quit`] is never put to
++    /// it. Registering again replaces the previous callback.
++    pub fn on_should_terminate(
++        &self,
++        mut callback: impl FnMut(crate::TerminateReply, &mut App) + 'static,
++    ) {
++        let this = self.this.clone();
++        self.platform.on_should_terminate(Box::new(move |reply| {
++            if let Some(app) = this.upgrade() {
++                callback(reply, &mut app.borrow_mut());
++            }
++        }));
++    }
++
+     /// Schedules all windows in the application to be redrawn. This can be called
+     /// multiple times in an update cycle and still result in a single redraw.
+     pub fn refresh_windows(&mut self) {
+--- a/src/app/test_context.rs
++++ b/src/app/test_context.rs
+@@ -335,6 +335,13 @@
+     /// capture sources.
+     pub fn set_screen_capture_sources(&self, sources: Vec<TestScreenCaptureSource>) {
+         self.test_platform.set_screen_capture_sources(sources);
++    }
++
++    /// Simulates the platform asking whether the application may terminate,
++    /// as macOS does for Quit from the Dock or the menu bar, or at logout.
++    /// The returned request records the application's answer.
++    pub fn simulate_should_terminate(&self) -> crate::TestTerminateRequest {
++        self.test_platform.simulate_should_terminate()
+     }
+ 
+     /// Returns all windows open in the test.
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -85,7 +85,10 @@
+ pub(crate) use windows::*;
+ 
+ #[cfg(any(test, feature = "test-support"))]
+-pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
++pub use test::{
++    TerminateAnswer, TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream,
++    TestTerminateRequest,
++};
+ 
+ /// Returns a background executor for the current platform.
+ pub fn background_executor() -> BackgroundExecutor {
+@@ -160,6 +163,54 @@
+             .inspect_err(|err| show_error("Failed to launch", err.to_string()))
+             .unwrap(),
+     )
++}
++
++/// The application's answer when the platform asks whether it may terminate
++/// now, for a quit the application did not request through `App::quit`: on
++/// macOS, Quit from the Dock or the menu bar, or the session ending at logout,
++/// restart or shutdown.
++///
++/// Answer it once, with [`TerminateReply::allow`] or [`TerminateReply::cancel`],
++/// at once or after work of the application's own. It is answered on the main
++/// thread, so it is not `Send`. A reply dropped unanswered allows termination:
++/// nothing is left to answer it, and refusing would leave the application
++/// impossible to quit and hold up logout.
++pub struct TerminateReply {
++    send: Option<Box<dyn FnOnce(bool)>>,
++}
++
++impl TerminateReply {
++    #[cfg_attr(
++        not(any(target_os = "macos", test, feature = "test-support")),
++        allow(dead_code)
++    )]
++    pub(crate) fn new(send: impl FnOnce(bool) + 'static) -> Self {
++        Self {
++            send: Some(Box::new(send)),
++        }
++    }
++
++    /// Lets the platform terminate the application.
++    pub fn allow(mut self) {
++        self.send(true);
++    }
++
++    /// Keeps the application running.
++    pub fn cancel(mut self) {
++        self.send(false);
++    }
++
++    fn send(&mut self, allow: bool) {
++        if let Some(send) = self.send.take() {
++            send(allow);
++        }
++    }
++}
++
++impl Drop for TerminateReply {
++    fn drop(&mut self) {
++        self.send(true);
++    }
+ }
+ 
+ pub(crate) trait Platform: 'static {
+@@ -232,6 +283,10 @@
+ 
+     fn on_quit(&self, callback: Box<dyn FnMut()>);
+     fn on_reopen(&self, callback: Box<dyn FnMut()>);
++    /// Registers the callback asked before the platform terminates the
++    /// application for a quit it did not request through [`Platform::quit`].
++    /// Platforms that never ask keep this default and never call it.
++    fn on_should_terminate(&self, _callback: Box<dyn FnMut(TerminateReply)>) {}
+ 
+     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap);
+     fn get_menus(&self) -> Option<Vec<OwnedMenu>> {
+--- a/src/platform/mac/platform.rs
++++ b/src/platform/mac/platform.rs
+@@ -99,6 +99,10 @@
+                 will_terminate as extern "C" fn(&mut Object, Sel, id),
+             );
+             decl.add_method(
++                sel!(applicationShouldTerminate:),
++                should_terminate as extern "C" fn(&mut Object, Sel, id) -> NSUInteger,
++            );
++            decl.add_method(
+                 sel!(handleGPUIMenuItem:),
+                 handle_menu_item as extern "C" fn(&mut Object, Sel, id),
+             );
+@@ -168,6 +172,11 @@
+     reopen: Option<Box<dyn FnMut()>>,
+     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
+     quit: Option<Box<dyn FnMut()>>,
++    should_terminate: Option<Box<dyn FnMut(crate::TerminateReply)>>,
++    /// Whether a reply handed to `should_terminate` is still unanswered.
++    terminate_reply_outstanding: Rc<Cell<bool>>,
++    /// Whether the application asked to quit through `Platform::quit`.
++    quit_requested: bool,
+     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
+     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
+     will_open_menu: Option<Box<dyn FnMut()>>,
+@@ -209,6 +218,9 @@
+             metadata_pasteboard_type: unsafe { ns_string("zed-metadata") },
+             reopen: None,
+             quit: None,
++            should_terminate: None,
++            terminate_reply_outstanding: Rc::default(),
++            quit_requested: false,
+             menu_command: None,
+             validate_menu_command: None,
+             will_open_menu: None,
+@@ -501,6 +513,10 @@
+     }
+ 
+     fn quit(&self) {
++        // The application has decided; `applicationShouldTerminate:` lets
++        // this quit through without asking it again.
++        self.0.lock().quit_requested = true;
++
+         // Quitting the app causes us to close windows, which invokes `Window::on_close` callbacks
+         // synchronously before this method terminates. If we call `Platform::quit` while holding a
+         // borrow of the app state (which most of the time we will do), we will end up
+@@ -879,6 +895,10 @@
+         self.0.lock().reopen = Some(callback);
+     }
+ 
++    fn on_should_terminate(&self, callback: Box<dyn FnMut(crate::TerminateReply)>) {
++        self.0.lock().should_terminate = Some(callback);
++    }
++
+     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
+         self.0.lock().on_keyboard_layout_change = Some(callback);
+     }
+@@ -1428,6 +1448,67 @@
+     }
+ }
+ 
++// `NSApplicationTerminateReply` values.
++const NS_TERMINATE_CANCEL: NSUInteger = 0;
++const NS_TERMINATE_NOW: NSUInteger = 1;
++const NS_TERMINATE_LATER: NSUInteger = 2;
++
++extern "C" fn should_terminate(this: &mut Object, _: Sel, _: id) -> NSUInteger {
++    let platform = unsafe { get_mac_platform(this) };
++    let mut lock = platform.0.lock();
++    if lock.quit_requested {
++        return NS_TERMINATE_NOW;
++    }
++    if lock.terminate_reply_outstanding.get() {
++        // The reply already handed out answers AppKit's pending request.
++        return NS_TERMINATE_CANCEL;
++    }
++    let Some(mut callback) = lock.should_terminate.take() else {
++        return NS_TERMINATE_NOW;
++    };
++    let outstanding = lock.terminate_reply_outstanding.clone();
++    outstanding.set(true);
++    drop(lock);
++    callback(crate::TerminateReply::new(move |allow| {
++        outstanding.set(false);
++        reply_to_terminate(allow);
++    }));
++    platform.0.lock().should_terminate.get_or_insert(callback);
++    NS_TERMINATE_LATER
++}
++
++/// Sends the answer from the main queue, as `MacPlatform::quit` sends
++/// `terminate:`. Allowing termination closes the windows and runs the quit
++/// callbacks synchronously, which must not happen while the caller holds a
++/// borrow of the app state. It also keeps an answer given inside the callback
++/// from arriving before `NSTerminateLater` has been returned.
++fn reply_to_terminate(allow: bool) {
++    use super::dispatcher::{dispatch_get_main_queue, dispatch_sys::dispatch_async_f};
++
++    unsafe extern "C" fn allow_termination(_: *mut c_void) {
++        unsafe {
++            let app = NSApplication::sharedApplication(nil);
++            let _: () = msg_send![app, replyToApplicationShouldTerminate: YES];
++        }
++    }
++
++    unsafe extern "C" fn cancel_termination(_: *mut c_void) {
++        unsafe {
++            let app = NSApplication::sharedApplication(nil);
++            let _: () = msg_send![app, replyToApplicationShouldTerminate: NO];
++        }
++    }
++
++    let answer: unsafe extern "C" fn(*mut c_void) = if allow {
++        allow_termination
++    } else {
++        cancel_termination
++    };
++    unsafe {
++        dispatch_async_f(dispatch_get_main_queue(), ptr::null_mut(), Some(answer));
++    }
++}
++
+ extern "C" fn on_keyboard_layout_change(this: &mut Object, _: Sel, _: id) {
+     let platform = unsafe { get_mac_platform(this) };
+     let mut lock = platform.0.lock();
+--- a/src/platform/test.rs
++++ b/src/platform/test.rs
+@@ -8,4 +8,6 @@
+ pub(crate) use platform::*;
+ pub(crate) use window::*;
+ 
+-pub use platform::{TestScreenCaptureSource, TestScreenCaptureStream};
++pub use platform::{
++    TerminateAnswer, TestScreenCaptureSource, TestScreenCaptureStream, TestTerminateRequest,
++};
+--- a/src/platform/test/platform.rs
++++ b/src/platform/test/platform.rs
+@@ -10,7 +10,7 @@
+ use futures::channel::oneshot;
+ use parking_lot::Mutex;
+ use std::{
+-    cell::RefCell,
++    cell::{Cell, RefCell},
+     path::{Path, PathBuf},
+     rc::{Rc, Weak},
+     sync::Arc,
+@@ -39,6 +39,36 @@
+     #[cfg(target_os = "windows")]
+     bitmap_factory: std::mem::ManuallyDrop<IWICImagingFactory>,
+     weak: Weak<Self>,
++    should_terminate: RefCell<Option<Box<dyn FnMut(crate::TerminateReply)>>>,
++    terminate_reply_outstanding: Rc<Cell<bool>>,
++    quit_requested: Cell<bool>,
++}
++
++/// How the application answered a should-terminate request from the test
++/// platform.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum TerminateAnswer {
++    /// Not answered yet.
++    #[default]
++    Pending,
++    /// The application may terminate.
++    Allowed,
++    /// The application keeps running.
++    Cancelled,
++}
++
++/// A should-terminate request made by
++/// [`TestAppContext::simulate_should_terminate`](crate::TestAppContext::simulate_should_terminate).
++#[derive(Clone, Debug, Default)]
++pub struct TestTerminateRequest {
++    answer: Rc<Cell<TerminateAnswer>>,
++}
++
++impl TestTerminateRequest {
++    /// The application's answer so far.
++    pub fn answer(&self) -> TerminateAnswer {
++        self.answer.get()
++    }
+ }
+ 
+ #[derive(Clone)]
+@@ -120,7 +150,42 @@
+             #[cfg(target_os = "windows")]
+             bitmap_factory,
+             text_system,
++            should_terminate: Default::default(),
++            terminate_reply_outstanding: Default::default(),
++            quit_requested: Default::default(),
+         })
++    }
++
++    /// Asks the application whether it may terminate, deciding as the macOS
++    /// delegate's `applicationShouldTerminate:` does.
++    pub(crate) fn simulate_should_terminate(&self) -> TestTerminateRequest {
++        let request = TestTerminateRequest::default();
++        if self.quit_requested.get() {
++            request.answer.set(TerminateAnswer::Allowed);
++            return request;
++        }
++        if self.terminate_reply_outstanding.get() {
++            request.answer.set(TerminateAnswer::Cancelled);
++            return request;
++        }
++        let callback = self.should_terminate.borrow_mut().take();
++        let Some(mut callback) = callback else {
++            request.answer.set(TerminateAnswer::Allowed);
++            return request;
++        };
++        self.terminate_reply_outstanding.set(true);
++        let outstanding = self.terminate_reply_outstanding.clone();
++        let answer = request.answer.clone();
++        callback(crate::TerminateReply::new(move |allow| {
++            outstanding.set(false);
++            answer.set(if allow {
++                TerminateAnswer::Allowed
++            } else {
++                TerminateAnswer::Cancelled
++            });
++        }));
++        self.should_terminate.borrow_mut().get_or_insert(callback);
++        request
+     }
+ 
+     pub(crate) fn simulate_new_path_selection(
+@@ -248,7 +313,9 @@
+         unimplemented!()
+     }
+ 
+-    fn quit(&self) {}
++    fn quit(&self) {
++        self.quit_requested.set(true);
++    }
+ 
+     fn restart(&self, _: Option<PathBuf>) {
+         //
+@@ -363,6 +430,10 @@
+ 
+     fn on_quit(&self, _callback: Box<dyn FnMut()>) {}
+ 
++    fn on_should_terminate(&self, callback: Box<dyn FnMut(crate::TerminateReply)>) {
++        *self.should_terminate.borrow_mut() = Some(callback);
++    }
++
+     fn on_reopen(&self, _callback: Box<dyn FnMut()>) {
+         unimplemented!()
+     }

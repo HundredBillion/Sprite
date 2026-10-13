@@ -27,7 +27,9 @@ depends=(
     'xcb-util-keysyms'
 )
 makedepends=('git' 'ncurses' 'python' 'rustup' 'zig')
-source=("git+$url.git")
+# The release tag, not the default branch: a build started before the tag is
+# pushed fails instead of packaging whatever HEAD happens to be.
+source=("git+$url.git#tag=v$pkgver")
 sha256sums=('SKIP')
 
 _root="$srcdir/Sprite"

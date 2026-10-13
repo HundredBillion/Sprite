@@ -85,7 +85,10 @@ pub(crate) use test::*;
 pub(crate) use windows::*;
 
 #[cfg(any(test, feature = "test-support"))]
-pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
+pub use test::{
+    TerminateAnswer, TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream,
+    TestTerminateRequest,
+};
 
 /// Returns a background executor for the current platform.
 pub fn background_executor() -> BackgroundExecutor {
@@ -162,6 +165,54 @@ pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
     )
 }
 
+/// The application's answer when the platform asks whether it may terminate
+/// now, for a quit the application did not request through `App::quit`: on
+/// macOS, Quit from the Dock or the menu bar, or the session ending at logout,
+/// restart or shutdown.
+///
+/// Answer it once, with [`TerminateReply::allow`] or [`TerminateReply::cancel`],
+/// at once or after work of the application's own. It is answered on the main
+/// thread, so it is not `Send`. A reply dropped unanswered allows termination:
+/// nothing is left to answer it, and refusing would leave the application
+/// impossible to quit and hold up logout.
+pub struct TerminateReply {
+    send: Option<Box<dyn FnOnce(bool)>>,
+}
+
+impl TerminateReply {
+    #[cfg_attr(
+        not(any(target_os = "macos", test, feature = "test-support")),
+        allow(dead_code)
+    )]
+    pub(crate) fn new(send: impl FnOnce(bool) + 'static) -> Self {
+        Self {
+            send: Some(Box::new(send)),
+        }
+    }
+
+    /// Lets the platform terminate the application.
+    pub fn allow(mut self) {
+        self.send(true);
+    }
+
+    /// Keeps the application running.
+    pub fn cancel(mut self) {
+        self.send(false);
+    }
+
+    fn send(&mut self, allow: bool) {
+        if let Some(send) = self.send.take() {
+            send(allow);
+        }
+    }
+}
+
+impl Drop for TerminateReply {
+    fn drop(&mut self) {
+        self.send(true);
+    }
+}
+
 pub(crate) trait Platform: 'static {
     fn background_executor(&self) -> BackgroundExecutor;
     fn foreground_executor(&self) -> ForegroundExecutor;
@@ -232,6 +283,10 @@ pub(crate) trait Platform: 'static {
 
     fn on_quit(&self, callback: Box<dyn FnMut()>);
     fn on_reopen(&self, callback: Box<dyn FnMut()>);
+    /// Registers the callback asked before the platform terminates the
+    /// application for a quit it did not request through [`Platform::quit`].
+    /// Platforms that never ask keep this default and never call it.
+    fn on_should_terminate(&self, _callback: Box<dyn FnMut(TerminateReply)>) {}
 
     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap);
     fn get_menus(&self) -> Option<Vec<OwnedMenu>> {

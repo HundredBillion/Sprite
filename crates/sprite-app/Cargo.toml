@@ -38,6 +38,7 @@ sprite-term = { workspace = true }
 proptest = { version = "=1.10.0", default-features = false, features = ["std"] }
 serde_json = { workspace = true }
 gpui = { workspace = true, features = ["test-support"] }
+sprite-term = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui = { workspace = true, features = ["wayland", "x11"] }

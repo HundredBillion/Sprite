@@ -490,7 +490,10 @@ mod tests {
         ))
         .unwrap();
         crate::test_event_pressure::focus_and_release(&spawned.session.commands());
-        crate::test_event_pressure::saturate_control(&spawned.session.commands());
+        crate::test_event_pressure::saturate_control(
+            &spawned.session.commands(),
+            &spawned.events.stall_probe(),
+        );
         let panes = WindowPanes::new();
         panes.register(PaneId(0), TabId(0), spawned.session.commands());
         let (tx, rx) = std::sync::mpsc::channel();

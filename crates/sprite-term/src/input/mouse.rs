@@ -3,8 +3,8 @@ use crate::{
     CellPosition, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton, MouseEvent,
     SelectionMode, SessionError, ValidTerminalSize, WheelEvent,
 };
-use libghostty_vt::screen::{Screen, TrackedGridRef};
-use libghostty_vt::terminal::{Point, PointCoordinate};
+use libghostty_vt::screen::{GridRef, Screen, TrackedGridRef};
+use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
 use libghostty_vt::{Terminal, key};
 const MAX_WHEEL_TURNS: u32 = 32;
 /// Who a wheel turn belongs to.
@@ -229,8 +229,56 @@ pub(crate) fn encode_mouse(
 /// A gesture's press pinned to the content under it, with the screen that was
 /// active when it was pinned: a pin belongs to that screen, so it means
 /// nothing once the other one is showing.
+///
+/// A pin alone cannot always tell that its content is gone, and two checks
+/// cover the two ways it goes wrong.
+///
+/// Rotation: a scroll that keeps no history (the alternate screen, a pane with
+/// no scrollback budget, or any scroll region with a top margin) rotates rows
+/// in place. The pin on the erased row is not dropped. It stays put, or moves
+/// to the row above the region, and silently names whatever is there now. The
+/// sentinels are pins on the rows directly above and below the anchor.
+/// Rotating the anchor's row away is exactly what lands one of them on the
+/// anchor's row, so a shared row means the anchor is lost.
+///
+/// Shifted content: line insertion and deletion, and scrolls that go through
+/// them (a region scroll with a top margin or left/right margins, reverse
+/// index at the region top), copy row contents and move no pins. The anchor
+/// and both sentinels then stay where they were while different text sits
+/// under them. The text of the anchor's row, taken at the press, catches that
+/// and also the rotation and region-hopping cases the sentinels miss.
+///
+/// The sentinels stay alongside the row text because the text alone misses a
+/// rotation when neighbouring rows hold the same text, such as repeated output
+/// lines or blank rows: the row that rotates in under the anchor's pin matches
+/// the text taken at the press, so the anchor would be kept on content it was
+/// never pressed on. The sentinel landing on the anchor's row still shows it
+/// is lost.
+///
+/// Accepted limits, because a cleared selection is never a wrong one:
+/// - libghostty keeps a pin on page row 0 in place when that row is erased,
+///   so a sentinel there stays while the anchor moves onto it. That happens on
+///   a screen without history, and also on one with history when a region's
+///   top lands on a page's first row. The gesture is cleared one scroll
+///   before its own row is erased.
+/// - A gesture pressed on the row directly above a scroll region is cleared at
+///   that region's first scroll and stays cleared.
+/// - A program that redraws the anchor's row in place, such as a progress bar
+///   or a status line, clears the gesture, and so does a resize that rewraps
+///   the row.
+/// - Only the anchor's own row is compared, so a row that ends up with the
+///   same text as the anchor's (a blank row, say) goes unnoticed even though
+///   the anchor's real content may have moved elsewhere.
 pub(crate) struct PinnedAnchor {
     tracked: TrackedGridRef,
+    /// The row directly above the anchor's; `None` on the top screen row.
+    above: Option<TrackedGridRef>,
+    /// The row directly below the anchor's; `None` on the bottom screen row.
+    /// With neither sentinel (a one-row screen without history) the anchor
+    /// is checked only for eviction, screen switches and its row text.
+    below: Option<TrackedGridRef>,
+    /// The anchor's row text when it was pressed.
+    row_text: String,
     screen: Screen,
 }
 
@@ -263,7 +311,97 @@ pub(crate) fn track_selection_anchor(
     let tracked = terminal
         .track_grid_ref(viewport_point(anchor))
         .map_err(|error| SessionError::new("selection_anchor", error))?;
-    Ok(PinnedAnchor { tracked, screen })
+    let anchor_error = |error: libghostty_vt::Error| SessionError::new("selection_anchor", error);
+    // A press with no screen row yet gets no sentinels and an empty row text,
+    // so the first check against it finds a mismatch and clears the gesture.
+    let row = tracked.point(PointSpace::Screen).map_err(anchor_error)?;
+    let row_text = match row {
+        Some(at) => row_text(terminal, at.y).map_err(anchor_error)?,
+        None => String::new(),
+    };
+    let total = u32::try_from(terminal.total_rows().map_err(sentinel_error)?).unwrap_or(u32::MAX);
+    let above = track_row(terminal, row.and_then(|at| at.y.checked_sub(1)))?;
+    let below = track_row(
+        terminal,
+        row.and_then(|at| at.y.checked_add(1))
+            .filter(|&y| y < total),
+    )?;
+    Ok(PinnedAnchor {
+        tracked,
+        above,
+        below,
+        row_text,
+        screen,
+    })
+}
+
+/// The text of one screen-space row, one entry per cell with blanks as empty,
+/// so equal rows give equal strings.
+fn row_text(terminal: &Terminal<'_, '_>, y: u32) -> Result<String, libghostty_vt::Error> {
+    let mut text = String::new();
+    let mut graphemes = ['\0'; 16];
+    for x in 0..terminal.cols()? {
+        let cell = terminal.grid_ref(Point::Screen(PointCoordinate { x, y }))?;
+        match cell.graphemes(&mut graphemes) {
+            Ok(count) => text.extend(graphemes.iter().take(count)),
+            // A cluster longer than the buffer still differs from the cells
+            // around it; a marker keeps the comparison deterministic.
+            Err(libghostty_vt::Error::OutOfSpace { .. }) => text.push('\u{FFFD}'),
+            Err(error) => return Err(error),
+        }
+        text.push('\u{1F}');
+    }
+    Ok(text)
+}
+
+/// Pins column 0 of screen-space row `y`, where row 0 is the oldest line of
+/// scrollback, when there is such a row.
+fn track_row(
+    terminal: &Terminal<'_, '_>,
+    y: Option<u32>,
+) -> Result<Option<TrackedGridRef>, SessionError> {
+    y.map(|y| {
+        terminal
+            .track_grid_ref(Point::Screen(PointCoordinate { x: 0, y }))
+            .map_err(sentinel_error)
+    })
+    .transpose()
+}
+
+fn sentinel_error(error: libghostty_vt::Error) -> SessionError {
+    SessionError::new("selection_sentinel", error)
+}
+
+/// The cell a pinned press still names. `None` once it names something else:
+/// the other screen is showing, its content was evicted, its row was rotated
+/// away (a sentinel lost or on the anchor's row), or other text was shifted
+/// under it (the row's text changed).
+fn pinned_anchor<'t>(
+    terminal: &'t Terminal<'_, '_>,
+    pin: &PinnedAnchor,
+) -> Result<Option<GridRef<'t>>, SessionError> {
+    let lost = |error: libghostty_vt::Error| SessionError::new("selection_anchor", error);
+    if terminal.active_screen().map_err(lost)? != pin.screen {
+        return Ok(None);
+    }
+    let Some(anchor_ref) = pin.tracked.snapshot(terminal).map_err(lost)? else {
+        return Ok(None);
+    };
+    let Some(anchor_at) = pin.tracked.point(PointSpace::Screen).map_err(lost)? else {
+        return Ok(None);
+    };
+    if row_text(terminal, anchor_at.y).map_err(lost)? != pin.row_text {
+        return Ok(None);
+    }
+    for sentinel in pin.above.iter().chain(pin.below.iter()) {
+        let Some(sentinel_at) = sentinel.point(PointSpace::Screen).map_err(lost)? else {
+            return Ok(None);
+        };
+        if sentinel_at.y == anchor_at.y {
+            return Ok(None);
+        }
+    }
+    Ok(Some(anchor_ref))
 }
 
 /// Installs a selection whose head is a viewport cell.
@@ -271,8 +409,10 @@ pub(crate) fn track_selection_anchor(
 /// Word and line modes delegate to libghostty so Sprite agrees with Ghostty on
 /// what a word or a wrapped line is, rather than inventing its own boundaries.
 ///
-/// Returns `false` when a tracked anchor has lost its content, or the other
-/// screen is now active; the selection is then cleared rather than re-anchored on whatever took its place.
+/// Returns `false` when a tracked anchor no longer names the content it was
+/// pressed on (evicted, or its row rotated away) or the other screen is now
+/// active; the selection is then cleared rather than re-anchored on whatever
+/// took its place.
 pub(crate) fn apply_selection(
     terminal: &Terminal<'_, '_>,
     anchor: SelectionAnchor<'_>,
@@ -293,17 +433,7 @@ pub(crate) fn apply_selection(
                     .grid_ref(viewport_point(position))
                     .map_err(|error| SessionError::new("selection_grid_ref", error))?,
                 SelectionAnchor::Tracked(pin) => {
-                    let active = terminal
-                        .active_screen()
-                        .map_err(|error| SessionError::new("selection_anchor", error))?;
-                    let pinned = if active == pin.screen {
-                        pin.tracked
-                            .snapshot(terminal)
-                            .map_err(|error| SessionError::new("selection_anchor", error))?
-                    } else {
-                        None
-                    };
-                    let Some(anchor_ref) = pinned else {
+                    let Some(anchor_ref) = pinned_anchor(terminal, pin)? else {
                         terminal
                             .set_selection(None)
                             .map_err(|error| SessionError::new("clear_selection", error))?;

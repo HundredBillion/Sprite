@@ -10,7 +10,7 @@
 //! newline-delimited JSON. The connection closing — or the program dying —
 //! removes the Surface, so nothing is ever left on screen without an owner.
 
-use crate::timeouts::{HANDSHAKE_TIMEOUT, REPLY_TIMEOUT, WRITE_TIMEOUT};
+use crate::timeouts::{HANDSHAKE_TIMEOUT, REPLY_TIMEOUT, WRITE_TIMEOUT, drain_deadline};
 use crate::workspace::{Patience, Relayed};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -19,8 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-#[cfg(test)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use sprite_term::Rgb;
@@ -204,6 +203,9 @@ const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 /// The largest buffer a writer keeps between writes, so one burst does not
 /// pin its memory for the rest of the connection's life.
 const KEPT_WRITE_BUFFER_BYTES: usize = 64 * 1024;
+/// The most a writer hands the socket in one write, so it checks its drain
+/// deadline at least this often.
+const WRITE_CHUNK_BYTES: usize = 64 * 1024;
 
 /// What one connection's handles and its writer thread share. The lock is
 /// held to queue lines or to take them, never across a socket write.
@@ -306,7 +308,8 @@ impl Drop for Handle {
 ///
 /// An event is queued only while fewer than `MAX_PENDING_BYTES` are
 /// pending. Sending with the bound already reached, a write that times out,
-/// or a failed write marks the connection dead and shuts the socket down;
+/// a batch that misses its drain deadline, or a failed write marks the
+/// connection dead and shuts the socket down;
 /// the connection thread's read then ends and the window hears the Surface
 /// closed. Once the last clone is dropped the writer sends what is still
 /// queued — `closed` included — ends its side, and returns. Nothing joins
@@ -339,14 +342,14 @@ impl SurfaceConnection {
         // Detached on purpose, and nothing ever waits to join it, the GPUI
         // thread least of all. It returns as soon as the connection is dead.
         // Once the last handle is gone nothing more can be queued, so what is
-        // left to drain is at most the pending bound plus one event, and a
-        // write that makes no progress for `WRITE_TIMEOUT` fails and kills
-        // the connection. That bounds the bytes, not the time: a reader that
-        // takes a few bytes at a time, each sooner than the timeout, keeps
-        // this thread and its slot for as long as it keeps reading. It holds
-        // one of the endpoint's slots and no more, so the cap on connections
-        // still caps writer threads, and only a program running as the same
-        // user can connect at all.
+        // left to drain is at most the pending bound plus one event. Each
+        // batch has a drain deadline: `WRITE_TIMEOUT` plus the time the batch
+        // takes at `MIN_DRAIN_RATE`. A reader slower than that loses the
+        // connection, however steadily it reads, so the thread and its slot
+        // are bounded in time as well as in bytes. It holds one of the
+        // endpoint's slots and no more, so the cap on connections still caps
+        // writer threads, and only a program running as the same user can
+        // connect at all.
         drop(
             std::thread::Builder::new()
                 .name("sprite-surface-writer".to_owned())
@@ -500,8 +503,7 @@ fn write_events(shared: &Shared) {
         std::mem::swap(&mut outgoing, &mut queue.queued);
         queue.in_flight = outgoing.len();
         drop(queue);
-        let mut stream = &shared.stream;
-        let written = stream.write_all(&outgoing).and_then(|()| stream.flush());
+        let written = write_within(&shared.stream, &outgoing, drain_deadline(outgoing.len()));
         outgoing.clear();
         if outgoing.capacity() > KEPT_WRITE_BUFFER_BYTES {
             outgoing = Vec::new();
@@ -509,7 +511,8 @@ fn write_events(shared: &Shared) {
         let mut queue = crate::locked::locked(&shared.queue);
         queue.in_flight = 0;
         if written.is_err() {
-            // The write timed out or failed: the program is not reading, or
+            // The write timed out, the batch missed its drain deadline, or
+            // the write failed: the program is not reading fast enough, or
             // is gone. Shutting the socket down ends the connection thread's
             // read, and the window hears the Surface closed.
             shared.stream.shutdown(Shutdown::Both).ok();
@@ -520,6 +523,39 @@ fn write_events(shared: &Shared) {
         drop(queue);
         shared.changed.notify_all();
     }
+}
+
+/// Writes `bytes` within `budget`, one chunk at a time. Before each chunk
+/// the socket's write timeout is set to the smaller of `WRITE_TIMEOUT` and
+/// the time left. A write that makes no progress still fails after
+/// `WRITE_TIMEOUT`, and a reader that makes a little progress on every
+/// write still runs out of time. Running out is a timeout like any other.
+///
+/// The timeout is a property of the socket, shared by every clone of it.
+/// Once a connection is opened only its writer writes to it, so narrowing
+/// the timeout here does not affect any other writer.
+fn write_within(mut stream: &UnixStream, bytes: &[u8], budget: Duration) -> std::io::Result<()> {
+    let started = Instant::now();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let left = budget.saturating_sub(started.elapsed());
+        // Checked before the socket is told: it refuses a zero timeout.
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the reader fell below the drain floor",
+            ));
+        }
+        stream.set_write_timeout(Some(left.min(WRITE_TIMEOUT)))?;
+        let (chunk, _) = rest.split_at(rest.len().min(WRITE_CHUNK_BYTES));
+        match stream.write(chunk) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => rest = rest.get(written..).unwrap_or_default(),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    stream.flush()
 }
 
 /// A test's handle on one connection's writer thread.
@@ -2008,14 +2044,16 @@ mod tests {
         drop(here);
     }
 
-    /// The connection cap is also the cap on writer threads: a program that
-    /// closes its Surface while events are still queued for it keeps its
-    /// slot until the writer has delivered them and returned, however long a
-    /// slow reader stretches that out.
+    /// The connection cap is also the cap on writer threads, so a writer
+    /// must not keep its slot for as long as a reader cares to trickle. A
+    /// program closes its Surface with a megabyte queued, then reads it a few
+    /// kilobytes at a time. Each read comes well inside the write timeout, so
+    /// no single write ever times out. The writer gives up at the batch's
+    /// drain deadline anyway, the slot comes back, and the rest of the
+    /// megabyte is never delivered.
     #[test]
-    fn a_draining_writer_keeps_its_connection_slot_until_it_returns() {
+    fn a_reader_slower_than_the_drain_floor_loses_its_slot() {
         use std::io::Read;
-        use std::sync::atomic::AtomicBool;
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
         let (connections, connection) = mpsc::channel();
@@ -2048,24 +2086,20 @@ mod tests {
         let connection = connection
             .recv_timeout(Duration::from_secs(2))
             .expect("the window saw the open");
-        // A reader that takes a little at a time, often enough that the
-        // writer keeps making progress and never meets its write timeout.
-        let draining = Arc::new(AtomicBool::new(false));
+        // At most 4 KiB every WRITE_TIMEOUT / 5: about 100 KiB/s, a
+        // thirteenth of the test-scale drain floor. Every read is far inside
+        // the write timeout, so the writer always makes progress.
         let reader = std::thread::spawn({
             let mut stream = stream.try_clone().expect("clone");
-            let draining = Arc::clone(&draining);
             move || {
                 let mut received = 0;
                 let mut chunk = [0; 4096];
                 loop {
-                    let count = stream.read(&mut chunk).expect("read");
-                    if count == 0 {
-                        return received;
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => return received,
+                        Ok(count) => received += count,
                     }
-                    received += count;
-                    if !draining.load(Ordering::SeqCst) {
-                        crate::test_blocking_wait::pause(WRITE_TIMEOUT / 10);
-                    }
+                    crate::test_blocking_wait::pause(WRITE_TIMEOUT / 5);
                 }
             }
         });
@@ -2076,25 +2110,22 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("the window saw the close");
         drop(connection);
-        // The connection thread has returned and every handle is gone, but
-        // the writer is still delivering the megabyte.
-        let watching = Instant::now();
-        while watching.elapsed() < WRITE_TIMEOUT * 2 {
-            assert_eq!(
-                endpoint.transport.live_connections(),
-                1,
-                "a writer still draining gave up its connection slot"
-            );
-            crate::test_blocking_wait::pause(WRITE_TIMEOUT / 20);
-        }
-        draining.store(true, Ordering::SeqCst);
-        let received = reader.join().expect("reader");
-        assert!(received > event.len(), "every queued byte arrived");
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Every handle is gone and the connection thread has returned, so
+        // only the writer holds the slot now. At this reader's pace the
+        // megabyte takes over ten seconds, far beyond its drain deadline.
+        let deadline = Instant::now() + crate::test_blocking_wait::watchdog();
         while endpoint.transport.live_connections() != 0 {
-            assert!(Instant::now() < deadline, "the slot outlived its writer");
+            assert!(
+                Instant::now() < deadline,
+                "a reader slower than the drain floor kept the writer's slot"
+            );
             crate::test_blocking_wait::pause(Duration::from_millis(5));
         }
+        let received = reader.join().expect("reader");
+        assert!(
+            received < event.len(),
+            "the writer gave up before delivering the megabyte ({received} bytes arrived)"
+        );
     }
 
     /// A program that connects and says nothing must not hold a connection

@@ -20,8 +20,8 @@ use crate::surface::channel::{
 use crate::surface::description::{GuideVisibility, ListBorderSide, ListConfig};
 use crate::surface::list::{ListModel, ListOp, ScrollAnchor};
 #[cfg(test)]
-use crate::surface::render::render_svg;
-use crate::surface::render::{MAX_SURFACE_IMAGE_BYTES, raster_bytes, render_svg_with_budget};
+use crate::surface::svg_decode::render_svg;
+use crate::surface::svg_decode::{SvgDecodes, SvgState};
 use crate::terminal_view::TerminalView;
 use crate::tokens::{Role, TokenRegistry};
 
@@ -47,43 +47,37 @@ fn dragged_scroll_offset(total: f32, viewport: f32, pointer_y: f32, grab: f32) -
     (pointer_y - grab).clamp(0.0, track) / track * (total - viewport)
 }
 
+/// Asks for the pictures of the visible assets and keeps what rows draw: a
+/// picture once its decode is ready, an empty slot once it was refused. A
+/// pending asset is left out, so its row draws an empty slot until the
+/// decode finishes and the list is told to draw again. Every outcome is kept
+/// until the raster width changes, as assets cannot be redefined.
 fn sync_image_cache(
     cache: &mut Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
+    decodes: &SvgDecodes<String>,
     assets: &BTreeMap<String, String>,
     ids: impl IntoIterator<Item = String>,
-    raster_width: f32,
 ) {
-    let ids: Vec<String> = ids.into_iter().collect();
-    if ids
-        .iter()
-        .all(|id| cache.contains_key(id) || !assets.contains_key(id))
-    {
-        return;
-    }
-    let mut retained_bytes: usize = cache
-        .values()
-        .flatten()
-        .map(|image| raster_bytes(image))
-        .sum();
-    let mut images = (**cache).clone();
+    let mut settled = Vec::new();
     for id in ids {
-        if !images.contains_key(&id)
-            && let Some(svg) = assets.get(&id)
-        {
-            let picture = render_svg_with_budget(
-                svg,
-                Some(raster_width),
-                MAX_SURFACE_IMAGE_BYTES - retained_bytes,
-            );
-            if let Some(picture) = &picture {
-                retained_bytes += raster_bytes(picture);
-            }
-            images.insert(id, picture);
+        if cache.contains_key(&id) {
+            continue;
+        }
+        let Some(svg) = assets.get(&id) else {
+            continue;
+        };
+        match decodes.want(id.as_str(), || (id.clone(), Arc::from(svg.as_str()))) {
+            SvgState::Pending => {}
+            SvgState::Ready(picture) => settled.push((id, Some(picture))),
+            SvgState::Refused(_) => settled.push((id, None)),
         }
     }
-    if images.len() != cache.len() {
-        *cache = Arc::new(images);
+    if settled.is_empty() {
+        return;
     }
+    let mut images = (**cache).clone();
+    images.extend(settled);
+    *cache = Arc::new(images);
 }
 
 /// Converts GPUI's negative pixel offset into the wire-format row anchor.
@@ -159,6 +153,8 @@ pub(super) struct VirtualListView {
     host: WeakEntity<TerminalView>,
     pub(super) scroll: UniformListScrollHandle,
     images: Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
+    /// The decodes behind `images`, drawn `raster_width` pixels wide.
+    decodes: SvgDecodes<String>,
     raster_width: f32,
     focused: bool,
     viewport: Option<Bounds<gpui::Pixels>>,
@@ -198,6 +194,7 @@ impl VirtualListView {
             host,
             scroll: UniformListScrollHandle::new(),
             images: Arc::new(BTreeMap::new()),
+            decodes: SvgDecodes::new(None),
             raster_width: 0.0,
             focused: false,
             viewport: None,
@@ -414,6 +411,7 @@ impl Render for VirtualListView {
         if self.raster_width != raster_width {
             self.raster_width = raster_width;
             self.images = Arc::new(BTreeMap::new());
+            self.decodes.reset(Some(raster_width));
         }
         let viewport = self
             .viewport
@@ -442,7 +440,8 @@ impl Render for VirtualListView {
                     .iter()
                     .filter_map(|header| header.icon.clone()),
             );
-        sync_image_cache(&mut self.images, &self.model.assets, icons, raster_width);
+        sync_image_cache(&mut self.images, &self.decodes, &self.model.assets, icons);
+        self.decodes.start(cx);
         let registry = cx.global::<TokenRegistry>();
         let config = self.config.clone();
         let colors = &config.colors;
@@ -931,6 +930,125 @@ fn header_element(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::surface::svg_decode::RefusalKind;
+    use gpui::AppContext as _;
+
+    /// Stands in for the list view: a finished decode tells this entity to
+    /// draw again.
+    struct Owner;
+
+    /// Asks for `ids` as a frame does, lets every decode finish, then takes
+    /// up what they came to, as the next frame does.
+    fn settle(
+        cx: &mut gpui::TestAppContext,
+        owner: &gpui::Entity<Owner>,
+        cache: &mut Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
+        decodes: &SvgDecodes<String>,
+        assets: &BTreeMap<String, String>,
+        ids: &[&str],
+    ) {
+        let wanted = || ids.iter().map(|id| (*id).to_owned());
+        sync_image_cache(cache, decodes, assets, wanted());
+        owner.update(cx, |_, cx| decodes.start(cx));
+        cx.run_until_parked();
+        sync_image_cache(cache, decodes, assets, wanted());
+    }
+
+    #[gpui::test]
+    fn a_list_icon_is_decoded_off_the_ui_thread_and_its_list_told_when_it_is_ready(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed(
+                "test".to_owned(),
+                SharedString::from(".SystemUIFont"),
+                window,
+                cx,
+            )
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = crate::surface::channel::SurfaceConnection::new(&stream).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-v1.json"
+        ))
+        .unwrap();
+        host.update_in(cx, |view, window, cx| {
+            view.open_surface(
+                SurfaceId(1),
+                crate::surface::channel::Open {
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None },
+                    focus: false,
+                    description: fixture["description"].clone(),
+                },
+                connection,
+                window,
+                cx,
+            )
+            .unwrap();
+        });
+        // The fixture's section header draws the "chevron-down" icon on every
+        // frame. Make that icon the shape that once took seconds to decode:
+        // differently named flood results, all merged by one feMerge.
+        let floods: String = (0..4)
+            .map(|n| format!("<feFlood flood-color='#{:06x}' result='r{n}'/>", n * 0x40))
+            .collect();
+        let merges: String = (0..4)
+            .map(|n| format!("<feMergeNode in='r{n}'/>"))
+            .collect();
+        let svg = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'>\
+             <filter id='f' x='0' y='0' width='1' height='1'>{floods}<feMerge>{merges}</feMerge></filter>\
+             <rect width='16' height='16' filter='url(#f)'/></svg>"
+        );
+        let assets = crate::surface::list::parse_op(
+            &serde_json::json!({"type":"assets","entries":{"chevron-down":svg}}),
+        )
+        .unwrap();
+        host.update(cx, |view, cx| view.list_operation(SurfaceId(1), assets, cx));
+        let list = host.read_with(cx, |view, _| {
+            match &view.surfaces.fill.as_ref().unwrap().body {
+                super::super::surfaces::Body::List { view, .. } => view.clone(),
+                super::super::surfaces::Body::Elements(_)
+                | super::super::surfaces::Body::Grid { .. } => panic!("expected a list"),
+            }
+        });
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = notified.clone();
+        let _observer =
+            cx.update(|_, cx| cx.observe(&list, move |_, _| counter.set(counter.get() + 1)));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        let icon = |cx: &mut gpui::VisualTestContext| {
+            list.read_with(cx, |list, _| list.images.get("chevron-down").cloned())
+        };
+
+        draw(cx);
+        assert!(
+            icon(cx).is_none(),
+            "the frame decoded the icon on the UI thread"
+        );
+        let before = notified.get();
+        cx.run_until_parked();
+        assert!(
+            notified.get() > before,
+            "the finished decode told the list to draw again"
+        );
+        draw(cx);
+        assert!(
+            icon(cx).flatten().is_some(),
+            "the next frame draws the decoded icon"
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
     #[test]
     fn scrollbar_handles_empty_and_fit_content() {
         assert_eq!(scrollbar_geometry(0.0, 20.0, 0.0), (0.0, 20.0));
@@ -981,10 +1099,12 @@ mod tests {
         let restored = restored_pixel_offset(index, intra, 1000, 24.0, 440.0);
         assert_eq!(scroll_anchor(1000, 24.0, 440.0, -restored), (100, 3.0, 19));
     }
-    #[test]
-    fn visible_list_assets_bound_retained_pixels_and_reset() {
+    #[gpui::test]
+    fn visible_list_assets_bound_retained_pixels_and_reset(cx: &mut gpui::TestAppContext) {
+        let owner = cx.new(|_| Owner);
         let mut cache = Arc::new(BTreeMap::new());
-        let assets = (0..5)
+        let decodes = SvgDecodes::new(Some(2048.0));
+        let assets: BTreeMap<String, String> = (0..5)
             .map(|i| {
                 (
                     i.to_string(),
@@ -993,9 +1113,16 @@ mod tests {
                 )
             })
             .collect();
-        sync_image_cache(&mut cache, &assets, (0..4).map(|i| i.to_string()), 2048.0);
+        settle(
+            cx,
+            &owner,
+            &mut cache,
+            &decodes,
+            &assets,
+            &["0", "1", "2", "3"],
+        );
         assert_eq!(cache.values().flatten().count(), 4);
-        sync_image_cache(&mut cache, &assets, ["4".to_owned()], 2048.0);
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["4"]);
         let retained: usize = cache
             .values()
             .flatten()
@@ -1003,48 +1130,70 @@ mod tests {
             .sum();
         assert_eq!(retained, 64 * 1024 * 1024);
         assert!(cache["4"].is_none());
+        assert!(matches!(
+            decodes.state("4"),
+            Some(SvgState::Refused(RefusalKind::OverBudget))
+        ));
         let first = cache.clone();
-        sync_image_cache(&mut cache, &assets, ["4".to_owned()], 2048.0);
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["4"]);
         assert!(Arc::ptr_eq(&cache, &first));
+        assert_eq!(
+            decodes.started().len(),
+            5,
+            "a list keeps a refusal rather than decoding again"
+        );
         drop(first);
         cache = Arc::new(BTreeMap::new());
-        sync_image_cache(&mut cache, &assets, ["4".to_owned()], 1024.0);
+        decodes.reset(Some(1024.0));
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["4"]);
         assert_eq!(
             cache["4"].as_ref().unwrap().as_bytes(0).unwrap().len(),
             4 * 1024 * 1024
         );
     }
-
-    #[test]
-    fn accepted_duplicate_assets_reuse_cache_and_image_arcs() {
+    #[gpui::test]
+    fn accepted_duplicate_assets_reuse_cache_and_image_arcs(cx: &mut gpui::TestAppContext) {
+        let owner = cx.new(|_| Owner);
         let mut cache = Arc::new(BTreeMap::new());
+        let decodes = SvgDecodes::new(Some(2.0));
         let mut assets = BTreeMap::new();
         assets.insert(
             "first".to_owned(),
             "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>".to_owned(),
         );
-        sync_image_cache(&mut cache, &assets, ["first".to_owned()], 2.0);
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["first"]);
         let old_cache = cache.clone();
         let old_image = cache["first"].as_ref().unwrap().clone();
-        sync_image_cache(&mut cache, &assets, ["first".to_owned()], 2.0);
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["first"]);
         assert!(Arc::ptr_eq(&cache, &old_cache));
         assets.insert(
             "second".to_owned(),
             "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>".to_owned(),
         );
-        sync_image_cache(&mut cache, &assets, ["second".to_owned()], 2.0);
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["second"]);
         assert!(Arc::ptr_eq(cache["first"].as_ref().unwrap(), &old_image));
         assert_eq!(cache.len(), 2);
     }
-    #[test]
-    fn invalid_visible_svg_is_cached_as_an_empty_slot() {
+    #[gpui::test]
+    fn invalid_visible_svg_is_cached_as_an_empty_slot(cx: &mut gpui::TestAppContext) {
+        let owner = cx.new(|_| Owner);
         let mut cache = Arc::new(BTreeMap::new());
+        let decodes = SvgDecodes::new(Some(32.0));
         let assets = BTreeMap::from([("broken".to_owned(), "<svg invalid".to_owned())]);
-        sync_image_cache(&mut cache, &assets, ["broken".to_owned()], 32.0);
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["broken"]);
         assert!(cache["broken"].is_none());
+        assert!(matches!(
+            decodes.state("broken"),
+            Some(SvgState::Refused(RefusalKind::Unparsable))
+        ));
         let first = cache.clone();
-        sync_image_cache(&mut cache, &assets, ["broken".to_owned()], 32.0);
+        settle(cx, &owner, &mut cache, &decodes, &assets, &["broken"]);
         assert!(Arc::ptr_eq(&first, &cache));
+        assert_eq!(
+            decodes.started().len(),
+            1,
+            "an unparsable asset is decoded once"
+        );
     }
     #[test]
     fn svg_cache_keeps_blue_red_and_alpha_channels_in_renderer_order() {

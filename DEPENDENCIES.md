@@ -247,10 +247,16 @@ than the no-op backend. Sprite's development dependency also enables
 
 **License and source.** Apache-2.0. <https://github.com/zed-industries/zed>.
 
-**Local input patch.** The exact published 0.2.2 archive is retained in
-`vendor/gpui`, with its Apache license and a narrow recorded native-commit/key-
-fallback patch. `scripts/check_gpui_patch.py` verifies the complete source
-against the SHA256-pinned archive plus `patches/gpui-0.2.2-native-text.patch`;
+**Local patches.** The exact published 0.2.2 archive is retained in
+`vendor/gpui`, with its Apache license, a narrow recorded native-commit/key-
+fallback patch, a macOS should-terminate hook (ADR 0032), a test-platform
+scale-factor simulation, and a lost-wake-up fix in the test executor.
+`scripts/check_gpui_patch.py` verifies the complete source against the
+SHA256-pinned archive plus, in order,
+`patches/gpui-0.2.2-native-text.patch`,
+`patches/gpui-0.2.2-should-terminate.patch`,
+`patches/gpui-0.2.2-test-scale-factor.patch` and
+`patches/gpui-0.2.2-test-block-wakeup.patch`;
 CI runs this and its tamper-negative/source trace tests. Cargo.lock changes only
 GPUI's registry source/checksum removal for the local path. Existing versions
 and features remain unchanged. See ADR0027 and `vendor/gpui.provenance.md` for

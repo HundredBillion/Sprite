@@ -38,6 +38,36 @@ impl EventStream {
     pub fn next_blocking(&mut self) -> Result<TerminalEvent, SessionError> {
         self.receiver.next_blocking()
     }
+
+    /// A handle that tells whether the worker is stalled behind this stream,
+    /// kept by whoever needs to ask after the stream has moved, such as into
+    /// a view's event task.
+    #[cfg(feature = "test-support")]
+    pub fn stall_probe(&self) -> StallProbe {
+        StallProbe {
+            mailbox: self.receiver.mailbox(),
+        }
+    }
+}
+
+/// Tells whether a session's worker is stalled behind its event stream, for
+/// tests that need a stalled worker and must not infer one from how long a
+/// full control lane stays full.
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+pub struct StallProbe {
+    mailbox: Arc<crate::event_mailbox::Mailbox>,
+}
+
+#[cfg(feature = "test-support")]
+impl StallProbe {
+    /// Whether the worker has raised more events than the stream holds and
+    /// waits for them to be taken. A stalled worker takes no command, so its
+    /// control lane, once full, stays full until the stream is read,
+    /// cancelled or dropped.
+    pub fn worker_stalled(&self) -> bool {
+        self.mailbox.producer_waiting()
+    }
 }
 
 /// The latest-only snapshot stream. Single-owner by construction.

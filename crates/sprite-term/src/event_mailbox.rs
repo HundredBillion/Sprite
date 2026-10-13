@@ -133,6 +133,19 @@ impl Mailbox {
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
     }
 
+    /// Whether the producer waits, with no deadline, for the consumer to
+    /// take part of a batch it has already handed over. Only taking events
+    /// (or cancelling) ends that wait.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn producer_waiting(&self) -> bool {
+        let state = crate::locked::locked(&self.state);
+        !state.pending.is_empty()
+            && !state.canceled
+            && !state.consumer_gone
+            && !state.sealed
+            && state.drain_deadline.is_none()
+    }
+
     pub(crate) fn producer_ready(&self) -> bool {
         let state = crate::locked::locked(&self.state);
         state.pending.is_empty() && !state.canceled && !state.consumer_gone && !state.sealed
@@ -169,6 +182,11 @@ impl Mailbox {
 }
 
 impl Receiver {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn mailbox(&self) -> Arc<Mailbox> {
+        Arc::clone(&self.mailbox)
+    }
+
     fn pop(&self) -> Result<Option<TerminalEvent>, SessionError> {
         let mut state = crate::locked::locked(&self.mailbox.state);
         let event = state

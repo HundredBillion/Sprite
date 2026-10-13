@@ -69,6 +69,11 @@ enum SessionState {
     Ended(TerminalSession),
 }
 
+/// Each placeholder tile painted in the last frame: its cell, and its bounds
+/// in the window.
+#[cfg(test)]
+pub(crate) type TileLog = std::rc::Rc<std::cell::RefCell<Vec<(u16, usize, gpui::Bounds<Pixels>)>>>;
+
 pub struct TerminalView {
     applied_settings: crate::config::Settings,
     /// What the worker could not take yet, kept so the latest value is
@@ -155,6 +160,10 @@ pub struct TerminalView {
     /// hit testing uses what paint reported rather than a position computed
     /// twice and liable to disagree.
     content_origin: Option<gpui::Point<Pixels>>,
+    /// Where this frame painted each placeholder tile, for tests that check
+    /// it against the cells.
+    #[cfg(test)]
+    painted_tiles: TileLog,
     /// A paste withheld as unsafe, awaiting a second explicit request for the
     /// same text.
     unsafe_paste: crate::confirmation::Confirmation<String>,
@@ -176,6 +185,10 @@ pub struct TerminalView {
     /// nothing about a composition until the person commits it.
     preedit: Option<String>,
     _events: Task<()>,
+    /// Whether the worker is stalled behind the event stream `_events` owns,
+    /// for tests that fill the control lane only once it is.
+    #[cfg(test)]
+    stall_probe: Option<sprite_term::StallProbe>,
     _snapshots: Task<()>,
     _retry: Task<()>,
     retry_wake: async_channel::Sender<()>,
@@ -407,6 +420,8 @@ impl TerminalView {
             link.panes.register(link.pane, link.tab, session.commands());
         }
 
+        #[cfg(test)]
+        let stall_probe = Some(events.stall_probe());
         let event_task = cx.spawn(async move |view, cx| {
             loop {
                 let decision = crate::terminal_events::decide(events.next().await);
@@ -542,12 +557,16 @@ impl TerminalView {
             origin: point(px(grid.padding.get()), px(grid.padding.get())),
             padding: grid.padding.get(),
             content_origin: None,
+            #[cfg(test)]
+            painted_tiles: Default::default(),
             unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
             pane_focus: pane_focus::PaneFocus::default(),
             _focus_observers: focus_observers,
             _events: event_task,
+            #[cfg(test)]
+            stall_probe,
             _snapshots: snapshot_task,
             _retry: retry_task,
             retry_wake,
@@ -631,12 +650,16 @@ impl TerminalView {
             ),
             padding: crate::config::Grid::DEFAULT_PADDING,
             content_origin: None,
+            #[cfg(test)]
+            painted_tiles: Default::default(),
             unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
             pane_focus: pane_focus::PaneFocus::default(),
             _focus_observers: focus_observers,
             _events: Task::ready(()),
+            #[cfg(test)]
+            stall_probe: None,
             _snapshots: Task::ready(()),
             _retry: Task::ready(()),
             retry_wake: async_channel::bounded(1).0,
@@ -958,6 +981,48 @@ impl TerminalView {
     #[cfg(test)]
     pub(crate) fn bundle_for_test(&self) -> Option<Arc<SnapshotBundle>> {
         self.bundle.clone()
+    }
+
+    /// Whether this view's worker is stalled behind its event stream. False
+    /// for a view that never started a session of its own.
+    #[cfg(test)]
+    pub(crate) fn worker_stalled_for_test(&self) -> bool {
+        self.stall_probe
+            .as_ref()
+            .is_some_and(sprite_term::StallProbe::worker_stalled)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn painted_tiles_for_test(&self) -> Vec<(u16, usize, gpui::Bounds<Pixels>)> {
+        self.painted_tiles.borrow().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content_origin_for_test(&self) -> Option<gpui::Point<Pixels>> {
+        self.content_origin
+    }
+
+    /// One cell's bounds in the window, snapped as the painter snaps them,
+    /// against the grid's corner as the last frame's layout placed it.
+    #[cfg(test)]
+    pub(crate) fn cell_bounds_for_test(
+        &self,
+        column: u16,
+        row: usize,
+        scale: f32,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        use crate::grid::{Col, Row, column_edge, row_edge};
+        let origin = self.content_origin?;
+        let (width, height) = (self.metrics.width(), self.metrics.height());
+        let column = u32::from(column);
+        let left = column_edge(origin.x, width, Col(column), scale).pixels();
+        let right = column_edge(origin.x, width, Col(column + 1), scale).pixels();
+        let top = row_edge(origin.y, height, Row(row), scale).pixels();
+        let bottom = row_edge(origin.y, height, Row(row + 1), scale).pixels();
+        Some(gpui::Bounds::new(
+            gpui::point(left, top),
+            gpui::size(right - left, bottom - top),
+        ))
     }
 
     fn refresh_display_title(&mut self, cx: &mut Context<Self>) {

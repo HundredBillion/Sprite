@@ -343,9 +343,14 @@ fn input_is_admitted_while_every_output_permit_is_outstanding() {
             "the worker never stalled behind the flood"
         );
     }
-    // The lane is full and stays full, so the worker is stalled; every
-    // keystroke offered on the way was admitted, and a whole lane's worth of
-    // them was, even though the inbox is saturated with output.
+    // A lane still full after `STALL_PROOF` most likely means the worker is
+    // stalled in publish, but under CPU load a worker that is merely not
+    // scheduled keeps its lane full too, so this does not prove a stall. The
+    // assertion does not need one: a refusal means the lane is full, the
+    // worker had taken the release, and everything queued before it, by the
+    // time the flood began, and only this thread has offered anything since.
+    // So a whole lane's worth of keystrokes was admitted, even though the
+    // inbox is saturated with output.
     assert!(
         accepted >= sprite_term::CONTROL_CAPACITY,
         "only {accepted} keystrokes were admitted under an output flood"

@@ -1,6 +1,7 @@
 """Exercise the CI source guards, including their failure exit status."""
 
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -53,6 +54,17 @@ class CiPolicyTests(unittest.TestCase):
         for path in ["std::thread::sleep", "gpui::Timer::after", "request_animation_frame"]:
             self.assertIn(path, config)
         self.assertIn("allow-unwrap-in-tests = true", config)
+
+    def test_every_job_has_a_time_limit(self):
+        # Without one a hung test holds a hosted runner for six hours.
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        jobs = workflow.split("\njobs:\n", 1)[1]
+        headers = list(re.finditer(r"(?m)^  ([a-z][a-z0-9-]*):$", jobs))
+        self.assertTrue(headers, "no jobs found under jobs:")
+        ends = [header.start() for header in headers[1:]] + [len(jobs)]
+        for header, end in zip(headers, ends):
+            with self.subTest(job=header.group(1)):
+                self.assertRegex(jobs[header.end():end], r"(?m)^    timeout-minutes: [1-9][0-9]*$")
 
 
 if __name__ == "__main__":
