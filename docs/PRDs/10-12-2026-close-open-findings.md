@@ -125,7 +125,7 @@ entry afterwards.
     never rasterised.
   - The existing cache and list-view tests wait for decodes to finish.
 
-## R-S. Two sentinel pins detect a rotated-out anchor (GAP-C06, #66)
+## R-S. Sentinel pins and the anchor row's text detect a lost anchor (GAP-C06, #66)
 
 - R-S1 When a gesture starts, `track_selection_anchor` also tracks up to two
   sentinel `TrackedGridRef`s: one on the screen row directly above the anchor,
@@ -157,6 +157,21 @@ entry afterwards.
   - A one-row screen has no sentinels and keeps today's behaviour.
   - A widening reflow during a gesture can merge the anchor's row with an
     adjacent wrapped row, which clears the selection.
+- R-S3b Text shifted under a pin that did not move. libghostty's insert line,
+  delete line, scroll up/down inside a region and reverse index (`insertLines`
+  / `deleteLines`) move row contents without touching tracked pins, so the
+  anchor and both sentinels stay put while other text slides in. vim and less
+  use these heavily. `track_selection_anchor` therefore also records the text
+  of the anchor's row at the press, and `apply_selection` treats the anchor as
+  lost when the row under the anchor pin no longer holds that text. Accepted
+  imprecision:
+  - A program that redraws the anchor's row in place (a progress bar, a status
+    line) clears the gesture.
+  - Text replaced by identical text is not detected. That is harmless: the copy
+    is the same text.
+  - A gesture pressed on the row directly above a scroll region is cleared at
+    that region's first scroll.
+  - A resize that rewraps the anchor's row during a gesture clears it.
 - R-S4 This covers the primary screen with zero scrollback, the alternate
   screen (always created without scrollback) and scroll regions. Scrollback
   configuration is unchanged.
@@ -167,6 +182,14 @@ entry afterwards.
   - `a_gesture_anchored_on_the_last_row_is_cleared_before_it_drifts`
   - `a_gesture_anchored_mid_way_down_a_wrapped_line_is_cleared_when_its_row_rotates_out`
   - `a_gesture_inside_a_scroll_region_is_cleared_when_its_row_rotates_out`
+  - `a_gesture_whose_anchor_row_was_deleted_selects_nothing`
+  - `a_gesture_whose_anchor_row_was_pushed_down_by_an_inserted_line_selects_nothing`
+  - `a_gesture_whose_anchor_row_was_scrolled_by_reverse_index_selects_nothing`
+  - `a_gesture_whose_anchor_row_was_scrolled_by_scroll_up_in_a_region_selects_nothing`
+
+  Two further tests guard against clearing too often, and pass before and
+  after: `a_gesture_whose_anchor_stays_on_screen_after_scrolling_keeps_its_text`
+  and `a_gesture_below_a_scrolled_region_top_keeps_its_text`.
 
 ## R-D. A slow reader cannot keep a writer slot indefinitely (GAP-C07, #67)
 
