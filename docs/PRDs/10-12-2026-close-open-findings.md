@@ -66,6 +66,9 @@ entry afterwards.
   A logout, restart or shutdown is a Quit Request like any other: with a busy
   pane, it is cancelled and the question shown, as Terminal.app does. The quit
   reason is not inspected. Linux behaviour is unchanged.
+- R-Q4b The quit question's instruction for repeating the request changes from
+  "press the same keys again" to "quit again", because a Dock or menu Quit
+  repeats it without keys.
 - R-Q4a ADR 0032 records this decision and the rejected alternatives.
 - R-Q5 Tests:
   - A GPUI test simulates the request with an idle pane and a cleanup gate
@@ -74,8 +77,11 @@ entry afterwards.
   - A second GPUI test, with a busy pane, asserts that the first request is
     cancelled with the question on screen, and that a second request is allowed
     after cleanup.
-  - Manual evidence on a macOS desktop: with `sleep 1000` in a pane, Dock →
-    Quit twice, then `ps` shows the process is gone.
+  - Manual evidence on a macOS desktop: with
+    `sh -c 'trap "" HUP; exec sleep 1000'` in a pane, Dock → Quit twice, then
+    `pgrep -f "sleep 1000"` finds nothing. The child ignores the hangup on
+    purpose: a plain `sleep` dies on the hangup even without this fix, so it
+    proves nothing.
 
 ## R-V. SVG decoding leaves the UI thread, and filter work is capped (GAP-C03, #63)
 
@@ -189,9 +195,16 @@ entry afterwards.
   frame's `content_origin`.
 - R-G2 `content_origin` stays for its other reader (`input.rs`). The comment
   admitting the stale origin is removed.
-- R-G3 Test: a GPUI test places a Kitty image in an unfocused pane, drags the
-  divider and draws without a forced `window.refresh()`. It asserts the painted
-  tile bounds lie on that frame's cell edges. It fails today.
+- R-G3 The issue's trigger, a divider drag, cannot misalign tiles: layout
+  rounds every position to whole device pixels, and snapping is unchanged by a
+  whole-pixel shift. The trigger is a display-scale change, such as moving the
+  window between a 2× and a 1× display, after which the previous frame's corner
+  sits between device pixels.
+- R-G4 The GPUI test window gains a settable scale factor, carried as a third
+  patch in `patches/` and replayed by `check_gpui_patch.py`. Test: a GPUI test
+  places a Kitty image in an unfocused pane and changes the window's scale from
+  2.0 to 1.0. It draws the next frame without a forced `window.refresh()` and
+  asserts the painted tiles lie on that frame's cell edges. It fails today.
 
 ## R-K. Kitty Unicode-placeholder inheritance (GAP-C16, #75)
 
