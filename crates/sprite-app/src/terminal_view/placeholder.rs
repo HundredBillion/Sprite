@@ -311,7 +311,9 @@ const DIACRITICS: &[char] = &[
 const PLACEHOLDER: char = '\u{10eeee}';
 
 /// What one placeholder cell's diacritics say. Each mark is optional: one that
-/// is missing, or is not in the table, is taken from the cell to the left.
+/// is missing, or is not in the table, continues the run from the cell to the
+/// left (the same row and high byte, the next column). The first cell of a
+/// run has nothing to its left to continue, so a mark it lacks counts as 0.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Marks {
     row: Option<u32>,
