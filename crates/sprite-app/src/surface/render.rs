@@ -36,18 +36,20 @@ use crate::tokens::{Role, TokenRegistry};
 /// picture. Elements that draw the same SVG share one decode, and an update
 /// that keeps an SVG keeps its decode wherever in the tree it moved.
 ///
-/// The text is looked up once per description, and once more after any
-/// decode finishes. A description may carry megabytes of SVG, so in between,
-/// each image's state is kept by its tree-order index and every frame finds
-/// it there.
+/// The text is looked up once per description, and an image whose decode was
+/// still pending once more after any decode finishes. A description may
+/// carry megabytes of SVG, so in between, each image's state is kept by its
+/// tree-order index and every frame finds it there.
 #[derive(Default)]
 pub(crate) struct ElementImageCache {
     decodes: SvgDecodes<Arc<str>>,
     /// What each image of the current description had come to when it was
     /// last looked up, by its index in tree order. `None` until that image is
     /// drawn. Emptied by `retain_drawn_by`, which `ElementBody::replace`
-    /// calls with every new description, and whenever a decode has settled
-    /// since `placed_at`.
+    /// calls with every new description. Whenever a decode has settled since
+    /// `placed_at`, the images that were pending are forgotten, so the next
+    /// frame finds what their decode came to; ready and refused images keep
+    /// their place, since neither changes while the description draws them.
     placed: Vec<Option<SvgState>>,
     placed_at: u64,
     #[cfg(test)]
@@ -60,7 +62,15 @@ impl ElementImageCache {
     fn picture(&mut self, index: u64, svg: &str) -> Option<Arc<RenderImage>> {
         let settled = self.decodes.settled();
         if self.placed_at != settled {
-            self.placed.clear();
+            // Only a pending decode can have changed: a ready picture or a
+            // refusal stays as it is until the next description. Forgetting
+            // those too would hash every image's text again each time one
+            // decode lands.
+            for slot in &mut self.placed {
+                if matches!(slot, Some(SvgState::Pending)) {
+                    *slot = None;
+                }
+            }
             self.placed_at = settled;
         }
         let index = index as usize;
@@ -769,9 +779,10 @@ mod tests {
     }
 
     /// A description may carry megabytes of SVG text. It is looked up by that
-    /// text once per description and once more after decodes finish; every
-    /// other frame finds each image by its place in the tree, so a repaint
-    /// never hashes or compares the text.
+    /// text once per description, and an image still waiting for its decode
+    /// once more after a decode finishes; every other frame finds each image
+    /// by its place in the tree, so a repaint never hashes or compares the
+    /// text.
     #[gpui::test]
     fn an_unchanged_description_never_looks_its_svg_text_up_again(cx: &mut gpui::TestAppContext) {
         let (ours, _peer) = UnixStream::pair().unwrap();
@@ -826,7 +837,12 @@ mod tests {
         cx.run_until_parked();
         draw_frame(cx, &owner, &mut cache, &moved, &registry, &connection);
         draw_frame(cx, &owner, &mut cache, &moved, &registry, &connection);
-        assert_eq!(cache.text_lookups(), 10);
+        assert_eq!(
+            cache.text_lookups(),
+            9,
+            "only the image that was still pending is found again once its decode settles; \
+             the one already drawn keeps its place"
+        );
         assert_eq!(cache.decodes(), 3, "only the new SVG is decoded");
         assert!(Arc::ptr_eq(&shown, &cache.image_for(&svg(1)).unwrap()));
     }
