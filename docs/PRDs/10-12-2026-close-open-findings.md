@@ -66,6 +66,7 @@ entry afterwards.
   A logout, restart or shutdown is a Quit Request like any other: with a busy
   pane, it is cancelled and the question shown, as Terminal.app does. The quit
   reason is not inspected. Linux behaviour is unchanged.
+- R-Q4a ADR 0032 records this decision and the rejected alternatives.
 - R-Q5 Tests:
   - A GPUI test simulates the request with an idle pane and a cleanup gate
     held. It asserts the request has no answer while the gate is held, and is
@@ -132,6 +133,9 @@ entry afterwards.
   - The sentinel's snapshot is `None`.
   - The two pins report the same row in screen coordinates.
   - The other screen is now active (today's check).
+- R-S2a When no sentinel can be placed (the anchor's logical line covers every
+  row of the screen, scrollback included), the gesture keeps today's
+  behaviour. A code comment records this limit.
 - R-S3 Why this works: libghostty's row rotation (`eraseRow`) leaves a pin on
   the erased row in place and shifts the pins below it up by one. A sentinel
   below the anchor therefore lands on the anchor's row exactly when the
