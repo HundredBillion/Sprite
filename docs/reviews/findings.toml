@@ -602,9 +602,14 @@ test = "a_placeholder_without_diacritics_continues_its_left_neighbour"
 [[finding]]
 id = "GAP-C17"
 title = "Some tests outside #57 still fail intermittently under load"
-status = "open"
+status = "resolved"
 source = "docs/PRDs/10-12-2026-close-open-findings.md"
-issue = 77
+fixed_by = "#80"
+test = [
+    "transmitting_images_in_a_loop_reaches_a_steady_state",
+    "surface_output_failure_interrupts_open_stdin_and_partial_json",
+    "outside_a_sprite_window_a_surface_cannot_be_opened_and_says_why",
+]
 
 [[finding]]
 id = "GAP-C18"
@@ -612,3 +617,10 @@ title = "macOS can miss a socket's end-of-stream, leaving a surface open"
 status = "deferred"
 source = "https://github.com/HundredBillion/Sprite/issues/79"
 issue = 79
+
+[[finding]]
+id = "GAP-C19"
+title = "#77's tests are not yet looped under load on native Linux"
+status = "open"
+source = "https://github.com/HundredBillion/Sprite/issues/81"
+issue = 81
