@@ -27,16 +27,24 @@ fn first_quiet_and_final_output_install_without_paint(cx: &mut gpui::TestAppCont
     });
     let executor = cx.executor();
     executor.allow_parking();
-    executor.block_test(view.condition::<()>(cx, |view, _| view.bundle.is_some()));
+    executor.block_test(crate::test_blocking_wait::condition(
+        &view,
+        cx,
+        |view, _| view.bundle.is_some(),
+    ));
     for marker in ["FIRST_CONTENT", "QUIET_CONTENT", "FINAL_CONTENT"] {
         view.update(cx, |view, _| {
             view.send(TerminalCommand::Input(b"\n".to_vec()))
         });
-        executor.block_test(view.condition::<()>(cx, |view, _| {
-            view.bundle
-                .as_ref()
-                .is_some_and(|bundle| bundle.pane.rows.iter().any(|row| row.text.contains(marker)))
-        }));
+        executor.block_test(crate::test_blocking_wait::condition(
+            &view,
+            cx,
+            |view, _| {
+                view.bundle.as_ref().is_some_and(|bundle| {
+                    bundle.pane.rows.iter().any(|row| row.text.contains(marker))
+                })
+            },
+        ));
     }
     view.update(cx, |view, _| {
         if let Some(cleanup) = view.begin_shutdown() {

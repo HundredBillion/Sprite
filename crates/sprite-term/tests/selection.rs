@@ -455,12 +455,16 @@ fn a_gesture_anchor_follows_its_content_while_output_scrolls() {
 /// selects nothing rather than re-anchoring on whatever replaced it.
 #[test]
 fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
+    // The shell outlives the test, which ends it: a debug build of the
+    // terminal can take longer than 30 s to take in twenty thousand lines on
+    // a loaded runner, and a shell that exited first would end the session
+    // before the test saw the end of the stream.
     let mut config = SessionConfig::command(
         "/bin/sh",
         args(&[
             "-c",
             "stty -echo; seq 1 100; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-             seq 1 20000; printf 'STREAM-DONE'; sleep 30",
+             seq 1 20000; printf 'STREAM-DONE'; sleep 300",
         ]),
     );
     // The smallest nonzero budget: libghostty keeps scrollback in whole pages
