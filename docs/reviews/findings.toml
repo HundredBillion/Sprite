@@ -605,3 +605,10 @@ title = "Some tests outside #57 still fail intermittently under load"
 status = "open"
 source = "docs/PRDs/10-12-2026-close-open-findings.md"
 issue = 77
+
+[[finding]]
+id = "GAP-C18"
+title = "macOS can miss a socket's end-of-stream, leaving a surface open"
+status = "deferred"
+source = "https://github.com/HundredBillion/Sprite/issues/79"
+issue = 79
