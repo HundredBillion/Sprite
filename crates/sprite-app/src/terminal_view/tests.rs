@@ -16,13 +16,13 @@ fn wait_for_bundle(
 ) -> Arc<SnapshotBundle> {
     let executor = cx.executor();
     executor.allow_parking();
-    executor.block_test(view.condition::<()>(cx, |view, _| {
+    executor.block_test(crate::test_blocking_wait::condition(view, cx, |view, _| {
         view.bundle.as_ref().is_some_and(|bundle| predicate(bundle))
     }));
     view.read_with(cx, |view, _| view.bundle.clone().unwrap())
 }
 
-/// Waits briefly for the view itself to reach a state. The worker's answers
+/// Waits for the view itself to reach a state. The worker's answers
 /// land through the event task, not as a snapshot, so `wait_for_bundle` cannot
 /// see them.
 fn wait_for_view(
@@ -32,7 +32,9 @@ fn wait_for_view(
 ) {
     let executor = cx.executor();
     executor.allow_parking();
-    executor.block_test(view.condition::<()>(cx, |view, _| predicate(view)));
+    executor.block_test(crate::test_blocking_wait::condition(view, cx, |view, _| {
+        predicate(view)
+    }));
 }
 
 fn redraw(cx: &mut gpui::VisualTestContext) {
@@ -858,7 +860,11 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
         cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
         let executor = cx.executor();
         executor.allow_parking();
-        executor.block_test(view.condition::<()>(cx, |view, _| view.hovered_link.is_some()));
+        executor.block_test(crate::test_blocking_wait::condition(
+            &view,
+            cx,
+            |view, _| view.hovered_link.is_some(),
+        ));
         let link = view.read_with(cx, |view, _| view.hovered_link);
         cx.simulate_mouse_move(inside, None, gpui::Modifiers::default());
         view.read_with(cx, |view, _| {
@@ -876,7 +882,11 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
             "plain link opens only on release"
         );
         cx.simulate_mouse_up(start, gpui::MouseButton::Left, gpui::Modifiers::default());
-        executor.block_test(view.condition::<()>(cx, |view, _| view.pending_link_click.is_none()));
+        executor.block_test(crate::test_blocking_wait::condition(
+            &view,
+            cx,
+            |view, _| view.pending_link_click.is_none(),
+        ));
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
     }));
     if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
@@ -958,9 +968,11 @@ fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::Test
         let executor = cx.executor();
         executor.allow_parking();
         cx.simulate_mouse_move(on_link, None, gpui::Modifiers::default());
-        executor.block_test(view.condition::<()>(cx, |view, _| {
-            view.hovered_link.is_some() && view.hover_request.is_none()
-        }));
+        executor.block_test(crate::test_blocking_wait::condition(
+            &view,
+            cx,
+            |view, _| view.hovered_link.is_some() && view.hover_request.is_none(),
+        ));
         let before = requests();
         let generation = view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation);
 
@@ -1001,9 +1013,11 @@ fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::Test
         wait_for_bundle(&view, cx, |bundle| {
             bundle.pane.rows[0].text.contains("CHANGED")
         });
-        executor.block_test(view.condition::<()>(cx, |view, _| {
-            view.hover_request.is_none() && view.hovered_link.is_some()
-        }));
+        executor.block_test(crate::test_blocking_wait::condition(
+            &view,
+            cx,
+            |view, _| view.hover_request.is_none() && view.hovered_link.is_some(),
+        ));
         assert!(
             requests() > before,
             "a change to the hovered row re-requests its link"
@@ -1362,6 +1376,49 @@ fn cell_center(
             origin.y + view.metrics.height() * (row as f32 + 0.5),
         )
     })
+}
+
+/// A screen the worker produces more than a second after the wait began is
+/// still waited for. GPUI's own `condition` gives up after one second, which a
+/// debug build on a loaded runner can outlast with nothing wrong.
+#[gpui::test]
+fn a_screen_that_takes_longer_than_a_second_is_still_waited_for(cx: &mut gpui::TestAppContext) {
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "stty -echo; sleep 2; printf LATE-MARK; sleep 300".into(),
+            ]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("LATE-MARK"))
+        });
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[gpui::test]

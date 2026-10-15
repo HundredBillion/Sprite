@@ -2810,11 +2810,15 @@ mod tests {
         });
         let executor = cx.executor();
         executor.allow_parking();
-        executor.block_test(host.condition::<()>(cx, |host, _| {
-            host.bundle
-                .as_ref()
-                .is_some_and(|bundle| bundle.pane.title.is_some())
-        }));
+        executor.block_test(crate::test_blocking_wait::condition(
+            &host,
+            cx,
+            |host, _| {
+                host.bundle
+                    .as_ref()
+                    .is_some_and(|bundle| bundle.pane.title.is_some())
+            },
+        ));
         let owner_pid = host.read_with(cx, |host, _| {
             host.bundle
                 .as_ref()

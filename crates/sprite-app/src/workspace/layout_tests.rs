@@ -535,20 +535,24 @@ fn placeholder_tiles_land_on_this_frames_cells_after_a_scale_change(cx: &mut gpu
     let view = terminal_view(&workspace, unfocused, cx);
     let executor = cx.executor();
     executor.allow_parking();
-    executor.block_test(view.condition::<()>(cx, |view, _| {
-        view.bundle_for_test().is_some_and(|bundle| {
-            bundle.graphics.as_ref().is_some_and(|frame| {
-                frame
-                    .placements
-                    .iter()
-                    .any(|placement| placement.image == 1 && placement.is_virtual)
-            }) && bundle.render.rows.iter().any(|row| {
-                row.cells
-                    .iter()
-                    .any(|cell| cell.text.starts_with('\u{10eeee}'))
+    executor.block_test(crate::test_blocking_wait::condition(
+        &view,
+        cx,
+        |view, _| {
+            view.bundle_for_test().is_some_and(|bundle| {
+                bundle.graphics.as_ref().is_some_and(|frame| {
+                    frame
+                        .placements
+                        .iter()
+                        .any(|placement| placement.image == 1 && placement.is_virtual)
+                }) && bundle.render.rows.iter().any(|row| {
+                    row.cells
+                        .iter()
+                        .any(|cell| cell.text.starts_with('\u{10eeee}'))
+                })
             })
-        })
-    }));
+        },
+    ));
     draw_workspace(cx);
     assert!(
         !view
