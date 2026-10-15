@@ -173,6 +173,7 @@ jobs:
         run: |
           set -uo pipefail
           test "$(uname -m)" = x86_64 || exit 1
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           failed=0
           for target in client app graphics_policy graphics_tmux; do
             python3 scripts/stress_tests.py "$target" --runs 100 --output "stress/$target" || failed=1

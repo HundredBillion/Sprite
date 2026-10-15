@@ -625,6 +625,32 @@ mod tests {
         stream.shutdown(Shutdown::Write).ok();
     }
 
+    fn assert_eof(stream: &mut UnixStream) {
+        // Darwin rejects socket options if the peer has already closed.
+        let deadline = Instant::now() + watchdog();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "peer did not close before the watchdog"
+            );
+            let mut descriptors = [PollFd::new(stream.as_fd(), PollFlags::POLLIN)];
+            match poll(&mut descriptors, PollTimeout::try_from(remaining).unwrap()) {
+                Ok(0) | Err(Errno::EINTR) => continue,
+                Ok(_) => break,
+                Err(error) => panic!("waiting for EOF: {error}"),
+            }
+        }
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn eof_is_observed_even_when_the_peer_already_closed() {
+        let (mut stream, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        assert_eof(&mut stream);
+    }
+
     fn wait_for_count(socket: &LocalSocket, count: usize) {
         let deadline = Instant::now() + watchdog();
         while socket.connections.lock().unwrap().len() != count {
@@ -950,8 +976,7 @@ mod tests {
             clients.push(stream);
         }
         let mut excess = UnixStream::connect(socket.socket_path()).unwrap();
-        excess.set_read_timeout(Some(watchdog())).unwrap();
-        assert_eq!(excess.read(&mut [0]).unwrap(), 0);
+        assert_eof(&mut excess);
         clients.pop().unwrap().shutdown(Shutdown::Both).unwrap();
         wait_for_count(&socket, 1);
         let mut next = UnixStream::connect(socket.socket_path()).unwrap();
@@ -981,8 +1006,7 @@ mod tests {
             .collect();
         wait_for_count(&socket, policy.max_connections);
         let mut excess = UnixStream::connect(socket.socket_path()).unwrap();
-        excess.set_read_timeout(Some(watchdog())).unwrap();
-        assert_eq!(excess.read(&mut [0]).unwrap(), 0);
+        assert_eof(&mut excess);
         socket.close();
         wait_for_count(&socket, 0);
     }

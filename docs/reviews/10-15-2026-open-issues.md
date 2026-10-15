@@ -113,7 +113,7 @@ The first loaded app loop passed 29/30 full runs. Both reported local-socket
 regressions passed all 30; run 23 failed only
 `a_silent_handshake_is_refused_after_the_timeout`.
 
-That test started its stopwatch after `connect`, but the server starts its
+That test started its stopwatch after `connect`, but the server can start its
 handshake deadline after `accept`. Scheduling between those operations made
 the measured remainder shorter than the handshake budget. Adding a temporary
 500 ms pause after connect reproduced the same assertion failure (0/1 passed).
@@ -124,3 +124,20 @@ Clippy and the 21 client tests also passed after the test-only correction.
 Variant search: `elapsed() >=` has three matches in sprite-app source/tests.
 The handshake test was affected; the reload test starts before sending its
 request, and the startup benchmark measures its own loop, so both are safe.
+
+The repeat app loop then exposed a different test setup race: run 2 failed in
+`silent_handshakes_are_counted_against_the_connection_cap` while setting the
+excess connection's read timeout (`EINVAL`). Darwin rejects socket options
+after the peer has closed. A socket-pair test with the peer already dropped
+reproduced this deterministically. Both connection-cap tests now use a bounded
+readiness wait followed by the same EOF assertion, avoiding the socket option.
+The new regression and all 18 local-socket tests pass. The remaining five
+read-timeout setups precede the operation that permits peer closure; they do not
+have this immediate-rejection race. The interrupted repeat loop is retained as
+failed evidence, not counted as a clean acceptance run.
+
+The first native Arch normal gate passed, but stress startup failed before any
+iteration because Git rejected the container checkout's ownership. The Linux
+stress step now registers only `$GITHUB_WORKSPACE` as a safe directory before
+collecting commit metadata. This setup failure supplies no Linux stress evidence.
+Both follow-ups received an independent review with no findings.
