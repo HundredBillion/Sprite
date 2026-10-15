@@ -85,7 +85,16 @@ fn run_with_input(arguments: &[&str], environment: &[(&str, &str)], input: &str)
         .expect("spawn sprite");
     {
         let mut stdin = child.stdin.take().expect("stdin");
-        stdin.write_all(input.as_bytes()).expect("write stdin");
+        // A client that refuses before reading may exit before this write, so
+        // a broken pipe is one of its normal outcomes; its exit status and
+        // output are what the tests judge.
+        if let Err(error) = stdin.write_all(input.as_bytes()) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "write stdin: {error}"
+            );
+        }
     }
     let output = child.wait_with_output().expect("wait");
     Outcome {
