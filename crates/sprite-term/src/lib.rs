@@ -52,3 +52,17 @@ pub(crate) use config::max_clipboard_bytes;
 pub(crate) use hyperlink::is_allowed_link;
 #[cfg(test)]
 pub(crate) use session::WORKER_QUEUE_CAPACITY;
+
+/// A libghostty terminal whose scrollback is bounded by `scrollback_bytes`
+/// alone, which is what Sprite's `scrollback_bytes` setting has always meant.
+/// libghostty starts a terminal at a 10 000-byte limit, so leaving the limit
+/// unset would quietly shrink every pane's history; zero disables scrollback.
+pub(crate) fn new_terminal<'alloc: 'cb, 'cb>(
+    cols: u16,
+    rows: u16,
+    scrollback_bytes: usize,
+) -> Result<libghostty_vt::Terminal<'alloc, 'cb>, libghostty_vt::Error> {
+    let mut terminal = libghostty_vt::Terminal::new(cols, rows)?;
+    terminal.set_scrollback_max_bytes(Some(scrollback_bytes))?;
+    Ok(terminal)
+}

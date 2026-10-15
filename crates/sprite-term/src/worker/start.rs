@@ -1,5 +1,4 @@
 use super::*;
-use libghostty_vt::terminal::Options as TerminalOptions;
 use portable_pty::{CommandBuilder, native_pty_system};
 use std::thread;
 const HELPER_STACK_BYTES: usize = 256 * 1024;
@@ -28,11 +27,8 @@ pub(super) fn initialize(
     let notices = Rc::new(RefCell::new(Notices::default()));
 
     let size = config.size;
-    let mut terminal = match Terminal::new(TerminalOptions {
-        cols: size.cols(),
-        rows: size.rows(),
-        max_scrollback: config.scrollback_bytes,
-    }) {
+    let mut terminal = match crate::new_terminal(size.cols(), size.rows(), config.scrollback_bytes)
+    {
         Ok(terminal) => terminal,
         Err(error) => {
             return Err(SessionError::new("create_terminal", error));
@@ -95,35 +91,42 @@ pub(super) fn initialize(
         return Err(SessionError::new("on_pwd_changed", error));
     }
 
-    // OSC 52. libghostty has already decoded the payload and dropped every
-    // read request before this is called, so the policy here is only about
-    // whether a *write* is allowed.
+    // OSC 52, iTerm2's OSC 1337 Copy and Kitty's OSC 5522 all arrive here,
+    // already decoded, and read requests never do, so the policy here is only
+    // about whether a *write* is allowed. libghostty denies a write that is
+    // never replied to.
     let registered_clipboard = terminal.on_clipboard_write({
         let focused = Rc::clone(&focused);
         let pending = Rc::clone(&clipboard_pending);
         move |_terminal: &Terminal<'_, '_>, write: libghostty_vt::terminal::ClipboardWrite<'_>| {
-            if !focused.get() {
-                return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
-            }
-
-            let mut text = String::new();
-            for content in write.contents() {
-                // Only plain text is honoured; a richer representation is not
-                // something Sprite can vouch for.
-                if content.mime.is_empty() || content.mime.starts_with("text/") {
-                    text.push_str(content.data);
+            let verdict = (|| {
+                if !focused.get() {
+                    return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
                 }
-            }
 
-            if text.is_empty() {
-                return Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported);
-            }
-            if text.len() > crate::max_clipboard_bytes() {
-                return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
-            }
+                let mut text = String::new();
+                for content in write.contents() {
+                    // Only plain text is honoured; a richer representation is not
+                    // something Sprite can vouch for.
+                    if content.mime.is_empty() || content.mime.starts_with("text/") {
+                        // Text that is not UTF-8 is not text Sprite can put on a clipboard.
+                        if let Ok(data) = std::str::from_utf8(content.data) {
+                            text.push_str(data);
+                        }
+                    }
+                }
 
-            pending.borrow_mut().push(text);
-            Ok(())
+                if text.is_empty() {
+                    return Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported);
+                }
+                if text.len() > crate::max_clipboard_bytes() {
+                    return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
+                }
+
+                pending.borrow_mut().push(text);
+                Ok(())
+            })();
+            write.reply(verdict, false);
         }
     });
     if let Err(error) = registered_clipboard {

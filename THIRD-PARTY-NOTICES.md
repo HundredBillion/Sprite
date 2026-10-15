@@ -318,8 +318,8 @@ SOFTWARE.
 | `lebe` | 0.5.3 | BSD-3-Clause | https://github.com/johannesvollmer/lebe |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
 | `libfuzzer-sys` | 0.4.13 | (MIT OR Apache-2.0) AND NCSA | https://github.com/rust-fuzz/libfuzzer |
-| `libghostty-vt` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/uzaaft/libghostty-rs |
-| `libghostty-vt-sys` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/uzaaft/libghostty-rs |
+| `libghostty-vt` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/HundredBillion/libghostty-rs (fork of uzaaft/libghostty-rs) |
+| `libghostty-vt-sys` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/HundredBillion/libghostty-rs (fork of uzaaft/libghostty-rs) |
 | `libloading` | 0.8.9 | ISC | https://github.com/nagisa/rust_libloading/ |
 | `libm` | 0.2.16 | MIT | https://github.com/rust-lang/compiler-builtins |
 | `libredox` | 0.1.20 | MIT | https://gitlab.redox-os.org/redox-os/libredox.git |

@@ -299,6 +299,10 @@ pub(crate) fn capture_graphics(
             let Some(image) = graphics.image(image_id) else {
                 continue;
             };
+            // Pixels still pending are summarised as an image not yet stored.
+            let Some(data) = image.data().map_err(vt("image_data"))? else {
+                continue;
+            };
             images.push(ImageSummary {
                 id: image_id,
                 generation: image.generation().map_err(vt("image_generation"))?,
@@ -306,7 +310,7 @@ pub(crate) fn capture_graphics(
                 height: image.height().map_err(vt("image_height"))?,
                 // The length only. Copying the data is Task 3's job, and doing
                 // it here would make every probe as expensive as a decode.
-                byte_len: image.data().map_err(vt("image_data"))?.len(),
+                byte_len: data.len(),
             });
         }
     }
@@ -413,6 +417,11 @@ pub(crate) fn capture_frame(
         let Some(image) = graphics.image(placement.image) else {
             continue;
         };
+        // An image whose pixels are still pending is drawn once they arrive,
+        // and is not cached until then.
+        let Some(data) = image.data().map_err(vt("image_data"))? else {
+            continue;
+        };
         let image_generation = image.generation().map_err(vt("image_generation"))?;
 
         // The heart of this task: pixels are copied when an image's generation
@@ -427,7 +436,7 @@ pub(crate) fn capture_frame(
                     width: image.width().map_err(vt("image_width"))?,
                     height: image.height().map_err(vt("image_height"))?,
                     transmitted: transmitted_format(image.format().map_err(vt("image_format"))?),
-                    pixels: image.data().map_err(vt("image_data"))?.to_vec(),
+                    pixels: data.to_vec(),
                 });
                 cache.images.insert(placement.image, Arc::clone(&pixels));
                 pixels
@@ -508,15 +517,9 @@ pub(crate) fn capture_placements(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libghostty_vt::terminal::Options;
 
     fn populated_terminal(count: u32, repeats: u32) -> Terminal<'static, 'static> {
-        let mut terminal = Terminal::new(Options {
-            rows: 24,
-            cols: 80,
-            max_scrollback: 1000,
-        })
-        .unwrap();
+        let mut terminal = crate::new_terminal(80, 24, 1000).unwrap();
         terminal.set_kitty_image_storage_limit(1024 * 1024).unwrap();
         for id in (1..=count).rev() {
             terminal.vt_write(format!("\x1b_Ga=t,f=32,s=1,v=1,i={id};ESIzRA==\x1b\\").as_bytes());

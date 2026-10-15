@@ -656,7 +656,7 @@ fn fail_capture_at(
 #[cfg(test)]
 mod sharing_tests {
     use super::*;
-    use libghostty_vt::terminal::{Options, ScrollViewport};
+    use libghostty_vt::terminal::ScrollViewport;
 
     fn fixture() -> (
         Projector<'static>,
@@ -673,12 +673,7 @@ mod sharing_tests {
             "test",
         )
         .unwrap();
-        let mut terminal = Terminal::new(Options {
-            rows: size.rows(),
-            cols: size.cols(),
-            max_scrollback: 1024 * 1024,
-        })
-        .unwrap();
+        let mut terminal = crate::new_terminal(size.cols(), size.rows(), 1024 * 1024).unwrap();
         terminal.resize(size.cols(), size.rows(), 8, 16).unwrap();
         terminal.vt_write("abc é e\u{301}界\r\nsecond".as_bytes());
         (Projector::new().unwrap(), terminal, size)

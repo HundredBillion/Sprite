@@ -234,14 +234,16 @@ fn copying_without_a_selection_yields_nothing() {
     }
 }
 
-/// A wide character is its own word.
+/// Either half of a wide character selects the whole word it is in.
 ///
-/// libghostty treats each CJK character as a word boundary, because segmenting
-/// CJK into words needs a dictionary that a terminal has no business carrying.
-/// Sprite follows that rather than inventing a rule, and this pins the choice so
-/// nobody "fixes" it into something that disagrees with Ghostty.
+/// libghostty counts a run of CJK characters as one word, ending at a space,
+/// and resolves the second column of a wide character to the character itself.
+/// Real segmentation of CJK into words needs a dictionary that a terminal has
+/// no business carrying. Sprite follows libghostty rather than inventing a rule,
+/// and this pins the choice so nobody "fixes" it into something that disagrees
+/// with Ghostty.
 #[test]
-fn a_wide_character_is_its_own_word() {
+fn either_half_of_a_wide_character_selects_its_whole_word() {
     // Two CJK words either side of an ASCII space. Each character occupies two
     // columns, so a naive column-counting rule would land in the wrong place.
     let sprite_term::Spawned {
@@ -280,8 +282,8 @@ fn a_wide_character_is_its_own_word() {
         .map(|cell| cell.text.as_str())
         .collect();
     assert_eq!(
-        selected, "日",
-        "each CJK character is its own word; a two-column glyph is not split"
+        selected, "日本",
+        "a run of CJK characters is one word, and a two-column glyph is not split"
     );
 }
 

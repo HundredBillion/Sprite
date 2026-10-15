@@ -1,7 +1,7 @@
 //! A synchronous production projection seam, without a PTY or worker thread.
 
 use crate::{SessionError, SnapshotBundle, TerminalSize, ValidTerminalSize, snapshot::Projector};
-use libghostty_vt::{Terminal, terminal::Options};
+use libghostty_vt::Terminal;
 
 pub struct CaptureBenchmark {
     projector: Projector<'static>,
@@ -20,12 +20,8 @@ impl CaptureBenchmark {
             },
             "benchmark",
         )?;
-        let mut terminal = Terminal::new(Options {
-            rows: size.rows(),
-            cols: size.cols(),
-            max_scrollback: 1024 * 1024,
-        })
-        .map_err(|error| SessionError::new("benchmark_terminal", error))?;
+        let mut terminal = crate::new_terminal(size.cols(), size.rows(), 1024 * 1024)
+            .map_err(|error| SessionError::new("benchmark_terminal", error))?;
         for row in 1..=100 {
             terminal.vt_write(
                 format!("\x1b[{row};1HASCII é e\u{301} 界 \x1b[44m    \x1b[0m").as_bytes(),

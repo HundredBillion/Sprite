@@ -266,7 +266,7 @@ caller coverage, default-client compatibility, and native execution limits.
 between patch releases; updates require a deliberate review of window, input,
 and accessibility behavior on both platforms.
 
-### `libghostty-vt` `=0.2.1`
+### `libghostty-vt` 0.2.1, from the HundredBillion fork
 
 **Capability.** Terminal semantics: VT parsing, screen and scrollback state,
 styling, and key encoding, matching Ghostty's own behavior.
@@ -305,11 +305,17 @@ process**. It is never called. The medium is denied anyway by Ghostty's default
 limits, and `tests/graphics_policy.rs` asserts that by behaviour rather than
 trusting the default. All three are worth reporting upstream.
 
-**License and source.** MIT OR Apache-2.0.
-<https://github.com/uzaaft/libghostty-rs>.
+**License and source.** MIT OR Apache-2.0. Upstream is
+<https://github.com/uzaaft/libghostty-rs>; Sprite builds the fork
+<https://github.com/HundredBillion/libghostty-rs>, branch `ghostty-zig-0.17`,
+whose only changes are the Ghostty pin and bindings regenerated for it. No
+crates.io release is built against a Ghostty that accepts Zig 0.17 yet.
 
-**Pin policy.** Exact `=0.2.1`, paired with the exact Ghostty source commit
-below. The pair moves together and only through ADR 0003 review.
+**Pin policy.** A git dependency at an exact revision, paired with the exact
+Ghostty source commit below; the fork's own `GHOSTTY_COMMIT` names the same
+commit. The pair moves together and only through ADR 0003 review. Sprite
+returns to a crates.io release once one is built against a Ghostty that
+supports Zig 0.17 (ADR 0009, amended).
 
 **Upstream documentation defect.** `GhosttyTerminalOptions.max_scrollback` is
 documented in `include/ghostty/vt/terminal.h` as "Maximum number of lines to
@@ -397,15 +403,19 @@ interface directly.
 These are not runtime Rust dependencies.
 
 - **Ghostty source**, submodule `vendor/ghostty` pinned to
-  `ab0b9da9e88fcb4b0533a1854e84628f663930af`. `libghostty-vt-sys 0.2.1` defaults
-  to a different commit (`a887df42c56f6de86c0fe6da9c4eeca37931e083`);
-  `.cargo/config.toml` forces `GHOSTTY_SOURCE_DIR` to the submodule so the pin
-  in this ledger is what actually compiles. Ghostty v1.3.1 lacks the
+  `92fb5d0b67b762211728975865d00eb2503df6da`, the head of
+  ghostty-org/ghostty#14519 ("Update to Zig 0.17") on 2026-10-15. The
+  submodule is fetched from <https://github.com/HundredBillion/ghostty>, branch
+  `sprite/zig-0.17-92fb5d0`, so the commit stays reachable if the PR is
+  rebased. `.cargo/config.toml` forces `GHOSTTY_SOURCE_DIR` to the submodule so
+  the pin in this ledger is what actually compiles. Ghostty v1.3.1 lacks the
   terminal/render C interface the binding uses; Sprite returns to stable tags
   when a compatible release passes qualification. `gpui-ghostty` and `tty7`
   remain references only.
-- **Zig 0.16.0**, exactly. Required by `libghostty-vt-sys`'s build script to
-  compile libghostty-vt, and by the terminfo generator. Not invoked by a running
+- **Zig 0.17.0**, exactly, downloaded from ziglang.org and checked against the
+  SHA-256 digests in `.github/workflows/ci.yml`. Required by
+  `libghostty-vt-sys`'s build script to compile libghostty-vt, and by the
+  terminfo generator. Ghostty's build accepts exactly one minor version of Zig. Not invoked by a running
   Sprite terminal session.
 - **ncurses `tic`/`infocmp`** with extended-capability support (`tic -x`),
   verified at 6.6. Build and packaging tools only. The bootstrap generates
