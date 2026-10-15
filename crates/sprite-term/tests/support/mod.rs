@@ -237,6 +237,19 @@ impl EventPump {
 // Kitty graphics
 // ---------------------------------------------------------------------------
 
+/// Typed into an interactive `/bin/sh` before any graphics command, then
+/// acknowledged with `READY`.
+///
+/// `-icanon` because long graphics commands exceed the Linux canonical input
+/// line limit. Line editing off because macOS's bash 3.2 readline, with echo
+/// off, sometimes keeps a command typed while the previous one runs and never
+/// acts on its newline: the shell sits at its prompt and waits for good, which
+/// a plain `pty` driving `/bin/sh` shows too, so it is not the terminal's doing.
+/// With editing off the shell reads plain lines. `READY` is split so the echo
+/// of this line, before `stty` turns echo off, cannot match it.
+pub const PLAIN_SHELL_SETUP: &[u8] =
+    b"set +o emacs +o vi; stty -icanon -echo min 1 time 0 && printf 'RE%sADY\\n' ''\n";
+
 /// A command that prints `MARK<n>`, and the text that proves it ran.
 ///
 /// The number is passed as an argument rather than written into the command,
@@ -330,11 +343,7 @@ impl GraphicsSession {
         let snapshots = SnapshotPump::new(snapshots);
         events.expect_ready();
         session
-            // Long graphics commands exceed the Linux canonical input line limit.
-            // Acknowledge only after stty succeeds; split READY so input echo cannot match it.
-            .send(TerminalCommand::Input(
-                b"stty -icanon -echo min 1 time 0 && printf 'RE%sADY\\n' ''\n".to_vec(),
-            ))
+            .send(TerminalCommand::Input(PLAIN_SHELL_SETUP.to_vec()))
             .expect("ask the shell to announce itself");
         snapshots.wait_for("the shell to start", |bundle| {
             pane_text(bundle).contains("READY")

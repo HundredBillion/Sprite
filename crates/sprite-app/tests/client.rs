@@ -14,6 +14,9 @@
 #[path = "../src/test_blocking_wait.rs"]
 mod test_blocking_wait;
 
+#[path = "../src/test_child.rs"]
+mod test_child;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -21,6 +24,18 @@ use sprite_app::Endpoint;
 
 /// The binary under test, built by cargo for this run.
 const SPRITE: &str = env!("CARGO_BIN_EXE_sprite");
+
+/// How long a client may go without finishing before a test calls it stuck.
+///
+/// A hang detector, not a speed limit. Five seconds by default, as in the
+/// terminal suite; `SPRITE_TEST_WATCHDOG_SECS` raises it on a runner that
+/// starves the client past that.
+fn watchdog() -> Duration {
+    std::env::var("SPRITE_TEST_WATCHDOG_SECS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(Duration::from_secs(5), Duration::from_secs)
+}
 
 struct Outcome {
     status: i32,
@@ -70,7 +85,16 @@ fn run_with_input(arguments: &[&str], environment: &[(&str, &str)], input: &str)
         .expect("spawn sprite");
     {
         let mut stdin = child.stdin.take().expect("stdin");
-        stdin.write_all(input.as_bytes()).expect("write stdin");
+        // A client that refuses before reading may exit before this write, so
+        // a broken pipe is one of its normal outcomes; its exit status and
+        // output are what the tests judge.
+        if let Err(error) = stdin.write_all(input.as_bytes()) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "write stdin: {error}"
+            );
+        }
     }
     let output = child.wait_with_output().expect("wait");
     Outcome {
@@ -257,7 +281,7 @@ fn outside_a_sprite_window_a_surface_cannot_be_opened_and_says_why() {
         "{}",
         outcome.errors
     );
-    assert!(outcome.took < std::time::Duration::from_secs(5));
+    assert!(outcome.took < watchdog());
 }
 
 #[test]
@@ -359,7 +383,7 @@ fn outside_a_sprite_window_it_fails_clearly_and_promptly() {
         outcome.errors
     );
     assert!(
-        outcome.took < Duration::from_secs(5),
+        outcome.took < watchdog(),
         "it returned rather than hanging: {:?}",
         outcome.took
     );
@@ -380,7 +404,7 @@ fn a_socket_that_is_not_there_fails_rather_than_hanging() {
     assert_ne!(outcome.status, 0);
     assert!(outcome.out.is_empty());
     assert!(outcome.errors.contains("could not ask this window"));
-    assert!(outcome.took < Duration::from_secs(5));
+    assert!(outcome.took < watchdog());
 }
 
 #[test]
@@ -630,8 +654,8 @@ fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
             let mut remaining = String::new();
             std::io::Read::read_to_string(&mut reader, &mut remaining).unwrap();
         });
-        let opened = rx.recv_timeout(Duration::from_secs(3));
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let opened = rx.recv_timeout(watchdog());
+        let deadline = Instant::now() + watchdog();
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break Some(status);
@@ -668,6 +692,20 @@ fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
 
 #[test]
 fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
+    // The client learns stdout is gone only when its one event write fails.
+    // A child that a parallel test spawns while this test's pipes are made can
+    // inherit the read end: on macOS std marks a new pipe close-on-exec in a second
+    // step, and on Linux every spawned child holds a copy of the pipe until exec.
+    // That write then succeeds and the client rightly waits for more, so this runs
+    // in a process where no other test spawns anything.
+    if std::env::var_os("SPRITE_SURFACE_OUTPUT_FAILURE_CHILD").is_none() {
+        test_child::run_child_test(
+            "surface_output_failure_interrupts_open_stdin_and_partial_json",
+            &[("SPRITE_SURFACE_OUTPUT_FAILURE_CHILD", "1".as_ref())],
+            "the stdout-failure subprocess",
+        );
+        return;
+    }
     use std::io::{BufRead, BufReader, Write};
     for after_opened in [false, true] {
         let mut live = None;
@@ -713,7 +751,7 @@ fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
                 reader.read_line(&mut line).unwrap();
                 tx.send(line).unwrap();
             });
-            if rx.recv_timeout(Duration::from_secs(3)).is_err() {
+            if rx.recv_timeout(watchdog()).is_err() {
                 child.kill().unwrap();
                 drop(input);
                 child.wait().unwrap();
@@ -730,7 +768,7 @@ fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
             drop(stdout);
             writeln!(input, "{DESCRIPTION}").unwrap();
         }
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + watchdog();
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break Some(status);
@@ -833,7 +871,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
     });
     let mut peer = None;
     let result = (|| -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + watchdog();
         let stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
@@ -846,7 +884,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
             test_blocking_wait::pause(Duration::from_millis(10));
         };
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(watchdog()))
             .map_err(|error| error.to_string())?;
         peer = Some(BufReader::new(stream));
         let reader = peer.as_mut().unwrap();
@@ -866,7 +904,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
         if prefix != *b"{" {
             return Err("update was not JSON".into());
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + watchdog();
         loop {
             let syscall = std::fs::read_to_string(format!("/proc/{}/syscall", child.id()))
                 .map_err(|error| error.to_string())?;
@@ -895,7 +933,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
             .get_ref()
             .shutdown(Shutdown::Write)
             .map_err(|error| error.to_string())?;
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + watchdog();
         loop {
             if child
                 .try_wait()
