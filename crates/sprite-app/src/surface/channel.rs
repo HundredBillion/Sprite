@@ -2138,8 +2138,9 @@ mod tests {
     fn a_silent_handshake_is_refused_after_the_timeout() {
         let scratch = Scratch::new();
         let (endpoint, _rx) = endpoint(&scratch);
-        let (_stream, mut reader) = connect(&endpoint);
+        // The server starts its deadline during connect, before this thread may run again.
         let start = Instant::now();
+        let (_stream, mut reader) = connect(&endpoint);
         let refused = line(&mut reader);
         assert_eq!(refused["type"], "refused");
         assert_eq!(refused["reason"], "denied");

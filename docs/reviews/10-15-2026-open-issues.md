@@ -106,3 +106,21 @@ tmux setup and cleanup, and the stress runner. Its server-cleanup finding was
 fixed and re-reviewed with no remaining important findings. The idle-reader test
 is behavioral coverage, not a deterministic reproduction of the Darwin kernel
 bug; the long client loop provides the statistical acceptance evidence.
+
+## Additional failure found by the acceptance loop
+
+The first loaded app loop passed 29/30 full runs. Both reported local-socket
+regressions passed all 30; run 23 failed only
+`a_silent_handshake_is_refused_after_the_timeout`.
+
+That test started its stopwatch after `connect`, but the server starts its
+handshake deadline after `accept`. Scheduling between those operations made
+the measured remainder shorter than the handshake budget. Adding a temporary
+500 ms pause after connect reproduced the same assertion failure (0/1 passed).
+Starting the stopwatch before connect passed with the same pause (1/1), then
+passed again after removing the probe. Production handshake behavior is unchanged.
+Clippy and the 21 client tests also passed after the test-only correction.
+
+Variant search: `elapsed() >=` has three matches in sprite-app source/tests.
+The handshake test was affected; the reload test starts before sending its
+request, and the startup benchmark measures its own loop, so both are safe.
