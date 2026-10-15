@@ -1013,16 +1013,10 @@ fn apply_resize(
 #[cfg(test)]
 mod bell_tests {
     use super::*;
-    use libghostty_vt::terminal::Options as TerminalOptions;
 
     #[test]
     fn one_bell_per_chunk_and_no_bell_for_the_next_silent_chunk() {
-        let mut terminal = Terminal::new(TerminalOptions {
-            cols: 80,
-            rows: 24,
-            max_scrollback: 0,
-        })
-        .expect("terminal");
+        let mut terminal = crate::new_terminal(80, 24, 0).expect("terminal");
         let notices = Rc::new(RefCell::new(Notices::default()));
         register_bell(&mut terminal, Rc::clone(&notices)).expect("bell callback");
 

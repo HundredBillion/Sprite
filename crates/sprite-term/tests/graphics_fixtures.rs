@@ -101,13 +101,21 @@ fn an_explicit_placement_id_is_reported() {
 }
 
 /// One image can be placed more than once, and the placements are distinct.
+/// The second placement is a put (`a=p`) of the stored image: transmitting
+/// the same image ID again replaces the image and deletes its placements, as
+/// the Kitty protocol requires.
 #[test]
 fn one_image_can_hold_several_placements() {
     let mut pane = GraphicsSession::start(GraphicsPolicy::default());
 
     place(&mut pane, "i=1,p=1", 8);
     pane.feed("\\033[10;1H");
-    let placements = place(&mut pane, "i=1,p=2", 8);
+    let placements = pane
+        .feed(&kitty("a=p,i=1,p=2", ""))
+        .graphics
+        .as_ref()
+        .map(|frame| frame.placements.clone())
+        .unwrap_or_default();
 
     let ids: Vec<u32> = placements
         .iter()
