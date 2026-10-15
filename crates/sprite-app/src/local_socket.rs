@@ -589,6 +589,7 @@ pub(crate) fn runtime_directory() -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_blocking_wait::watchdog;
     use std::io::Write;
     use std::sync::mpsc;
 
@@ -625,7 +626,7 @@ mod tests {
     }
 
     fn wait_for_count(socket: &LocalSocket, count: usize) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + watchdog();
         while socket.connections.lock().unwrap().len() != count {
             assert!(
                 Instant::now() < deadline,
@@ -635,7 +636,7 @@ mod tests {
         }
     }
 
-    fn watchdog(test: &str, run: impl FnOnce(&Path)) {
+    fn run_in_child(test: &str, run: impl FnOnce(&Path)) {
         const CHILD: &str = "SPRITE_SOCKET_HOUSEKEEPING_CHILD";
         if let Some(directory) = std::env::var_os(CHILD) {
             run(Path::new(&directory));
@@ -653,7 +654,8 @@ mod tests {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
+        // The child can wait for a reply and then for housekeeping, each for one watchdog.
+        let deadline = Instant::now() + watchdog() * 3;
         let mut expired = false;
         while child.try_wait().unwrap().is_none() {
             if Instant::now() >= deadline {
@@ -734,7 +736,7 @@ mod tests {
 
     #[test]
     fn housekeeping_preserves_a_saturated_live_listener() {
-        watchdog(
+        run_in_child(
             "local_socket::tests::housekeeping_preserves_a_saturated_live_listener",
             |directory| {
                 let full = directory.join("full.sock");
@@ -746,7 +748,7 @@ mod tests {
                 sweep_dead_sockets(directory);
                 assert!(full.exists(), "a full live backlog must never be unlinked");
                 assert!(live.exists(), "ordinary live listener must survive");
-                let deadline = Instant::now() + Duration::from_secs(2);
+                let deadline = Instant::now() + watchdog();
                 while stale.exists() && Instant::now() < deadline {
                     sweep_dead_sockets(directory);
                     std::thread::yield_now();
@@ -758,7 +760,7 @@ mod tests {
 
     #[test]
     fn opening_serves_requests_without_sweeping_on_the_calling_thread() {
-        watchdog(
+        run_in_child(
             "local_socket::tests::opening_serves_requests_without_sweeping_on_the_calling_thread",
             |directory| {
                 let full = directory.join("full.sock");
@@ -786,11 +788,8 @@ mod tests {
                     "opening must not traverse the directory on the calling/UI thread"
                 );
                 let _client = authenticated_client(&socket);
-                assert_eq!(
-                    received.recv_timeout(Duration::from_secs(2)).unwrap(),
-                    "reply"
-                );
-                let deadline = Instant::now() + Duration::from_secs(2);
+                assert_eq!(received.recv_timeout(watchdog()).unwrap(), "reply");
+                let deadline = Instant::now() + watchdog();
                 while stale.exists() && Instant::now() < deadline {
                     std::thread::yield_now();
                 }
@@ -947,19 +946,17 @@ mod tests {
         for _ in 0..POLICY.max_connections {
             let mut stream = UnixStream::connect(socket.socket_path()).unwrap();
             writeln!(stream, "{} hello", socket.key_hex()).unwrap();
-            entry.recv_timeout(Duration::from_secs(2)).unwrap();
+            entry.recv_timeout(watchdog()).unwrap();
             clients.push(stream);
         }
         let mut excess = UnixStream::connect(socket.socket_path()).unwrap();
-        excess
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        excess.set_read_timeout(Some(watchdog())).unwrap();
         assert_eq!(excess.read(&mut [0]).unwrap(), 0);
         clients.pop().unwrap().shutdown(Shutdown::Both).unwrap();
         wait_for_count(&socket, 1);
         let mut next = UnixStream::connect(socket.socket_path()).unwrap();
         writeln!(next, "{} hello", socket.key_hex()).unwrap();
-        entry.recv_timeout(Duration::from_secs(2)).unwrap();
+        entry.recv_timeout(watchdog()).unwrap();
         socket.close();
         wait_for_count(&socket, 0);
     }
@@ -984,9 +981,7 @@ mod tests {
             .collect();
         wait_for_count(&socket, policy.max_connections);
         let mut excess = UnixStream::connect(socket.socket_path()).unwrap();
-        excess
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        excess.set_read_timeout(Some(watchdog())).unwrap();
         assert_eq!(excess.read(&mut [0]).unwrap(), 0);
         socket.close();
         wait_for_count(&socket, 0);
@@ -1010,9 +1005,7 @@ mod tests {
         let path = socket.socket_path().to_owned();
         let mut client = UnixStream::connect(&path).unwrap();
         // macOS can reject changing the read timeout after the peer has shut down.
-        client
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        client.set_read_timeout(Some(watchdog())).unwrap();
         wait_for_count(&socket, 1);
         socket.close();
         socket.close();
@@ -1045,11 +1038,7 @@ mod tests {
                     Some(POLICY.write_timeout)
                 );
                 entered.send(connection.reply_connection).unwrap();
-                finished
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap();
+                finished.lock().unwrap().recv_timeout(watchdog()).unwrap();
                 writeln!(connection.stream, "finished").ok();
             },
         )
@@ -1059,9 +1048,7 @@ mod tests {
 
     fn authenticated_client(socket: &LocalSocket) -> UnixStream {
         let mut client = UnixStream::connect(socket.socket_path()).unwrap();
-        client
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        client.set_read_timeout(Some(watchdog())).unwrap();
         writeln!(client, "{} reply", socket.key_hex()).unwrap();
         client
     }
@@ -1089,11 +1076,7 @@ mod tests {
                 );
                 entered.send(connection.reply_connection).unwrap();
                 if connection.body == "reply" {
-                    finished
-                        .lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(2))
-                        .unwrap();
+                    finished.lock().unwrap().recv_timeout(watchdog()).unwrap();
                     writeln!(connection.stream, "finished").unwrap();
                 } else {
                     connection.reader.read_line(&mut String::new()).ok();
@@ -1102,17 +1085,13 @@ mod tests {
         )
         .unwrap();
         let mut client = authenticated_client(&socket);
-        let origin = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let origin = identities.recv_timeout(watchdog()).unwrap();
         let mut unrelated = UnixStream::connect(socket.socket_path()).unwrap();
-        unrelated
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        unrelated.set_read_timeout(Some(watchdog())).unwrap();
         writeln!(unrelated, "{} unrelated", socket.key_hex()).unwrap();
-        identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        identities.recv_timeout(watchdog()).unwrap();
         let mut partial = UnixStream::connect(socket.socket_path()).unwrap();
-        partial
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        partial.set_read_timeout(Some(watchdog())).unwrap();
         write!(partial, "{} unfinished", socket.key_hex()).unwrap();
         wait_for_count(&socket, 3);
         socket.close_after_reply(Some(&origin));
@@ -1139,10 +1118,10 @@ mod tests {
         let target_dir = Scratch::new();
         let (mut source, identities, finish_source) = gated_reply_socket(&source_dir.0);
         let _source_client = authenticated_client(&source);
-        let foreign = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let foreign = identities.recv_timeout(watchdog()).unwrap();
         let (mut target, identities, finish_target) = gated_reply_socket(&target_dir.0);
         let mut target_client = authenticated_client(&target);
-        let old_target = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let old_target = identities.recv_timeout(watchdog()).unwrap();
         assert_eq!(foreign.id, old_target.id);
         target.close_after_reply(Some(&foreign));
         assert_eq!(target_client.read(&mut [0]).unwrap(), 0);
@@ -1151,7 +1130,7 @@ mod tests {
         drop(target);
         let (mut reopened, identities, finish_reopened) = gated_reply_socket(&target_dir.0);
         let mut reopened_client = authenticated_client(&reopened);
-        let new_target = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let new_target = identities.recv_timeout(watchdog()).unwrap();
         assert_eq!(old_target.id, new_target.id);
         reopened.close_after_reply(Some(&old_target));
         assert_eq!(reopened_client.read(&mut [0]).unwrap(), 0);
@@ -1167,12 +1146,12 @@ mod tests {
         let scratch = Scratch::new();
         let (mut socket, identities, finish) = gated_reply_socket(&scratch.0);
         let mut first = authenticated_client(&socket);
-        let stale = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let stale = identities.recv_timeout(watchdog()).unwrap();
         finish.send(()).unwrap();
         first.read_to_string(&mut String::new()).unwrap();
         wait_for_count(&socket, 0);
         let mut second = authenticated_client(&socket);
-        let active = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let active = identities.recv_timeout(watchdog()).unwrap();
         assert_ne!(stale.id, active.id);
         socket.close_after_reply(Some(&stale));
         assert_eq!(second.read(&mut [0]).unwrap(), 0);
@@ -1181,7 +1160,7 @@ mod tests {
 
         let (mut socket, identities, finish) = gated_reply_socket(&scratch.0);
         let mut client = authenticated_client(&socket);
-        let _active = identities.recv_timeout(Duration::from_secs(2)).unwrap();
+        let _active = identities.recv_timeout(watchdog()).unwrap();
         socket.close();
         assert_eq!(client.read(&mut [0]).unwrap(), 0);
         finish.send(()).unwrap();
@@ -1205,7 +1184,7 @@ mod tests {
         .unwrap();
         let mut client = UnixStream::connect(socket.socket_path()).unwrap();
         writeln!(client, "{} hello", socket.key_hex()).unwrap();
-        entry.recv_timeout(Duration::from_secs(2)).unwrap();
+        entry.recv_timeout(watchdog()).unwrap();
         wait_for_count(&socket, 0);
     }
     #[test]
@@ -1226,11 +1205,9 @@ mod tests {
         .unwrap();
         let mut client = UnixStream::connect(socket.socket_path()).unwrap();
         writeln!(client, "{} hello", socket.key_hex()).unwrap();
-        entry.recv_timeout(Duration::from_secs(2)).unwrap();
+        entry.recv_timeout(watchdog()).unwrap();
         // macOS refuses socket options once both directions are shut down.
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        client.set_read_timeout(Some(watchdog())).unwrap();
         fs::remove_file(socket.socket_path()).unwrap();
         let (done, completed) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1238,7 +1215,7 @@ mod tests {
             done.send(()).unwrap();
         });
         completed
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(watchdog())
             .expect("unlinked listener must close");
         assert_eq!(client.read(&mut [0]).unwrap(), 0);
     }
@@ -1378,7 +1355,7 @@ mod tests {
         let mut retry = connect_with_retries(&path);
         writeln!(retry, "{key} retry").ok();
         let body = received
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(watchdog())
             .expect("the listener must survive running out of descriptors");
         assert!(["first", "retry"].contains(&body.as_str()), "{body}");
 
@@ -1396,7 +1373,7 @@ mod tests {
             done.send(()).unwrap();
         });
         completed
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(watchdog())
             .expect("closing must end a resting listener");
         drop(held);
         drop((first, second, retry));

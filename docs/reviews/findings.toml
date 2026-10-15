@@ -624,3 +624,17 @@ title = "#77's tests are not yet looped under load on native Linux"
 status = "open"
 source = "https://github.com/HundredBillion/Sprite/issues/81"
 issue = 81
+
+[[finding]]
+id = "GAP-C20"
+title = "tmux image fixtures can emit before a client attaches"
+status = "open"
+source = "https://github.com/HundredBillion/Sprite/issues/83"
+issue = 83
+
+[[finding]]
+id = "GAP-C21"
+title = "Local-socket test coordination uses fixed short deadlines"
+status = "open"
+source = "https://github.com/HundredBillion/Sprite/issues/85"
+issue = 85

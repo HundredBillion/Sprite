@@ -844,7 +844,7 @@ fn converse(connection: Authenticated, lanes: &SurfaceLanes) {
 
 fn serve_surface(
     mut stream: UnixStream,
-    mut reader: BufReader<UnixStream>,
+    reader: BufReader<UnixStream>,
     connection: std::io::Result<SurfaceConnection>,
     pane: PaneId,
     open: Open,
@@ -912,6 +912,10 @@ fn serve_surface(
         }
     }
 
+    // Authentication may already have read the first stream messages into its buffer.
+    let buffered = std::io::Cursor::new(reader.buffer().to_vec());
+    let socket = super::socket_reader::SocketReader(reader.into_inner());
+    let mut reader = BufReader::new(buffered.chain(socket));
     loop {
         let mut bytes = Vec::new();
         let count = match (&mut reader)
