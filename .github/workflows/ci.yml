@@ -18,8 +18,13 @@ permissions:
 
 env:
   RUST_VERSION: "1.97.1"
-  ZIG_VERSION: "0.16.0"
-  GHOSTTY_COMMIT: "ab0b9da9e88fcb4b0533a1854e84628f663930af"
+  # Zig comes from ziglang.org, checked against these digests, rather than
+  # from a package manager: Homebrew and Arch move to a new Zig on their own
+  # schedule, and Ghostty's build accepts exactly one minor version.
+  ZIG_VERSION: "0.17.0"
+  ZIG_SHA256_X86_64_LINUX: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
+  ZIG_SHA256_AARCH64_MACOS: "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a"
+  GHOSTTY_COMMIT: "92fb5d0b67b762211728975865d00eb2503df6da"
 
 jobs:
   release-automation:
@@ -54,12 +59,21 @@ jobs:
           pacman -Syu --noconfirm --needed \
             base-devel git curl ncurses python \
             less \
-            "zig=${ZIG_VERSION}" \
             wayland libxkbcommon libx11 libxcb libxkbcommon-x11 \
             mesa vulkan-icd-loader vulkan-headers \
             fontconfig freetype2 openssl alsa-lib
           tic -V
-          zig version | grep -qx "${ZIG_VERSION}"
+
+      - name: Install the exact Zig
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/zig.tar.xz \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          echo "${ZIG_SHA256_X86_64_LINUX}  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+          "$HOME/zig/zig" version | grep -qx "${ZIG_VERSION}"
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -189,10 +203,13 @@ jobs:
             | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
               --component clippy --component rustfmt
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # Homebrew's zig tracks latest; the exact version is asserted below
-          # rather than assumed.
-          brew install zig
-          zig version | grep -qx "${ZIG_VERSION}"
+          curl --proto '=https' --tlsv1.2 -sSfL -o "$RUNNER_TEMP/zig.tar.xz" \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VERSION}.tar.xz"
+          echo "${ZIG_SHA256_AARCH64_MACOS}  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$HOME/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+          "$HOME/zig/zig" version | grep -qx "${ZIG_VERSION}"
 
       - name: Fetch dependencies (the only network-enabled build stage)
         run: |

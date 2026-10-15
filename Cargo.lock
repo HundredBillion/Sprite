@@ -2965,6 +2965,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
+source = "git+https://github.com/HundredBillion/libghostty-rs?rev=f77032ddaec2ab075154c61bf7e1b3c49f259498#f77032ddaec2ab075154c61bf7e1b3c49f259498"
 dependencies = [
  "bitflags 2.13.1",
  "int-enum",
@@ -2974,6 +2975,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
+source = "git+https://github.com/HundredBillion/libghostty-rs?rev=f77032ddaec2ab075154c61bf7e1b3c49f259498#f77032ddaec2ab075154c61bf7e1b3c49f259498"
 
 [[package]]
 name = "libgit2-sys"
