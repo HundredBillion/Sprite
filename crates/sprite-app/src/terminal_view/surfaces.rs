@@ -1145,6 +1145,13 @@ impl TerminalView {
             width: size.width,
             height: px((f32::from(size.height) - tab_height).max(0.0)),
         };
+        let grid_slack = match &surface.body {
+            Body::Grid { grid, .. } if fills && tab_height > 0.0 => (f32::from(grid_size.height)
+                - f32::from(grid.rows()) * f32::from(metrics.cells.height()))
+            .max(0.0),
+            _ => 0.0,
+        };
+        let grid_top = tab_height + grid_slack;
         let told = (
             f32::from(size.width).round() as u32,
             f32::from(grid_size.height).round() as u32,
@@ -1191,6 +1198,7 @@ impl TerminalView {
                             .relative()
                             .min_h_0()
                             .flex_1()
+                            .pt(px(grid_slack))
                             .overflow_hidden()
                             .child(cells),
                     )
@@ -1214,7 +1222,7 @@ impl TerminalView {
                     div()
                         .absolute()
                         .top(px(
-                            tab_height + f32::from(cursor.row) * f32::from(metrics.cells.height())
+                            grid_top + f32::from(cursor.row) * f32::from(metrics.cells.height())
                         ))
                         .left(px(
                             f32::from(cursor.column) * f32::from(metrics.cells.width())
@@ -1243,7 +1251,7 @@ impl TerminalView {
                     entity_for_bounds.update(cx, |view, _cx| {
                         if let Some(surface) = view.surfaces.get_mut(|surface| surface.id == id) {
                             surface.origin =
-                                Some(point(bounds.origin.x, bounds.origin.y + px(tab_height)));
+                                Some(point(bounds.origin.x, bounds.origin.y + px(grid_top)));
                         }
                     });
                 }
@@ -1253,8 +1261,11 @@ impl TerminalView {
                     &focus_for_input,
                     ElementInputHandler::new(
                         gpui::Bounds {
-                            origin: point(bounds.origin.x, bounds.origin.y + px(tab_height)),
-                            size: grid_size,
+                            origin: point(bounds.origin.x, bounds.origin.y + px(grid_top)),
+                            size: Size {
+                                width: grid_size.width,
+                                height: px((f32::from(grid_size.height) - grid_slack).max(0.0)),
+                            },
                         },
                         entity_for_input,
                     ),
@@ -2130,6 +2141,26 @@ mod tests {
             &serde_json::json!({"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"},{"id":"b","label":"beta.rs","modified":true}]})).unwrap() });
         draw_test_window(cx);
         draw_test_window(cx);
+        let (cols, rows) = host.read_with(cx, |host, _| {
+            host.surfaces
+                .fill
+                .as_ref()
+                .unwrap()
+                .told
+                .unwrap()
+                .2
+                .unwrap()
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![crate::surface::grid::Op::Resize { cols, rows }],
+            },
+        );
+        draw_test_window(cx);
         let (origin, told, first, second) = host.read_with(cx, |host, _| {
             let surface = host.surfaces.fill.as_ref().unwrap();
             let Body::Grid { tabs, .. } = &surface.body else {
@@ -2142,7 +2173,17 @@ mod tests {
                 tabs.item_bounds(1),
             )
         });
-        assert_eq!(origin.y, baseline.0.y + px(35.0));
+        let drawn_height = host.read_with(cx, |host, _| {
+            let Body::Grid { grid, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            f32::from(grid.rows()) * f32::from(host.metrics.height())
+        });
+        assert_eq!(
+            origin.y + px(drawn_height),
+            baseline.0.y + px(baseline.1.1 as f32),
+            "native editor grid must touch the bottom of its allocation"
+        );
         assert_eq!(told.1, baseline.1.1 - 35);
         assert!(told.2.unwrap().1 < baseline.1.2.unwrap().1);
         events(&mut peer);
