@@ -632,6 +632,10 @@ source = "https://github.com/HundredBillion/Sprite/issues/81"
 issue = 81
 fixed_by = "#87"
 test = [
+    "ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit",
+    "ordinary_repeated_shift_unicode_keys_and_delayed_native_ascii_are_not_doubled",
+    "native_commit_without_preedit_reaches_actual_pty",
+    "pointer_events_preserve_buttons_modifiers_and_buttonless_motion",
     "surface_output_failure_interrupts_open_stdin_and_partial_json",
     "outside_a_sprite_window_a_surface_cannot_be_opened_and_says_why",
     "transmitting_images_in_a_loop_reaches_a_steady_state",

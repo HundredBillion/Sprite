@@ -225,3 +225,45 @@ review of `7ad4bc4..d6b43bb` reported no unresolved correctness or integration
 findings. [Hosted verification of the final implementation](https://github.com/HundredBillion/Sprite/actions/runs/38831458565)
 repeats normal gates and extended stress, including the additional Linux tmux
 check. The PR records the outcome of that final run and links its artifacts.
+
+## Final hosted results and the remaining positive-capture race
+
+At `d6b43bb`, the final hosted macOS stress step passed graphics_tmux 100/100,
+app 30/30 and client 3,000/3,000. All reports show a clean checkout and three
+CPU workers. Native x86-64 Linux passed client, graphics_policy and graphics_tmux
+100/100 each with four CPU workers. Its app binary passed 99/100; run 88 failed
+`ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit`
+with an empty byte capture instead of `1b5b39377561`.
+
+The child used `stty min 0 time 5`, so its first read returned EOF after half a
+second without input. Under load, the test thread could observe READY and send
+its key only after that interval. A temporary 1.2-second delay reproduced empty
+captures in all three keyboard fixtures (0/3 passed). Waiting for input and
+appending an ordered NUL marker after the test's input passed the same delayed
+checks (3/3). Capturing exactly the expected payload length plus the marker
+still detects extra bytes; missing bytes hit the shared watchdog. The expected
+payloads contain no NUL.
+
+The bounded variant search covered `min 0 time` in `terminal_view/tests.rs`:
+five fixtures, four positive byte captures and one intentional absence
+observation. The positive mouse fixture reproduced the same empty result after
+a 600 ms delay and received the same marker protocol. The negative selection
+fixture has a distinct timed-absence contract and was not changed. Permanent
+600 ms delay regressions remain in the ordinary-key and positive-mouse tests;
+the temporary probes were removed from the other two keyboard tests.
+
+After this test-only correction, all 741 app tests passed (one ignored),
+workspace Clippy and formatting passed, and independent review found no
+important findings. Review confirmed that keyboard, native-text, mouse and marker
+submissions share the FIFO command lane and PTY writer. This traces and fixes
+the sole app-loop failure, satisfying #81's explicit alternative to a completely
+clean 100-run sample. The prior 100/100 app sample at `2ad8a05` remains recorded;
+the later 99/100 sample is not presented as clean.
+
+The extended run's macOS job is red because its preceding normal gate hit the
+five-second timeout in `input_is_admitted_while_every_output_permit_is_outstanding`
+at `event_backpressure.rs:305`. The identical failure occurred on
+[unchanged master](https://github.com/HundredBillion/Sprite/actions/runs/38788583886)
+before this work. That separate pre-existing flake is not claimed fixed by this
+PR. The separate normal CI run on `a117a95` passed on both platforms; the final
+PR links the normal CI result for the test-only follow-up as well.

@@ -645,8 +645,8 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
     use gpui::{Modifiers, MouseButton};
     let expected = "\x1b[<59;2;2M\x1b[<24;2;2M\x1b[<56;3;2M\x1b[<24;3;2m\x1b[<25;2;2M\x1b[<57;3;2M\x1b[<25;3;2m\x1b[<26;2;2M\x1b[<58;3;2M\x1b[<26;3;2m";
     let script = format!(
-        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; stty min 0 time 5; printf 'CAPTURING\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
-        expected.len()
+        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; stty min 1 time 0; printf 'CAPTURING\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        expected.len() + 1
     );
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -697,6 +697,8 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
                 .iter()
                 .any(|row| row.text.contains("CAPTURING"))
         });
+        // Readiness must not expire the capture before the first event is sent.
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(600));
         let modifiers = Modifiers {
             alt: true,
             control: true,
@@ -715,6 +717,10 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
             cx.simulate_mouse_move(end, Some(button), modifiers);
             cx.simulate_mouse_up(end, button, modifiers);
         }
+        // An ordered end marker makes missing or extra input visible without a quiet-period timer.
+        view.update(cx, |view, _| {
+            assert!(view.submit(TerminalCommand::Input(vec![0])));
+        });
         let bundle = wait_for_bundle(&view, cx, |bundle| {
             bundle.pane.rows.iter().any(|row| row.text.contains("DONE"))
         });
@@ -726,7 +732,11 @@ fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui
             .split("DONE")
             .next()
             .unwrap();
-        let expected: String = expected.bytes().map(|byte| format!("{byte:02x}")).collect();
+        let expected: String = expected
+            .bytes()
+            .chain(std::iter::once(0))
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         assert_eq!(actual, expected);
         view.read_with(cx, |view, _| {
             assert!(view.drag.is_none());
@@ -1058,8 +1068,8 @@ fn native_commit_without_preedit_reaches_actual_pty(cx: &mut gpui::TestAppContex
     use gpui::{ElementInputHandler, InputHandler};
     let expected = "日本😀aaa";
     let script = format!(
-        "stty raw -echo min 0 time 10; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
-        expected.len()
+        "stty raw -echo min 1 time 0; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        expected.len() + 1
     );
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -1088,6 +1098,10 @@ fn native_commit_without_preedit_reaches_actual_pty(cx: &mut gpui::TestAppContex
                 handler.replace_text_in_range(None, text, window, cx);
             }
         });
+        // An ordered end marker makes missing or extra input visible without a quiet-period timer.
+        view.update(cx, |view, _| {
+            assert!(view.submit(TerminalCommand::Input(vec![0])));
+        });
         let bundle = wait_for_bundle(&view, cx, |b| {
             b.pane.rows.iter().any(|r| r.text.contains("DONE"))
         });
@@ -1102,6 +1116,7 @@ fn native_commit_without_preedit_reaches_actual_pty(cx: &mut gpui::TestAppContex
             .as_bytes()
             .iter()
             .map(|b| format!("{b:02x}"))
+            .chain(std::iter::once("00".to_owned()))
             .collect::<String>();
         assert!(text.contains(&hex), "native commits at PTY: {text}");
     }));
@@ -1120,7 +1135,7 @@ fn ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit
     use gpui::{ElementInputHandler, InputHandler, Keystroke};
     let expected = "\x1b[97ua";
     let script = format!(
-        "stty raw -echo min 0 time 5; printf '\\033[>8uREADY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        "stty raw -echo min 1 time 0; printf '\\033[>8uREADY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
         expected.len() + 1
     );
     let settings = crate::config::Settings::default();
@@ -1144,6 +1159,8 @@ fn ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit
         wait_for_bundle(&view, cx, |b| {
             b.pane.rows.iter().any(|r| r.text.contains("READY"))
         });
+        // Readiness must not expire the capture before the first key is sent.
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(600));
         view.update_in(cx, |view, window, _| window.focus(&view.focus));
         cx.update(|window, cx| {
             window.activate_window();
@@ -1162,6 +1179,10 @@ fn ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit
         cx.update(|window, cx| {
             handler.replace_text_in_range(None, "a", window, cx);
         });
+        // An ordered end marker makes missing or extra input visible without a quiet-period timer.
+        view.update(cx, |view, _| {
+            assert!(view.submit(TerminalCommand::Input(vec![0])));
+        });
         let bundle = wait_for_bundle(&view, cx, |b| {
             b.pane.rows.iter().any(|r| r.text.contains("DONE"))
         });
@@ -1177,6 +1198,7 @@ fn ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit
             .as_bytes()
             .iter()
             .map(|b| format!("{b:02x}"))
+            .chain(std::iter::once("00".to_owned()))
             .collect::<String>();
         assert_eq!(
             actual, hex,
@@ -1197,7 +1219,7 @@ fn ordinary_repeated_shift_unicode_keys_and_delayed_native_ascii_are_not_doubled
     use gpui::{ElementInputHandler, InputHandler, Keystroke};
     let expected = "aaAé a";
     let script = format!(
-        "stty raw -echo min 0 time 5; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
+        "stty raw -echo min 1 time 0; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
         expected.len() + 1
     );
     let settings = crate::config::Settings::default();
@@ -1250,6 +1272,10 @@ fn ordinary_repeated_shift_unicode_keys_and_delayed_native_ascii_are_not_doubled
         cx.update(|window, cx| {
             handler.replace_text_in_range(None, "a", window, cx);
         });
+        // An ordered end marker makes missing or extra input visible without a quiet-period timer.
+        view.update(cx, |view, _| {
+            assert!(view.submit(TerminalCommand::Input(vec![0])));
+        });
         let bundle = wait_for_bundle(&view, cx, |b| {
             b.pane.rows.iter().any(|r| r.text.contains("DONE"))
         });
@@ -1265,6 +1291,7 @@ fn ordinary_repeated_shift_unicode_keys_and_delayed_native_ascii_are_not_doubled
             .as_bytes()
             .iter()
             .map(|b| format!("{b:02x}"))
+            .chain(std::iter::once("00".to_owned()))
             .collect::<String>();
         assert_eq!(
             actual, hex,
