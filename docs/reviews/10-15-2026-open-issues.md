@@ -70,8 +70,8 @@ with `--runs 100`. The script defaults `SPRITE_TEST_WATCHDOG_SECS` to 20.
 The existing `ci` workflow accepts `workflow_dispatch` input `stress=true`.
 It runs the native Arch container on an x86-64 hosted runner and the macOS loops,
 then uploads `stress-linux` and `stress-macos`. Normal PR CI keeps its shorter
-job limits. Acceptance results will be recorded after execution, not inferred
-from a passing build or a single suite run.
+job limits. Completed acceptance evidence is recorded below; a passing build or a single
+suite run does not substitute for the requested loops.
 
 ## Bounded variant review
 
@@ -200,3 +200,28 @@ Versioned source for the redraw behavior: tmux 3.8
 [`tty_client_ready`](https://github.com/tmux/tmux/blob/3.8/tty.c#L1629),
 [pane redraw filtering](https://github.com/tmux/tmux/blob/3.8/screen-write.c#L135),
 and [deferred initial redraw](https://github.com/tmux/tmux/blob/3.8/server-client.c#L2533).
+
+## Acceptance audit
+
+| Issue | Criterion | Evidence |
+|---|---|---|
+| #79 | All three unbounded reads poll on macOS; retain authentication buffer/deadline | `SocketReader`, client verdict/events, server buffered handoff; workspace tests and independent review |
+| #79 | About 3,000 clean loaded client runs | 3,000/3,000 locally and 3,000/3,000 hosted at `2ad8a05` |
+| #81 | 100 loaded runs of each requested native Linux binary | client, app, graphics_policy each 100/100 on native x86-64 Arch at `2ad8a05`, four workers, watchdog 20 |
+| #83 | Confirm image loss root cause | Detached-emission probe plus delayed-initial-redraw red 3/3, green 10/10 |
+| #83 | 100 loaded tmux runs | Final marker-gated fixture 100/100 on unmodified tmux 3.8, 18 workers |
+| #85 | Shared watchdog bounds | Coordination waits and child watchdog updated; production policy deadlines preserved |
+| #85 | At least 30 macOS runs without either reported failure | Final full app loop 30/30 at `2ad8a05` |
+| #85 | Arch CI passes | Normal CI `38816985659` passed |
+| #85 | Findings ledger | GAP-C21 registered and resolved by #87 with both named tests |
+
+GAP-C18 through GAP-C21 are resolved against this evidence. The final production
+code is unchanged since the successful client and native Linux loops. Later
+changes fix test setup, tmux synchronization and a debug-test watchdog.
+
+The complete local workspace suite passed again at `d6b43bb`, including 741 app
+unit tests (one ignored), 21 client tests and all three tmux tests. Final integrated
+review of `7ad4bc4..d6b43bb` reported no unresolved correctness or integration
+findings. [Hosted verification of the final implementation](https://github.com/HundredBillion/Sprite/actions/runs/38831458565)
+repeats normal gates and extended stress, including the additional Linux tmux
+check. The PR records the outcome of that final run and links its artifacts.

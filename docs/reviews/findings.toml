@@ -614,27 +614,50 @@ test = [
 [[finding]]
 id = "GAP-C18"
 title = "macOS can miss a socket's end-of-stream, leaving a surface open"
-status = "deferred"
+status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/79"
 issue = 79
+fixed_by = "#87"
+test = [
+    "a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes",
+    "a_half_close_drains_buffered_lines_and_keeps_the_reply_direction_open",
+    "an_idle_surface_can_receive_data_after_a_poll_interval",
+]
 
 [[finding]]
 id = "GAP-C19"
 title = "#77's tests are not yet looped under load on native Linux"
-status = "open"
+status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/81"
 issue = 81
+fixed_by = "#87"
+test = [
+    "surface_output_failure_interrupts_open_stdin_and_partial_json",
+    "outside_a_sprite_window_a_surface_cannot_be_opened_and_says_why",
+    "transmitting_images_in_a_loop_reaches_a_steady_state",
+]
 
 [[finding]]
 id = "GAP-C20"
 title = "tmux image fixtures can emit before a client attaches"
-status = "open"
+status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/83"
 issue = 83
+fixed_by = "#87"
+test = [
+    "an_image_survives_tmux_when_passthrough_is_enabled",
+    "an_image_survives_tmux_with_shell_metacharacters_in_fixture_paths",
+    "an_image_does_not_survive_tmux_without_passthrough",
+]
 
 [[finding]]
 id = "GAP-C21"
 title = "Local-socket test coordination uses fixed short deadlines"
-status = "open"
+status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/85"
 issue = 85
+fixed_by = "#87"
+test = [
+    "opening_serves_requests_without_sweeping_on_the_calling_thread",
+    "foreign_and_reopened_reply_identities_cannot_spare_another_connection",
+]
