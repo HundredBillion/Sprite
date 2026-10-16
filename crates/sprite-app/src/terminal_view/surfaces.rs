@@ -1197,7 +1197,7 @@ impl TerminalView {
             height: px((f32::from(size.height) - tab_height).max(0.0)),
         };
         let grid_slack = match &surface.body {
-            Body::Grid { grid, .. } if fills && tab_height > 0.0 => (f32::from(grid_size.height)
+            Body::Grid { grid, .. } if fills => (f32::from(grid_size.height)
                 - f32::from(grid.rows()) * f32::from(metrics.cells.height()))
             .max(0.0),
             _ => 0.0,
@@ -2271,7 +2271,7 @@ mod tests {
         });
         assert_eq!(
             origin.y + px(drawn_height),
-            baseline.0.y + px(baseline.1.1 as f32),
+            px(baseline.1.1 as f32),
             "native editor grid must touch the bottom of its allocation"
         );
         assert_eq!(told.1, baseline.1.1 - 35);
@@ -2387,7 +2387,14 @@ mod tests {
         draw_test_window(cx);
         host.read_with(cx, |host, _| {
             let surface = host.surfaces.fill.as_ref().unwrap();
-            assert_eq!(surface.origin.unwrap(), baseline.0);
+            let Body::Grid { grid, .. } = &surface.body else {
+                panic!("grid")
+            };
+            assert_eq!(
+                surface.origin.unwrap().y + host.metrics.height() * f32::from(grid.rows()),
+                px(baseline.1.1 as f32),
+                "hidden tabs must keep the status line at the bottom"
+            );
             assert_eq!(surface.told.unwrap(), baseline.1);
         });
     }
