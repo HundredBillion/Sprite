@@ -64,7 +64,7 @@ class CiPolicyTests(unittest.TestCase):
         ends = [header.start() for header in headers[1:]] + [len(jobs)]
         for header, end in zip(headers, ends):
             with self.subTest(job=header.group(1)):
-                self.assertRegex(jobs[header.end():end], r"(?m)^    timeout-minutes: [1-9][0-9]*$")
+                self.assertRegex(jobs[header.end():end], r"(?m)^    timeout-minutes: (?:[1-9][0-9]*|\$\{\{ inputs\.stress && 360 \|\| [1-9][0-9]* \}\})$")
 
 
 if __name__ == "__main__":

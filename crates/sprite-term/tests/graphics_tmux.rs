@@ -24,7 +24,7 @@ use sprite_term::{
     TerminalSession,
 };
 
-use support::{EventPump, SnapshotPump, base64, pane_text};
+use support::{EventPump, SnapshotPump, base64, pane_text, wait_until};
 
 /// Where tmux is, if this machine has it.
 fn tmux() -> Option<String> {
@@ -52,6 +52,22 @@ fn kitty_image(id: u32, size: u32) -> String {
         "\x1b_Ga=T,f=32,s={size},v={size},i={id},q=2;{}\x1b\\",
         base64(&pixels)
     )
+}
+
+struct TmuxFixture<'a> {
+    binary: &'a str,
+    socket: &'a str,
+    directory: &'a std::path::Path,
+}
+
+impl Drop for TmuxFixture<'_> {
+    fn drop(&mut self) {
+        std::process::Command::new(self.binary)
+            .args(["-L", self.socket, "kill-server"])
+            .output()
+            .ok();
+        std::fs::remove_dir_all(self.directory).ok();
+    }
 }
 
 /// Runs tmux with passthrough on or off, showing it an image, and reports what
@@ -85,24 +101,42 @@ fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapsho
         "sprite-test-{}-{passthrough}-{special_path}",
         std::process::id()
     );
+    let _fixture = TmuxFixture {
+        binary: &tmux,
+        socket: &socket,
+        directory: &directory,
+    };
+    // Start detached so the producer waits before tmux can forward the image.
+    // Passthrough output sent without an attached client is lost, unlike ordinary text.
+    let started = std::process::Command::new(&tmux)
+        .args(["-L", &socket, "-f"])
+        .arg(&config)
+        .args([
+            "new-session", "-d", "--", "sh", "-c",
+            "printf WAITING; \"$2\" -L \"$3\" wait-for sprite-ready && cat \"$1\"; printf DONE; sleep 300",
+            "sprite-image-fixture",
+        ])
+        .arg(&image)
+        .arg(&tmux)
+        .arg(&socket)
+        .output()
+        .expect("start the detached fixture");
+    assert!(started.status.success(), "{started:?}");
+    wait_until("the detached producer to start", || {
+        let pane = std::process::Command::new(&tmux)
+            .args(["-L", &socket, "capture-pane", "-p"])
+            .output()
+            .expect("inspect the detached pane");
+        String::from_utf8_lossy(&pane.stdout)
+            .contains("WAITING")
+            .then_some(())
+    });
     let mut config_session = SessionConfig::terminal_command(
-        "/bin/sh",
+        &tmux,
         vec![
-            OsString::from("-c"),
-            OsString::from("exec \"$@\""),
-            OsString::from("sprite-tmux-fixture"),
-            OsString::from(&tmux),
             OsString::from("-L"),
             OsString::from(&socket),
-            OsString::from("-f"),
-            config.into_os_string(),
-            OsString::from("new-session"),
-            OsString::from("--"),
-            OsString::from("sh"),
-            OsString::from("-c"),
-            OsString::from("cat \"$1\"; printf DONE; sleep 300"),
-            OsString::from("sprite-image-fixture"),
-            image.into_os_string(),
+            OsString::from("attach-session"),
         ],
     );
     config_session.graphics = GraphicsPolicy::default();
@@ -116,8 +150,17 @@ fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapsho
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
-    // tmux takes a moment to start; the marker is how we know the inner shell
-    // has run rather than how long we waited.
+    // The attachment hook runs before tmux finishes its initial redraw.
+    // Passthrough is discarded during a pending redraw, so wait for visible output.
+    snapshots.wait_for("tmux to draw the attached pane", |bundle| {
+        pane_text(bundle).contains("WAITING")
+    });
+    let released = std::process::Command::new(&tmux)
+        .args(["-L", &socket, "wait-for", "-S", "sprite-ready"])
+        .output()
+        .expect("release the image producer after the initial redraw");
+    assert!(released.status.success(), "{released:?}");
+
     snapshots.wait_for("tmux to run the command", |bundle| {
         pane_text(bundle).contains("DONE")
     });
@@ -132,13 +175,6 @@ fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapsho
             answer = Some((*graphics).clone());
         }
     }
-
-    // Leave no server behind on the machine running the tests.
-    std::process::Command::new(&tmux)
-        .args(["-L", &socket, "kill-server"])
-        .output()
-        .ok();
-    std::fs::remove_dir_all(&directory).ok();
 
     answer.expect("a graphics answer arrived")
 }

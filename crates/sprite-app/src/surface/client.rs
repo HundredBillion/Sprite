@@ -20,6 +20,7 @@ use std::os::unix::net::UnixStream;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde_json::{Value, json};
 
+use super::socket_reader::SocketReader;
 use crate::cli::{SurfaceOpenArgs, TokenRegisterArgs};
 pub use crate::observation::client::Exit;
 use crate::observation::client::PANE_VARIABLE;
@@ -94,7 +95,7 @@ fn open_exchange(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exi
 }
 
 /// Reads the window's first line, which is always its verdict.
-fn first_line(reader: &mut BufReader<UnixStream>, errors: &mut dyn Write) -> Result<Value, Exit> {
+fn first_line(reader: &mut impl BufRead, errors: &mut dyn Write) -> Result<Value, Exit> {
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
         writeln!(
@@ -219,7 +220,10 @@ pub fn run_surface_open(
         Ok(stream) => stream,
         Err(exit) => return exit,
     };
-    let Ok(mut reader) = stream.try_clone().map(BufReader::new) else {
+    let Ok(mut reader) = stream
+        .try_clone()
+        .map(|socket| BufReader::new(SocketReader(socket)))
+    else {
         writeln!(errors, "sprite: could not read from the surface channel").ok();
         return Exit::Unreachable;
     };
@@ -254,7 +258,7 @@ pub fn run_surface_open(
                 break;
             }
         }
-        reader.get_ref().shutdown(Shutdown::Both).ok();
+        reader.get_ref().0.shutdown(Shutdown::Both).ok();
         event_canceled.store(true, Ordering::Release);
         drop(cancel_events);
     });

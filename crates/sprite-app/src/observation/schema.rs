@@ -1115,7 +1115,8 @@ mod tests {
         // Deliberately generous: these tests run unoptimised, where encoding
         // several megabytes is many times slower than in the build a user runs.
         // The number worth quoting is measured in release, not here.
-        assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+        let limit = crate::test_blocking_wait::watchdog().max(std::time::Duration::from_secs(10));
+        assert!(took < limit, "took {took:?}");
         eprintln!(
             "  16 MiB limit: {} bytes, {} panes kept, {} dropped rows, took {took:?}",
             rendered.len(),

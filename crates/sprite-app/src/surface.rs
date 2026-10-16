@@ -9,6 +9,7 @@ pub mod host;
 pub(crate) mod lanes;
 pub mod list;
 pub mod render;
+mod socket_reader;
 pub mod style;
 pub(crate) mod svg_decode;
 mod wire;
