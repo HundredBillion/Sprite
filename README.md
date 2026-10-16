@@ -356,6 +356,10 @@ no state of its own. Highlight attributes may include `definition: true` to
 mark callable symbols. Sprite shows a pointing hand over their text while
 Cmd/Super is held; omitted attributes retain the normal pointer. This is a
 navigation affordance, not confirmation that a language server has a target.
+Highlight attributes can also set `ui_font: true` for short UI labels, such as
+popup headings. Those spans use the native system UI font at 14px and retain
+their bold weight, color, grid allocation, and background; ordinary code keeps
+the terminal font. Older hosts ignore both optional hints.
 The grid is painted by the terminal's painter with the
 pane's font and cell size, and the theme styles it by highlight-group name:
 

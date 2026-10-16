@@ -1231,6 +1231,32 @@ impl TerminalView {
             } => {
                 let bar = tabs.render(&grid.tabs, surface.id, f32::from(size.width), cx);
                 let cells = crate::surface::render::render_grid(grid, highlights, metrics, shapes);
+                let labels: Vec<_> = grid
+                    .ui_labels()
+                    .map(|(row, label)| {
+                        let foreground = match label.style.foreground {
+                            sprite_term::SnapshotColor::Rgb(color) => color,
+                            _ => metrics.defaults.0,
+                        };
+                        div()
+                            .absolute()
+                            .left(metrics.cells.width() * f32::from(label.column))
+                            .top(px(grid_slack) + metrics.cells.height() * row as f32)
+                            .w(metrics.cells.width() * f32::from(label.columns))
+                            .h(metrics.cells.height())
+                            .overflow_hidden()
+                            .font_family(".SystemUIFont")
+                            .text_size(px(14.0))
+                            .line_height(metrics.cells.height())
+                            .font_weight(if label.style.bold {
+                                gpui::FontWeight::BOLD
+                            } else {
+                                gpui::FontWeight::NORMAL
+                            })
+                            .text_color(rgb(crate::grid_paint::pack(foreground)))
+                            .child(SharedString::from(label.text.clone()))
+                    })
+                    .collect();
                 let container = if fills {
                     div().size_full()
                 } else {
@@ -1251,7 +1277,8 @@ impl TerminalView {
                             .flex_1()
                             .pt(px(grid_slack))
                             .overflow_hidden()
-                            .child(cells),
+                            .child(cells)
+                            .children(labels),
                     )
                     .into_any_element()
             }
