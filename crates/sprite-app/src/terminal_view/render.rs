@@ -16,8 +16,8 @@ use gpui::prelude::*;
 
 use gpui::{
     Context, ElementInputHandler, ExternalPaths, ImageSource, InteractiveElement, KeyDownEvent,
-    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, ScrollDelta, ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
 };
 use sprite_term::{
     CellPosition, KeyAction, MouseAction, SelectionMode, SnapshotBundle, TerminalCommand,
@@ -797,6 +797,11 @@ impl Render for TerminalView {
                     control: event.modifiers.control,
                 }));
             }))
+            .on_modifiers_changed(cx.listener(
+                |view, _event: &ModifiersChangedEvent, window, cx| {
+                    view.update_definition_modifiers(window, cx);
+                },
+            ))
             .on_key_up(cx.listener(|view, event: &KeyUpEvent, window, _cx| {
                 // A release belongs to whoever saw the press: with a Surface
                 // focused the child never saw the key-down, so it must not be

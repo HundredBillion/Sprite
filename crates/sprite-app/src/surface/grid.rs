@@ -50,6 +50,7 @@ pub struct Attrs {
     pub italic: bool,
     pub reverse: bool,
     pub strikethrough: bool,
+    pub definition: bool,
     pub underline: UnderlineStyle,
 }
 
@@ -63,6 +64,7 @@ impl Default for Attrs {
             italic: false,
             reverse: false,
             strikethrough: false,
+            definition: false,
             underline: UnderlineStyle::None,
         }
     }
@@ -363,6 +365,7 @@ fn parse_attrs(value: &Value) -> Result<Attrs, Refusal> {
         italic: flag_field(object, "italic")?.unwrap_or(false),
         reverse: flag_field(object, "reverse")?.unwrap_or(false),
         strikethrough: flag_field(object, "strikethrough")?.unwrap_or(false),
+        definition: flag_field(object, "definition")?.unwrap_or(false),
         underline: match object.get("underline") {
             None | Some(Value::Bool(false)) => UnderlineStyle::None,
             Some(Value::Bool(true)) => UnderlineStyle::Single,
@@ -556,6 +559,27 @@ impl GridSurface {
 
     pub fn rows(&self) -> u16 {
         self.rows
+    }
+
+    pub fn is_definition_symbol(&self, row: u16, col: u16) -> bool {
+        let Some(cell) = self
+            .cells
+            .get(usize::from(row))
+            .and_then(|row| row.get(usize::from(col)))
+        else {
+            return false;
+        };
+        if !self
+            .texts
+            .text(cell.text)
+            .chars()
+            .any(|ch| ch.is_alphanumeric() || ch == '_')
+        {
+            return false;
+        }
+        self.attrs
+            .get(&cell.hl)
+            .is_some_and(|attrs| attrs.definition)
     }
 
     /// Applies operations in order and stops at the first bad one, which is
@@ -1285,6 +1309,21 @@ mod tests {
             "        ",
             "the first chunk's repeats never reached the grid either"
         );
+    }
+
+    #[test]
+    fn definition_pointer_uses_symbol_highlights_and_ignores_padding() {
+        let mut grid = GridSurface::new(4, 1);
+        grid.apply_all(ops(json!({"type":"batch", "ops":[
+            {"type":"highlights", "define":{"1":{"definition":true},"2":{}}},
+            {"type":"rows", "rows":[{"row":0,"cells":[["f",1],[" ",1],["(",1],["x",2]]}]}
+        ]})))
+        .unwrap();
+        assert!(grid.is_definition_symbol(0, 0));
+        for col in 1..5 {
+            assert!(!grid.is_definition_symbol(0, col));
+        }
+        assert!(!grid.is_definition_symbol(1, 0));
     }
 
     #[test]

@@ -145,6 +145,7 @@ pub(super) struct HostedSurface {
     /// A selection dragged out of the terminal and across a dock therefore
     /// tells the dock nothing.
     pressed: Option<&'static str>,
+    definition_pointer: Option<(gpui::Point<Pixels>, bool)>,
     /// Sub-cell wheel remainders, one per axis, so a trackpad's pixel deltas
     /// become whole cells exactly as they do for the terminal.
     wheel_rows: crate::grid::ScrollAccumulator,
@@ -163,6 +164,27 @@ enum HostedPlacement {
 }
 
 impl HostedSurface {
+    fn definition_pointer_active(&self, metrics: &crate::surface::render::GridMetrics) -> bool {
+        match (&self.body, self.origin, self.definition_pointer) {
+            (Body::Grid { grid, .. }, Some(origin), Some((position, true))) => {
+                let inside = position.x >= origin.x
+                    && position.y >= origin.y
+                    && position.x < origin.x + metrics.cells.width() * f32::from(grid.cols())
+                    && position.y < origin.y + metrics.cells.height() * f32::from(grid.rows());
+                inside
+                    && crate::surface::render::grid_cell_under(
+                        position,
+                        origin,
+                        metrics,
+                        grid.cols(),
+                        grid.rows(),
+                    )
+                    .is_some_and(|(row, col)| grid.is_definition_symbol(row, col))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn size(&self) -> f32 {
         match self.placement {
             HostedPlacement::Dock { width, .. } => width,
@@ -570,6 +592,7 @@ impl TerminalView {
             _focus_events: [on_focus, on_blur],
             origin: None,
             pressed: None,
+            definition_pointer: None,
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
         };
@@ -585,6 +608,34 @@ impl TerminalView {
         self.size = None;
         cx.notify();
         Ok(())
+    }
+
+    pub(super) fn update_definition_modifiers(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let ids: Vec<_> = self.surfaces.iter().map(|surface| surface.id).collect();
+        for id in ids {
+            self.update_definition_pointer(
+                id,
+                window.mouse_position(),
+                window.modifiers().platform,
+                cx,
+            );
+        }
+    }
+
+    fn update_definition_pointer(
+        &mut self,
+        id: SurfaceId,
+        position: gpui::Point<Pixels>,
+        platform: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
+            let pointer = Some((position, platform));
+            if surface.definition_pointer != pointer {
+                surface.definition_pointer = pointer;
+                cx.notify();
+            }
+        }
     }
 
     /// Reports the pointer on a grid Surface, in cells. Nothing is sent for
@@ -1288,7 +1339,13 @@ impl TerminalView {
         if let Body::Grid { root, .. } = &surface.body {
             wrapper = crate::surface::render::apply_described_style(wrapper, root, registry);
         }
+        let definition_pointer = surface.definition_pointer_active(metrics);
         wrapper
+            .cursor(if definition_pointer {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
             .overflow_hidden()
             .track_focus(&surface.focus)
             .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
@@ -1402,6 +1459,12 @@ impl TerminalView {
             // underneath exactly as it did before Surfaces heard the mouse.
             .on_mouse_move(
                 cx.listener(move |view, event: &MouseMoveEvent, window, cx| {
+                    view.update_definition_pointer(
+                        id,
+                        event.position,
+                        event.modifiers.platform,
+                        cx,
+                    );
                     if !view.accept_surface_input(id, window, cx) {
                         cx.stop_propagation();
                         return;
@@ -2415,6 +2478,90 @@ mod tests {
         );
         cx.update(|window, _| window.remove_window());
         drop(host);
+    }
+
+    #[gpui::test]
+    fn definition_pointer_tracks_stationary_modifiers_outside_grid_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(987),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        let mut dock = open_description(
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"Explorer"}}),
+        );
+        dock.placement = Placement::Dock {
+            side: Side::Left,
+            size: Default::default(),
+            ownership: Ownership::Unowned,
+        };
+        dock.focus = true;
+        let (answer, _dock_peer) = open_request(&host, cx, SurfaceId(988), dock);
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(SurfaceId(988)), window, cx)
+                .unwrap();
+            host.grid_operations(
+                SurfaceId(987),
+                crate::surface::grid::parse_ops(&serde_json::json!({
+                "type":"batch", "ops":[
+                    {"type":"highlights","define":{"1":{"definition":true}}},
+                    {"type":"rows","rows":[{"row":0,"cells":[["f",1]]}]}
+                ]}))
+                .unwrap(),
+                cx,
+            );
+        });
+        draw_test_window(cx);
+        let position = host.read_with(cx, |host, _| {
+            host.surfaces.fill.as_ref().unwrap().origin.unwrap() + gpui::point(px(1.0), px(1.0))
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position,
+            ..Default::default()
+        });
+        cx.simulate_modifiers_change(gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        });
+        assert!(host.read_with(cx, |host, _| {
+            host.surfaces
+                .fill
+                .as_ref()
+                .unwrap()
+                .definition_pointer_active(&host.grid_metrics())
+        }));
+        cx.simulate_modifiers_change(gpui::Modifiers::default());
+        assert!(!host.read_with(cx, |host, _| {
+            host.surfaces
+                .fill
+                .as_ref()
+                .unwrap()
+                .definition_pointer_active(&host.grid_metrics())
+        }));
+        host.update(cx, |host, _| {
+            let metrics = host.grid_metrics();
+            let surface = host.surfaces.fill.as_mut().unwrap();
+            let origin = surface.origin.unwrap();
+            surface.definition_pointer = Some((origin - gpui::point(px(0.0), px(1.0)), true));
+            assert!(
+                !surface.definition_pointer_active(&metrics),
+                "top slack is not a symbol"
+            );
+        });
+        cx.update(|window, _| window.remove_window());
     }
 
     #[gpui::test]
