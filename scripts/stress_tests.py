@@ -49,6 +49,12 @@ def run_isolated(command, cwd, log, timeout, env, scratch):
                                    timeout=10)
 
 
+def test_environment():
+    # Direct binaries do not inherit Cargo's configured runtime environment.
+    return {**os.environ, "SPRITE_TERMINFO_DIR": str(ROOT / "target/terminfo"),
+            "SPRITE_TEST_WATCHDOG_SECS": os.environ.get("SPRITE_TEST_WATCHDOG_SECS", "20")}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", choices=TARGETS)
@@ -78,7 +84,7 @@ def main():
                    and a["profile"]["test"]]
     if len(executables) != 1:
         raise RuntimeError(f"expected one {name} test executable: {executables}")
-    env = {**os.environ, "SPRITE_TEST_WATCHDOG_SECS": os.environ.get("SPRITE_TEST_WATCHDOG_SECS", "20")}
+    env = test_environment()
     report = {"platform": platform.platform(), "machine": platform.machine(),
               "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
               "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),

@@ -176,7 +176,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           failed=0
           for target in client app graphics_policy graphics_tmux; do
-            python3 scripts/stress_tests.py "$target" --runs 100 --output "stress/$target" || failed=1
+            python3 scripts/stress_tests.py "$target" --runs 100 --output "$RUNNER_TEMP/stress/$target" || failed=1
           done
           exit "$failed"
 
@@ -185,7 +185,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stress-linux
-          path: stress/
+          path: ${{ runner.temp }}/stress/
 
       - name: Forbidden states
         run: |
@@ -282,9 +282,9 @@ jobs:
           set -uo pipefail
           command -v tmux >/dev/null || brew install tmux
           failed=0
-          python3 scripts/stress_tests.py graphics_tmux --runs 100 --output stress/graphics_tmux || failed=1
-          python3 scripts/stress_tests.py app --runs 30 --output stress/app || failed=1
-          python3 scripts/stress_tests.py client --runs 3000 --output stress/client || failed=1
+          python3 scripts/stress_tests.py graphics_tmux --runs 100 --output "$RUNNER_TEMP/stress/graphics_tmux" || failed=1
+          python3 scripts/stress_tests.py app --runs 30 --output "$RUNNER_TEMP/stress/app" || failed=1
+          python3 scripts/stress_tests.py client --runs 3000 --output "$RUNNER_TEMP/stress/client" || failed=1
           exit "$failed"
 
       - name: Retain stress evidence
@@ -292,7 +292,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stress-macos
-          path: stress/
+          path: ${{ runner.temp }}/stress/
 
       - name: Bundle the debug binary and verify the result
         run: |

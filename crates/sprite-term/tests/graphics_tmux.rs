@@ -94,14 +94,8 @@ fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapsho
     // machine's tmux configuration and the machine's says nothing about it.
     let config = directory.join("tmux.conf");
     let setting = if passthrough { "on" } else { "off" };
-    std::fs::write(
-        &config,
-        format!(
-            "set -g allow-passthrough {setting}\n\
-             set-hook -g client-attached 'wait-for -S sprite-attached'\n"
-        ),
-    )
-    .expect("write the configuration");
+    std::fs::write(&config, format!("set -g allow-passthrough {setting}\n"))
+        .expect("write the configuration");
 
     let socket = format!(
         "sprite-test-{}-{passthrough}-{special_path}",
@@ -112,14 +106,14 @@ fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapsho
         socket: &socket,
         directory: &directory,
     };
-    // Start detached so the producer always reaches the attachment gate first.
+    // Start detached so the producer waits before tmux can forward the image.
     // Passthrough output sent without an attached client is lost, unlike ordinary text.
     let started = std::process::Command::new(&tmux)
         .args(["-L", &socket, "-f"])
         .arg(&config)
         .args([
             "new-session", "-d", "--", "sh", "-c",
-            "printf WAITING; \"$2\" -L \"$3\" wait-for sprite-attached && cat \"$1\"; printf DONE; sleep 300",
+            "printf WAITING; \"$2\" -L \"$3\" wait-for sprite-ready && cat \"$1\"; printf DONE; sleep 300",
             "sprite-image-fixture",
         ])
         .arg(&image)
@@ -156,8 +150,17 @@ fn images_through_tmux(passthrough: bool, special_path: bool) -> GraphicsSnapsho
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
-    // tmux takes a moment to start; the marker is how we know the inner shell
-    // has run rather than how long we waited.
+    // The attachment hook runs before tmux finishes its initial redraw.
+    // Passthrough is discarded during a pending redraw, so wait for visible output.
+    snapshots.wait_for("tmux to draw the attached pane", |bundle| {
+        pane_text(bundle).contains("WAITING")
+    });
+    let released = std::process::Command::new(&tmux)
+        .args(["-L", &socket, "wait-for", "-S", "sprite-ready"])
+        .output()
+        .expect("release the image producer after the initial redraw");
+    assert!(released.status.success(), "{released:?}");
+
     snapshots.wait_for("tmux to run the command", |bundle| {
         pane_text(bundle).contains("DONE")
     });

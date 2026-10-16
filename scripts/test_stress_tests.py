@@ -4,9 +4,10 @@ from pathlib import Path
 import tempfile
 import shutil
 import time
+import tomllib
 import unittest
 
-from scripts.stress_tests import run_once
+from scripts.stress_tests import ROOT, run_once, test_environment
 
 
 class StressTests(unittest.TestCase):
@@ -15,6 +16,18 @@ class StressTests(unittest.TestCase):
             log = Path(directory) / "run.log"
             status = run_once(command, directory, log, timeout, os.environ.copy())
             return status, log.read_text()
+
+    def test_direct_binary_receives_the_cargo_terminfo_directory(self):
+        config = tomllib.loads((ROOT / ".cargo/config.toml").read_text())
+        setting = config["env"]["SPRITE_TERMINFO_DIR"]
+        self.assertTrue(setting["relative"])
+        expected = str(ROOT / setting["value"])
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "environment.log"
+            status = run_once(["sh", "-c", 'printf %s "$SPRITE_TERMINFO_DIR"'],
+                              directory, log, 5, test_environment())
+            self.assertEqual(status, 0)
+            self.assertEqual(log.read_text(), expected)
 
     def test_preserves_failure_status_and_output(self):
         status, output = self.run_command(["sh", "-c", "echo failure >&2; exit 7"])

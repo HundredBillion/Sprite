@@ -9,8 +9,8 @@ Scope: GitHub issues #79, #81, #83 and #85, against `7ad4bc4`.
   one-second retry interval before reading; an idle connection has no expiry.
   The server chains authentication read-ahead ahead of the socket. Linux keeps
   ordinary reads. Existing pipelined-open coverage guards the handoff.
-- The tmux producer starts detached and waits for the client-attached hook before
-  emitting the image. Ordinary text is replayed on attach, but an earlier
+- The tmux producer starts detached and waits until Sprite receives its initial
+  screen marker before emitting the image. Ordinary text is replayed on attach, but an earlier
   passthrough image is not. Fixture cleanup runs on panic as well as success.
 - Local-socket test coordination uses the shared watchdog. The child process
   gets three watchdog periods for startup, reply and housekeeping. Transport
@@ -28,8 +28,8 @@ documents readiness, millisecond timeouts, EINTR and draining data before EOF.
 The local precedent is `surface/client.rs::CancellableInput`.
 
 The local runtime is tmux 3.6a. Its [versioned manual](https://github.com/tmux/tmux/blob/3.6a/tmux.1)
-defines `client-attached` and `wait-for -S`; these coordinate the fixture without
-sleeping to guess when attachment finishes.
+defines `wait-for -S`; this releases the fixture after the screen marker arrives
+without sleeping to guess when attachment or redraw finishes.
 
 ## Baseline evidence
 
@@ -141,3 +141,62 @@ iteration because Git rejected the container checkout's ownership. The Linux
 stress step now registers only `$GITHUB_WORKSPACE` as a safe directory before
 collecting commit metadata. This setup failure supplies no Linux stress evidence.
 Both follow-ups received an independent review with no findings.
+
+## Completed stress evidence at `2ad8a05`
+
+Local macOS 26.5.2 arm64, 18 `yes` workers, watchdog 20:
+
+| Binary | Result |
+|---|---|
+| app | 30/30 full runs passed |
+| client | 3,000/3,000 full runs passed |
+| graphics_tmux (unchanged since `e269b40`) | 100/100 full runs passed |
+
+[Normal CI](https://github.com/HundredBillion/Sprite/actions/runs/38816985659)
+passed on macOS and native Arch.
+[Hosted stress](https://github.com/HundredBillion/Sprite/actions/runs/38817003680)
+provided the following native Linux x86-64 results with four `yes` workers and
+watchdog 20: client 100/100, app 100/100 and graphics_policy 100/100. These are
+the three binaries required by #81. Extra graphics_tmux coverage passed 90/100;
+the ten failures are empty-image assertions (seven ordinary paths, three special
+paths), requiring a stronger redraw barrier.
+
+Hosted macOS arm64 with three `yes` workers also passed client 3,000/3,000.
+The app loop failed 30/30 on the terminal-identity test and tmux failed 100/100
+with early session exit. The direct-binary runner omitted `SPRITE_TERMINFO_DIR`,
+which Cargo normally injects from `.cargo/config.toml`; `shell.rs::bootstrapped_terminfo`
+reads that runtime variable. Unlike the Linux root image, hosted macOS does not
+install the generated database system-wide. The runner now passes the same
+absolute path, and a Python child-process test checks it against Cargo's config.
+
+App run 17 additionally hit the debug schema-rendering guard: 13.1677 seconds
+against a fixed 10-second limit. Its size, pane preservation and fairness
+assertions passed. The guard now retains its default ten-second minimum while
+honoring a larger shared watchdog under load. The focused schema test passes.
+The bounded timing search in `observation/schema.rs` has one elapsed-time guard;
+there are no sibling timing assertions in that module.
+
+The hosted result files marked later binaries dirty because prior logs were
+written inside the checkout. The workflow now writes artifacts beneath
+`runner.temp` so generated evidence does not obscure source cleanliness.
+The full failed artifacts remain available in the linked run; they are not
+counted as clean stress acceptance.
+
+The remaining tmux failure is a second part of the same ordering problem:
+`client-attached` fires before initial redraw completes, and tmux suppresses
+passthrough while a window/pane redraw is pending. Delaying initial redraw in a
+temporary diagnostic tmux 3.8 build reproduced the exact empty-image failure in
+both enabled tests in 3/3 runs. The fixture now waits for `WAITING` in Sprite's
+snapshot before signaling the producer. The same diagnostic build passes 10/10
+runs with this barrier. This diagnostic change is not part of Sprite or its
+vendored dependencies.
+
+The revised fixture passed 100/100 full binary runs with unmodified tmux 3.8,
+18 CPU-load workers and watchdog 20. Formatting, focused tmux Clippy, workspace
+Clippy for the app/script follow-ups, and all 23 Python checks passed.
+Independent review found no remaining issue in either follow-up.
+
+Versioned source for the redraw behavior: tmux 3.8
+[`tty_client_ready`](https://github.com/tmux/tmux/blob/3.8/tty.c#L1629),
+[pane redraw filtering](https://github.com/tmux/tmux/blob/3.8/screen-write.c#L135),
+and [deferred initial redraw](https://github.com/tmux/tmux/blob/3.8/server-client.c#L2533).
