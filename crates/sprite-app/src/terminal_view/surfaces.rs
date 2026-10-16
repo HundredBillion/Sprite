@@ -35,6 +35,7 @@ pub(super) enum Body {
     Elements(ElementBody),
     Grid {
         grid: Box<GridSurface>,
+        tabs: super::native_tabs::NativeTabs,
         /// The description's root element, kept for the `bg` and `color` it
         /// may carry: a grid's wrapper takes its colours from them, the way an
         /// element root's box does. A grid root refuses `style` and `border`,
@@ -58,6 +59,7 @@ impl Body {
         match &root {
             Element::Grid { size, .. } => Body::Grid {
                 grid: Box::new(GridSurface::new(size.cols, size.rows)),
+                tabs: Default::default(),
                 root,
                 shapes: Default::default(),
             },
@@ -749,6 +751,31 @@ impl TerminalView {
         }
     }
 
+    pub(super) fn native_tab_action(
+        &mut self,
+        id: SurfaceId,
+        revision: u64,
+        tab: &str,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_surface_input(id, window, cx) {
+            return;
+        }
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let Body::Grid { grid, .. } = &surface.body else {
+            return;
+        };
+        if let Some(event) = grid.tabs.action(revision, tab, action) {
+            window.focus(&surface.focus);
+            surface.connection.send(&event);
+            cx.notify();
+        }
+    }
+
     /// Applies a grid operation, or a batch of them, to a grid Surface. The
     /// first bad operation is refused on the connection; what came before it
     /// stands, and the Surface is never removed for a bad message.
@@ -1110,12 +1137,20 @@ impl TerminalView {
         cx: &mut Context<Self>,
         fills: bool,
     ) -> AnyElement {
+        let tab_height = match &surface.body {
+            Body::Grid { grid, .. } => grid.tabs.visible_height(),
+            _ => 0.0,
+        };
+        let grid_size = Size {
+            width: size.width,
+            height: px((f32::from(size.height) - tab_height).max(0.0)),
+        };
         let told = (
             f32::from(size.width).round() as u32,
-            f32::from(size.height).round() as u32,
+            f32::from(grid_size.height).round() as u32,
         );
         let cells = matches!(surface.body, Body::Grid { .. })
-            .then(|| crate::surface::render::cells_that_fit(size, metrics));
+            .then(|| crate::surface::render::cells_that_fit(grid_size, metrics));
         let told = (told.0, told.1, cells);
         if surface.told != Some(told) {
             let event = match cells {
@@ -1133,8 +1168,33 @@ impl TerminalView {
                 elements.start_decodes(cx);
                 body
             }
-            Body::Grid { grid, shapes, .. } => {
-                crate::surface::render::render_grid(grid, highlights, metrics, shapes)
+            Body::Grid {
+                grid, shapes, tabs, ..
+            } => {
+                let bar = tabs.render(&grid.tabs, surface.id, f32::from(size.width), cx);
+                let cells = crate::surface::render::render_grid(grid, highlights, metrics, shapes);
+                let container = if fills {
+                    div().size_full()
+                } else {
+                    div()
+                        .w(px(f32::from(grid.cols()) * f32::from(metrics.cells.width())))
+                        .h(px(f32::from(grid.rows())
+                            * f32::from(metrics.cells.height())
+                            + tab_height))
+                };
+                container
+                    .flex()
+                    .flex_col()
+                    .child(bar)
+                    .child(
+                        div()
+                            .relative()
+                            .min_h_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(cells),
+                    )
+                    .into_any_element()
             }
             Body::List { view, .. } => {
                 let focused = focused == Some(&surface.focus);
@@ -1153,7 +1213,9 @@ impl TerminalView {
                 Some(
                     div()
                         .absolute()
-                        .top(px(f32::from(cursor.row) * f32::from(metrics.cells.height())))
+                        .top(px(
+                            tab_height + f32::from(cursor.row) * f32::from(metrics.cells.height())
+                        ))
                         .left(px(
                             f32::from(cursor.column) * f32::from(metrics.cells.width())
                         ))
@@ -1180,7 +1242,8 @@ impl TerminalView {
                 move |bounds, _window, cx| {
                     entity_for_bounds.update(cx, |view, _cx| {
                         if let Some(surface) = view.surfaces.get_mut(|surface| surface.id == id) {
-                            surface.origin = Some(bounds.origin);
+                            surface.origin =
+                                Some(point(bounds.origin.x, bounds.origin.y + px(tab_height)));
                         }
                     });
                 }
@@ -1188,7 +1251,13 @@ impl TerminalView {
             move |bounds, (), window, cx| {
                 window.handle_input(
                     &focus_for_input,
-                    ElementInputHandler::new(bounds, entity_for_input),
+                    ElementInputHandler::new(
+                        gpui::Bounds {
+                            origin: point(bounds.origin.x, bounds.origin.y + px(tab_height)),
+                            size: grid_size,
+                        },
+                        entity_for_input,
+                    ),
                     cx,
                 );
             },
@@ -2029,6 +2098,166 @@ mod tests {
                 "cleanup must return focus to the terminal"
             );
             assert_eq!(host.dock_widths(allocated), (0.0, 0.0));
+        });
+    }
+
+    #[gpui::test]
+    fn native_tabs_reserve_space_route_clicks_and_hide(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(990);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        draw_test_window(cx);
+        let baseline = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            (surface.origin.unwrap(), surface.told.unwrap())
+        });
+        events(&mut peer);
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops: crate::surface::grid::parse_ops(
+            &serde_json::json!({"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"},{"id":"b","label":"beta.rs","modified":true}]})).unwrap() });
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let (origin, told, first, second) = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let Body::Grid { tabs, .. } = &surface.body else {
+                panic!("grid")
+            };
+            (
+                surface.origin.unwrap(),
+                surface.told.unwrap(),
+                tabs.item_bounds(0),
+                tabs.item_bounds(1),
+            )
+        });
+        assert_eq!(origin.y, baseline.0.y + px(35.0));
+        assert_eq!(told.1, baseline.1.1 - 35);
+        assert!(told.2.unwrap().1 < baseline.1.2.unwrap().1);
+        events(&mut peer);
+        let select = point(second.left() + px(35.0), second.top() + px(17.0));
+        cx.simulate_mouse_down(select, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(select, MouseButton::Left, Default::default());
+        let actions = events(&mut peer);
+        assert!(
+            actions
+                .iter()
+                .any(|e| e["type"] == "tab_action" && e["id"] == "b" && e["action"] == "select"),
+            "{actions:?}"
+        );
+        assert!(!actions.iter().any(|e| e["type"] == "mouse"), "{actions:?}");
+        let close = point(first.right() - px(20.0), first.top() + px(17.0));
+        cx.simulate_mouse_down(close, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(close, MouseButton::Left, Default::default());
+        let actions = events(&mut peer);
+        assert_eq!(
+            actions.iter().filter(|e| e["type"] == "tab_action").count(),
+            1,
+            "{actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|e| e["id"] == "a" && e["action"] == "close"),
+            "{actions:?}"
+        );
+        assert!(!actions.iter().any(|e| e["type"] == "mouse"));
+        let on_grid = point(origin.x + px(3.0), origin.y + px(3.0));
+        cx.simulate_mouse_down(on_grid, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(select, MouseButton::Left, Default::default());
+        let gesture = events(&mut peer);
+        assert!(
+            gesture
+                .iter()
+                .any(|e| e["type"] == "mouse" && e["action"] == "press"),
+            "{gesture:?}"
+        );
+        assert!(
+            gesture
+                .iter()
+                .any(|e| e["type"] == "mouse" && e["action"] == "release"),
+            "{gesture:?}"
+        );
+        assert!(!gesture.iter().any(|e| e["type"] == "tab_action"));
+        host.read_with(cx, |host, _| {
+            assert!(host.surfaces.fill.as_ref().unwrap().pressed.is_none())
+        });
+        host.update_in(cx, |host, window, cx| {
+            host.native_tab_action(id, 0, "a", "select", window, cx);
+            host.report_grid_mouse(
+                id,
+                point(origin.x + px(1.0), origin.y + px(1.0)),
+                "left",
+                "press",
+                &Default::default(),
+            );
+        });
+        let actions = events(&mut peer);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0]["row"], 0);
+        assert_eq!(actions[0]["col"], 0);
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops: crate::surface::grid::parse_ops(
+            &serde_json::json!({"type":"tabs","revision":2,"active":"b39","items":(0..40).map(|n| serde_json::json!({"id":format!("b{n}"),"label":format!("file-{n}.rs")})).collect::<Vec<_>>()})).unwrap() });
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let (viewport, offset) = host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            let last = tabs.item_bounds(39);
+            let viewport = tabs.viewport();
+            assert!(
+                last.left() >= viewport.left() && last.right() <= viewport.right(),
+                "{last:?} outside {viewport:?}"
+            );
+            assert!(tabs.offset().x < px(0.0));
+            (viewport, tabs.offset())
+        });
+        events(&mut peer);
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(viewport.left() + px(40.0), viewport.top() + px(15.0)),
+            delta: gpui::ScrollDelta::Pixels(point(px(100.0), px(0.0))),
+            ..Default::default()
+        });
+        draw_test_window(cx);
+        host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert!(
+                tabs.offset().x > offset.x,
+                "wheel must scroll tabs horizontally"
+            );
+        });
+        assert!(!events(&mut peer).iter().any(|e| e["type"] == "mouse"));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(
+                    &serde_json::json!({"type":"tabs","revision":3,"active":null,"items":[]}),
+                )
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            assert_eq!(surface.origin.unwrap(), baseline.0);
+            assert_eq!(surface.told.unwrap(), baseline.1);
         });
     }
 

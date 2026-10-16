@@ -145,6 +145,7 @@ impl RowChunk {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
+    Tabs(super::tabs::Tabs),
     Rows(Vec<RowChunk>),
     Highlights {
         define: Vec<(u32, Attrs)>,
@@ -170,7 +171,15 @@ pub enum Op {
 pub fn is_op(kind: &str) -> bool {
     matches!(
         kind,
-        "rows" | "highlights" | "defaults" | "cursor" | "resize" | "scroll" | "clear" | "batch"
+        "tabs"
+            | "rows"
+            | "highlights"
+            | "defaults"
+            | "cursor"
+            | "resize"
+            | "scroll"
+            | "clear"
+            | "batch"
     )
 }
 
@@ -208,6 +217,7 @@ fn parse_op(message: &Value) -> Result<Op, Refusal> {
         .and_then(Value::as_str)
         .ok_or_else(|| malformed("an operation needs a type"))?;
     match kind {
+        "tabs" => Ok(Op::Tabs(super::tabs::Tabs::parse(message)?)),
         "rows" => {
             let chunks = object
                 .get("rows")
@@ -472,6 +482,7 @@ impl TextPool {
 /// A program's grid as Sprite holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridSurface {
+    pub tabs: super::tabs::Tabs,
     cols: u16,
     rows: u16,
     cells: Vec<Vec<Cell>>,
@@ -508,6 +519,7 @@ impl GridSurface {
         texts.entry_mut(blank).references = usize::from(cols) * usize::from(rows) + 1;
         let empty_row = Arc::new(Vec::new());
         Self {
+            tabs: Default::default(),
             cols,
             rows,
             cells: vec![vec![Cell { text: blank, hl: 0 }; usize::from(cols)]; usize::from(rows)],
@@ -566,6 +578,12 @@ impl GridSurface {
 
     pub fn apply(&mut self, op: Op) -> Result<(), Refusal> {
         match op {
+            Op::Tabs(tabs) => {
+                if tabs.revision <= self.tabs.revision {
+                    return Err(malformed("tabs revision must increase"));
+                }
+                self.tabs = tabs;
+            }
             Op::Rows(chunks) => {
                 // Every chunk is checked before any is written, so a bad one
                 // late in the operation leaves the grid as it was — and no

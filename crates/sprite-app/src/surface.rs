@@ -12,6 +12,7 @@ pub mod render;
 mod socket_reader;
 pub mod style;
 pub(crate) mod svg_decode;
+pub mod tabs;
 mod wire;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
