@@ -363,10 +363,8 @@ impl Render for TerminalView {
             crate::startup_benchmark::capture(cx.entity_id(), self.bundle.as_deref(), cx);
         let snapshot = self.bundle.as_ref().map(|bundle| bundle.render.as_ref());
         let rows = prepare_rows(&mut self.layout_cache, snapshot, self.hovered_link);
-        // The one place the pane's cell, font and colours are read for a frame:
-        // the terminal's own rows and any hosted grid draw from the same values,
-        // so a grid cannot end up a font behind the text beside it.
-        let metrics = self.grid_metrics();
+        let metrics = self.terminal_grid_metrics();
+        let surface_metrics = self.grid_metrics();
         let (default_fg, default_bg) = metrics.defaults;
         let cell_width = metrics.cells.width();
         let cell_height = metrics.cells.height();
@@ -443,7 +441,7 @@ impl Render for TerminalView {
             self.surface_layers(
                 allocated,
                 &registry,
-                &metrics,
+                &surface_metrics,
                 &highlights,
                 focused.as_ref(),
                 preedit.as_deref(),

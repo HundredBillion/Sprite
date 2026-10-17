@@ -27,6 +27,7 @@ pub struct Settings {
     pub pane_observation: PaneObservation,
     pub graphics: Graphics,
     pub font: Font,
+    pub surface_font: Option<Font>,
     pub colors: Colors,
     pub highlights: Highlights,
     pub cursor: Cursor,
@@ -306,6 +307,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             font: Font::default(),
+            surface_font: None,
             colors: Colors::default(),
             highlights: Highlights::default(),
             cursor: Cursor::default(),
@@ -323,6 +325,10 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn effective_surface_font(&self) -> &Font {
+        self.surface_font.as_ref().unwrap_or(&self.font)
+    }
+
     /// The settings as TOML, in the shape a configuration file takes.
     ///
     /// Everything is written, including what is at its default, because the
@@ -346,6 +352,17 @@ impl Settings {
         }
         out.push_str(&format!("size = {}\n", self.font.size));
         out.push_str(&format!("line_height = {}\n", self.font.line_height));
+
+        if let Some(font) = &self.surface_font {
+            out.push_str("\n[surface_font]\n");
+            if let Some(family) = &font.family {
+                out.push_str(&format!("family = {}\n", quote(family)));
+            }
+            out.push_str(&format!("size = {}\n", font.size));
+            out.push_str(&format!("line_height = {}\n", font.line_height));
+        } else {
+            out.push_str("\n# surface_font is unset: native grids inherit font\n");
+        }
 
         out.push_str("\n[grid]\n");
         out.push_str(&format!("padding = {}\n", self.grid.padding));
@@ -694,6 +711,44 @@ mod tests {
             Graphics::default().texture_bytes
         );
         assert!(!complaints(negative).is_empty());
+    }
+
+    #[test]
+    fn surface_font_is_optional_and_explicit_fields_are_independent() {
+        let inherited = parsed("[font]\nsize = 22\n");
+        assert!(inherited.surface_font.is_none());
+        assert_eq!(inherited.effective_surface_font(), &inherited.font);
+        let explicit = parsed("[font]\nsize = 22\n[surface_font]\nline_height = 1.5\n");
+        assert_eq!(explicit.effective_surface_font().size, Font::DEFAULT_SIZE);
+        assert_eq!(explicit.effective_surface_font().line_height, 1.5);
+        assert_eq!(parsed(&explicit.to_toml()), explicit);
+        assert_eq!(parsed(&inherited.to_toml()), inherited);
+    }
+
+    #[test]
+    fn invalid_surface_font_fields_recover_independently_and_report_the_section() {
+        let text = "[font]\nsize = 22\n[surface_font]\nfamily = []\nsize = 0\nline_height = 1.5\nunknown = true\n";
+        let settings = parsed(text);
+        assert_eq!(settings.font.size, 22.0);
+        let font = settings.surface_font.as_ref().unwrap();
+        assert_eq!(font.family, None);
+        assert_eq!(font.size, Font::MIN_SIZE);
+        assert_eq!(font.line_height, 1.5);
+        let errors = complaints(text);
+        for key in [
+            "surface_font.family",
+            "surface_font.size",
+            "surface_font.unknown",
+        ] {
+            assert!(errors.iter().any(|error| error.contains(key)), "{errors:?}");
+        }
+        let malformed = "surface_font = false\n[font]\nsize = 22\n";
+        assert!(parsed(malformed).surface_font.is_none());
+        assert!(complaints(malformed)[0].contains("surface_font must be a table"));
+        assert_eq!(
+            Settings::default().diff(&settings).live,
+            vec![LiveChange::Font, LiveChange::SurfaceFont]
+        );
     }
 
     #[test]

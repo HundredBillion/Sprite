@@ -290,12 +290,33 @@ impl TerminalView {
                 settings.font.line_height.get(),
             );
         }
+        let surface_font = settings.effective_surface_font();
+        let surface_changed = if surface_font == &settings.font {
+            let changed = self.surface_metrics != self.metrics;
+            self.surface_metrics = self.metrics.clone();
+            changed
+        } else {
+            let (family, _) = chosen_family(window, surface_font.family.as_deref(), cx);
+            let changed = family != self.surface_metrics.family
+                || px(surface_font.size.get()) != self.surface_metrics.font_size
+                || surface_font.line_height.get() != self.surface_metrics.line_height;
+            if changed {
+                self.surface_metrics = CellMetrics::measure(
+                    window,
+                    family,
+                    surface_font.size.get(),
+                    surface_font.line_height.get(),
+                );
+            }
+            changed
+        };
         if font_changed || changes.has(LiveChange::Grid) {
             self.padding = settings.grid.padding.get();
             self.size = None;
             self.synchronise_size(window);
         }
-        if font_changed || changes.has(LiveChange::Highlights) || changes.has(LiveChange::Colors) {
+        if surface_changed || changes.has(LiveChange::Highlights) || changes.has(LiveChange::Colors)
+        {
             self.invalidate_grids();
         }
         let defaults = session_defaults(settings);
@@ -334,8 +355,14 @@ impl TerminalView {
         }
     }
 
-    /// What a grid Surface borrows from this pane to draw like its terminal.
     pub(super) fn grid_metrics(&self) -> crate::surface::render::GridMetrics {
+        crate::surface::render::GridMetrics {
+            cells: self.surface_metrics.clone(),
+            ..self.terminal_grid_metrics()
+        }
+    }
+
+    pub(super) fn terminal_grid_metrics(&self) -> crate::surface::render::GridMetrics {
         crate::surface::render::GridMetrics {
             cells: self.metrics.clone(),
             defaults: self.default_colors(),
@@ -348,6 +375,45 @@ impl TerminalView {
 #[cfg(test)]
 mod metric_tests {
     use super::*;
+
+    #[gpui::test]
+    fn surface_font_reload_keeps_terminal_geometry_independent(cx: &mut gpui::TestAppContext) {
+        cx.set_global(FontDiscoveryProbe {
+            available: Some(vec!["Menlo".into(), "Hack".into()]),
+            ..Default::default()
+        });
+        let mut settings = crate::config::Settings::parse_candidate(
+            "[font]\nfamily = 'Menlo'\nsize = 12\n[surface_font]\nfamily = 'Hack'\nsize = 24\nline_height = 1.5\n",
+        )
+        .unwrap()
+        .0;
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("metrics test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(view.metrics.family().as_ref(), "Menlo");
+            assert_eq!(view.grid_metrics().cells.family().as_ref(), "Hack");
+            assert_eq!(view.metrics.font_size(), px(12.0));
+            assert_eq!(view.grid_metrics().cells.font_size(), px(24.0));
+            let terminal_size = view.size;
+            let terminal_cells = view.metrics.clone();
+            settings.surface_font.as_mut().unwrap().size = crate::config::FontSize::new(30.0);
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(view.size, terminal_size);
+            assert_eq!(view.metrics, terminal_cells);
+            assert_eq!(view.grid_metrics().cells.height(), px(45.0));
+            let surface_cells = view.grid_metrics().cells;
+            settings.font.size = crate::config::FontSize::new(18.0);
+            view.apply_settings(&settings, window, cx);
+            assert_ne!(view.size, terminal_size);
+            assert_eq!(view.grid_metrics().cells, surface_cells);
+            settings.surface_font = None;
+            view.apply_settings(&settings, window, cx);
+            assert_eq!(view.grid_metrics().cells, view.metrics);
+        });
+    }
 
     #[gpui::test]
     fn reload_replaces_the_measured_font_and_surface_metrics_together(

@@ -1306,6 +1306,9 @@ impl TerminalView {
                             f32::from(cursor.column) * f32::from(metrics.cells.width())
                         ))
                         .h(metrics.cells.height())
+                        .font_family(metrics.cells.family())
+                        .text_size(metrics.cells.font_size())
+                        .line_height(metrics.cells.height())
                         .bg(rgb(crate::grid_paint::pack(default_fg)))
                         .text_color(rgb(crate::grid_paint::pack(default_bg)))
                         .underline()
@@ -2512,6 +2515,128 @@ mod tests {
         );
         cx.update(|window, _| window.remove_window());
         drop(host);
+    }
+
+    #[gpui::test]
+    fn surface_font_geometry_drives_resize_click_wheel_and_ime(cx: &mut gpui::TestAppContext) {
+        use gpui::{Bounds, EntityInputHandler};
+        let mut settings = crate::config::Settings::parse_candidate(
+            "[font]\nsize = 12\n[surface_font]\nsize = 24\nline_height = 1.5\n",
+        )
+        .unwrap()
+        .0;
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let mut host = TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx);
+            host.apply_settings(&settings, window, cx);
+            host
+        });
+        let id = SurfaceId(993);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(id), window, cx).unwrap();
+            host.grid_operations(id, crate::surface::grid::parse_ops(&serde_json::json!({
+                "type":"batch", "ops":[
+                    {"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"}]},
+                    {"type":"cursor","row":2,"col":3}
+                ]
+            })).unwrap(), cx);
+        });
+        draw_test_window(cx);
+        let (cols, rows) = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let (width, height, cells) = surface.told.unwrap();
+            let cells = cells.unwrap();
+            assert_eq!(
+                cells.0,
+                (width as f32 / f32::from(host.grid_metrics().cells.width())).floor() as u16
+            );
+            assert_eq!(cells.1, (height as f32 / 36.0).floor() as u16);
+            assert_eq!(host.terminal_grid_metrics().cells.font_size(), px(12.0));
+            cells
+        });
+        host.update(cx, |host, cx| {
+            host.grid_operations(id, vec![Op::Resize { cols, rows }], cx);
+        });
+        draw_test_window(cx);
+        events(&mut peer);
+        let position = host.update_in(cx, |host, window, cx| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let origin = surface.origin.unwrap();
+            let cells = host.grid_metrics().cells;
+            assert!(
+                origin.y >= px(35.0),
+                "tabs and alignment slack precede grid content"
+            );
+            let expected = Bounds {
+                origin: origin + point(cells.width() * 3.0, cells.height() * 2.0),
+                size: gpui::size(cells.width(), cells.height()),
+            };
+            let bounds = host
+                .bounds_for_range(
+                    0..0,
+                    Bounds {
+                        origin,
+                        size: gpui::size(px(1000.0), px(1000.0)),
+                    },
+                    window,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(bounds, expected);
+            origin + point(cells.width() * 3.5, cells.height() * 2.5)
+        });
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+            ..Default::default()
+        });
+        let mouse: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|event| event["type"] == "mouse")
+            .collect();
+        assert_eq!(mouse.len(), 3, "{mouse:?}");
+        for event in &mouse {
+            assert_eq!(event["row"], 2);
+            assert_eq!(event["col"], 3);
+        }
+        assert_eq!(mouse[2]["button"], "wheel");
+        assert_eq!(mouse[2]["action"], "up");
+        let terminal_size = host.read_with(cx, |host, _| host.size);
+        settings.surface_font.as_mut().unwrap().size = crate::config::FontSize::new(30.0);
+        host.update_in(cx, |host, window, cx| {
+            host.apply_settings(&settings, window, cx)
+        });
+        draw_test_window(cx);
+        let resized: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|event| event["type"] == "resize")
+            .collect();
+        assert_eq!(resized.len(), 1, "{resized:?}");
+        assert!(resized[0]["rows"].as_u64().unwrap() < u64::from(rows));
+        assert_eq!(host.read_with(cx, |host, _| host.size), terminal_size);
+        cx.update(|window, _| window.remove_window());
     }
 
     #[gpui::test]

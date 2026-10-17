@@ -3,6 +3,7 @@ use super::Settings;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LiveChange {
     Font,
+    SurfaceFont,
     Colors,
     Grid,
     Highlights,
@@ -14,6 +15,7 @@ impl LiveChange {
     fn name(self) -> &'static str {
         match self {
             Self::Font => "font",
+            Self::SurfaceFont => "surface_font",
             Self::Colors => "colors",
             Self::Grid => "grid",
             Self::Highlights => "highlights",
@@ -83,6 +85,10 @@ impl Settings {
         let mut diff = SettingsDiff::default();
         for (changed, effect) in [
             (self.font != next.font, LiveChange::Font),
+            (
+                self.surface_font != next.surface_font,
+                LiveChange::SurfaceFont,
+            ),
             (self.colors != next.colors, LiveChange::Colors),
             (self.grid != next.grid, LiveChange::Grid),
             (self.highlights != next.highlights, LiveChange::Highlights),

@@ -96,6 +96,7 @@ pub struct TerminalView {
     textures: crate::graphics_cache::GraphicsCache,
     focus: FocusHandle,
     metrics: CellMetrics,
+    surface_metrics: CellMetrics,
     /// The configured gap around the grid, in logical pixels.
     padding: f32,
     /// Foreground and background to use before the first snapshot arrives.
@@ -330,6 +331,7 @@ impl TerminalView {
         #[cfg(any(test, feature = "startup-benchmark"))]
         crate::startup_benchmark::constructor_started(cx.entity_id(), cx);
         let applied_settings = settings.clone();
+        let surface_font = settings.effective_surface_font().clone();
         let defaults = theme::session_defaults(&settings);
         let crate::config::Settings {
             font,
@@ -349,6 +351,23 @@ impl TerminalView {
             font.size.get(),
             font.line_height.get(),
         );
+        let surface_metrics = if surface_font == font {
+            metrics.clone()
+        } else {
+            let (family, surface_complaints) =
+                chosen_family(window, surface_font.family.as_deref(), cx);
+            complaints.extend(
+                surface_complaints
+                    .into_iter()
+                    .map(|message| message.replacen("font.family", "surface_font.family", 1)),
+            );
+            CellMetrics::measure(
+                window,
+                family,
+                surface_font.size.get(),
+                surface_font.line_height.get(),
+            )
+        };
         let scale_factor = window.scale_factor();
 
         // A window told what to run gives every one of its panes the same
@@ -527,6 +546,7 @@ impl TerminalView {
             surface_window: window.window_handle(),
             dock_drag: None,
             metrics,
+            surface_metrics,
             // A setting that did nothing is shown rather than silently
             // ignored: somebody whose file had no effect deserves to know why.
             status: (!complaints.is_empty()).then(|| complaints.join(" · ").into()),
@@ -605,6 +625,12 @@ impl TerminalView {
             });
         let focus = cx.focus_handle();
         let focus_observers = Self::observe_pane_focus(&focus, window, cx);
+        let metrics = CellMetrics::measure(
+            window,
+            font_family,
+            crate::config::Font::DEFAULT_SIZE,
+            crate::config::Font::DEFAULT_LINE_HEIGHT,
+        );
         Self {
             applied_settings: crate::config::Settings::default(),
             pending: Pending::default(),
@@ -616,12 +642,8 @@ impl TerminalView {
             surfaces: SurfaceHost::default(),
             surface_window: window.window_handle(),
             dock_drag: None,
-            metrics: CellMetrics::measure(
-                window,
-                font_family,
-                crate::config::Font::DEFAULT_SIZE,
-                crate::config::Font::DEFAULT_LINE_HEIGHT,
-            ),
+            surface_metrics: metrics.clone(),
+            metrics,
             bundle: None,
             textures: crate::graphics_cache::GraphicsCache::default(),
             focus,
