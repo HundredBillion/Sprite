@@ -79,8 +79,12 @@ impl NativeTabs {
             .bg(color(&tabs.colors.background))
             .font_family(".SystemUIFont")
             .text_size(px(13.0));
-        for item in &tabs.items {
+        for (index, item) in tabs.items.iter().enumerate() {
             let active = tabs.active.as_ref() == Some(&item.id);
+            let next_active = tabs
+                .items
+                .get(index + 1)
+                .is_some_and(|next| tabs.active.as_ref() == Some(&next.id));
             let revision = tabs.revision;
             let select_id = item.id.clone();
             let close_id = item.id.clone();
@@ -123,8 +127,7 @@ impl NativeTabs {
                 .min_w(px(90.0))
                 .max_w(px(240.0))
                 .border_r_1()
-                .border_b_2()
-                .border_color(color(if active {
+                .border_color(color(if active || next_active {
                     &tabs.colors.accent
                 } else {
                     &tabs.colors.border

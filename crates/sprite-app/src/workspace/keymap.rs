@@ -632,6 +632,57 @@ mod tests {
     /// The workspace's focus routing and the window's activation together
     /// decide which terminal has Pane Focus.
     #[gpui::test]
+    fn clicking_native_editor_activates_its_workspace_pane(cx: &mut gpui::TestAppContext) {
+        use crate::surface::channel::{Open, Placement, SurfaceConnection};
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        cx.simulate_keystrokes("ctrl-shift-d");
+        draw_workspace(cx);
+        let second = terminal_view(&workspace, PaneId(1), cx);
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        connection.establish(&crate::surface::channel::event_opened(
+            crate::surface::SurfaceId(998),
+        ));
+        second.update_in(cx, |view, window, cx| {
+            view.open_surface(crate::surface::SurfaceId(998), Open {
+                placement: Placement::Fill { owner_pid: None }, focus: false,
+                description: serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            }, connection, window, cx).unwrap();
+        });
+        workspace.update(cx, |workspace, cx| workspace.focus_pane(PaneId(0), cx));
+        draw_workspace(cx);
+        draw_workspace(cx);
+        let previous_focus = cx.update(|window, cx| window.focused(cx));
+        let right = cx.debug_bounds("workspace-pane-1").unwrap().center();
+        cx.simulate_mouse_down(right, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(right, gpui::MouseButton::Left, Default::default());
+        let clicked_focus = cx.update(|window, cx| window.focused(cx));
+        assert!(clicked_focus.is_some());
+        assert_ne!(
+            clicked_focus, previous_focus,
+            "click must move keyboard focus into the editor"
+        );
+        draw_workspace(cx);
+        draw_workspace(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.tabs.active().unwrap().focus(), Some(PaneId(1)));
+        });
+        assert_eq!(
+            cx.update(|window, cx| window.focused(cx)),
+            clicked_focus,
+            "workspace redraw must not steal focus from the clicked native editor"
+        );
+        let left = cx.debug_bounds("workspace-pane-0").unwrap().center();
+        cx.simulate_mouse_down(left, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(left, gpui::MouseButton::Left, Default::default());
+        draw_workspace(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.tabs.active().unwrap().focus(), Some(PaneId(0)));
+        });
+    }
+
+    #[gpui::test]
     fn pane_focus_follows_the_focused_pane_and_the_active_window(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         cx.update(|window, _| window.activate_window());

@@ -496,14 +496,13 @@ impl Render for Workspace {
                     .h(px(pane_height))
                     .overflow_hidden()
                     .bg(rgb(BACKGROUND))
-                    // Clicking a pane focuses it, which is how focus follows
-                    // the mouse without a separate mechanism.
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |workspace, _event, _window, cx| {
-                            workspace.focus_pane(pane, cx);
-                        }),
-                    )
+                    .capture_any_mouse_down(cx.listener(
+                        move |workspace, event: &gpui::MouseDownEvent, _window, cx| {
+                            if event.button == gpui::MouseButton::Left {
+                                workspace.focus_pane(pane, cx);
+                            }
+                        },
+                    ))
                     .child(handle.view())
                     .when(!is_focused, |element| element.opacity(0.92))
             })
