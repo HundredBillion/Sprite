@@ -373,7 +373,13 @@ impl EntityInputHandler for TerminalView {
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let (row, column) = match self.focused_surface(window) {
+        let focused_surface = self.focused_surface(window);
+        let metrics = if focused_surface.is_some() {
+            &self.surface_metrics
+        } else {
+            &self.metrics
+        };
+        let (row, column) = match focused_surface {
             Some(surface) => match &surface.body {
                 Body::Grid { grid, .. } => {
                     let cursor = grid.cursor_snapshot();
@@ -388,10 +394,10 @@ impl EntityInputHandler for TerminalView {
         };
         Some(Bounds {
             origin: point(
-                element_bounds.origin.x + px(f32::from(column) * f32::from(self.metrics.width())),
-                element_bounds.origin.y + px(f32::from(row) * f32::from(self.metrics.height())),
+                element_bounds.origin.x + px(f32::from(column) * f32::from(metrics.width())),
+                element_bounds.origin.y + px(f32::from(row) * f32::from(metrics.height())),
             ),
-            size: gpui::size(self.metrics.width(), self.metrics.height()),
+            size: gpui::size(metrics.width(), metrics.height()),
         })
     }
 

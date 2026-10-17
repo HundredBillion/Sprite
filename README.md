@@ -282,6 +282,31 @@ terminal selection to copy from. A grid Surface also hears the mouse in cells �
 so an editor behind it can place its cursor and scroll. A selection dragged
 across it from the terminal began on the terminal and is not reported.
 
+Grid Surfaces can show a native file-tab row when `opened.features` contains
+`"grid-tabs-v1"` (also advertised by `capabilities`). Send a standalone operation
+or include it in a grid batch:
+
+```json
+{"type":"tabs","revision":1,"height":35,"active":"b12","items":[{"id":"b12","label":"core.lua","modified":false,"icon":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"/>"}]}
+```
+
+The row uses system text at 13 pixels and 16-pixel icons, scrolls horizontally,
+and brings the active item into view. `height` defaults to 35 and accepts 24–64;
+empty `items` hides the row. Grid resize events report the remaining content
+height and cell count, and pointer and input-method coordinates use that same
+content origin. Optional `colors` accepts `#rrggbb` values for `background`,
+`active_background`, `inactive_background`, `foreground`, `active_foreground`,
+`border`, and `accent`.
+
+Revisions must increase and fit a positive JavaScript safe integer. A snapshot
+allows at most 256 items, unique nonempty IDs up to 256 bytes, labels up to
+1024 bytes, and inline SVG icons up to 64KiB each, within the channel's message
+limit. `active` must name an item or be null. A refused snapshot leaves the
+previous tabs intact. Clicking emits
+`{"type":"tab_action","revision":1,"id":"b12","action":"select"}` or `"close"`.
+The owning program decides what those actions do, including whether a modified
+file may close; Sprite never evaluates labels or opens icon paths.
+
 An `image` element's SVG is rendered from the bytes given, with no resource
 directory, so an `href` that points at a file resolves to nothing; embed
 what the picture needs.
@@ -327,7 +352,15 @@ An editor draws differently: it opens a *grid* Surface (`{"kind":"grid",
 "cols":80,"rows":24}`) and streams cells with highlight ids — `rows`,
 `highlights`, `cursor`, `scroll`, and friends, alone or in a `batch` that
 lands in one frame — mirroring Neovim's own redraw stream so an adapter keeps
-no state of its own. The grid is painted by the terminal's painter with the
+no state of its own. Highlight attributes may include `definition: true` to
+mark callable symbols. Sprite shows a pointing hand over their text while
+Cmd/Super is held; omitted attributes retain the normal pointer. This is a
+navigation affordance, not confirmation that a language server has a target.
+Highlight attributes can also set `ui_font: true` for short UI labels, such as
+popup headings. Those spans use the native system UI font at 14px and retain
+their bold weight, color, grid allocation, and background; ordinary code keeps
+the terminal font. Older hosts ignore both optional hints.
+The grid is painted by the terminal's painter with the
 pane's font and cell size, and the theme styles it by highlight-group name:
 
 ```toml

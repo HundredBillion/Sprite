@@ -395,6 +395,10 @@ fn parse(svg: &str) -> Result<usvg::Tree, RefusalKind> {
     static OPTIONS: LazyLock<usvg::Options<'static>> = LazyLock::new(|| {
         let select = usvg::FontResolver::default_font_selector();
         usvg::Options {
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_string: Box::new(|_, _| None),
+                ..Default::default()
+            },
             font_resolver: usvg::FontResolver {
                 select_font: Box::new(move |font, db| {
                     if db.is_empty() {
@@ -537,6 +541,23 @@ pub(crate) fn merged_floods(results: usize, side: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svg_data_does_not_load_external_files() {
+        let path =
+            std::env::temp_dir().join(format!("sprite-svg-resource-{}.svg", std::process::id()));
+        std::fs::write(&path, "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><rect width='16' height='16' fill='red'/></svg>").unwrap();
+        let svg = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' width='16' height='16'><image width='16' height='16' xlink:href='{}'/></svg>",
+            path.display()
+        );
+        let parsed = parse(&svg).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            parsed.root().children().is_empty(),
+            "external image was resolved"
+        );
+    }
 
     fn tree(svg: &str) -> usvg::Tree {
         usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap()

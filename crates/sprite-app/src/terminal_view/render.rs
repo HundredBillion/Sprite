@@ -16,8 +16,8 @@ use gpui::prelude::*;
 
 use gpui::{
     Context, ElementInputHandler, ExternalPaths, ImageSource, InteractiveElement, KeyDownEvent,
-    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
+    KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, ScrollDelta, ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
 };
 use sprite_term::{
     CellPosition, KeyAction, MouseAction, SelectionMode, SnapshotBundle, TerminalCommand,
@@ -363,10 +363,8 @@ impl Render for TerminalView {
             crate::startup_benchmark::capture(cx.entity_id(), self.bundle.as_deref(), cx);
         let snapshot = self.bundle.as_ref().map(|bundle| bundle.render.as_ref());
         let rows = prepare_rows(&mut self.layout_cache, snapshot, self.hovered_link);
-        // The one place the pane's cell, font and colours are read for a frame:
-        // the terminal's own rows and any hosted grid draw from the same values,
-        // so a grid cannot end up a font behind the text beside it.
-        let metrics = self.grid_metrics();
+        let metrics = self.terminal_grid_metrics();
+        let surface_metrics = self.grid_metrics();
         let (default_fg, default_bg) = metrics.defaults;
         let cell_width = metrics.cells.width();
         let cell_height = metrics.cells.height();
@@ -443,7 +441,7 @@ impl Render for TerminalView {
             self.surface_layers(
                 allocated,
                 &registry,
-                &metrics,
+                &surface_metrics,
                 &highlights,
                 focused.as_ref(),
                 preedit.as_deref(),
@@ -797,6 +795,11 @@ impl Render for TerminalView {
                     control: event.modifiers.control,
                 }));
             }))
+            .on_modifiers_changed(cx.listener(
+                |view, _event: &ModifiersChangedEvent, window, cx| {
+                    view.update_definition_modifiers(window, cx);
+                },
+            ))
             .on_key_up(cx.listener(|view, event: &KeyUpEvent, window, _cx| {
                 // A release belongs to whoever saw the press: with a Surface
                 // focused the child never saw the key-down, so it must not be

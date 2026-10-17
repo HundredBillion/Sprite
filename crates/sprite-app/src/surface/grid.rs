@@ -50,6 +50,8 @@ pub struct Attrs {
     pub italic: bool,
     pub reverse: bool,
     pub strikethrough: bool,
+    pub definition: bool,
+    pub ui_font: bool,
     pub underline: UnderlineStyle,
 }
 
@@ -63,6 +65,8 @@ impl Default for Attrs {
             italic: false,
             reverse: false,
             strikethrough: false,
+            definition: false,
+            ui_font: false,
             underline: UnderlineStyle::None,
         }
     }
@@ -145,6 +149,7 @@ impl RowChunk {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
+    Tabs(super::tabs::Tabs),
     Rows(Vec<RowChunk>),
     Highlights {
         define: Vec<(u32, Attrs)>,
@@ -170,7 +175,15 @@ pub enum Op {
 pub fn is_op(kind: &str) -> bool {
     matches!(
         kind,
-        "rows" | "highlights" | "defaults" | "cursor" | "resize" | "scroll" | "clear" | "batch"
+        "tabs"
+            | "rows"
+            | "highlights"
+            | "defaults"
+            | "cursor"
+            | "resize"
+            | "scroll"
+            | "clear"
+            | "batch"
     )
 }
 
@@ -208,6 +221,7 @@ fn parse_op(message: &Value) -> Result<Op, Refusal> {
         .and_then(Value::as_str)
         .ok_or_else(|| malformed("an operation needs a type"))?;
     match kind {
+        "tabs" => Ok(Op::Tabs(super::tabs::Tabs::parse(message)?)),
         "rows" => {
             let chunks = object
                 .get("rows")
@@ -353,6 +367,8 @@ fn parse_attrs(value: &Value) -> Result<Attrs, Refusal> {
         italic: flag_field(object, "italic")?.unwrap_or(false),
         reverse: flag_field(object, "reverse")?.unwrap_or(false),
         strikethrough: flag_field(object, "strikethrough")?.unwrap_or(false),
+        definition: flag_field(object, "definition")?.unwrap_or(false),
+        ui_font: flag_field(object, "ui_font")?.unwrap_or(false),
         underline: match object.get("underline") {
             None | Some(Value::Bool(false)) => UnderlineStyle::None,
             Some(Value::Bool(true)) => UnderlineStyle::Single,
@@ -469,9 +485,18 @@ impl TextPool {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiLabel {
+    pub column: u16,
+    pub columns: u16,
+    pub text: String,
+    pub style: CellStyle,
+}
+
 /// A program's grid as Sprite holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridSurface {
+    pub tabs: super::tabs::Tabs,
     cols: u16,
     rows: u16,
     cells: Vec<Vec<Cell>>,
@@ -498,6 +523,7 @@ pub struct GridSurface {
     /// The rows as the painter wants them, rebuilt only when something
     /// changed: a frame that repaints an idle grid costs no layout.
     laid_out: crate::grid::PositionedRows,
+    ui_labels: Vec<Arc<Vec<UiLabel>>>,
 }
 
 impl GridSurface {
@@ -508,6 +534,7 @@ impl GridSurface {
         texts.entry_mut(blank).references = usize::from(cols) * usize::from(rows) + 1;
         let empty_row = Arc::new(Vec::new());
         Self {
+            tabs: Default::default(),
             cols,
             rows,
             cells: vec![vec![Cell { text: blank, hl: 0 }; usize::from(cols)]; usize::from(rows)],
@@ -521,6 +548,7 @@ impl GridSurface {
             defaults: Defaults::default(),
             cursor: Cursor::default(),
             laid_out: vec![empty_row; usize::from(rows)].into(),
+            ui_labels: vec![Arc::new(Vec::new()); usize::from(rows)],
         }
     }
 
@@ -546,6 +574,27 @@ impl GridSurface {
         self.rows
     }
 
+    pub fn is_definition_symbol(&self, row: u16, col: u16) -> bool {
+        let Some(cell) = self
+            .cells
+            .get(usize::from(row))
+            .and_then(|row| row.get(usize::from(col)))
+        else {
+            return false;
+        };
+        if !self
+            .texts
+            .text(cell.text)
+            .chars()
+            .any(|ch| ch.is_alphanumeric() || ch == '_')
+        {
+            return false;
+        }
+        self.attrs
+            .get(&cell.hl)
+            .is_some_and(|attrs| attrs.definition)
+    }
+
     /// Applies operations in order and stops at the first bad one, which is
     /// refused; the ones before it stand, as a terminal's would. Inside a
     /// batch of several, the refusal names the operation's index so a client
@@ -566,6 +615,12 @@ impl GridSurface {
 
     pub fn apply(&mut self, op: Op) -> Result<(), Refusal> {
         match op {
+            Op::Tabs(tabs) => {
+                if tabs.revision <= self.tabs.revision {
+                    return Err(malformed("tabs revision must increase"));
+                }
+                self.tabs = tabs;
+            }
             Op::Rows(chunks) => {
                 // Every chunk is checked before any is written, so a bad one
                 // late in the operation leaves the grid as it was — and no
@@ -698,6 +753,7 @@ impl GridSurface {
                         for (index, row) in rows.iter_mut().enumerate().take(usize::from(self.rows))
                         {
                             *row = self.laid_out[index].clone();
+                            resized.ui_labels[index] = self.ui_labels[index].clone();
                             resized.dirty[index] = self.dirty[index];
                         }
                     }
@@ -705,6 +761,7 @@ impl GridSurface {
                     self.texts = resized.texts;
                     self.dirty = resized.dirty;
                     self.laid_out = resized.laid_out;
+                    self.ui_labels = resized.ui_labels;
                     self.cols = cols;
                     self.rows = rows;
                 }
@@ -806,10 +863,43 @@ impl GridSurface {
             if self.dirty[index] {
                 let row = Arc::new(self.lay_out(&self.cells[index], theme));
                 Arc::make_mut(&mut self.laid_out)[index] = row;
+                self.ui_labels[index] = Arc::new(self.row_labels(&self.cells[index], theme));
                 self.dirty[index] = false;
             }
         }
         self.laid_out.clone()
+    }
+
+    pub fn ui_labels(&self) -> impl Iterator<Item = (usize, &UiLabel)> {
+        self.ui_labels
+            .iter()
+            .enumerate()
+            .flat_map(|(row, labels)| labels.iter().map(move |label| (row, label)))
+    }
+
+    fn row_labels(&self, row: &[Cell], theme: &Highlights) -> Vec<UiLabel> {
+        let mut labels = Vec::new();
+        let mut col = 0;
+        while col < row.len() {
+            let cell = row[col];
+            if !self.attrs.get(&cell.hl).is_some_and(|attrs| attrs.ui_font) {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            let mut text = String::new();
+            while col < row.len() && row[col].hl == cell.hl {
+                text.push_str(self.texts.text(row[col].text).as_str());
+                col += 1;
+            }
+            labels.push(UiLabel {
+                column: start as u16,
+                columns: (col - start) as u16,
+                text,
+                style: self.style_for(cell.hl, theme),
+            });
+        }
+        labels
     }
 
     fn lay_out(&self, row: &[Cell], theme: &Highlights) -> Vec<PositionedCell> {
@@ -826,7 +916,16 @@ impl GridSurface {
             placed.push(PositionedCell {
                 column: column as u16,
                 columns: if wide { 2 } else { 1 },
-                text: self.texts.text(cell.text).clone(),
+                text: self
+                    .texts
+                    .text(
+                        if self.attrs.get(&cell.hl).is_some_and(|attrs| attrs.ui_font) {
+                            0
+                        } else {
+                            cell.text
+                        },
+                    )
+                    .clone(),
                 style: self.style_for(cell.hl, theme),
                 selected: false,
                 hovered_link: false,
@@ -1267,6 +1366,50 @@ mod tests {
             "        ",
             "the first chunk's repeats never reached the grid either"
         );
+    }
+
+    #[test]
+    fn native_ui_labels_preserve_grid_background_and_follow_resize_and_clear() {
+        let mut grid = GridSurface::new(4, 1);
+        grid.apply_all(ops(json!({"type":"batch", "ops":[
+            {"type":"highlights","define":{"1":{"ui_font":true,"bold":true,"bg":"#2b2d30"}}},
+            {"type":"rows","rows":[{"row":0,"cells":[["D",1],["e",1],["f",1],["x",0]]}]}
+        ]})))
+        .unwrap();
+        let rows = grid.positioned_rows(&Highlights::default());
+        assert_eq!(text_of(&rows[0]), "   x");
+        let (row, label) = grid.ui_labels().next().unwrap();
+        assert_eq!(
+            (row, label.column, label.columns, label.text.as_str()),
+            (0, 0, 3, "Def")
+        );
+        assert!(label.style.bold);
+        assert_eq!(
+            rows[0][0].style.background,
+            SnapshotColor::Rgb(unpack(0x2b2d30))
+        );
+        grid.apply_all(ops(json!({"type":"resize","cols":4,"rows":2})))
+            .unwrap();
+        grid.positioned_rows(&Highlights::default());
+        assert_eq!(grid.ui_labels().count(), 1);
+        grid.apply(Op::Clear).unwrap();
+        grid.positioned_rows(&Highlights::default());
+        assert_eq!(grid.ui_labels().count(), 0);
+    }
+
+    #[test]
+    fn definition_pointer_uses_symbol_highlights_and_ignores_padding() {
+        let mut grid = GridSurface::new(4, 1);
+        grid.apply_all(ops(json!({"type":"batch", "ops":[
+            {"type":"highlights", "define":{"1":{"definition":true},"2":{}}},
+            {"type":"rows", "rows":[{"row":0,"cells":[["f",1],[" ",1],["(",1],["x",2]]}]}
+        ]})))
+        .unwrap();
+        assert!(grid.is_definition_symbol(0, 0));
+        for col in 1..5 {
+            assert!(!grid.is_definition_symbol(0, col));
+        }
+        assert!(!grid.is_definition_symbol(1, 0));
     }
 
     #[test]
