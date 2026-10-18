@@ -45,29 +45,37 @@ fn placement_element(
     image_height: u32,
     cell_width: Pixels,
     cell_height: Pixels,
+    display_scale: f32,
 ) -> Option<gpui::Div> {
     if placement.source.width == 0 || placement.source.height == 0 {
         return None;
     }
 
-    let scale_x = placement.pixel_width as f32 / placement.source.width as f32;
-    let scale_y = placement.pixel_height as f32 / placement.source.height as f32;
+    // Placement geometry is physical; GPUI layout and cell metrics are logical.
+    let width = placement.pixel_width as f32 / display_scale;
+    let height = placement.pixel_height as f32 / display_scale;
+    let scale_x = width / placement.source.width as f32;
+    let scale_y = height / placement.source.height as f32;
 
-    let left = placement.viewport_column as f32 * f32::from(cell_width) + placement.x_offset as f32;
-    let top = placement.viewport_row as f32 * f32::from(cell_height) + placement.y_offset as f32;
+    let left = placement.viewport_column as f32 * f32::from(cell_width)
+        + placement.x_offset as f32 / display_scale;
+    let top = placement.viewport_row as f32 * f32::from(cell_height)
+        + placement.y_offset as f32 / display_scale;
 
     Some(
         div()
+            .debug_selector(|| "review-fixed-image".into())
             .absolute()
             .left(px(left))
             .top(px(top))
-            .w(px(placement.pixel_width as f32))
-            .h(px(placement.pixel_height as f32))
+            .w(px(width))
+            .h(px(height))
             // Clips the image to its source rectangle, and clips the whole
             // placement at the pane's edge rather than stretching it.
             .overflow_hidden()
             .child(
                 img(ImageSource::Render(texture))
+                    .debug_selector(|| "review-fixed-image-content".into())
                     .absolute()
                     .left(px(-(placement.source.x as f32) * scale_x))
                     .top(px(-(placement.source.y as f32) * scale_y))
@@ -234,6 +242,7 @@ impl TerminalView {
         rows: &[std::sync::Arc<Vec<PositionedCell>>],
         cell_width: Pixels,
         cell_height: Pixels,
+        display_scale: f32,
     ) -> ([Vec<gpui::Div>; 3], Vec<PlaceholderTile>) {
         let mut layers = [Vec::new(), Vec::new(), Vec::new()];
         let mut tiles = Vec::new();
@@ -261,6 +270,7 @@ impl TerminalView {
                 image.height,
                 cell_width,
                 cell_height,
+                display_scale,
             ) else {
                 continue;
             };
@@ -320,15 +330,7 @@ impl TerminalView {
             self.textures.clear();
             return;
         };
-        let mut refused: Vec<u32> = Vec::new();
-        for image in &frame.images {
-            // A refusal here — pixels that disagree with their declared size,
-            // or an image larger than the whole budget — costs that one image.
-            // The pane keeps its text and its other images.
-            if self.textures.texture(image).is_none() {
-                refused.push(image.id);
-            }
-        }
+        let refused = self.textures.refresh(&frame.images);
         if !refused.is_empty() {
             // Said out loud rather than left as a blank space where a picture
             // should be: a person seeing nothing cannot tell a refused image
@@ -339,15 +341,13 @@ impl TerminalView {
                 .collect::<Vec<_>>()
                 .join(", ");
             let warning: SharedString = format!(
-                "image {names} not shown: larger than this pane's texture budget \
+                "image {names} not shown: invalid pixels or insufficient texture budget \
                  (graphics.texture_bytes)"
             )
             .into();
             self.texture_warning = Some(warning.clone());
             self.status = Some(warning);
         }
-        let shown: Vec<u32> = frame.images.iter().map(|image| image.id).collect();
-        self.textures.retain(&shown);
     }
 }
 
@@ -368,13 +368,8 @@ impl Render for TerminalView {
         let (default_fg, default_bg) = metrics.defaults;
         let cell_width = metrics.cells.width();
         let cell_height = metrics.cells.height();
-        // A blinking cursor is simply absent for half of each blink, which is
-        // the whole of what blinking is; a steady one ignores the phase.
-        let cursor = self
-            .bundle
-            .as_ref()
-            .map(|bundle| bundle.render.cursor)
-            .filter(|cursor| metrics.blink_on || !cursor.blinking);
+        // Composition follows the terminal position even while GridPaint hides the cursor.
+        let cursor = self.bundle.as_ref().map(|bundle| bundle.render.cursor);
         let status = self.status.clone();
         let preedit = self.preedit.clone();
         // The terminal draws its own composition only when the terminal holds
@@ -403,7 +398,7 @@ impl Render for TerminalView {
         // Images first, because whether any belong below the text decides how
         // the rows themselves are drawn.
         let ([below_background, below_text, above_text], tiles) =
-            self.image_layers(&rows, cell_width, cell_height);
+            self.image_layers(&rows, cell_width, cell_height, window.scale_factor());
         // The split costs an extra pass over the cells, so it is taken only
         // when something actually needs to sit between them. The Kitty default
         // is above the text, so the common case never pays for it.
@@ -473,6 +468,7 @@ impl Render for TerminalView {
             // it.
             .children(terminal_preedit.map(|text| {
                 div()
+                    .debug_selector(|| "review-preedit".into())
                     .absolute()
                     .top(px(
                         f32::from(cursor.map_or(0, |c| c.row)) * f32::from(cell_height)

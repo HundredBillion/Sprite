@@ -91,6 +91,51 @@ fn a_shell_at_its_prompt_is_idle() {
     );
 }
 
+fn cat_has_answered(session: &mut TerminalSession, snapshots: &SnapshotPump) {
+    session
+        .send(TerminalCommand::Input(b"CAT-IS-RUNNING\n".to_vec()))
+        .expect("send input to cat");
+    snapshots.wait_for("cat's output after the terminal's input echo", |bundle| {
+        pane_text(bundle).matches("CAT-IS-RUNNING").count() >= 2
+    });
+}
+
+#[test]
+fn a_directly_launched_program_requires_confirmation() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(SessionConfig::command("/bin/cat", Vec::new()))
+        .expect("spawn cat directly");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    cat_has_answered(&mut session, &snapshots);
+
+    assert_eq!(
+        session.foreground(),
+        ForegroundState::Busy(Some("cat".to_owned()))
+    );
+}
+
+#[test]
+fn a_program_that_replaces_the_idle_shell_requires_confirmation() {
+    let (mut session, snapshots) = interactive_shell();
+    wait_for(&session, "the shell's initial idle state", |state| {
+        *state == ForegroundState::Idle
+    });
+    session
+        .send(TerminalCommand::Input(b"exec /bin/cat\n".to_vec()))
+        .expect("replace the shell with cat");
+    cat_has_answered(&mut session, &snapshots);
+
+    assert_eq!(
+        session.foreground(),
+        ForegroundState::Busy(Some("cat".to_owned()))
+    );
+}
+
 #[test]
 fn a_running_program_is_reported_by_name() {
     let (mut session, _snapshots) = interactive_shell();

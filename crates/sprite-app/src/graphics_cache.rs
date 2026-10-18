@@ -117,18 +117,35 @@ impl GraphicsCache {
             .map(|entry| Arc::clone(&entry.texture))
     }
 
-    /// Drops every texture whose image is no longer being shown.
+    /// Preserves current textures before admitting images into the remaining budget.
     ///
-    /// Called with the images of the current frame, so a pane that has shown a
-    /// thousand images over an hour holds textures for the few on screen.
-    pub fn retain(&mut self, shown: &[u32]) {
+    /// A snapshot must not evict its own unchanged images while filling the cache.
+    /// Returns IDs whose current pixels could not be admitted.
+    pub fn refresh(&mut self, images: &[Arc<ImagePixels>]) -> Vec<u32> {
         self.entries.retain(|id, entry| {
-            let keep = shown.contains(id);
+            let keep = images
+                .iter()
+                .any(|image| image.id == *id && image.generation == entry.generation);
             if !keep {
                 self.used = self.used.saturating_sub(entry.bytes);
             }
             keep
         });
+
+        let mut refused = Vec::new();
+        for image in images {
+            if !self.entries.contains_key(&image.id)
+                && bgra_layout(image)
+                    .is_none_or(|(_, bytes)| bytes > self.budget.saturating_sub(self.used))
+            {
+                refused.push(image.id);
+                continue;
+            }
+            if self.texture(image).is_none() {
+                refused.push(image.id);
+            }
+        }
+        refused
     }
 
     /// Releases everything, for a pane that is closing.
@@ -442,9 +459,7 @@ mod tests {
     fn images_no_longer_shown_are_evicted() {
         let mut cache = GraphicsCache::default();
         for id in 0..1000 {
-            cache.texture(&image(id, 1, 4, 0x30)).expect("a texture");
-            // Each frame shows only the newest image.
-            cache.retain(&[id]);
+            assert!(cache.refresh(&[Arc::new(image(id, 1, 4, 0x30))]).is_empty());
         }
 
         assert_eq!(cache.len(), 1, "one image on screen, one texture held");
@@ -533,3 +548,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "graphics_cache_snapshot_tests.rs"]
+mod snapshot_tests;

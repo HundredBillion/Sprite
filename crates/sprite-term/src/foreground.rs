@@ -7,10 +7,11 @@
 //! closed is no confirmation at all.
 //!
 //! So it is answered from the kernel instead. Every terminal has a foreground
-//! process group — the one that receives a Ctrl+C — and comparing it against
-//! the group the pane's own shell was put in says whether the shell is sitting
-//! at a prompt or waiting on something it started. That is the same question a
-//! shell asks itself, and it needs nothing from the worker thread.
+//! process group — the one that receives a Ctrl+C.
+//! The initial group is idle only while its leader is a recognized shell.
+//! A directly launched application or an application replacing the shell with
+//! `exec` keeps that group, so group equality alone cannot mean idle.
+//! The kernel's current program name distinguishes them without the worker.
 
 use std::os::fd::{OwnedFd, RawFd};
 use std::sync::{Mutex, MutexGuard};
@@ -22,7 +23,7 @@ use crate::pty_unix;
 pub enum ForegroundState {
     /// Nothing but the pane's own shell, sitting at a prompt.
     Idle,
-    /// A program the shell started, with its name when it can be read safely.
+    /// A running program, with its name when it can be read safely.
     ///
     /// The name is a basename read from the kernel — never arguments, never
     /// environment — and `None` rather than a guess when it cannot be had.
@@ -58,8 +59,8 @@ impl ForegroundState {
 struct Attached {
     /// A private duplicate, so the question survives the worker's own copy.
     master: OwnedFd,
-    /// The group the pane's shell was put in at spawn.
-    shell_group: i32,
+    /// The group the pane's initial child was put in at spawn.
+    initial_group: i32,
 }
 
 /// A handle on the "what is running" question for one pane.
@@ -76,11 +77,11 @@ pub struct ForegroundWatch {
 impl ForegroundWatch {
     /// Called once by the worker, as soon as the PTY and child exist.
     ///
-    /// A session whose shell has no process group is left unattached, and
+    /// A session whose child has no process group is left unattached, and
     /// answers `Unknown` forever — which is honest: without the group there is
     /// nothing to compare against.
-    pub(crate) fn attach(&self, master_fd: RawFd, shell_group: Option<i32>) {
-        let Some(shell_group) = shell_group else {
+    pub(crate) fn attach(&self, master_fd: RawFd, initial_group: Option<i32>) {
+        let Some(initial_group) = initial_group else {
             return;
         };
         let Some(master) = pty_unix::duplicate(master_fd) else {
@@ -90,7 +91,7 @@ impl ForegroundWatch {
         if attached.is_none() {
             *attached = Some(Attached {
                 master,
-                shell_group,
+                initial_group,
             });
         }
     }
@@ -114,26 +115,36 @@ impl ForegroundWatch {
     pub fn state(&self) -> ForegroundState {
         // The master is asked under the lock, which is what keeps `detach`
         // from closing it mid-call; what follows needs only the answer.
-        let (group, shell_group) = match self.lock().as_ref() {
+        let (group, initial_group) = match self.lock().as_ref() {
             Some(attached) => (
                 pty_unix::foreground_group(&attached.master),
-                attached.shell_group,
+                attached.initial_group,
             ),
             None => return ForegroundState::Unknown,
         };
         let Some(group) = group else {
             return ForegroundState::Unknown;
         };
-        if group == shell_group {
-            return ForegroundState::Idle;
-        }
         // A group the terminal still names but nothing is left in belongs to a
         // program that has already finished; there is nothing to lose by
         // closing.
         if !pty_unix::group_is_alive(group) {
             return ForegroundState::Idle;
         }
-        ForegroundState::Busy(executable_name(group))
+        let program = executable_name(group);
+        if group == initial_group {
+            // Shell names are a prompt heuristic, not a process-identity guarantee.
+            // Unrecognized shells ask before closing rather than risking unsaved work.
+            return match program.as_deref() {
+                Some(
+                    "sh" | "bash" | "dash" | "zsh" | "fish" | "ksh" | "mksh" | "pdksh" | "ash"
+                    | "csh" | "tcsh" | "nu" | "xonsh" | "elvish" | "ion",
+                ) => ForegroundState::Idle,
+                Some(_) => ForegroundState::Busy(program),
+                None => ForegroundState::Unknown,
+            };
+        }
+        ForegroundState::Busy(program)
     }
 
     /// Returns the process group when `pid` owns this pane's foreground.
