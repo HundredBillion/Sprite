@@ -553,17 +553,32 @@ fn spawn_child_waiter(
     commands: SyncSender<Message>,
     events: Arc<crate::event_mailbox::Mailbox>,
 ) -> Result<JoinHandle<()>, (SpawnedChild, SessionError)> {
+    let trace_shutdown = std::env::var_os("SPRITE_TRACE_SHUTDOWN").is_some();
     let (hand_over, handed_over) = std::sync::mpsc::sync_channel::<SpawnedChild>(1);
     let spawned = thread::Builder::new()
         .name("sprite-term-child-waiter".to_owned())
         .stack_size(HELPER_STACK_BYTES)
         .spawn(move || {
+            let started = std::time::Instant::now();
             let Ok(mut child) = handed_over.recv() else {
                 return;
             };
+            let pid = child.process_id();
             let status = child.wait().map_err(|error| error.to_string());
+            if trace_shutdown {
+                eprintln!(
+                    "shutdown phase=child_wait_returned elapsed_ms={} session={pid:?} process_group={pid:?} status={status:?}",
+                    started.elapsed().as_millis()
+                );
+            }
             events.begin_natural_drain();
-            commands.send(Message::ChildExited(status)).ok();
+            let queued = commands.send(Message::ChildExited(status)).is_ok();
+            if trace_shutdown {
+                eprintln!(
+                    "shutdown phase=child_exit_queued elapsed_ms={} session={pid:?} process_group={pid:?} queued={queued}",
+                    started.elapsed().as_millis()
+                );
+            }
         });
     match spawned {
         Ok(waiter) => {

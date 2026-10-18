@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -57,11 +58,7 @@ impl NativeTabs {
             {
                 self.scroll.scroll_to_item(index);
             }
-            self.images.retain(|svg| {
-                tabs.items
-                    .iter()
-                    .any(|item| item.icon.as_deref() == Some(&**svg))
-            });
+            retain_snapshot_images(&self.images, tabs);
             self.revision = tabs.revision;
             self.width = width;
         }
@@ -162,5 +159,72 @@ impl NativeTabs {
         }
         bar.on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .into_any_element()
+    }
+}
+
+fn retain_snapshot_images(images: &SvgDecodes<Arc<str>>, tabs: &Tabs) {
+    let incoming: HashSet<&str> = tabs
+        .items
+        .iter()
+        .filter_map(|item| item.icon.as_deref())
+        .collect();
+    images.retain(|svg| incoming.contains(&**svg));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::surface::tabs::{Tab, TabColors};
+
+    #[test]
+    fn snapshot_retention_keeps_only_icons_in_maximum_size_snapshot() {
+        let images = SvgDecodes::<Arc<str>>::new(Some(32.0));
+        let mut tabs = Tabs {
+            revision: 1,
+            height: 35,
+            active: None,
+            items: Vec::new(),
+            colors: TabColors::default(),
+        };
+        let icons: Vec<_> = (0..256)
+            .map(|n| {
+                let suffix = format!("{n:03}");
+                format!("{}{suffix}", "x".repeat(65_536 - suffix.len()))
+            })
+            .collect();
+        for icon in &icons {
+            assert_eq!(icon.len(), 65_536);
+            images.want(icon.as_str(), || {
+                let key: Arc<str> = icon.clone().into();
+                (key.clone(), key)
+            });
+        }
+        images.want("stale", || {
+            let key: Arc<str> = "stale".into();
+            (key.clone(), key)
+        });
+        tabs.items.push(Tab {
+            id: "kept".into(),
+            label: "kept".into(),
+            modified: false,
+            icon: Some(icons[0].clone()),
+        });
+        tabs.items
+            .extend(icons.iter().enumerate().skip(1).map(|(n, icon)| Tab {
+                id: format!("tab-{n}"),
+                label: "icon".into(),
+                modified: false,
+                icon: Some(icon.clone()),
+            }));
+
+        retain_snapshot_images(&images, &tabs);
+
+        let keys = images.keys();
+        assert_eq!(keys.len(), 256);
+        assert!(
+            icons
+                .iter()
+                .all(|icon| keys.contains(&Arc::<str>::from(icon.clone())))
+        );
     }
 }

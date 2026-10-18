@@ -1,6 +1,7 @@
 use super::{GroupSignal, signal_group};
 use nix::unistd::{getpgrp, getsid};
 use std::collections::HashSet;
+use std::time::Instant;
 
 /// Why a scan or a reading could not finish. Disappearance is not an error: it is `Ok(None)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,8 @@ pub(crate) struct SessionProcesses {
     session: i32,
     leader_birth: Option<u64>,
     own_group: i32,
+    trace_shutdown: bool,
+    trace_started: Instant,
     retired: bool,
     /// The groups the latest step's signal has reached, so a step retried
     /// after a partial attempt reaches only the ones it missed.
@@ -37,6 +40,10 @@ pub(crate) struct SessionProcesses {
 }
 
 impl SessionProcesses {
+    pub(crate) fn session_id(&self) -> i32 {
+        self.session
+    }
+
     pub(crate) fn capture(child: u32) -> Option<Self> {
         let session = i32::try_from(child).ok()?;
         let own_session = getsid(None).ok()?.as_raw();
@@ -53,6 +60,8 @@ impl SessionProcesses {
             session,
             leader_birth: leader.map(|p| p.birth),
             own_group: getpgrp().as_raw(),
+            trace_shutdown: std::env::var_os("SPRITE_TRACE_SHUTDOWN").is_some(),
+            trace_started: Instant::now(),
             retired: false,
             reached: None,
         })
@@ -69,7 +78,27 @@ impl SessionProcesses {
         if self.retired {
             return Ok(vec![]);
         }
-        self.select(scan(self.session))
+        let scan_started = Instant::now();
+        let snapshot = scan(self.session);
+        if self.trace_shutdown {
+            eprintln!(
+                "shutdown phase=process_scope_scan elapsed_ms={} scan_ms={} session={} process_group_root={} outcome={snapshot:?}",
+                self.trace_started.elapsed().as_millis(),
+                scan_started.elapsed().as_millis(),
+                self.session,
+                self.session
+            );
+        }
+        let selected = self.select(snapshot);
+        if self.trace_shutdown {
+            eprintln!(
+                "shutdown phase=process_scope_result elapsed_ms={} session={} process_group_root={} result={selected:?}",
+                self.trace_started.elapsed().as_millis(),
+                self.session,
+                self.session
+            );
+        }
+        selected
     }
 
     fn select(
@@ -126,6 +155,14 @@ impl SessionProcesses {
         let Ok(members) = members else {
             return false;
         };
+        if self.trace_shutdown {
+            eprintln!(
+                "shutdown phase=signal_scope elapsed_ms={} session={} process_group_root={} signal={signal:?} members={members:?}",
+                self.trace_started.elapsed().as_millis(),
+                self.session,
+                self.session
+            );
+        }
         let mut signalled = match self.reached.take() {
             Some((step, reached)) if step == *signal && step != GroupSignal::Kill => reached,
             _ => HashSet::new(),
@@ -135,7 +172,16 @@ impl SessionProcesses {
             if signalled.contains(&member.group) {
                 continue;
             }
-            match reread(member.pid) {
+            let identity = reread(member.pid);
+            if self.trace_shutdown {
+                eprintln!(
+                    "shutdown phase=signal_identity elapsed_ms={} session={} process_group={} before={member:?} after={identity:?}",
+                    self.trace_started.elapsed().as_millis(),
+                    self.session,
+                    member.group
+                );
+            }
+            match identity {
                 Ok(Some(now)) if same_member(member, now) && self.owned(&now) => {
                     send(member.group);
                     signalled.insert(member.group);
@@ -149,6 +195,14 @@ impl SessionProcesses {
             }
         }
         let complete = unreadable.iter().all(|group| signalled.contains(group));
+        if self.trace_shutdown {
+            eprintln!(
+                "shutdown phase=signal_scope_result elapsed_ms={} session={} process_group_root={} signal={signal:?} reached={signalled:?} unreadable={unreadable:?} complete={complete}",
+                self.trace_started.elapsed().as_millis(),
+                self.session,
+                self.session
+            );
+        }
         self.reached = Some((*signal, signalled));
         complete
     }
@@ -395,6 +449,8 @@ mod tests {
             session: 42,
             leader_birth: Some(1),
             own_group: 7,
+            trace_shutdown: false,
+            trace_started: Instant::now(),
             retired: false,
             reached: None,
         };
@@ -448,6 +504,8 @@ mod tests {
             session: 42,
             leader_birth: Some(1),
             own_group: 7,
+            trace_shutdown: false,
+            trace_started: Instant::now(),
             retired: false,
             reached: None,
         };
@@ -538,6 +596,8 @@ mod tests {
             session: 42,
             leader_birth: Some(1),
             own_group: 7,
+            trace_shutdown: false,
+            trace_started: Instant::now(),
             retired: false,
             reached: None,
         };
@@ -630,6 +690,8 @@ mod tests {
             session: 42,
             leader_birth: Some(1),
             own_group: 7,
+            trace_shutdown: false,
+            trace_started: Instant::now(),
             retired: false,
             reached: None,
         };
@@ -700,6 +762,8 @@ mod tests {
             session: 42,
             leader_birth: None,
             own_group: 7,
+            trace_shutdown: false,
+            trace_started: Instant::now(),
             retired: false,
             reached: None,
         };

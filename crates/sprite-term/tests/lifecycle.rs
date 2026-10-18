@@ -9,6 +9,8 @@
 mod support;
 
 use std::ffi::OsString;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use sprite_term::{SessionConfig, TerminalEvent, TerminalSession};
 
@@ -393,6 +395,69 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
         | TerminalEvent::ClipboardWrite(_)
         | TerminalEvent::Error(_)) => panic!("expected Exited, got {other:?}"),
     }
+}
+
+#[test]
+fn three_hostile_sessions_shutdown_concurrently() {
+    let mut sessions = Vec::new();
+    let mut descendants = Vec::new();
+    let mut streams = Vec::new();
+    for _ in 0..3 {
+        let spawned = TerminalSession::spawn(SessionConfig::command(
+            "python3",
+            args(&[
+                "-c",
+                "import os,signal,time; signal.signal(signal.SIGHUP,signal.SIG_IGN); signal.signal(signal.SIGTERM,signal.SIG_IGN); print(f'HOSTILE_PID:{os.getpid()}',flush=True); time.sleep(60)",
+            ]),
+        ))
+        .expect("spawn hostile child");
+        let events = EventPump::new(spawned.events);
+        let snapshots = support::SnapshotPump::new(spawned.snapshots);
+        events.expect_ready();
+        let bundle = snapshots.wait_for("hostile child pid", |bundle| {
+            support::pane_text(bundle).contains("HOSTILE_PID:")
+        });
+        let pids = marker_fields(&support::pane_text(&bundle), "HOSTILE_PID:");
+        let child: i32 = pids.first().expect("hostile child pid").parse().unwrap();
+        let process = nix::unistd::Pid::from_raw(child);
+        descendants.push((
+            child.to_string(),
+            nix::unistd::getpgid(Some(process)).unwrap().as_raw(),
+            nix::unistd::getsid(Some(process)).unwrap().as_raw(),
+        ));
+        streams.push((events, snapshots));
+        sessions.push(spawned.session);
+    }
+
+    let started = Instant::now();
+    let handles: Vec<_> = sessions
+        .into_iter()
+        .map(|mut session| {
+            session
+                .begin_shutdown()
+                .expect("begin_shutdown succeeds")
+                .expect("the first call owns the worker")
+        })
+        .collect();
+    let workers: Vec<_> = handles
+        .into_iter()
+        .map(|handle| thread::spawn(move || handle.wait().expect("shutdown completes")))
+        .collect();
+    for worker in workers {
+        worker.join().expect("shutdown waiter joins");
+    }
+    for (events, _) in &streams {
+        assert!(matches!(events.next(), TerminalEvent::Exited(_)));
+    }
+    assert!(
+        descendants.iter().all(|(pid, _, _)| !process_is_alive(pid)),
+        "all hostile descendants must be dead after shutdown: {descendants:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "three hostile sessions should complete together near the 3s KILL deadline; took {:?}; descendants={descendants:?}",
+        started.elapsed(),
+    );
 }
 
 #[test]
