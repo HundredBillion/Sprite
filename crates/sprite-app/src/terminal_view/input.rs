@@ -30,26 +30,42 @@ pub(super) struct Drag {
     pub(super) moved: bool,
 }
 
-#[derive(Default)]
-pub(super) struct PlainLinkClick(Option<CellPosition>);
+/// A modified press owns the whole gesture, including motion and release.
+#[derive(Default, PartialEq, Eq)]
+pub(super) enum LinkClick {
+    #[default]
+    Idle,
+    Plain(CellPosition),
+    Modified,
+}
 
-impl PlainLinkClick {
+impl LinkClick {
     pub(super) fn press(&mut self, cell: CellPosition, behavior: LinkClickBehavior) {
-        self.0 = (behavior == LinkClickBehavior::Plain).then_some(cell);
+        *self = match behavior {
+            LinkClickBehavior::Plain => Self::Plain(cell),
+            LinkClickBehavior::Modified => Self::Modified,
+            LinkClickBehavior::Selection => Self::Idle,
+        };
+    }
+
+    pub(super) fn is_modified(&self) -> bool {
+        matches!(self, Self::Modified)
     }
 
     pub(super) fn moved_to(&mut self, cell: CellPosition) {
-        if self.0.is_some_and(|origin| origin != cell) {
-            self.0 = None;
+        if let Self::Plain(origin) = self
+            && *origin != cell
+        {
+            *self = Self::Idle;
         }
     }
 
     pub(super) fn cancel(&mut self) {
-        self.0 = None;
+        *self = Self::Idle;
     }
 
     pub(super) fn release(&mut self, cell: CellPosition) -> bool {
-        self.0.take() == Some(cell)
+        std::mem::take(self) == Self::Plain(cell)
     }
 }
 
@@ -416,7 +432,7 @@ impl EntityInputHandler for TerminalView {
 #[cfg(test)]
 mod tests {
     use super::{
-        LinkClickBehavior, PlainLinkClick, Shortcut, application_shortcut, dropped_paths_text,
+        LinkClick, LinkClickBehavior, Shortcut, application_shortcut, dropped_paths_text,
         link_click_behavior,
     };
     use gpui::{Keystroke, Modifiers};
@@ -595,9 +611,9 @@ mod tests {
     }
 
     #[test]
-    fn plain_link_click_is_tracked_independently_of_mouse_reporting() {
+    fn link_click_distinguishes_local_taps_from_drags_and_selection() {
         let origin = sprite_term::CellPosition { row: 2, column: 4 };
-        let mut click = PlainLinkClick::default();
+        let mut click = LinkClick::default();
 
         click.press(origin, LinkClickBehavior::Plain);
         assert!(click.release(origin));

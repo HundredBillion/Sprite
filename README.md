@@ -196,6 +196,14 @@ A tab shows the name you gave it, else what its focused pane is running — the
 title the program set, or the program's name — else its number. The window
 title follows the focused pane.
 
+## Terminal links
+
+Sprite opens visible `http://` and `https://` URLs, with one open per click.
+OSC 8 metadata does not make descriptive labels clickable or replace a printed URL's destination.
+Ordinary clicks belong to a program that has enabled mouse reporting, so Sprite does not also open its links.
+Use Cmd-click or Ctrl-click to ask Sprite to open a URL directly; Sprite consumes that whole gesture.
+Dragging text selects it instead of opening a link.
+
 ## Configuration
 
 TOML, read once at startup and re-readable at runtime. An absent or invalid

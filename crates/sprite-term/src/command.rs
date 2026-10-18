@@ -173,7 +173,7 @@ pub enum TerminalCommand {
     /// Window focus changed. Reaches the child only if it enabled focus
     /// reporting.
     Focus(bool),
-    /// Ask what OSC 8 hyperlink, if any, a cell carries.
+    /// Ask what visible HTTP(S) URL, if any, contains a cell.
     ///
     /// Resolved on demand rather than carried in every snapshot: a link lookup
     /// is per cell, so resolving a full screen each capture would mean

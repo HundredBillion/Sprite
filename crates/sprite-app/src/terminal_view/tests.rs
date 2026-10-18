@@ -2,6 +2,7 @@ use super::*;
 
 mod focus;
 mod history;
+mod hyperlinks;
 mod no_paint;
 mod paint;
 mod paste;
@@ -840,17 +841,23 @@ fn pointer_selection_keeps_shift_override_and_click_drag_semantics(cx: &mut gpui
 }
 
 #[gpui::test]
-fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext) {
+fn buttonless_reporting_preserves_hyperlink_hover_and_owns_plain_clicks(
+    cx: &mut gpui::TestAppContext,
+) {
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-        Some(vec!["/bin/sh".into(), "-c".into(), "printf '\\033[?1003h\\033[?1006h\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30".into()]), settings,
+        Some(vec!["/bin/sh".into(), "-c".into(), "stty -echo; printf '\\033[?1003h\\033[?1006h\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007'; sleep 30".into()]), settings,
         Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
     ));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         wait_for_bundle(&view, cx, |bundle| {
-            bundle.pane.rows.iter().any(|row| row.text.contains("LINK"))
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("https://example.com"))
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -864,7 +871,7 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
             (
                 gpui::point(origin.x + width * 0.5, origin.y + height * 0.5),
                 gpui::point(origin.x + width * 1.5, origin.y + height * 0.5),
-                gpui::point(origin.x + width * 5.5, origin.y + height * 0.5),
+                gpui::point(origin.x + width * 22.5, origin.y + height * 0.5),
             )
         });
         cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
@@ -897,6 +904,17 @@ fn buttonless_reporting_preserves_hyperlink_hover(cx: &mut gpui::TestAppContext)
             cx,
             |view, _| view.pending_link_click.is_none(),
         ));
+        assert!(
+            cx.opened_url().is_none(),
+            "the program owns ordinary reported clicks"
+        );
+        let modifiers = gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(start, gpui::MouseButton::Left, modifiers);
+        wait_for_view(&view, cx, |view| view.pending_link_click.is_none());
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
     }));
     if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
@@ -930,7 +948,7 @@ fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::Test
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let script = "stty -echo; printf '\\033]8;;https://example.com\\007LINK\\033]8;;\\007\\r\\nREADY\\r\\n'; IFS= read -r go; i=0; while [ $i -lt 5 ]; do printf '\\033[3;1Hrow%s' $i; sleep 0.05; i=$((i+1)); done; printf '\\033[4;1HQUIET'; IFS= read -r go; printf '\\033[1;10HCHANGED'; sleep 30";
+    let script = "stty -echo; printf '\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007\\r\\nREADY\\r\\n'; IFS= read -r go; i=0; while [ $i -lt 5 ]; do printf '\\033[3;1Hrow%s' $i; sleep 0.05; i=$((i+1)); done; printf '\\033[4;1HQUIET'; IFS= read -r go; printf '\\033[1;10HCHANGED'; sleep 30";
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
             Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),

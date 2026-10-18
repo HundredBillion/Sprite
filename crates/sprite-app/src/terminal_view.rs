@@ -135,7 +135,7 @@ pub struct TerminalView {
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
     drag: Option<Drag>,
-    plain_link_click: input::PlainLinkClick,
+    link_click: input::LinkClick,
     /// The most recent click awaiting terminal link resolution.
     pending_link_click: Option<u64>,
     hovered_cell: Option<sprite_term::CellPosition>,
@@ -209,6 +209,7 @@ thread_local! {
     pub(crate) static TITLE_STRINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static TITLE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static FOREGROUND_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static LINK_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static HOVER_LINK_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -566,7 +567,7 @@ impl TerminalView {
             display_title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
-            plain_link_click: input::PlainLinkClick::default(),
+            link_click: input::LinkClick::default(),
             pending_link_click: None,
             hovered_cell: None,
             hovered_link: None,
@@ -658,7 +659,7 @@ impl TerminalView {
             texture_warning: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
-            plain_link_click: input::PlainLinkClick::default(),
+            link_click: input::LinkClick::default(),
             pending_link_click: None,
             hovered_cell: None,
             hovered_link: None,
@@ -718,6 +719,8 @@ impl TerminalView {
                 if self.pending_link_click == Some(request_id) {
                     self.pending_link_click = None;
                     if let Some(uri) = uri {
+                        #[cfg(test)]
+                        LINK_OPENS.with(|count| count.set(count.get() + 1));
                         cx.open_url(&uri);
                     }
                 }

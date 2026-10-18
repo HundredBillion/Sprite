@@ -1,6 +1,5 @@
-//! OSC 8 hyperlinks. Terminal text is untrusted data: a link's label is chosen
-//! by whatever wrote it, so what Sprite opens must come from the parsed URI and
-//! must survive a scheme policy first.
+//! Only visible HTTP(S) URLs are terminal links. OSC 8 metadata must not
+//! turn descriptive labels into click targets or replace a printed URL's destination.
 #![expect(
     clippy::expect_used,
     reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
@@ -76,7 +75,7 @@ fn resolve(
 }
 
 #[test]
-fn an_https_link_resolves_to_its_target() {
+fn a_named_osc8_label_is_not_clickable() {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -86,19 +85,19 @@ fn an_https_link_resolves_to_its_target() {
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
-    assert_eq!(
-        resolve(&mut session, &events, &snapshots, 2).as_deref(),
-        Some("https://example.com/page")
-    );
+    assert_eq!(resolve(&mut session, &events, &snapshots, 2), None);
 }
 
 #[test]
-fn an_osc8_resolution_includes_the_visible_label_span() {
+fn an_osc8_wrapped_visible_url_resolves_to_its_visible_span() {
     let sprite_term::Spawned {
         mut session,
         events,
         snapshots,
-    } = session(&link_script("https://example.com/page", "click me"));
+    } = session(&link_script(
+        "https://example.com/page",
+        "https://example.com/page",
+    ));
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -109,7 +108,7 @@ fn an_osc8_resolution_includes_the_visible_label_span() {
             span: Some(sprite_term::HyperlinkSpan {
                 row: 0,
                 start_column: 0,
-                end_column: 8
+                end_column: 24
             }),
             ..
         }
@@ -130,10 +129,9 @@ fn a_visible_link_span_contains_only_its_cells_on_its_row() {
     assert!(!span.contains(CellPosition { row: 3, column: 5 }));
 }
 
-/// The label is chosen by whoever wrote the link and must never be what gets
-/// opened. Here the label impersonates a different, trusted destination.
+/// Hidden metadata must not replace the URL the person can see.
 #[test]
-fn a_hostile_label_cannot_change_the_target() {
+fn a_visible_url_does_not_inherit_the_hidden_osc8_target() {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -149,10 +147,10 @@ fn a_hostile_label_cannot_change_the_target() {
     let resolved = resolve(&mut session, &events, &snapshots, 2);
     assert_eq!(
         resolved.as_deref(),
-        Some("https://evil.example/steal"),
-        "the parsed target is returned, never the label"
+        Some("https://bank.example"),
+        "only the printed URL determines where the click goes"
     );
-    assert_ne!(resolved.as_deref(), Some("https://bank.example"));
+    assert_ne!(resolved.as_deref(), Some("https://evil.example/steal"));
 }
 
 /// `file:` is not in the default scheme allowlist, so it resolves to nothing.
@@ -162,7 +160,7 @@ fn a_file_link_is_denied_by_default() {
         mut session,
         events,
         snapshots,
-    } = session(&link_script("file:///etc/passwd", "harmless"));
+    } = session(&link_script("file:///etc/passwd", "file:///etc/passwd"));
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -181,7 +179,7 @@ fn an_executable_scheme_is_denied() {
         mut session,
         events,
         snapshots,
-    } = session(&link_script("javascript:alert(1)", "safe looking"));
+    } = session(&link_script("javascript:alert(1)", "javascript:alert(1)"));
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

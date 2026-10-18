@@ -602,15 +602,15 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
-                    view.plain_link_click.cancel();
+                    view.link_click.cancel();
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
                     };
                     let behavior = link_click_behavior(event.modifiers);
-                    view.plain_link_click.press(cell, behavior);
                     // Modified clicks open links immediately; a plain click
                     // waits until release so a drag remains a text selection.
                     if behavior == LinkClickBehavior::Modified {
+                        view.link_click.press(cell, behavior);
                         view.request_link_click(cell);
                         return;
                     }
@@ -620,6 +620,8 @@ impl Render for TerminalView {
                         Some(event.button),
                         event.modifiers,
                     ) {
+                        // A reporting program can open its own links, so only local clicks arm Sprite.
+                        view.link_click.press(cell, behavior);
                         // The press drops whatever was selected and pins where
                         // a drag would start from to the content under it, so
                         // output that scrolls before the drag cannot move the
@@ -658,11 +660,14 @@ impl Render for TerminalView {
                     }
                     return;
                 }
+                if view.link_click.is_modified() {
+                    return;
+                }
                 let Some(cell) = view.cell_under(event.position) else {
-                    view.plain_link_click.cancel();
+                    view.link_click.cancel();
                     return;
                 };
-                view.plain_link_click.moved_to(cell);
+                view.link_click.moved_to(cell);
                 let Some(drag) = view.drag else {
                     view.route_mouse(
                         cell,
@@ -693,11 +698,15 @@ impl Render for TerminalView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseUpEvent, _window, _cx| {
+                    if view.link_click.is_modified() {
+                        view.link_click.cancel();
+                        return;
+                    }
                     let Some(cell) = view.cell_under(event.position) else {
-                        view.plain_link_click.cancel();
+                        view.link_click.cancel();
                         return;
                     };
-                    let open_link = view.plain_link_click.release(cell)
+                    let open_link = view.link_click.release(cell)
                         && link_click_behavior(event.modifiers) == LinkClickBehavior::Plain;
                     if let Some(drag) = view.drag.take() {
                         if !drag.moved && open_link {
