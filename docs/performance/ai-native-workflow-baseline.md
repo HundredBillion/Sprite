@@ -140,3 +140,67 @@ Timing, steady-state CPU/RAM, GPU, energy, token and end-to-end task budgets rem
 1.10×p95 values into a new regression gate or silently replace existing budgets.
 Allocation limits can be checked directly against the named metrics' `max` fields;
 full regression-budget acceptance remains open in #102/#112.
+
+## Public observation workload (not executed)
+
+Use a dedicated Sprite Window built from the measured commit. Keep Surfaces off,
+default configuration fixed, window focused and display refresh settings recorded.
+Create 1, 4, then 8 terminal panes with the native UI; record the creation/layout
+steps. Verify **each pane** is 80 columns × 24 rows using `stty size` and confirm
+`size` in the returned JSON. A window pixel size alone is insufficient. If the
+host display/layout cannot fit those panes, mark that scenario unexecuted.
+
+For the fixed-content baseline, run this producer in every pane and wait for it
+to finish before collecting snapshots. It emits 3,000 × 80 = 240,000 bytes per pane
+before PTY newline processing. Record the actual output counters; these numbers
+are fixture bytes, not total PTY traffic (shell echoes/prompts are additional).
+
+```sh
+python3 -c 'import sys,time; [(sys.stdout.write(str(i).zfill(8)+"x"*71+"\n"),sys.stdout.flush(),time.sleep(0.01)) for i in range(3000)]'
+```
+
+Run 30 sequential `sprite panes snapshot --window --lines 500` calls from one of
+those same panes, using the real inherited observation environment. Do not add an
+extra measurement pane to a scenario. Write each response and stderr to files
+outside the terminal, without printing reports into the observed panes. Retain
+UTC start, monotonic wall duration, exit code, response bytes, `complete`,
+`errors`, each pane's `truncated`, `history`, `size`, and pane address. Shell
+prompt/command lines must be held consistent between comparisons. Verify the
+expected pane count and fail the scenario on incomplete/invalid responses.
+
+For subsequent incremental-output comparisons, add a separately named active
+variant: run the same producers while polling once per second for 30 calls;
+record actual producer start/end and call timestamps. Compare equal delivered
+content and completion outcomes, including replay gaps, rather than faster
+responses that silently omit output. Never compare a static full-snapshot run
+to an active delta run as a speedup.
+
+This session has inherited observation credentials and an active macOS display,
+but did not establish the dedicated controlled window, per-pane geometry and
+running app identity. Both public workloads remain **unexecuted**. No human-pane
+output or credentials are part of the committed artifacts.
+
+## Resource and agent-task gates
+
+- Native CPU/RAM: capture the Sprite process and its child-process identities;
+  measure 60 seconds idle after warmup, then the same 1/4/8-pane producers.
+  Record the OS tool, cadence, CPU normalization, RSS/physical-footprint meaning,
+  and sample distribution. A sum of RSS can double-count shared memory. Python
+  producers and model runtimes must be reported separately from Sprite Terminal.
+- Native display: measure presented frames and input-to-present latency with the
+  platform's real display tooling. Headless paint preparation cannot supply it.
+  Record refresh rate, display scale, Surface state and foreground/background state.
+- Energy: a real platform counter or instrument must identify measured processes,
+  sample period, power source and units. No energy value is inferred from CPU time.
+- Model-backed code-fix trials: select an available coding agent/backend, exact
+  model revision, tokenizer revision, fixed repository commit, change prompt,
+  test oracle, tool permissions, cache policy and repeat count **before** collecting
+  results. Run the same task against full snapshots, delta output and structured
+  results; retain pass/fail, wall time, input/output tokens and retries. No backend
+  or task fixture was selected/executed in this component baseline; that acceptance
+  item remains open. Bytes are never reported as tokens.
+- Native Linux: repeat on an actual Linux host and record Wayland/X11 display
+  evidence. macOS data, a headless CI job or an emulated display cannot satisfy it.
+
+The owner approved continuing development with these gaps visible. #102 and #112
+remain open until their required evidence and justified budgets are accepted.

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.97.1, existing benchmark binaries, Python 3.11+ standard library, Git, native macOS/Linux.
 
-**Status:** PRD and scheduling decision approved by the owner; implementation in progress. No numerical budget is accepted merely by writing this plan.
+**Status:** PRD and scheduling decision approved; capture driver, repeated component baselines and workload recipes implemented; independent review in progress. No numerical budget is accepted merely by writing this plan.
 
 **References:** [PRD](../PRDs/10-18-2026-ai-native-workflows.md), [source inventory](../reviews/10-18-2026-ai-native-source-audit.md), [#102](https://github.com/HundredBillion/Sprite/issues/102).
 
@@ -218,7 +218,7 @@ Run: `git commit -m "test: capture reproducible workflow baseline reports"`.
 - Consumes: Task 1 CLI and existing release benchmark JSON.
 - Produces: measured component baseline and evidence matrix; no claim about unmeasured live/UI/agent outcomes.
 
-- [ ] **Step 1: Build the measured checkout without reusing unverified binaries.**
+- [x] **Step 1: Build the measured checkout without reusing unverified binaries.**
 
 Run from the isolated checkout:
 
@@ -232,7 +232,7 @@ Expected: successful release builds at the recorded source commit. If offline
 dependencies are missing, report that condition before choosing an online fetch;
 do not silently measure an older executable from another checkout.
 
-- [ ] **Step 2: Capture at least 30 samples with the exact driver command.**
+- [x] **Step 2: Capture at least 30 samples with the exact driver command.**
 
 ```sh
 python3 scripts/capture_workflow_baseline.py --bin-dir target/release --output /tmp/sprite-workflow-baseline-native-run-1 --samples 30
@@ -243,7 +243,7 @@ Expected: three nonempty reports and a manifest with
 an earlier run rather than overwrite it. Repeat under a new output directory to
 check gross variability before accepting timings as a baseline.
 
-- [ ] **Step 3: Record hardware/tool identity and bounded resource observations.**
+- [x] **Step 3: Record hardware/tool identity and bounded resource observations.**
 
 On macOS run `sw_vers`, `sysctl -n machdep.cpu.brand_string`,
 `sysctl -n hw.memsize`, `cargo --version`, `rustc --version`, and `zig version`.
@@ -251,7 +251,7 @@ On Linux use `uname -a`, `lscpu`, `cat /proc/meminfo`, and the same tool command
 Record display availability, competing load and exact binaries/commands. Do not
 call whole-command resource use steady-state terminal CPU or GPU frame timing.
 
-- [ ] **Step 4: Preserve reports and write the evidence matrix.**
+- [x] **Step 4: Preserve reports and write the evidence matrix.**
 
 Copy only the manifest and three raw reports to the listed repository directory.
 In the Markdown report use these exact evidence categories:
@@ -270,7 +270,7 @@ failed or missing runs. Retain individual report metric sample counts: some
 existing expensive scenarios cap their sample count even when the run asks for
 30. Their p95 is descriptive, not a robust tail estimate.
 
-- [ ] **Step 5: Commit only inspected report artifacts and reproduction notes.**
+- [x] **Step 5: Commit only inspected report artifacts and reproduction notes.**
 
 Run: `git diff --check`.
 Run: `git add docs/performance/ai-native-workflow-baseline.md docs/performance/ai-native-workflow-baseline`.
@@ -288,7 +288,7 @@ Run: `git commit -m "docs: record native workflow component baseline"`.
 - Consumes: baseline artifacts and existing `sprite panes snapshot --window --lines 500` public CLI.
 - Produces: named reproducible workload recipe, budget acceptance decision, and explicit open evidence for #102/#112.
 
-- [ ] **Step 1: Specify the existing-observation workload exactly.**
+- [x] **Step 1: Specify the existing-observation workload exactly.**
 
 Use a dedicated Sprite Window, a controlled child emitting numbered 79-character
 lines, 80×24 cells, 500 requested history rows, 1/4/8 panes, 30 snapshot calls per
@@ -310,7 +310,7 @@ inflate the next snapshot. Record pane creation and window configuration. Mark
 the workload unexecuted if native launch, repeatable geometry, or identity cannot
 be established; do not substitute broker stand-ins.
 
-- [ ] **Step 2: Define fair future comparisons and freeze justified budgets.**
+- [x] **Step 2: Define fair future comparisons and freeze justified budgets.**
 
 Use identical input/output/task fixtures across snapshots, incremental events,
 and structured results. Record the actual tokenizer/model revision before
