@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.97.1, existing benchmark binaries, Python 3.11+ standard library, Git, native macOS/Linux.
 
-**Status:** PRD and scheduling decision approved; capture driver, repeated component baselines and workload recipes implemented; independent review in progress. No numerical budget is accepted merely by writing this plan.
+**Status:** PRD and scheduling decision approved; capture driver, repeated component baselines and workload recipes implemented and independently reviewed. Broader #102/#112 acceptance remains open. No numerical budget is accepted merely by writing this plan.
 
 **References:** [PRD](../PRDs/10-18-2026-ai-native-workflows.md), [source inventory](../reviews/10-18-2026-ai-native-source-audit.md), [#102](https://github.com/HundredBillion/Sprite/issues/102).
 
@@ -321,7 +321,7 @@ sample-count caveats and provenance; leave unavailable scenario budgets explicit
 unaccepted. Do not automatically adopt every benchmark's generated 1.10×p95
 suggestion, particularly for capped six-sample scenarios.
 
-- [ ] **Step 3: Review evidence and update issue readiness.**
+- [x] **Step 3: Review evidence and update issue readiness.**
 
 Run `python3 -m unittest scripts.test_workflow_baseline -v` and `git diff --check`.
 Obtain independent review of the driver, measured provenance and report claims.
@@ -342,3 +342,21 @@ Run: `git commit -m "docs: define workflow comparison and acceptance gates"`.
 - One functional helper and one CLI are sufficient; no framework, new runtime,
   dependency, or pluggable benchmark abstraction is introduced.
 - The scheduling decision above is approved; missing evidence remains an acceptance gate.
+
+## Execution evidence
+
+Implemented in PR #114; [baseline report and raw artifacts](../performance/ai-native-workflow-baseline.md).
+Two 30-sample component runs at `fa0131a` use Rust 1.97.1 / Zig 0.17.0 on
+macOS 26.5.2 / M5 Pro. Task 1 also adds the new tests to the existing CI Python
+job; Task 2 preserves both repetitions and OS-reported whole-command resources.
+
+- Python automation: 61 tests run, 4 Fish skips, no failures; includes 8 new
+  executable/CLI contract tests. Negative cases were observed before fixes.
+- Existing release report tests: 1 Terminal Session schema test and 2 paint
+  report tests passed. These schema checks are separate from measured runs.
+- Raw capture copies, executable hashes, all 24 result rows and local links checked.
+- Independent whole-change review found no critical/important issues. Its one
+  minor legacy capture-timing caveat was corrected and confirmed by the reviewer.
+- Timing variability prevented new timing budget acceptance. Only repeated
+  allocation maxima were frozen. Native live-pane/display, Linux, energy and
+  fixed model-backed task evidence remains open; #102/#112 are not closed.

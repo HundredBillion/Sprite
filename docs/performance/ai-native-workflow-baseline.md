@@ -92,6 +92,12 @@ measure real terminal capture plus socket round trip. Paint uses the existing
 200×60 fixture (whole/split, eight scenarios), without optional shaping mode;
 it excludes native layout, text shaping, GPU submission and presentation.
 Terminal throughput uses the benchmark's default 10 MiB output workload.
+The legacy `capture_100x100_grid` measurement may consume an already pending
+snapshot of the same generation; `capture_with_full_scrollback` may receive a
+new generation from ongoing output. Both include session scheduling and do not
+isolate capture work. Use `isolated_projector_capture` and its allocation metrics
+for projection comparisons; do not interpret the legacy timings as pure capture
+latency.
 
 Run-to-run variation is material: whole-first-frame paint median is 0.635167 vs
 0.285750 ms and four-pane broker collection is 0.002208 vs 0.000666 ms. Neither

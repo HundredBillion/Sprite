@@ -44,5 +44,5 @@ Full pane operations (#106) and conventional shell tracking (#107) extend that f
 
 ## TSP status
 
-- #102: TSP and scheduling decision approved; capture driver and two macOS component runs recorded in [baseline evidence](../performance/ai-native-workflow-baseline.md), with whole-change review in progress. Missing native Linux/display/energy/model evidence remains open and does not block development of #103; it still blocks full acceptance of #102/#112.
+- #102: TSP and scheduling decision approved; capture driver and two macOS component runs recorded in [baseline evidence](../performance/ai-native-workflow-baseline.md), with independent whole-change review complete. Missing native Linux/display/energy/model evidence remains open and does not block development of #103; it still blocks full acceptance of #102/#112.
 - #103–#113: TSPs are intentionally not written yet; they will use the actual interfaces and measurements delivered by their prerequisites.
