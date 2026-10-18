@@ -17,6 +17,7 @@
 - Support macOS and Linux.
 - Use Rust 1.97.1 and the repository's pinned dependency versions.
 - Sprite Terminal must remain fully functional without an agent, inference engine, replacement shell, or CPR tooling.
+- Sprite Terminal should target the lowest practical CPU, RAM, and energy use during idle and active workloads, with measured improvements that preserve correctness, responsiveness, and required functionality.
 - Reuse the existing Terminal Session, pane layout, local Unix-socket transport, bounded channels, and Surface modules unless measured evidence establishes a deficiency.
 - Keep model execution, model weights, inference kernels, context assembly, and compiler semantics outside Sprite Terminal's rendering hot path.
 - Preserve supported observation CLI/JSON and Surface Channel compatibility; new authority must not be inferred from legacy credentials.
