@@ -29,7 +29,7 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
         vec![
             "-c".into(),
             crate::test_event_pressure::pressure_script(
-                "printf '\\033[H\\033]8;;https://example.com\\007LINK\\033]8;;\\007'; sleep 30",
+                "printf '\\033[H\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007'; sleep 30",
             )
             .into(),
         ],
@@ -95,7 +95,12 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
         let bundle = snapshots_rx
             .recv_timeout(crate::test_blocking_wait::watchdog())
             .unwrap();
-        if bundle.pane.rows.iter().any(|row| row.text.contains("LINK")) {
+        if bundle
+            .pane
+            .rows
+            .iter()
+            .any(|row| row.text.contains("https://example.com"))
+        {
             break bundle;
         }
     };

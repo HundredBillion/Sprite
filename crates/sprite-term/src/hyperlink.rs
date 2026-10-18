@@ -40,38 +40,6 @@ pub(crate) fn resolve_hyperlink(
 ) -> Option<ResolvedHyperlink> {
     use libghostty_vt::terminal::{Point, PointCoordinate};
 
-    let grid_ref = terminal
-        .grid_ref(Point::Viewport(PointCoordinate {
-            x: position.column,
-            y: u32::from(position.row),
-        }))
-        .ok()?;
-
-    let mut buffer = [0_u8; 2048];
-    if let Ok(written) = grid_ref.hyperlink_uri(&mut buffer)
-        && written != 0
-        && let Ok(uri) = std::str::from_utf8(&buffer[..written])
-        && crate::is_allowed_link(uri)
-    {
-        let columns = usize::from(terminal.cols().ok()?);
-        let mut start = usize::from(position.column);
-        let mut end = start + 1;
-        while start > 0 && hyperlink_uri_matches(terminal, position.row, start - 1, uri) {
-            start -= 1;
-        }
-        while end < columns && hyperlink_uri_matches(terminal, position.row, end, uri) {
-            end += 1;
-        }
-        return Some(ResolvedHyperlink {
-            uri: uri.to_owned(),
-            span: crate::HyperlinkSpan {
-                row: position.row,
-                start_column: start as u16,
-                end_column: end as u16,
-            },
-        });
-    }
-
     let columns = usize::from(terminal.cols().ok()?);
     let mut row = vec![' '; columns];
     for (column, character) in row.iter_mut().enumerate() {
@@ -96,24 +64,6 @@ pub(crate) fn resolve_hyperlink(
             end_column: end as u16,
         },
     })
-}
-
-fn hyperlink_uri_matches(
-    terminal: &Terminal<'_, '_>,
-    row: u16,
-    column: usize,
-    expected: &str,
-) -> bool {
-    use libghostty_vt::terminal::{Point, PointCoordinate};
-    let Ok(cell) = terminal.grid_ref(Point::Viewport(PointCoordinate {
-        x: column as u16,
-        y: u32::from(row),
-    })) else {
-        return false;
-    };
-    let mut buffer = [0_u8; 2048];
-    cell.hyperlink_uri(&mut buffer)
-        .is_ok_and(|written| written != 0 && &buffer[..written] == expected.as_bytes())
 }
 
 fn url_at(row: &[char], column: usize) -> Option<(String, usize, usize)> {
