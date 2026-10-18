@@ -44,5 +44,5 @@ Full pane operations (#106) and conventional shell tracking (#107) extend that f
 
 ## TSP status
 
-- #102: first TSP is prepared for the DMI-superpowers design review.
+- #102: TSP and scheduling decision approved; macOS/component baseline implementation in progress. Missing native Linux/display/energy/model evidence remains open and does not block development of #103; it still blocks full acceptance of #102/#112.
 - #103–#113: TSPs are intentionally not written yet; they will use the actual interfaces and measurements delivered by their prerequisites.

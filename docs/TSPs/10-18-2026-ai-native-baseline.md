@@ -1,6 +1,6 @@
 # AI-native workflow baseline Technical Spec
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use dmi-superpowers:subagent-driven-development (recommended) or dmi-superpowers:executing-plans to implement this TSP task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use dmi-superpowers:subagent-driven-development (recommended) or dmi-superpowers:executing-plans to implement this TSP task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Give issue #102 reproducible baseline evidence and an explicit inventory of measurements that still require native platform or agent-runtime access.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.97.1, existing benchmark binaries, Python 3.11+ standard library, Git, native macOS/Linux.
 
-**Status:** Prepared for DMI-superpowers design review; implementation has not started. No numerical budget is accepted merely by writing this plan.
+**Status:** PRD and scheduling decision approved by the owner; implementation in progress. No numerical budget is accepted merely by writing this plan.
 
 **References:** [PRD](../PRDs/10-18-2026-ai-native-workflows.md), [source inventory](../reviews/10-18-2026-ai-native-source-audit.md), [#102](https://github.com/HundredBillion/Sprite/issues/102).
 
@@ -30,14 +30,19 @@
 
 ## Design review decision
 
-The available host is macOS. Existing headless observation benchmarks use stand-in
-panes, and CPU paint preparation excludes GPU presentation. Decide whether native
-Linux/display/energy and model-backed task evidence must block all subsequent
-implementation, or whether component baselines may unlock development while those
-explicit acceptance gaps remain open until #112. Recommended: collect the current
-host baseline now, retain separate open evidence for the missing measurements,
-and never describe #102/#112 as fully accepted while their required evidence is
-missing. This is a scheduling decision, not permission to omit measurements.
+The owner approved collecting the macOS component baseline now and proceeding
+with development while unavailable native Linux/display/energy and model-backed
+task evidence remains open. Neither #102 nor #112 is fully accepted until its
+required evidence exists. This changes scheduling, not measurement requirements.
+
+Source review confirms all three binaries accept the planned arguments and expose
+`sample_count` and nonempty `metrics`; paint nests timing/allocation metrics.
+Capture validation checks that common envelope without duplicating each binary's
+schema tests. Use vertical executable-contract tests, retain timeout/failure logs,
+and refuse pre-existing reports so a successful process cannot validate stale data.
+The manifest records failure details as well as successful runs. Preserve both
+repetitions so variability claims are independently inspectable. These are routine
+reliability refinements to the approved capture interface.
 
 ## File structure and testing seam
 
@@ -62,7 +67,7 @@ remains the public Sprite CLI/protocol; this driver does not replace that seam.
 - Consumes: existing `sprite-term-bench`, `sprite-observation-bench`, `sprite-paint-bench` executables accepting `--samples N --output PATH`.
 - Produces: `capture(binary: Path, output: Path, samples: int) -> dict`, which writes the raw JSON and adjacent process log, validates a nonempty report, and returns binary/command/time provenance. CLI: `--bin-dir PATH --output PATH --samples N`.
 
-- [ ] **Step 1: Write the failing executable-contract tests.**
+- [x] **Step 1: Write the failing executable-contract tests.**
 
 Create `scripts/test_workflow_baseline.py`:
 
@@ -112,14 +117,14 @@ class CaptureTests(unittest.TestCase):
                     capture(self.fixture(root, body), root / 'report.json', 30)
 ```
 
-- [ ] **Step 2: Run the new tests before implementation.**
+- [x] **Step 2: Run the new tests before implementation.**
 
 Run: `python3 -m unittest scripts.test_workflow_baseline -v`.
 Expected: import failure because the capture driver does not exist. Record it;
 this is a test setup red, followed by behavioral negative cases in the completed
 suite. No production behavior is being modified.
 
-- [ ] **Step 3: Implement the minimal capture driver.**
+- [x] **Step 3: Implement the minimal capture driver.**
 
 Create `scripts/capture_workflow_baseline.py`:
 
@@ -187,13 +192,13 @@ if __name__ == '__main__':
     main()
 ```
 
-- [ ] **Step 4: Verify positive and negative process/report behavior.**
+- [x] **Step 4: Verify positive and negative process/report behavior.**
 
 Run: `python3 -m unittest scripts.test_workflow_baseline -v`.
-Expected: three tests pass, including subprocess failure, nonfinite JSON, missing
+Expected: eight tests pass after the design-review refinements, including subprocess failure, nonfinite JSON, missing
 metrics and mismatched sample count. Then run `git diff --check`.
 
-- [ ] **Step 5: Commit the capture driver and its tests.**
+- [x] **Step 5: Commit the capture driver and its tests.**
 
 Run: `git add scripts/capture_workflow_baseline.py scripts/test_workflow_baseline.py`.
 Run: `git commit -m "test: capture reproducible workflow baseline reports"`.
@@ -219,8 +224,8 @@ Run from the isolated checkout:
 
 ```sh
 git submodule update --init vendor/ghostty
-cargo build --release --locked --offline -p sprite-term --bin sprite-term-bench
-cargo build --release --locked --offline -p sprite-app --bin sprite-observation-bench --bin sprite-paint-bench
+PATH="$HOME/.cargo/bin:$PATH" cargo build --release --locked --offline -p sprite-term --bin sprite-term-bench
+PATH="$HOME/.cargo/bin:$PATH" cargo build --release --locked --offline -p sprite-app --bin sprite-observation-bench --bin sprite-paint-bench
 ```
 
 Expected: successful release builds at the recorded source commit. If offline
@@ -336,4 +341,4 @@ Run: `git commit -m "docs: define workflow comparison and acceptance gates"`.
   not a fabricated implementation detail or a silently passing check.
 - One functional helper and one CLI are sufficient; no framework, new runtime,
   dependency, or pluggable benchmark abstraction is introduced.
-- The design-review scheduling decision above remains open before execution.
+- The scheduling decision above is approved; missing evidence remains an acceptance gate.
