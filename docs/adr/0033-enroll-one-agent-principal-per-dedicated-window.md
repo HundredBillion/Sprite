@@ -10,3 +10,7 @@ It does not turn legacy credentials into general control authority. Agent window
 apply their grant policy to every exposed path, including queued Surface work and
 configuration requests. Human-window behavior stays compatible. This is application
 authority, not an OS sandbox against arbitrary same-user processes.
+
+The owner also approved revoking Sprite permissions and disconnecting Surfaces
+while terminal processes continue. Revocation is irreversible for that window;
+process cancellation is a separate operation covered by the managed-command TSP.

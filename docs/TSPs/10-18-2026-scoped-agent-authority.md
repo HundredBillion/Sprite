@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.97.1; pinned GPUI 0.2.2, serde/serde_json, async-channel and standard library. No new dependencies or transport.
 
-**Status:** Owner approved the dedicated-window, single-principal launch model. DMI design review is confirming revoke-versus-stop semantics; implementation has not started. This TSP covers #103, not the command/output implementation of #104/#105.
+**Status:** Owner approved the dedicated-window, single-principal launch model and revocation policy: remove Sprite permissions and disconnect Surfaces while terminal processes continue. Design decisions are resolved; implementation has not started. This TSP covers #103, not the command/output implementation of #104/#105.
 
 **References:** [PRD AN-02](../PRDs/10-18-2026-ai-native-workflows.md), [#103](https://github.com/HundredBillion/Sprite/issues/103), [ADR 0033](../adr/0033-enroll-one-agent-principal-per-dedicated-window.md), [baseline evidence](../performance/ai-native-workflow-baseline.md).
 
