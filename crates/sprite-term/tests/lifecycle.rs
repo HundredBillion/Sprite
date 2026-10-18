@@ -697,3 +697,35 @@ os._exit(0)
         hung_up.exists().then_some(())
     });
 }
+
+#[test]
+fn shutdown_does_not_wait_for_the_deadline_when_a_child_prints_while_exiting() {
+    let spawned = TerminalSession::spawn(SessionConfig::command(
+        "/bin/sh",
+        args(&[
+            "-c",
+            "trap 'printf CLOSING; exit 0' HUP; printf READY; while :; do sleep 1; done",
+        ]),
+    ))
+    .unwrap();
+    let events = EventPump::new(spawned.events);
+    let snapshots = support::SnapshotPump::new(spawned.snapshots);
+    events.expect_ready();
+    snapshots.wait_for("ready", |bundle| {
+        support::pane_text(bundle).contains("READY")
+    });
+    let mut session = spawned.session;
+    let started = Instant::now();
+    session.begin_shutdown().unwrap().unwrap().wait().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a child that exits on HUP must not wait for the shutdown deadline: {:?}",
+        started.elapsed(),
+    );
+    let TerminalEvent::Exited(exit) = events.next() else {
+        panic!("shutdown must report the child's exit");
+    };
+    assert!(exit.requested);
+    assert_eq!(exit.code, Some(0), "the HUP handler must finish normally");
+    assert_eq!(exit.signal, None);
+}
