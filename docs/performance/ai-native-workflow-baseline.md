@@ -205,7 +205,8 @@ output or credentials are part of the committed artifacts.
   results; retain pass/fail, wall time, input/output tokens and retries. No backend
   or task fixture was selected/executed in this component baseline; that acceptance
   item remains open. Bytes are never reported as tokens.
-- Native Linux: repeat on an actual Linux host and record Wayland/X11 display
+- Native Linux (owner: David, on his separate Linux machine): repeat on an actual
+  Linux host and record Wayland/X11 display
   evidence. macOS data, a headless CI job or an emulated display cannot satisfy it.
 
 The owner approved continuing development with these gaps visible. #102 and #112

@@ -42,6 +42,14 @@ Full pane operations (#106) and conventional shell tracking (#107) extend that f
 - No issue closed with unexecuted acceptance evidence hidden in a success summary.
 - No release, version bump, or automatic merge is part of this planning change.
 
+## Native Linux validation ownership
+
+David will run native Linux validation separately on his Linux machine. Preserve
+Linux support in every implementation and keep Linux acceptance evidence open in
+#102/#112 until those results are attached. macOS development continues under the
+approved scheduling decision. Hosted Linux build/test CI remains a separate
+check; it does not substitute for native display or resource measurements.
+
 ## TSP status
 
 - #102: TSP and scheduling decision approved; capture driver and two macOS component runs recorded in [baseline evidence](../performance/ai-native-workflow-baseline.md), with independent whole-change review complete. Missing native Linux/display/energy/model evidence remains open and does not block development of #103; it still blocks full acceptance of #102/#112.
