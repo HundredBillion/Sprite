@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sprite Terminal shutdown analysis — October 18, 2026</title>
+<style>body{font:17px/1.6 system-ui,sans-serif;max-width:900px;margin:50px auto;padding:0 24px;color:#202630;background:#fafbfc}h1,h2{line-height:1.2}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:12px;border-bottom:1px solid #ccd2da}code,pre{font:14px/1.6 ui-monospace,monospace}pre{background:#edf0f4;padding:18px;overflow:auto}.note{border-left:4px solid #3576be;padding-left:18px}a{color:#205fa6}</style>
+<h1>Why quitting could take six seconds</h1>
+<p>Sprite Terminal stopped its terminal I/O thread, then waited for the child process to finish while keeping the terminal descriptors open. A child exiting after a hangup could remain blocked until those descriptors closed. The six-second safety deadline eventually closed them, releasing the child. This created an avoidable wait even after the process scanner reported no live session jobs.</p>
+<h2>The measured result</h2>
+<table><thead><tr><th>Scenario</th><th>Before</th><th>After</th></tr></thead><tbody>
+<tr><td>Shell prints during its HUP exit handler</td><td>6.043 seconds</td><td>0.003 seconds</td></tr>
+<tr><td>Three terminal VSVim panes, second Cmd+Q to process exit</td><td>6.053 seconds</td><td>0.020 seconds</td></tr>
+<tr><td>Three native VSVim panes, second Cmd+Q to process exit</td><td>Variable: 0.080–3.056 seconds</td><td>0.081 seconds</td></tr>
+</tbody></table>
+<p class="note">These are local macOS samples, not latency guarantees. The native run did not reproduce the full six-second delay. The terminal run and the minimal shell regression did. Each GUI probe verified that the first Cmd+Q asked about three running Neovim programs and the second confirmed the warning.</p>
+<h2>The change</h2>
+<p>After the I/O pump reports that it has stopped, Sprite joins that thread and releases both the worker’s terminal master and the duplicate used for foreground queries. It then waits for child-exit reporting and process cleanup. Process identities are retained independently of the terminal descriptors, so surviving ordinary session jobs still receive the existing HUP, TERM and KILL escalation. The two-, three- and six-second deadlines are unchanged.</p>
+<pre>Before: signal jobs → stop I/O → wait for child exit → deadline → close terminal
+After:  signal jobs → stop I/O → close terminal → child exit → finish cleanup</pre>
+<h2>Evidence and reproduction</h2>
+<p>The regression uses the public TerminalSession API to run this shell, wait for READY, and request shutdown:</p>
+<pre>trap 'printf CLOSING; exit 0' HUP
+printf READY
+while :; do sleep 1; done</pre>
+<p>It failed before the fix at 6.04 seconds. With the fix, it finishes promptly and reports the HUP handler’s normal exit code. Run it with:</p>
+<pre>cargo test -p sprite-term --test lifecycle   shutdown_does_not_wait_for_the_deadline_when_a_child_prints_while_exiting</pre>
+<p>The throwaway desktop build dispatched Ctrl+Shift+D, Ctrl+Shift+E, Cmd+Q, Cmd+Q through the real window event dispatcher. It opened three real VSVim panes and recorded shutdown tracing. This exercised rendering, workspace confirmation, real PTYs, cleanup threads and app exit, but did not inject physical AppKit keyboard events. Probe modifications were removed from the production diff.</p>
+<p>Representative trace:</p>
+<pre>Before: pump_stopped_observed → scope empty → worker_pending_settlement
+        give_up at about 6010 ms → child_wait_returned
+After:  pump_stopped_observed → pty_released at about 1 ms
+        child_exit_observed → worker_settled at about 1 ms</pre>
+<p>No duplicate Sprite Terminal process or serial pane-cleanup wait was observed. The baseline did leave one detached scratch Neovim alive during sampling; it was explicitly cleaned up. Fixed desktop runs left no scratch Neovim processes.</p>
+<h2>Validation boundaries</h2>
+<p>Validation covers the terminal library’s unit tests; lifecycle, event backpressure, session I/O and session output integrations; and workspace quit-flow tests. The lifecycle tests include children that ignore HUP/TERM and still require the three-second KILL step, natural exits with retained descendants, and output-tail publication. Linux desktop behavior and physical keyboard delivery are not established by the local macOS probes.</p>
+<p>Raw local evidence is in <code>/tmp/sprite-quit-investigation/</code>: <code>minimal-red.log</code>, <code>minimal-green.log</code>, <code>terminal-timed.log</code>, <code>terminal-fixed.log</code>, <code>native-fixed.log</code>, and the test summaries. These temporary files are not part of the repository.</p>
+</html>

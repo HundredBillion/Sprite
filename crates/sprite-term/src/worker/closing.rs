@@ -161,6 +161,7 @@ fn close_with_signal_since(
         mut pump_stopped,
         mut fatal,
     } = runtime;
+    let mut master = Some(master);
     // The pump may be parked on a PTY that an Ordinary Session Job keeps open forever, so
     // it is woken now rather than waited on.
     if let Some(pump) = &pump {
@@ -206,6 +207,18 @@ fn close_with_signal_since(
                 requested_at.map(|since| since.elapsed()),
                 &mut signal_processes,
             );
+        }
+
+        // A child exiting on HUP can wait for its terminal to close before it can be reaped.
+        // Once the pump stops, release the master instead of waiting for that child's exit report.
+        // Process-scope cleanup still reaches surviving jobs without the PTY.
+        if pump_stopped && master.is_some() {
+            if let Some(pump) = &mut pump {
+                pump.shutdown();
+            }
+            foreground.detach();
+            drop(master.take());
+            trace.emit("pty_released");
         }
 
         let settled = exit_status.is_some() && pump_stopped;
@@ -316,10 +329,8 @@ fn close_with_signal_since(
         })),
         None => {}
     }
-    // Every descriptor this session holds on the PTY master closes before the
-    // outcome is published: the worker's own and the duplicate kept for
-    // foreground questions. An Ordinary Session Job still holding the terminal then sees
-    // it hang up, and whoever is told the session ended can rely on that.
+    // A pump that reached its deadline may have deferred terminal release until teardown.
+    // Every remaining master descriptor must close before the outcome is published.
     drop(master);
     foreground.detach();
     events.seal(outcomes);
