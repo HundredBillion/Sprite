@@ -1,5 +1,27 @@
 use super::test_support::*;
 use super::*;
+
+#[gpui::test]
+fn quit_toast_is_centered_above_panes_without_moving_their_geometry(cx: &mut gpui::TestAppContext) {
+    let (workspace, cx) = test_workspace(cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+    draw_workspace(cx);
+    let panes = cx.debug_bounds("workspace-panes").unwrap();
+    let published = publications(&workspace, cx);
+    workspace.update(cx, |workspace, cx| {
+        assert!(!workspace.confirm_close(cx));
+    });
+    draw_workspace(cx);
+    let toast = cx.debug_bounds("workspace-quit-toast").unwrap();
+    assert!((toast.center().x - px(500.0)).abs() < px(1.0));
+    assert_eq!(toast.origin.y, px(154.0));
+    assert!(toast.size.width < px(1000.0));
+    assert!(toast.size.height > px(40.0));
+    assert!(toast.bottom() < px(350.0));
+    assert_eq!(cx.debug_bounds("workspace-panes").unwrap(), panes);
+    assert_eq!(publications(&workspace, cx), published);
+    assert!(cx.debug_bounds("workspace-confirmation").is_none());
+}
 fn publications(
     workspace: &gpui::Entity<super::Workspace>,
     cx: &mut gpui::VisualTestContext,
