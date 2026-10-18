@@ -27,6 +27,7 @@ impl Workspace {
         if self.stopping {
             return Vec::new();
         }
+        self.cancel_quit();
         self.stopping = true;
         self.surfaces = None;
         if let Some(endpoint) = self.endpoint.as_mut() {
@@ -193,9 +194,8 @@ impl Workspace {
     }
     /// Whether the window may close now, or must ask first.
     ///
-    /// The title-bar X is a close like any other: a pane running a program is
-    /// asked about before the window goes. Returning `false` keeps the window
-    /// open and leaves the question on screen; the second click answers it.
+    /// Even an idle window asks before quitting.
+    /// A second close request within the double-press interval answers the question.
     ///
     /// Public because the close handler lives in the `sprite` binary rather
     /// than in this library. `CloseScope` stays private.
@@ -237,12 +237,9 @@ impl Workspace {
 
     /// Answers one Quit Request from the platform.
     ///
-    /// With nothing running, or when this request answers the quit question
-    /// already on screen, the reply allows the quit once every pane cleanup
-    /// has finished. With a program running and no question yet, the
-    /// question goes on screen and the reply refuses at once: a logout is
-    /// never left waiting on a question nobody has seen, and the next Quit
-    /// Request answers it.
+    /// The first request is refused immediately, even with idle panes.
+    /// A second timely request permits quitting after every pane cleanup finishes.
+    /// Refusing promptly keeps logout from waiting on an unseen question.
     fn answer_quit_request(&mut self, reply: gpui::TerminateReply, cx: &mut Context<Self>) {
         if self.stopping {
             // Cleanup is already under way and ends in a quit, which answers
@@ -259,7 +256,7 @@ impl Workspace {
             return;
         }
         // A click in the Dock or the menu bar, or the system, is never a held key.
-        if self.may_close(CloseScope::Quit, false, cx) {
+        if self.request_quit(QuitSource::Platform, false, cx) {
             self.quit_request = Some(reply);
             self.shutdown_and_quit(cx);
         } else {
@@ -268,11 +265,8 @@ impl Workspace {
     }
     /// Whether a close may go ahead now, or must be asked about first.
     ///
-    /// PRD story 11, and the last thing between a mistyped binding and an hour
-    /// of somebody's work. A pane sitting at a shell prompt closes without
-    /// ceremony; one running a program asks, and the same gesture again
-    /// answers. A pane whose state cannot be determined closes too — a question
-    /// nobody can ever resolve is one people learn to dismiss unread.
+    /// Application quit always asks through the timed quit gesture.
+    /// Closing a pane or tab asks only when a pane reports a running program.
     pub(super) fn may_close(
         &mut self,
         scope: CloseScope,
@@ -281,6 +275,11 @@ impl Workspace {
     ) -> bool {
         if self.stopping {
             return false;
+        }
+        match scope {
+            CloseScope::Window => return self.request_quit(QuitSource::Window, is_held, cx),
+            CloseScope::Quit => return self.request_quit(QuitSource::Shortcut, is_held, cx),
+            CloseScope::Pane | CloseScope::Tab => self.cancel_quit(),
         }
         // `key_down` already drops a held key's repeats for the close
         // actions, which do not repeat. The flag still comes through, so the
@@ -340,12 +339,17 @@ impl Workspace {
             .collect()
     }
     pub(super) fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
+        if self.quit_gesture.visible() {
+            self.cancel_quit();
+            cx.notify();
+        }
         if matches!(self.mode, Mode::ConfirmingClose(_)) {
             self.mode = Mode::Idle;
             cx.notify();
         }
     }
     pub(super) fn after_close(&mut self, cx: &mut Context<Self>) {
+        self.cancel_quit();
         self.mode = Mode::Idle;
         self.refresh_layout(cx);
         if self.tabs.is_empty() {
@@ -353,6 +357,89 @@ impl Workspace {
             return;
         }
         cx.notify();
+    }
+
+    fn request_quit(
+        &mut self,
+        source: QuitSource,
+        is_repeat: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.stopping {
+            return false;
+        }
+        self.mode = Mode::Idle;
+        let confirmed = self
+            .quit_gesture
+            .press(source, is_repeat, cx.background_executor().now());
+        self.refresh_quit_timer(cx);
+        cx.notify();
+        confirmed
+    }
+
+    pub(super) fn is_quit_key(key: &str) -> bool {
+        key == if cfg!(target_os = "macos") { "q" } else { "w" }
+    }
+
+    pub(super) fn quit_key_up(
+        &mut self,
+        event: &gpui::KeyUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quit_key_claimed && Self::is_quit_key(&event.keystroke.key) {
+            self.quit_key_claimed = false;
+            cx.stop_propagation();
+            let confirmed = self.quit_gesture.source() == Some(QuitSource::Shortcut)
+                && self.quit_gesture.release();
+            self.refresh_quit_timer(cx);
+            if confirmed {
+                self.shutdown_and_quit(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    pub(super) fn quit_modifiers_changed(
+        &mut self,
+        event: &gpui::ModifiersChangedEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quit_gesture.source() != Some(QuitSource::Shortcut) {
+            return;
+        }
+        if event.modifiers.alt
+            || event.modifiers.shift
+            || event.modifiers.control
+            || event.modifiers.function
+        {
+            self.dismiss_pending_close(cx);
+        } else if !event.modifiers.platform {
+            self.quit_gesture.modifier_released();
+        }
+    }
+
+    fn cancel_quit(&mut self) {
+        self.quit_gesture.cancel();
+        self.quit_timer = None;
+    }
+
+    fn refresh_quit_timer(&mut self, cx: &mut Context<Self>) {
+        self.quit_timer = self.quit_gesture.deadline().map(|deadline| {
+            let delay = deadline.saturating_duration_since(cx.background_executor().now());
+            cx.spawn(async move |workspace, cx| {
+                cx.background_executor().timer(delay).await;
+                workspace
+                    .update(cx, |workspace, cx| {
+                        if workspace.quit_gesture.poll(cx.background_executor().now()) {
+                            workspace.shutdown_and_quit(cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        });
     }
 }
 pub(super) struct PendingCleanup {
@@ -458,6 +545,203 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
+    fn finish_cleanup(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext) {
+        let threads = workspace.update(cx, |workspace, _| {
+            std::mem::take(&mut workspace.cleanup_threads)
+        });
+        for thread in threads.into_iter().flatten() {
+            thread.join().expect("pane cleanup finished");
+        }
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn an_idle_window_requires_two_timely_close_requests(cx: &mut gpui::TestAppContext) {
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        let (workspace, cx) = test_workspace(cx);
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                !workspace.confirm_close(cx),
+                "the first idle close must ask"
+            );
+        });
+        draw_workspace(cx);
+        assert!(cx.debug_bounds("workspace-quit-toast").is_some());
+        workspace.update(cx, |workspace, cx| {
+            workspace.close_window(cx);
+        });
+        finish_cleanup(&workspace, cx);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn a_native_quit_hold_requires_a_repeat_then_releases_to_quit(cx: &mut gpui::TestAppContext) {
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        let quit = press(
+            if cfg!(target_os = "macos") { "q" } else { "w" },
+            platform(),
+        );
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: quit.clone(),
+            is_held: false,
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1200));
+        cx.run_until_parked();
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: quit.clone(),
+            is_held: true,
+        });
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: quit });
+        finish_cleanup(&workspace, cx);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn a_native_quit_hold_waits_for_quiet_when_key_up_is_missing(cx: &mut gpui::TestAppContext) {
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        let quit = press(
+            if cfg!(target_os = "macos") { "q" } else { "w" },
+            platform(),
+        );
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: quit.clone(),
+            is_held: false,
+        });
+        for _ in 0..12 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: quit.clone(),
+                is_held: true,
+            });
+        }
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(599));
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| assert!(!workspace.stopping));
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1));
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| assert!(workspace.stopping));
+        finish_cleanup(&workspace, cx);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(5));
+        cx.run_until_parked();
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn a_slow_second_window_close_starts_a_new_confirmation(cx: &mut gpui::TestAppContext) {
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        let (workspace, cx) = test_workspace(cx);
+        workspace.update(cx, |workspace, cx| assert!(!workspace.confirm_close(cx)));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(501));
+        workspace.update(cx, |workspace, cx| assert!(!workspace.confirm_close(cx)));
+        workspace.read_with(cx, |workspace, _| assert!(!workspace.stopping));
+        workspace.update(cx, |workspace, cx| {
+            workspace.close_window(cx);
+        });
+        finish_cleanup(&workspace, cx);
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
+    }
+
+    #[gpui::test]
+    fn a_quit_tap_with_no_release_expires_without_quitting(cx: &mut gpui::TestAppContext) {
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: press(
+                if cfg!(target_os = "macos") { "q" } else { "w" },
+                platform(),
+            ),
+            is_held: false,
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(5));
+        cx.run_until_parked();
+        assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.quit_gesture.visible());
+            assert!(!workspace.stopping);
+        });
+    }
+
+    #[gpui::test]
+    fn deliberate_input_and_deactivation_cancel_quit_and_its_timer(cx: &mut gpui::TestAppContext) {
+        use gpui::{ElementInputHandler, InputHandler};
+        QUIT_REQUESTS.with(|requests| requests.set(0));
+        for cancellation in [
+            "escape",
+            "a",
+            "repeat",
+            "mouse",
+            "scroll",
+            "deactivate",
+            "native-text",
+        ] {
+            let (workspace, cx) = test_workspace(cx);
+            let view = terminal_view(&workspace, PaneId(0), cx);
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            draw_workspace(cx);
+            let quit = press(
+                if cfg!(target_os = "macos") { "q" } else { "w" },
+                platform(),
+            );
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: quit.clone(),
+                is_held: false,
+            });
+            match cancellation {
+                "scroll" => cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: gpui::point(px(20.0), px(250.0)),
+                    delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
+                    ..Default::default()
+                }),
+                "repeat" => cx.simulate_event(gpui::KeyDownEvent {
+                    keystroke: plain("a", Some("a")),
+                    is_held: true,
+                }),
+                "mouse" => cx.simulate_event(gpui::MouseDownEvent {
+                    position: gpui::point(px(20.0), px(250.0)),
+                    button: gpui::MouseButton::Left,
+                    ..Default::default()
+                }),
+                "deactivate" => cx.deactivate_window(),
+                "native-text" => {
+                    let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view);
+                    cx.update(|window, cx| handler.replace_text_in_range(None, "é", window, cx));
+                }
+                key => cx.simulate_keystrokes(key),
+            }
+            workspace.read_with(cx, |workspace, _| {
+                assert!(
+                    !workspace.quit_gesture.visible(),
+                    "{cancellation} kept quit armed"
+                );
+            });
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(5));
+            cx.run_until_parked();
+            assert_eq!(
+                QUIT_REQUESTS.with(|requests| requests.get()),
+                0,
+                "{cancellation}"
+            );
+        }
+    }
+
     #[gpui::test]
     fn native_text_commit_without_key_cancels_pending_close(cx: &mut gpui::TestAppContext) {
         use gpui::{AppContext, ElementInputHandler, InputHandler};
@@ -477,19 +761,25 @@ mod tests {
         for scope in [CloseScope::Tab, CloseScope::Window, CloseScope::Quit] {
             workspace.update(cx, |workspace, cx| {
                 assert!(!workspace.may_close(scope, false, cx));
-                assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
+                assert!(
+                    matches!(workspace.mode, Mode::ConfirmingClose(_))
+                        || workspace.quit_gesture.visible()
+                );
             });
             cx.update(|window, cx| {
                 handler.replace_text_in_range(None, "", window, cx);
                 handler.replace_text_in_range_from_key(None, "a", window, cx);
             });
             workspace.read_with(cx, |workspace, _| {
-                assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
+                assert!(
+                    matches!(workspace.mode, Mode::ConfirmingClose(_))
+                        || workspace.quit_gesture.visible()
+                );
             });
             cx.update(|window, cx| handler.replace_text_in_range(None, "é", window, cx));
             workspace.update(cx, |workspace, cx| {
                 assert!(
-                    matches!(workspace.mode, Mode::Idle),
+                    matches!(workspace.mode, Mode::Idle) && !workspace.quit_gesture.visible(),
                     "native text left close armed"
                 );
                 assert!(
@@ -645,9 +935,7 @@ mod tests {
             keystroke: quit.clone(),
             is_held: false,
         });
-        workspace.read_with(cx, |workspace, _| {
-            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)))
-        });
+        workspace.read_with(cx, |workspace, _| assert!(workspace.quit_gesture.visible()));
         for _ in 0..3 {
             cx.simulate_event(gpui::KeyDownEvent {
                 keystroke: quit.clone(),
@@ -659,9 +947,7 @@ mod tests {
             0,
             "a held repeat answered the quit question"
         );
-        workspace.read_with(cx, |workspace, _| {
-            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)))
-        });
+        workspace.read_with(cx, |workspace, _| assert!(workspace.quit_gesture.visible()));
         cx.simulate_event(gpui::KeyDownEvent {
             keystroke: quit,
             is_held: false,
@@ -802,6 +1088,8 @@ mod tests {
         let (workspace, cx) = test_workspace(cx);
         let (completed, gates) = gated_panes(&workspace, cx);
         cx.update(|_, cx| Workspace::answer_platform_quit_requests(&workspace, cx));
+        let first = cx.simulate_should_terminate();
+        assert_eq!(first.answer(), gpui::TerminateAnswer::Cancelled);
         let request = cx.simulate_should_terminate();
         cx.run_until_parked();
         assert_eq!(
@@ -850,7 +1138,7 @@ mod tests {
         );
         workspace.read_with(cx, |workspace, _| {
             assert!(
-                matches!(workspace.mode, Mode::ConfirmingClose(_)),
+                workspace.quit_gesture.visible(),
                 "the quit question is not on screen"
             );
             assert!(!workspace.stopping, "cleanup began before the answer");
@@ -879,7 +1167,8 @@ mod tests {
         let (completed, gates) = gated_panes(&workspace, cx);
         cx.update(|_, cx| Workspace::answer_platform_quit_requests(&workspace, cx));
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.quit(false, window, cx)
+            workspace.quit(false, window, cx);
+            workspace.quit(false, window, cx);
         });
         let request = cx.simulate_should_terminate();
         cx.run_until_parked();
@@ -901,7 +1190,10 @@ mod tests {
         let (workspace, cx) = test_workspace(cx);
         let (_completed, gates) = gated_panes(&workspace, cx);
         workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
-        workspace.update(cx, |workspace, cx| workspace.close_window(cx));
+        workspace.update(cx, |workspace, cx| {
+            workspace.close_window(cx);
+            workspace.close_window(cx);
+        });
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_tab(window, cx);
             workspace.split(Orientation::Vertical, window, cx);
@@ -925,6 +1217,7 @@ mod tests {
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         workspace.update(cx, |workspace, cx| {
             workspace.config_path = Some(path.clone());
+            workspace.close_window(cx);
             workspace.close_window(cx);
             workspace
                 .reload_sender

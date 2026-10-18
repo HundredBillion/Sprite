@@ -179,7 +179,7 @@ builds do not reach the network.
 | `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split right / split down |
 | `Ctrl+Shift+←↑↓→` | Move focus between panes |
 | `Cmd/Super+[` / `Cmd/Super+]` | Move focus left / right between panes |
-| `Cmd+Q` (macOS) / `Super+W` (Linux) | Quit Sprite |
+| `Cmd+Q` (macOS) / `Super+W` (Linux) | Hold or press twice to quit Sprite |
 | `Ctrl+Shift+T` / `Ctrl+Shift+Q` | New tab / close tab |
 | `Ctrl+Shift+PageUp` / `PageDown` | Previous / next tab |
 | `Ctrl+Shift+W` | Close pane |
@@ -188,7 +188,30 @@ builds do not reach the network.
 | `Cmd/Super+C` / `Cmd/Super+V` | Copy the selection / paste |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste compatibility bindings |
 
-Closing a pane, tab or window that is running a program asks first: the banner
+Every application quit, including an idle shell, first shows a rounded message:
+“Hold ⌘Q or press twice to quit” on macOS, or “Hold Super+W or press twice to
+quit” on Linux. Hold for 1.2 seconds or press twice within half a second.
+After a hold, Sprite waits for key release before quitting. Escape, another
+input, or changing focus cancels an unconfirmed quit. Closing the window or
+quitting from the Dock uses the same confirmation; repeat that request within
+half a second to confirm.
+
+Omarchy's default Super+W binding closes windows in the compositor, so it
+cannot deliver the held key to an application. On Hyprland **0.56.2** with
+Omarchy's Lua configuration, add this to `~/.config/hypr/bindings.lua`, after
+any other Super+W binding:
+
+```lua
+dofile("/absolute/path/to/Sprite/extras/hyprland/sprite-super-w.lua")
+```
+
+Replace the path with your checkout's path, then reload Hyprland. This forwards
+Super+W only when Sprite is focused and keeps the normal close action for other
+applications. Without it, two quick window-close requests still confirm quit,
+but holding Super+W cannot be detected. See the
+[configuration notes](extras/hyprland/README.md) for verification and rollback.
+
+Closing a pane or tab that is running a program asks first: the banner
 names what would be interrupted, and repeating the same gesture confirms.
 Escape keeps it.
 

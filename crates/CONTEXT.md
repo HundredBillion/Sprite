@@ -99,10 +99,12 @@ _Avoid_: workspace, session, terminal window
 
 **Quit Request**:
 Any request to end Sprite: the quit key, Quit from the Dock or the menu bar,
-or the system ending the session at logout, restart or shutdown. Every Quit
-Request gets the same answer: when a Pane is running a program, the question
-goes on screen and this request is refused, so the next Quit Request answers
-it; otherwise Sprite ends once present Pane cleanup completes.
+or the system ending the session at logout, restart or shutdown. Every first
+Quit Request shows the quit toast, including idle shells. Holding the quit
+shortcut for 1.2 seconds or repeating the same request within half a second
+confirms it; a hold waits for key release or a quiet repeat stream. Confirmed
+requests end Sprite once present Pane cleanup completes. Unrelated input or
+window deactivation cancels an unconfirmed request.
 _Avoid_: close (that ends a Pane, tab or window), terminate, exit
 
 **Pane Observation**:

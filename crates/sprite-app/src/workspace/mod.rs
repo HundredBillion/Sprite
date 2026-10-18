@@ -10,6 +10,8 @@ mod keymap;
 use divider::*;
 mod close_gate;
 use close_gate::*;
+mod quit_gesture;
+use quit_gesture::{QuitGesture, QuitSource};
 mod tab_strip;
 use tab_strip::*;
 mod reload;
@@ -114,6 +116,9 @@ pub struct Workspace {
     /// same thing the window was asked to run.
     command: Option<Vec<std::ffi::OsString>>,
     mode: Mode,
+    quit_gesture: QuitGesture,
+    quit_timer: Option<gpui::Task<()>>,
+    quit_key_claimed: bool,
     pending_cleanups: Vec<PendingCleanup>,
     stopping: bool,
     /// The platform's Quit Request this window answers when its pane cleanup
@@ -324,6 +329,9 @@ impl Workspace {
             settings,
             focus: cx.focus_handle(),
             mode: Mode::Idle,
+            quit_gesture: QuitGesture::default(),
+            quit_timer: None,
+            quit_key_claimed: false,
             pending_cleanups: Vec::new(),
             stopping: false,
             quit_request: None,
@@ -514,6 +522,11 @@ impl Render for Workspace {
         let divider_children = self.divider_elements(strip, cx);
 
         let tab_children = self.tab_elements(cx);
+        let quit_scroll = cx.listener(|workspace, _: &gpui::ScrollWheelEvent, _window, cx| {
+            if workspace.quit_gesture.visible() {
+                workspace.dismiss_pending_close(cx);
+            }
+        });
 
         let panes = div()
             .debug_selector(|| "workspace-panes".into())
@@ -541,6 +554,8 @@ impl Render for Workspace {
             // one event reaching two consumers, which the terminal's input
             // rules forbid.
             .capture_key_down(cx.listener(Self::key_down))
+            .capture_key_up(cx.listener(Self::quit_key_up))
+            .on_modifiers_changed(cx.listener(Self::quit_modifiers_changed))
             // A button press is a deliberate act, like an unrelated key, so it
             // withdraws a close question wherever it lands. Capture phase, so a
             // pane or divider that handles the press itself cannot hide it.
@@ -549,6 +564,22 @@ impl Render for Workspace {
                     workspace.dismiss_pending_close(cx);
                 },
             ))
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(
+                            move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                                if phase == gpui::DispatchPhase::Capture {
+                                    quit_scroll(event, window, cx);
+                                }
+                            },
+                        );
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .when(strip > 0.0, |element| {
                 element.child(
                     div()
@@ -583,6 +614,35 @@ impl Render for Workspace {
                     .text_color(rgb(CONFIRM_FG))
                     .child(pending.label.clone())
             }))
+            .when(self.quit_gesture.visible(), |element| {
+                element.child(
+                    div()
+                        .absolute()
+                        .top(self.viewport.height * 0.22)
+                        .left(px(0.0))
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .debug_selector(|| "workspace-quit-toast".into())
+                                .max_w_full()
+                                .rounded_full()
+                                .px(px(28.0))
+                                .py(px(14.0))
+                                .bg(rgb(0x27272a))
+                                .text_color(rgb(0xf4f4f5))
+                                .text_size(px(22.0))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .shadow_lg()
+                                .child(if cfg!(target_os = "macos") {
+                                    "Hold ⌘Q or press twice to quit"
+                                } else {
+                                    "Hold Super+W or press twice to quit"
+                                }),
+                        ),
+                )
+            })
             .into_any_element()
     }
 }

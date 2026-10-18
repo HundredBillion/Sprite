@@ -216,6 +216,24 @@ impl Workspace {
         {
             pane.cancel_pending_input(cx);
         }
+        if !event.is_held && Self::is_quit_key(&event.keystroke.key) {
+            self.quit_key_claimed = action == Some(WorkspaceAction::Quit);
+        }
+        if action == Some(WorkspaceAction::Quit)
+            || (event.is_held && self.quit_key_claimed && Self::is_quit_key(&event.keystroke.key))
+        {
+            self.quit_key_claimed = true;
+            cx.stop_propagation();
+            self.quit(event.is_held, window, cx);
+            return;
+        }
+        if self.quit_gesture.visible() {
+            self.dismiss_pending_close(cx);
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                return;
+            }
+        }
         match &self.mode {
             Mode::Renaming(_) => {
                 self.rename_key(&event.keystroke, cx);
@@ -291,6 +309,7 @@ mod tests {
     struct KeyboardPane {
         focus: gpui::FocusHandle,
         keys: Rc<std::cell::RefCell<Vec<String>>>,
+        releases: Rc<std::cell::RefCell<Vec<String>>>,
     }
 
     impl gpui::Focusable for KeyboardPane {
@@ -300,11 +319,14 @@ mod tests {
     }
     impl gpui::Render for KeyboardPane {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().track_focus(&self.focus).on_key_down(cx.listener(
-                |pane, event: &KeyDownEvent, _, _| {
+            div()
+                .track_focus(&self.focus)
+                .on_key_down(cx.listener(|pane, event: &KeyDownEvent, _, _| {
                     pane.keys.borrow_mut().push(event.keystroke.key.clone());
-                },
-            ))
+                }))
+                .on_key_up(cx.listener(|pane, event: &gpui::KeyUpEvent, _, _| {
+                    pane.releases.borrow_mut().push(event.keystroke.key.clone());
+                }))
         }
     }
     impl gpui::EventEmitter<sprite_pane::TitleChanged> for KeyboardPane {}
@@ -567,6 +589,7 @@ mod tests {
                 Rc::new(cx.new(|cx| KeyboardPane {
                     focus: cx.focus_handle(),
                     keys: keys.clone(),
+                    releases: Rc::default(),
                 })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
             };
             workspace.tabs = Tabs::new(&mut make);
@@ -620,6 +643,38 @@ mod tests {
         assert_ne!(first_focus, second_focus);
         cx.update(|window, _| assert!(second_focus.is_focused(window)));
         assert_eq!(&*keys.borrow(), &["a", "z", "y"]);
+    }
+
+    #[gpui::test]
+    fn quit_keys_and_their_release_never_reach_the_focused_pane(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = test_workspace(cx);
+        let keys = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let releases = Rc::new(std::cell::RefCell::new(Vec::new()));
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs = Tabs::new(|_, _| {
+                Rc::new(cx.new(|cx| KeyboardPane {
+                    focus: cx.focus_handle(),
+                    keys: keys.clone(),
+                    releases: releases.clone(),
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            });
+            workspace.refresh_layout(cx);
+        });
+        draw_workspace(cx);
+        let quit = press(
+            if cfg!(target_os = "macos") { "q" } else { "w" },
+            platform(),
+        );
+        cx.simulate_event(KeyDownEvent {
+            keystroke: quit.clone(),
+            is_held: false,
+        });
+        hold(cx, quit.clone());
+        cx.simulate_keystrokes("escape");
+        hold(cx, quit.clone());
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: quit });
+        assert!(keys.borrow().is_empty());
+        assert!(releases.borrow().is_empty());
     }
 
     #[gpui::test]

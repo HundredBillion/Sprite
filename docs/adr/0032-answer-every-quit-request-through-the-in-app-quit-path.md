@@ -34,3 +34,17 @@ adds a second quit rule.
 Cost: the patch in `patches/` must be carried forward on every GPUI upgrade,
 and `scripts/check_gpui_patch.py` fails until it is. Linux has no equivalent
 hook here; its session-end behaviour is unchanged.
+
+## Hold or press twice confirmation (2026-10-18)
+
+The shared quit path now asks on every first request, including idle shells.
+A fresh second request from the same source within 500 ms confirms; the
+shortcut also accepts a 1,200 ms hold witnessed by actual repeat events.
+The window stays visible until release, or until repeats become quiet when
+the platform omits the release. A timer by itself never turns a tap into a
+hold. One cancellable timer owns expiration and the release fallback.
+
+This gesture is separate from pane/tab confirmation, whose repeat rejection
+is unchanged. All confirmed paths still use the cleanup and platform-reply
+ownership described above. Omarchy's compositor binding needs the optional
+foreground forwarding rule in `extras/hyprland/` to deliver hold events.
