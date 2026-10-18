@@ -197,5 +197,4 @@ Agent Workspace. Reading and changing content are separate permissions.
 
 **Agent Revocation**:
 Withdrawal of an Agent Principal's access. It prevents further authorized
-operations; it does not undo completed work or itself terminate the agent's
-processes.
+operations; it does not undo completed work.
