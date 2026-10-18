@@ -17,7 +17,7 @@ title = "Direct applications and shell exec replacements bypass close warnings"
 status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/89"
 issue = 89
-fixed_by = "fix/issue-89"
+fixed_by = "#100"
 test = ["review_direct_program_requires_close_confirmation", "a_directly_launched_program_requires_confirmation", "a_program_that_replaces_the_idle_shell_requires_confirmation"]
 
 [[finding]]
@@ -26,7 +26,7 @@ title = "Fixed Kitty image placements use physical pixels in logical layout"
 status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/89"
 issue = 89
-fixed_by = "fix/issue-89"
+fixed_by = "#100"
 test = ["review_fixed_image_matches_requested_columns_at_two_x", "fixed_image_crop_and_offsets_use_logical_pixels_at_each_scale"]
 
 [[finding]]
@@ -35,7 +35,7 @@ title = "Cursor blinking moves IME composition to the top-left"
 status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/89"
 issue = 89
-fixed_by = "fix/issue-89"
+fixed_by = "#100"
 test = "review_ime_stays_at_cursor_across_blink"
 
 [[finding]]
@@ -44,7 +44,7 @@ title = "Collective texture pressure rebuilds retained unchanged images"
 status = "resolved"
 source = "https://github.com/HundredBillion/Sprite/issues/89"
 issue = 89
-fixed_by = "fix/issue-89"
+fixed_by = "#100"
 test = ["review_unchanged_images_reuse_textures_under_collective_pressure", "snapshot_pressure_preserves_retained_textures_without_conversion", "snapshot_budget_changes_release_and_restore_quiet_images", "snapshot_content_changes_drop_stale_generations_even_when_refused", "changing_snapshot_images_keeps_storage_bounded"]
 
 # ---- 2026-10-06 whole-repository audit (PR #53) ----------------------------
