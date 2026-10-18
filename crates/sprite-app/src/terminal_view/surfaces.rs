@@ -1190,7 +1190,7 @@ impl TerminalView {
     ) -> AnyElement {
         let tab_height = match &surface.body {
             Body::Grid { grid, .. } => grid.tabs.visible_height(),
-            _ => 0.0,
+            Body::Elements(_) | Body::List { .. } => 0.0,
         };
         let grid_size = Size {
             width: size.width,
@@ -1200,7 +1200,7 @@ impl TerminalView {
             Body::Grid { grid, .. } if fills => (f32::from(grid_size.height)
                 - f32::from(grid.rows()) * f32::from(metrics.cells.height()))
             .max(0.0),
-            _ => 0.0,
+            Body::Grid { .. } | Body::Elements(_) | Body::List { .. } => 0.0,
         };
         let grid_top = tab_height + grid_slack;
         let told = (
@@ -1236,7 +1236,8 @@ impl TerminalView {
                     .map(|(row, label)| {
                         let foreground = match label.style.foreground {
                             sprite_term::SnapshotColor::Rgb(color) => color,
-                            _ => metrics.defaults.0,
+                            sprite_term::SnapshotColor::Default
+                            | sprite_term::SnapshotColor::Palette(_) => metrics.defaults.0,
                         };
                         div()
                             .absolute()

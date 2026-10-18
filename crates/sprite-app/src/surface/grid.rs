@@ -548,7 +548,9 @@ impl GridSurface {
             defaults: Defaults::default(),
             cursor: Cursor::default(),
             laid_out: vec![empty_row; usize::from(rows)].into(),
-            ui_labels: vec![Arc::new(Vec::new()); usize::from(rows)],
+            ui_labels: std::iter::repeat_with(|| Arc::new(Vec::new()))
+                .take(usize::from(rows))
+                .collect::<Vec<_>>(),
         }
     }
 
