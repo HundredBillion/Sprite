@@ -181,3 +181,21 @@ _Avoid_: the CLI (unqualified), sprite.nvim, the adapter
 Unmodified upstream Croft used as an optional, manually invoked check against
 its moving `main`; it is not part of Sprite Terminal or a required CI gate.
 _Avoid_: Croft dependency, Croft fork, required Croft gate
+
+**Agent Workspace**:
+The panes entrusted to an enrolled agent as one unit. A dedicated agent Sprite
+Window contains one Agent Workspace; human work belongs in a separate window.
+_Avoid_: sandbox, human workspace (for an agent workspace)
+
+**Agent Principal**:
+The enrolled agent identity to which access is granted. Its child processes act
+with the same identity; a claimed pane address does not establish that identity.
+
+**Agent Grant**:
+Permission for an Agent Principal to perform a named kind of operation in its
+Agent Workspace. Reading and changing content are separate permissions.
+
+**Agent Revocation**:
+Withdrawal of an Agent Principal's access. It prevents further authorized
+operations; it does not undo completed work or itself terminate the agent's
+processes.
