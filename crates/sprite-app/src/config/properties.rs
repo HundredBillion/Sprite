@@ -59,6 +59,7 @@ fn style() -> impl Strategy<Value = HighlightStyle> {
 fn settings() -> impl Strategy<Value = Settings> {
     (
         (text(), number(), number()),
+        proptest::option::of((text(), number(), number())),
         (
             proptest::option::of(rgb()),
             proptest::option::of(rgb()),
@@ -81,6 +82,7 @@ fn settings() -> impl Strategy<Value = Settings> {
         .prop_map(
             |(
                 font,
+                surface_font,
                 colors,
                 highlights,
                 cursor,
@@ -92,6 +94,11 @@ fn settings() -> impl Strategy<Value = Settings> {
             )| {
                 use sprite_term::CursorStyle;
                 Settings {
+                    surface_font: surface_font.map(|font| Font {
+                        family: NonBlank::new(font.0),
+                        size: FontSize::new(font.1),
+                        line_height: LineHeight::new(font.2),
+                    }),
                     font: Font {
                         family: NonBlank::new(font.0),
                         size: FontSize::new(font.1),
@@ -190,7 +197,7 @@ proptest! {
     }
 
     #[test]
-    fn malformed_sections_preserve_other_sections(section in proptest::sample::select(vec!["font", "colors", "highlights", "cursor", "shell", "scrollback", "graphics", "pane_observation"]), value in proptest::sample::select(vec!["false", "[]", "7", "\"oops\""]), padding in 0u32..65) {
+    fn malformed_sections_preserve_other_sections(section in proptest::sample::select(vec!["font", "surface_font", "colors", "highlights", "cursor", "shell", "scrollback", "graphics", "pane_observation"]), value in proptest::sample::select(vec!["false", "[]", "7", "\"oops\""]), padding in 0u32..65) {
         let (settings, complaints) = Settings::parse_candidate(&format!("{section} = {value}\n[grid]\npadding = {padding}\n")).unwrap();
         prop_assert_eq!(settings.grid.padding.get(), padding as f32);
         prop_assert!(complaints.0.iter().any(|message| message.contains(section)));

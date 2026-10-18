@@ -67,7 +67,11 @@ impl Workspace {
     /// size when there is one.
     pub(super) fn active_settings(&self) -> crate::config::Settings {
         let mut settings = self.settings.clone();
+        let delta = self.font_size().get() - settings.font.size.get();
         settings.font.size = self.font_size();
+        if let Some(font) = &mut settings.surface_font {
+            font.size = crate::config::FontSize::new(font.size.get() + delta);
+        }
         settings
     }
     pub(super) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
@@ -325,6 +329,33 @@ mod tests {
         cx.simulate_event(KeyDownEvent {
             keystroke,
             is_held: true,
+        });
+    }
+
+    #[gpui::test]
+    fn surface_font_zoom_uses_the_same_delta_and_reset_restores_both(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (workspace, cx) = test_workspace(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.settings.font.size = crate::config::FontSize::new(12.0);
+            workspace.settings.surface_font = Some(crate::config::Font {
+                size: crate::config::FontSize::new(20.0),
+                ..Default::default()
+            });
+            workspace.adjust_font(3.0, cx);
+            let active = workspace.active_settings();
+            assert_eq!(active.font.size, 15.0);
+            assert_eq!(active.effective_surface_font().size, 23.0);
+            assert_eq!(workspace.settings.effective_surface_font().size, 20.0);
+            workspace.reset_font(cx);
+            let active = workspace.active_settings();
+            assert_eq!(active.font.size, 12.0);
+            assert_eq!(active.effective_surface_font().size, 20.0);
+            workspace.settings.surface_font = None;
+            workspace.adjust_font(2.0, cx);
+            let active = workspace.active_settings();
+            assert_eq!(active.effective_surface_font(), &active.font);
         });
     }
 
@@ -631,6 +662,57 @@ mod tests {
 
     /// The workspace's focus routing and the window's activation together
     /// decide which terminal has Pane Focus.
+    #[gpui::test]
+    fn clicking_native_editor_activates_its_workspace_pane(cx: &mut gpui::TestAppContext) {
+        use crate::surface::channel::{Open, Placement, SurfaceConnection};
+        let (workspace, cx) = test_workspace(cx);
+        draw_workspace(cx);
+        cx.simulate_keystrokes("ctrl-shift-d");
+        draw_workspace(cx);
+        let second = terminal_view(&workspace, PaneId(1), cx);
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = SurfaceConnection::new(&stream).unwrap();
+        connection.establish(&crate::surface::channel::event_opened(
+            crate::surface::SurfaceId(998),
+        ));
+        second.update_in(cx, |view, window, cx| {
+            view.open_surface(crate::surface::SurfaceId(998), Open {
+                placement: Placement::Fill { owner_pid: None }, focus: false,
+                description: serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            }, connection, window, cx).unwrap();
+        });
+        workspace.update(cx, |workspace, cx| workspace.focus_pane(PaneId(0), cx));
+        draw_workspace(cx);
+        draw_workspace(cx);
+        let previous_focus = cx.update(|window, cx| window.focused(cx));
+        let right = cx.debug_bounds("workspace-pane-1").unwrap().center();
+        cx.simulate_mouse_down(right, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(right, gpui::MouseButton::Left, Default::default());
+        let clicked_focus = cx.update(|window, cx| window.focused(cx));
+        assert!(clicked_focus.is_some());
+        assert_ne!(
+            clicked_focus, previous_focus,
+            "click must move keyboard focus into the editor"
+        );
+        draw_workspace(cx);
+        draw_workspace(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.tabs.active().unwrap().focus(), Some(PaneId(1)));
+        });
+        assert_eq!(
+            cx.update(|window, cx| window.focused(cx)),
+            clicked_focus,
+            "workspace redraw must not steal focus from the clicked native editor"
+        );
+        let left = cx.debug_bounds("workspace-pane-0").unwrap().center();
+        cx.simulate_mouse_down(left, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(left, gpui::MouseButton::Left, Default::default());
+        draw_workspace(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.tabs.active().unwrap().focus(), Some(PaneId(0)));
+        });
+    }
+
     #[gpui::test]
     fn pane_focus_follows_the_focused_pane_and_the_active_window(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);

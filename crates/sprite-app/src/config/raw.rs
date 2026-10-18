@@ -60,7 +60,7 @@ macro_rules! section {
     };
 }
 section!(RawConfig {
-    font: RawFont, grid: RawGrid, colors: RawColors,
+    font: RawFont, surface_font: RawFont, grid: RawGrid, colors: RawColors,
     highlights: BTreeMap<String, Field<RawHighlight>>,
     cursor: RawCursor, shell: RawShell, scrollback: RawScrollback,
     graphics: RawGraphics, pane_observation: RawObservation,
@@ -163,25 +163,11 @@ impl RawConfig {
         let c = &mut complaints;
         unknown(self.unknown, "", c);
 
-        let font = self.font.section("font", c);
-        unknown(font.unknown, "font", c);
-        settings.font.family = name(font.family, "font.family", "a name in quotes", c);
-        settings.font.size = metric(
-            font.size,
-            "font.size",
-            settings.font.size,
-            FontSize::new,
-            FontSize::get,
-            c,
-        );
-        settings.font.line_height = metric(
-            font.line_height,
-            "font.line_height",
-            settings.font.line_height,
-            LineHeight::new,
-            LineHeight::get,
-            c,
-        );
+        settings.font = self.font.section("font", c).validate("font", c);
+        settings.surface_font = self
+            .surface_font
+            .read("surface_font", "a table", c)
+            .map(|font| font.validate("surface_font", c));
         let grid = self.grid.section("grid", c);
         unknown(grid.unknown, "grid", c);
         settings.grid.padding = metric(
@@ -327,5 +313,35 @@ impl RawConfig {
             settings.pane_observation.enabled = enabled;
         }
         (settings, complaints)
+    }
+}
+
+impl RawFont {
+    fn validate(self, section: &str, c: &mut Complaints) -> Font {
+        unknown(self.unknown, section, c);
+        Font {
+            family: name(
+                self.family,
+                &format!("{section}.family"),
+                "a name in quotes",
+                c,
+            ),
+            size: metric(
+                self.size,
+                &format!("{section}.size"),
+                FontSize::default(),
+                FontSize::new,
+                FontSize::get,
+                c,
+            ),
+            line_height: metric(
+                self.line_height,
+                &format!("{section}.line_height"),
+                LineHeight::default(),
+                LineHeight::new,
+                LineHeight::get,
+                c,
+            ),
+        }
     }
 }

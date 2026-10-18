@@ -35,6 +35,7 @@ pub(super) enum Body {
     Elements(ElementBody),
     Grid {
         grid: Box<GridSurface>,
+        tabs: super::native_tabs::NativeTabs,
         /// The description's root element, kept for the `bg` and `color` it
         /// may carry: a grid's wrapper takes its colours from them, the way an
         /// element root's box does. A grid root refuses `style` and `border`,
@@ -58,6 +59,7 @@ impl Body {
         match &root {
             Element::Grid { size, .. } => Body::Grid {
                 grid: Box::new(GridSurface::new(size.cols, size.rows)),
+                tabs: Default::default(),
                 root,
                 shapes: Default::default(),
             },
@@ -143,6 +145,7 @@ pub(super) struct HostedSurface {
     /// A selection dragged out of the terminal and across a dock therefore
     /// tells the dock nothing.
     pressed: Option<&'static str>,
+    definition_pointer: Option<(gpui::Point<Pixels>, bool)>,
     /// Sub-cell wheel remainders, one per axis, so a trackpad's pixel deltas
     /// become whole cells exactly as they do for the terminal.
     wheel_rows: crate::grid::ScrollAccumulator,
@@ -161,6 +164,27 @@ enum HostedPlacement {
 }
 
 impl HostedSurface {
+    fn definition_pointer_active(&self, metrics: &crate::surface::render::GridMetrics) -> bool {
+        match (&self.body, self.origin, self.definition_pointer) {
+            (Body::Grid { grid, .. }, Some(origin), Some((position, true))) => {
+                let inside = position.x >= origin.x
+                    && position.y >= origin.y
+                    && position.x < origin.x + metrics.cells.width() * f32::from(grid.cols())
+                    && position.y < origin.y + metrics.cells.height() * f32::from(grid.rows());
+                inside
+                    && crate::surface::render::grid_cell_under(
+                        position,
+                        origin,
+                        metrics,
+                        grid.cols(),
+                        grid.rows(),
+                    )
+                    .is_some_and(|(row, col)| grid.is_definition_symbol(row, col))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn size(&self) -> f32 {
         match self.placement {
             HostedPlacement::Dock { width, .. } => width,
@@ -568,6 +592,7 @@ impl TerminalView {
             _focus_events: [on_focus, on_blur],
             origin: None,
             pressed: None,
+            definition_pointer: None,
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
         };
@@ -583,6 +608,34 @@ impl TerminalView {
         self.size = None;
         cx.notify();
         Ok(())
+    }
+
+    pub(super) fn update_definition_modifiers(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let ids: Vec<_> = self.surfaces.iter().map(|surface| surface.id).collect();
+        for id in ids {
+            self.update_definition_pointer(
+                id,
+                window.mouse_position(),
+                window.modifiers().platform,
+                cx,
+            );
+        }
+    }
+
+    fn update_definition_pointer(
+        &mut self,
+        id: SurfaceId,
+        position: gpui::Point<Pixels>,
+        platform: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
+            let pointer = Some((position, platform));
+            if surface.definition_pointer != pointer {
+                surface.definition_pointer = pointer;
+                cx.notify();
+            }
+        }
     }
 
     /// Reports the pointer on a grid Surface, in cells. Nothing is sent for
@@ -746,6 +799,31 @@ impl TerminalView {
     pub(crate) fn refuse_on(&mut self, id: SurfaceId, refusal: &Refusal) {
         if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
             surface.connection.send(&event_refused(&refusal.reason()));
+        }
+    }
+
+    pub(super) fn native_tab_action(
+        &mut self,
+        id: SurfaceId,
+        revision: u64,
+        tab: &str,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_surface_input(id, window, cx) {
+            return;
+        }
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let Body::Grid { grid, .. } = &surface.body else {
+            return;
+        };
+        if let Some(event) = grid.tabs.action(revision, tab, action) {
+            window.focus(&surface.focus);
+            surface.connection.send(&event);
+            cx.notify();
         }
     }
 
@@ -1110,12 +1188,27 @@ impl TerminalView {
         cx: &mut Context<Self>,
         fills: bool,
     ) -> AnyElement {
+        let tab_height = match &surface.body {
+            Body::Grid { grid, .. } => grid.tabs.visible_height(),
+            Body::Elements(_) | Body::List { .. } => 0.0,
+        };
+        let grid_size = Size {
+            width: size.width,
+            height: px((f32::from(size.height) - tab_height).max(0.0)),
+        };
+        let grid_slack = match &surface.body {
+            Body::Grid { grid, .. } if fills => (f32::from(grid_size.height)
+                - f32::from(grid.rows()) * f32::from(metrics.cells.height()))
+            .max(0.0),
+            Body::Grid { .. } | Body::Elements(_) | Body::List { .. } => 0.0,
+        };
+        let grid_top = tab_height + grid_slack;
         let told = (
             f32::from(size.width).round() as u32,
-            f32::from(size.height).round() as u32,
+            f32::from(grid_size.height).round() as u32,
         );
         let cells = matches!(surface.body, Body::Grid { .. })
-            .then(|| crate::surface::render::cells_that_fit(size, metrics));
+            .then(|| crate::surface::render::cells_that_fit(grid_size, metrics));
         let told = (told.0, told.1, cells);
         if surface.told != Some(told) {
             let event = match cells {
@@ -1133,8 +1226,62 @@ impl TerminalView {
                 elements.start_decodes(cx);
                 body
             }
-            Body::Grid { grid, shapes, .. } => {
-                crate::surface::render::render_grid(grid, highlights, metrics, shapes)
+            Body::Grid {
+                grid, shapes, tabs, ..
+            } => {
+                let bar = tabs.render(&grid.tabs, surface.id, f32::from(size.width), cx);
+                let cells = crate::surface::render::render_grid(grid, highlights, metrics, shapes);
+                let labels: Vec<_> = grid
+                    .ui_labels()
+                    .map(|(row, label)| {
+                        let foreground = match label.style.foreground {
+                            sprite_term::SnapshotColor::Rgb(color) => color,
+                            sprite_term::SnapshotColor::Default
+                            | sprite_term::SnapshotColor::Palette(_) => metrics.defaults.0,
+                        };
+                        div()
+                            .absolute()
+                            .left(metrics.cells.width() * f32::from(label.column))
+                            .top(px(grid_slack) + metrics.cells.height() * row as f32)
+                            .w(metrics.cells.width() * f32::from(label.columns))
+                            .h(metrics.cells.height())
+                            .overflow_hidden()
+                            .font_family(".SystemUIFont")
+                            .text_size(px(14.0))
+                            .line_height(metrics.cells.height())
+                            .font_weight(if label.style.bold {
+                                gpui::FontWeight::BOLD
+                            } else {
+                                gpui::FontWeight::NORMAL
+                            })
+                            .text_color(rgb(crate::grid_paint::pack(foreground)))
+                            .child(SharedString::from(label.text.clone()))
+                    })
+                    .collect();
+                let container = if fills {
+                    div().size_full()
+                } else {
+                    div()
+                        .w(px(f32::from(grid.cols()) * f32::from(metrics.cells.width())))
+                        .h(px(f32::from(grid.rows())
+                            * f32::from(metrics.cells.height())
+                            + tab_height))
+                };
+                container
+                    .flex()
+                    .flex_col()
+                    .child(bar)
+                    .child(
+                        div()
+                            .relative()
+                            .min_h_0()
+                            .flex_1()
+                            .pt(px(grid_slack))
+                            .overflow_hidden()
+                            .child(cells)
+                            .children(labels),
+                    )
+                    .into_any_element()
             }
             Body::List { view, .. } => {
                 let focused = focused == Some(&surface.focus);
@@ -1153,11 +1300,16 @@ impl TerminalView {
                 Some(
                     div()
                         .absolute()
-                        .top(px(f32::from(cursor.row) * f32::from(metrics.cells.height())))
+                        .top(px(
+                            grid_top + f32::from(cursor.row) * f32::from(metrics.cells.height())
+                        ))
                         .left(px(
                             f32::from(cursor.column) * f32::from(metrics.cells.width())
                         ))
                         .h(metrics.cells.height())
+                        .font_family(metrics.cells.family())
+                        .text_size(metrics.cells.font_size())
+                        .line_height(metrics.cells.height())
                         .bg(rgb(crate::grid_paint::pack(default_fg)))
                         .text_color(rgb(crate::grid_paint::pack(default_bg)))
                         .underline()
@@ -1180,7 +1332,8 @@ impl TerminalView {
                 move |bounds, _window, cx| {
                     entity_for_bounds.update(cx, |view, _cx| {
                         if let Some(surface) = view.surfaces.get_mut(|surface| surface.id == id) {
-                            surface.origin = Some(bounds.origin);
+                            surface.origin =
+                                Some(point(bounds.origin.x, bounds.origin.y + px(grid_top)));
                         }
                     });
                 }
@@ -1188,7 +1341,16 @@ impl TerminalView {
             move |bounds, (), window, cx| {
                 window.handle_input(
                     &focus_for_input,
-                    ElementInputHandler::new(bounds, entity_for_input),
+                    ElementInputHandler::new(
+                        gpui::Bounds {
+                            origin: point(bounds.origin.x, bounds.origin.y + px(grid_top)),
+                            size: Size {
+                                width: grid_size.width,
+                                height: px((f32::from(grid_size.height) - grid_slack).max(0.0)),
+                            },
+                        },
+                        entity_for_input,
+                    ),
                     cx,
                 );
             },
@@ -1208,7 +1370,13 @@ impl TerminalView {
         if let Body::Grid { root, .. } = &surface.body {
             wrapper = crate::surface::render::apply_described_style(wrapper, root, registry);
         }
+        let definition_pointer = surface.definition_pointer_active(metrics);
         wrapper
+            .cursor(if definition_pointer {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
             .overflow_hidden()
             .track_focus(&surface.focus)
             .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
@@ -1322,6 +1490,12 @@ impl TerminalView {
             // underneath exactly as it did before Surfaces heard the mouse.
             .on_mouse_move(
                 cx.listener(move |view, event: &MouseMoveEvent, window, cx| {
+                    view.update_definition_pointer(
+                        id,
+                        event.position,
+                        event.modifiers.platform,
+                        cx,
+                    );
                     if !view.accept_surface_input(id, window, cx) {
                         cx.stop_propagation();
                         return;
@@ -2033,6 +2207,203 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_tabs_reserve_space_route_clicks_and_hide(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(990);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        draw_test_window(cx);
+        let baseline = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            (surface.origin.unwrap(), surface.told.unwrap())
+        });
+        events(&mut peer);
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops: crate::surface::grid::parse_ops(
+            &serde_json::json!({"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"},{"id":"b","label":"beta.rs","modified":true}]})).unwrap() });
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let (cols, rows) = host.read_with(cx, |host, _| {
+            host.surfaces
+                .fill
+                .as_ref()
+                .unwrap()
+                .told
+                .unwrap()
+                .2
+                .unwrap()
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![crate::surface::grid::Op::Resize { cols, rows }],
+            },
+        );
+        draw_test_window(cx);
+        let (origin, told, first, second) = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let Body::Grid { tabs, .. } = &surface.body else {
+                panic!("grid")
+            };
+            (
+                surface.origin.unwrap(),
+                surface.told.unwrap(),
+                tabs.item_bounds(0),
+                tabs.item_bounds(1),
+            )
+        });
+        let drawn_height = host.read_with(cx, |host, _| {
+            let Body::Grid { grid, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            f32::from(grid.rows()) * f32::from(host.metrics.height())
+        });
+        assert_eq!(
+            origin.y + px(drawn_height),
+            px(baseline.1.1 as f32),
+            "native editor grid must touch the bottom of its allocation"
+        );
+        assert_eq!(told.1, baseline.1.1 - 35);
+        assert!(told.2.unwrap().1 < baseline.1.2.unwrap().1);
+        events(&mut peer);
+        let select = point(second.left() + px(35.0), second.top() + px(17.0));
+        cx.simulate_mouse_down(select, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(select, MouseButton::Left, Default::default());
+        let actions = events(&mut peer);
+        assert!(
+            actions
+                .iter()
+                .any(|e| e["type"] == "tab_action" && e["id"] == "b" && e["action"] == "select"),
+            "{actions:?}"
+        );
+        assert!(!actions.iter().any(|e| e["type"] == "mouse"), "{actions:?}");
+        let close = point(first.right() - px(20.0), first.top() + px(17.0));
+        cx.simulate_mouse_down(close, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(close, MouseButton::Left, Default::default());
+        let actions = events(&mut peer);
+        assert_eq!(
+            actions.iter().filter(|e| e["type"] == "tab_action").count(),
+            1,
+            "{actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|e| e["id"] == "a" && e["action"] == "close"),
+            "{actions:?}"
+        );
+        assert!(!actions.iter().any(|e| e["type"] == "mouse"));
+        let on_grid = point(origin.x + px(3.0), origin.y + px(3.0));
+        cx.simulate_mouse_down(on_grid, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(select, MouseButton::Left, Default::default());
+        let gesture = events(&mut peer);
+        assert!(
+            gesture
+                .iter()
+                .any(|e| e["type"] == "mouse" && e["action"] == "press"),
+            "{gesture:?}"
+        );
+        assert!(
+            gesture
+                .iter()
+                .any(|e| e["type"] == "mouse" && e["action"] == "release"),
+            "{gesture:?}"
+        );
+        assert!(!gesture.iter().any(|e| e["type"] == "tab_action"));
+        host.read_with(cx, |host, _| {
+            assert!(host.surfaces.fill.as_ref().unwrap().pressed.is_none())
+        });
+        host.update_in(cx, |host, window, cx| {
+            host.native_tab_action(id, 0, "a", "select", window, cx);
+            host.report_grid_mouse(
+                id,
+                point(origin.x + px(1.0), origin.y + px(1.0)),
+                "left",
+                "press",
+                &Default::default(),
+            );
+        });
+        let actions = events(&mut peer);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0]["row"], 0);
+        assert_eq!(actions[0]["col"], 0);
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops: crate::surface::grid::parse_ops(
+            &serde_json::json!({"type":"tabs","revision":2,"active":"b39","items":(0..40).map(|n| serde_json::json!({"id":format!("b{n}"),"label":format!("file-{n}.rs")})).collect::<Vec<_>>()})).unwrap() });
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let (viewport, offset) = host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            let last = tabs.item_bounds(39);
+            let viewport = tabs.viewport();
+            assert!(
+                last.left() >= viewport.left() && last.right() <= viewport.right(),
+                "{last:?} outside {viewport:?}"
+            );
+            assert!(tabs.offset().x < px(0.0));
+            (viewport, tabs.offset())
+        });
+        events(&mut peer);
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(viewport.left() + px(40.0), viewport.top() + px(15.0)),
+            delta: gpui::ScrollDelta::Pixels(point(px(100.0), px(0.0))),
+            ..Default::default()
+        });
+        draw_test_window(cx);
+        host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert!(
+                tabs.offset().x > offset.x,
+                "wheel must scroll tabs horizontally"
+            );
+        });
+        assert!(!events(&mut peer).iter().any(|e| e["type"] == "mouse"));
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(
+                    &serde_json::json!({"type":"tabs","revision":3,"active":null,"items":[]}),
+                )
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let Body::Grid { grid, .. } = &surface.body else {
+                panic!("grid")
+            };
+            assert_eq!(
+                surface.origin.unwrap().y + host.metrics.height() * f32::from(grid.rows()),
+                px(baseline.1.1 as f32),
+                "hidden tabs must keep the status line at the bottom"
+            );
+            assert_eq!(surface.told.unwrap(), baseline.1);
+        });
+    }
+
+    #[gpui::test]
     fn native_commits_and_key_fallback_follow_surface_focus(cx: &mut gpui::TestAppContext) {
         native_surface_trace(
             cx,
@@ -2145,6 +2516,212 @@ mod tests {
         );
         cx.update(|window, _| window.remove_window());
         drop(host);
+    }
+
+    #[gpui::test]
+    fn surface_font_geometry_drives_resize_click_wheel_and_ime(cx: &mut gpui::TestAppContext) {
+        use gpui::{Bounds, EntityInputHandler};
+        let mut settings = crate::config::Settings::parse_candidate(
+            "[font]\nsize = 12\n[surface_font]\nsize = 24\nline_height = 1.5\n",
+        )
+        .unwrap()
+        .0;
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let mut host = TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx);
+            host.apply_settings(&settings, window, cx);
+            host
+        });
+        let id = SurfaceId(993);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(id), window, cx).unwrap();
+            host.grid_operations(id, crate::surface::grid::parse_ops(&serde_json::json!({
+                "type":"batch", "ops":[
+                    {"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"}]},
+                    {"type":"cursor","row":2,"col":3}
+                ]
+            })).unwrap(), cx);
+        });
+        draw_test_window(cx);
+        let (cols, rows) = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let (width, height, cells) = surface.told.unwrap();
+            let cells = cells.unwrap();
+            assert_eq!(
+                cells.0,
+                (width as f32 / f32::from(host.grid_metrics().cells.width())).floor() as u16
+            );
+            assert_eq!(cells.1, (height as f32 / 36.0).floor() as u16);
+            assert_eq!(host.terminal_grid_metrics().cells.font_size(), px(12.0));
+            cells
+        });
+        host.update(cx, |host, cx| {
+            host.grid_operations(id, vec![Op::Resize { cols, rows }], cx);
+        });
+        draw_test_window(cx);
+        events(&mut peer);
+        let position = host.update_in(cx, |host, window, cx| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let origin = surface.origin.unwrap();
+            let cells = host.grid_metrics().cells;
+            assert!(
+                origin.y >= px(35.0),
+                "tabs and alignment slack precede grid content"
+            );
+            let expected = Bounds {
+                origin: origin + point(cells.width() * 3.0, cells.height() * 2.0),
+                size: gpui::size(cells.width(), cells.height()),
+            };
+            let bounds = host
+                .bounds_for_range(
+                    0..0,
+                    Bounds {
+                        origin,
+                        size: gpui::size(px(1000.0), px(1000.0)),
+                    },
+                    window,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(bounds, expected);
+            origin + point(cells.width() * 3.5, cells.height() * 2.5)
+        });
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+            ..Default::default()
+        });
+        let mouse: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|event| event["type"] == "mouse")
+            .collect();
+        assert_eq!(mouse.len(), 3, "{mouse:?}");
+        for event in &mouse {
+            assert_eq!(event["row"], 2);
+            assert_eq!(event["col"], 3);
+        }
+        assert_eq!(mouse[2]["button"], "wheel");
+        assert_eq!(mouse[2]["action"], "up");
+        let terminal_size = host.read_with(cx, |host, _| host.size);
+        settings.surface_font.as_mut().unwrap().size = crate::config::FontSize::new(30.0);
+        host.update_in(cx, |host, window, cx| {
+            host.apply_settings(&settings, window, cx)
+        });
+        draw_test_window(cx);
+        let resized: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|event| event["type"] == "resize")
+            .collect();
+        assert_eq!(resized.len(), 1, "{resized:?}");
+        assert!(resized[0]["rows"].as_u64().unwrap() < u64::from(rows));
+        assert_eq!(host.read_with(cx, |host, _| host.size), terminal_size);
+        cx.update(|window, _| window.remove_window());
+    }
+
+    #[gpui::test]
+    fn definition_pointer_tracks_stationary_modifiers_outside_grid_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            SurfaceId(987),
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        let mut dock = open_description(
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"Explorer"}}),
+        );
+        dock.placement = Placement::Dock {
+            side: Side::Left,
+            size: Default::default(),
+            ownership: Ownership::Unowned,
+        };
+        dock.focus = true;
+        let (answer, _dock_peer) = open_request(&host, cx, SurfaceId(988), dock);
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(SurfaceId(988)), window, cx)
+                .unwrap();
+            host.grid_operations(
+                SurfaceId(987),
+                crate::surface::grid::parse_ops(&serde_json::json!({
+                "type":"batch", "ops":[
+                    {"type":"highlights","define":{"1":{"definition":true}}},
+                    {"type":"rows","rows":[{"row":0,"cells":[["f",1]]}]}
+                ]}))
+                .unwrap(),
+                cx,
+            );
+        });
+        draw_test_window(cx);
+        let position = host.read_with(cx, |host, _| {
+            host.surfaces.fill.as_ref().unwrap().origin.unwrap() + gpui::point(px(1.0), px(1.0))
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position,
+            ..Default::default()
+        });
+        cx.simulate_modifiers_change(gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        });
+        assert!(host.read_with(cx, |host, _| {
+            host.surfaces
+                .fill
+                .as_ref()
+                .unwrap()
+                .definition_pointer_active(&host.grid_metrics())
+        }));
+        cx.simulate_modifiers_change(gpui::Modifiers::default());
+        assert!(!host.read_with(cx, |host, _| {
+            host.surfaces
+                .fill
+                .as_ref()
+                .unwrap()
+                .definition_pointer_active(&host.grid_metrics())
+        }));
+        host.update(cx, |host, _| {
+            let metrics = host.grid_metrics();
+            let surface = host.surfaces.fill.as_mut().unwrap();
+            let origin = surface.origin.unwrap();
+            surface.definition_pointer = Some((origin - gpui::point(px(0.0), px(1.0)), true));
+            assert!(
+                !surface.definition_pointer_active(&metrics),
+                "top slack is not a symbol"
+            );
+        });
+        cx.update(|window, _| window.remove_window());
     }
 
     #[gpui::test]

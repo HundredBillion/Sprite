@@ -1,5 +1,6 @@
 use super::*;
 use crate::pty_unix::GroupSignal;
+use std::ffi::OsStr;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 /// The bounded shutdown policy, measured from the moment shutdown is actually
@@ -21,6 +22,55 @@ const _: () = assert!(KILL_AFTER.as_millis() < GIVE_UP_AFTER.as_millis());
 /// Short enough that escalation deadlines are re-checked promptly even under
 /// continuous output.
 const CLOSING_SLICE: Duration = Duration::from_millis(50);
+
+fn shutdown_trace_enabled(value: Option<&OsStr>) -> bool {
+    value.is_some()
+}
+
+fn shutdown_trace_line(
+    phase: &str,
+    elapsed: Duration,
+    session: Option<i32>,
+    process_group: Option<i32>,
+) -> String {
+    format!(
+        "shutdown phase={phase} elapsed_ms={} session={session:?} process_group={process_group:?}",
+        elapsed.as_millis()
+    )
+}
+
+struct ShutdownTrace {
+    enabled: bool,
+    started: Instant,
+    session: Option<i32>,
+    process_group: Option<i32>,
+}
+
+impl ShutdownTrace {
+    fn new(started: Instant, session: Option<i32>, process_group: Option<i32>) -> Self {
+        let setting = std::env::var_os("SPRITE_TRACE_SHUTDOWN");
+        Self {
+            enabled: shutdown_trace_enabled(setting.as_deref()),
+            started,
+            session,
+            process_group,
+        }
+    }
+
+    fn emit(&self, phase: &str) {
+        if self.enabled {
+            eprintln!(
+                "{}",
+                shutdown_trace_line(
+                    phase,
+                    self.started.elapsed(),
+                    self.session,
+                    self.process_group,
+                )
+            );
+        }
+    }
+}
 
 /// The next signal escalation owes. It advances only once a signal was
 /// actually attempted against every member a complete scan found: a scan that
@@ -97,7 +147,7 @@ fn close_with_signal_since(
             Started {
                 master,
                 master_fd: _,
-                process_group: _,
+                process_group,
                 mut processes,
                 waiter,
             },
@@ -124,6 +174,11 @@ fn close_with_signal_since(
     // Set the first time the flag is observed, so every escalation deadline is
     // relative to the request rather than to the child's exit.
     let mut requested_at: Option<Instant> = None;
+    let mut logged_pending_worker = false;
+    let session = processes
+        .as_ref()
+        .map(pty_unix::SessionProcesses::session_id);
+    let trace = ShutdownTrace::new(closing_started, session, process_group);
 
     loop {
         // Read the flag every pass: a session may be told to shut down after
@@ -131,11 +186,20 @@ fn close_with_signal_since(
         let requested = shutdown.load(Ordering::SeqCst);
         if requested && requested_at.is_none() {
             requested_at = Some(Instant::now());
+            trace.emit("request_observed");
         }
 
         // Checked before every receive, so continuous output cannot postpone
         // escalation past its deadline.
         if let Some(processes) = &mut processes {
+            let due = escalation.due(requested_at.map(|since| since.elapsed()));
+            if let Some(signal) = due {
+                trace.emit(match signal {
+                    GroupSignal::Hangup => "hup_attempt",
+                    GroupSignal::Terminate => "term_attempt",
+                    GroupSignal::Kill => "kill_attempt",
+                });
+            }
             escalation = escalate(
                 processes,
                 escalation,
@@ -149,9 +213,12 @@ fn close_with_signal_since(
         // Natural exit retries an incomplete HUP before publishing its outcome.
         // Explicit shutdown also waits for owned jobs to exit.
         let jobs_gone = if requested {
-            processes
-                .as_mut()
-                .is_none_or(|processes| !processes.is_alive())
+            if let Some(processes) = processes.as_mut() {
+                trace.emit("process_scope_scan");
+                !processes.is_alive()
+            } else {
+                true
+            }
         } else {
             !hangup_pending
         };
@@ -162,12 +229,25 @@ fn close_with_signal_since(
             None => closing_started.elapsed() >= GIVE_UP_AFTER,
         };
         if (settled && jobs_gone) || exhausted {
+            trace.emit(if exhausted {
+                "give_up"
+            } else {
+                "worker_settled"
+            });
             break;
+        }
+        if jobs_gone && !settled && !logged_pending_worker {
+            trace.emit("worker_pending_settlement");
+            logged_pending_worker = true;
         }
 
         match inbox.recv_timeout(CLOSING_SLICE) {
-            Ok(Message::ChildExited(status)) => exit_status = Some(status),
+            Ok(Message::ChildExited(status)) => {
+                trace.emit("child_exit_observed");
+                exit_status = Some(status);
+            }
             Ok(Message::PumpStopped(outcome)) => {
+                trace.emit("pump_stopped_observed");
                 if let Some(error) = pump_failure(outcome) {
                     fatal.get_or_insert(error);
                 }
@@ -267,11 +347,26 @@ fn finish_shutdown_with(
     mut signal_processes: impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
     mut is_alive: impl FnMut(&mut pty_unix::SessionProcesses) -> bool,
 ) {
+    let session = Some(processes.session_id());
+    let trace = ShutdownTrace::new(requested_at, session, session);
+    trace.emit("ordinary_job_cleanup_started");
     // Natural close may have retained an incomplete hangup attempt.
     // SessionProcesses remembers reached groups, so retrying skips them.
     let mut escalation = Escalation::Hangup;
-    while is_alive(&mut processes) {
+    let mut cleanup_result = "scope_empty";
+    loop {
+        trace.emit("process_scope_scan");
+        if !is_alive(&mut processes) {
+            break;
+        }
         let waited = requested_at.elapsed();
+        if let Some(signal) = escalation.due(Some(waited)) {
+            trace.emit(match signal {
+                GroupSignal::Hangup => "hup_attempt",
+                GroupSignal::Terminate => "term_attempt",
+                GroupSignal::Kill => "kill_attempt",
+            });
+        }
         escalation = escalate(
             &mut processes,
             escalation,
@@ -279,10 +374,13 @@ fn finish_shutdown_with(
             &mut signal_processes,
         );
         if waited >= GIVE_UP_AFTER {
+            trace.emit("give_up");
+            cleanup_result = "give_up_with_members_or_incomplete_scan";
             break;
         }
         std::thread::sleep(CLOSING_SLICE.min(GIVE_UP_AFTER.saturating_sub(waited)));
     }
+    trace.emit(&format!("ordinary_job_cleanup_result={cleanup_result}"));
 }
 
 /// Reports one cause, never two: a signalled child has no exit code.
@@ -304,6 +402,23 @@ fn child_exit(status: &ExitStatus, requested: bool) -> ChildExit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_trace_is_opt_in_and_names_elapsed_time_and_process_scope() {
+        use std::ffi::OsStr;
+
+        assert!(!shutdown_trace_enabled(None));
+        assert!(shutdown_trace_enabled(Some(OsStr::new("1"))));
+        assert_eq!(
+            shutdown_trace_line(
+                "term_attempt",
+                Duration::from_millis(1234),
+                Some(42),
+                Some(43)
+            ),
+            "shutdown phase=term_attempt elapsed_ms=1234 session=Some(42) process_group=Some(43)"
+        );
+    }
 
     #[test]
     fn escalation_fits_inside_the_give_up_budget() {
