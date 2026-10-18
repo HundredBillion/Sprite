@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "source_commit": "fa0131aba995b3ced1c07fb304d0bc43d7b1c28f",
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.15.0",
+  "samples": 30,
+  "profile": "caller-built; see recorded release build commands",
+  "runs": [
+    {
+      "binary": "/Users/davidlee/Projects/Sprite/.worktrees/ai-native-workflows/target/release/sprite-term-bench",
+      "sha256": "d2076b0cd4d1277204751a7988240628e19a2644233694258ac70753e6482c7e",
+      "command": [
+        "/Users/davidlee/Projects/Sprite/.worktrees/ai-native-workflows/target/release/sprite-term-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/private/tmp/sprite-workflow-baseline-native-run-2/sprite-term-bench.json"
+      ],
+      "report": "sprite-term-bench.json",
+      "captured_at": "2026-10-18T20:33:18.457876+00:00"
+    },
+    {
+      "binary": "/Users/davidlee/Projects/Sprite/.worktrees/ai-native-workflows/target/release/sprite-observation-bench",
+      "sha256": "bd07f1cb8091a5993af2c20cb5ee08649ccdef093ab5e35dbea34c1c5d99cb8f",
+      "command": [
+        "/Users/davidlee/Projects/Sprite/.worktrees/ai-native-workflows/target/release/sprite-observation-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/private/tmp/sprite-workflow-baseline-native-run-2/sprite-observation-bench.json"
+      ],
+      "report": "sprite-observation-bench.json",
+      "captured_at": "2026-10-18T20:33:21.645077+00:00"
+    },
+    {
+      "binary": "/Users/davidlee/Projects/Sprite/.worktrees/ai-native-workflows/target/release/sprite-paint-bench",
+      "sha256": "eebcc61bb774ac182ebc3b079377b9bcf9232fc77cf06a8f5ee1bd176cc3a42b",
+      "command": [
+        "/Users/davidlee/Projects/Sprite/.worktrees/ai-native-workflows/target/release/sprite-paint-bench",
+        "--samples",
+        "30",
+        "--output",
+        "/private/tmp/sprite-workflow-baseline-native-run-2/sprite-paint-bench.json"
+      ],
+      "report": "sprite-paint-bench.json",
+      "captured_at": "2026-10-18T20:33:21.840646+00:00"
+    }
+  ],
+  "status": "component-capture-complete",
+  "unmeasured": [
+    "native GPU presentation",
+    "live IPC round trip",
+    "eight live pane CPU/RAM",
+    "energy",
+    "model-backed task time/tokens"
+  ]
+}

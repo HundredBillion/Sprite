@@ -1,0 +1,18 @@
+{
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.5.2\nBuildVersion:\t\t25F84",
+  "cpu": "Apple M5 Pro",
+  "memory_bytes": "68719476736",
+  "logical_cpus": "18",
+  "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "zig": "0.17.0",
+  "ghostty_commit": "92fb5d0b67b762211728975865d00eb2503df6da",
+  "source_commit": "fa0131aba995b3ced1c07fb304d0bc43d7b1c28f",
+  "load_during_build": "16:31  up 3 days,  1:32, 1 user, load averages: 12.77 6.68 5.05",
+  "display": "Apple M5 Pro / built-in Color LCD online, 3024x1964 Retina (system_profiler SPDisplaysDataType)",
+  "live_workload": "Not executed: inherited observation credentials present, but no dedicated controlled 1/4/8-pane window with verified geometry/source identity established.",
+  "load_run_1_before": "16:32  up 3 days,  1:33, 1 user, load averages: 14.55 9.19 6.19",
+  "load_run_1_after": "16:33  up 3 days,  1:33, 1 user, load averages: 11.92 8.87 6.13",
+  "load_run_2_before": "16:33  up 3 days,  1:33, 1 user, load averages: 11.92 8.87 6.13",
+  "load_run_2_after": "16:33  up 3 days,  1:33, 1 user, load averages: 10.84 8.74 6.11"
+}
