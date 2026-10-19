@@ -9,12 +9,7 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollWheelEvent, ShapedLine, SharedString, Size,
     TextRun, Window, canvas, div, fill, outline, point, px, rgb,
 };
-use std::{
-    cell::RefCell,
-    collections::{HashMap, VecDeque},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 const LINE_HEIGHT: f32 = 3.0;
 const FONT_SIZE: f32 = 2.5;
@@ -110,16 +105,18 @@ struct Interaction {
     scheduled: bool,
     wheel: crate::grid::ScrollAccumulator,
     scroll_top: Option<usize>,
-    scroll_acks: VecDeque<usize>,
+    next_action_id: u64,
+    sent_action_id: u64,
+    acked_action_id: u64,
     observed_top: usize,
     observed_revision: Option<u64>,
     hover: Option<(usize, String)>,
 }
-const MAX_SCROLL_ACKS: usize = 64;
 impl Interaction {
     fn reset_scroll_tracking(&mut self) {
         self.scroll_top = None;
-        self.scroll_acks.clear();
+        self.sent_action_id = self.next_action_id;
+        self.acked_action_id = self.next_action_id;
         self.wheel.reset();
     }
     fn scroll_rows(&mut self, rows: i32, total: usize, visible: usize, authoritative: usize) {
@@ -132,39 +129,57 @@ impl Interaction {
         self.pending = Some(Navigation::Scroll(top));
     }
     fn take_navigation(&mut self) -> Option<Navigation> {
-        if let Some(Navigation::Scroll(top)) = self.pending {
-            if self.scroll_acks.back() == Some(&top) {
-                self.pending = None;
-                return None;
-            }
-            if self.scroll_acks.len() == MAX_SCROLL_ACKS {
-                return None;
-            }
+        let action = self.pending.take();
+        if let Some(Navigation::Scroll(top)) = action {
             self.scroll_top = Some(top);
-            self.scroll_acks.push_back(top);
         }
-        self.pending.take()
+        action
     }
-    fn observe_scroll(&mut self, top: usize, revision: Option<u64>) -> bool {
+    fn sent(&mut self) -> Option<u64> {
+        self.next_action_id = self
+            .next_action_id
+            .checked_add(1)
+            .filter(|id| *id <= 9_007_199_254_740_991)?;
+        self.sent_action_id = self.next_action_id;
+        Some(self.next_action_id)
+    }
+    fn observe_scroll(
+        &mut self,
+        top: usize,
+        revision: Option<u64>,
+        ack: Option<u64>,
+        negotiated: bool,
+    ) {
         if self.observed_revision == revision {
-            return false;
+            return;
         }
         self.observed_revision = revision;
-        if let Some(index) = self.scroll_acks.iter().position(|sent| *sent == top) {
-            // States can coalesce repeated targets; consume the oldest match without dropping newer intent.
-            self.scroll_acks.drain(..=index);
-            if self.scroll_acks.is_empty() && !matches!(self.pending, Some(Navigation::Scroll(_))) {
-                self.scroll_top = None;
+        let outstanding = self.sent_action_id > self.acked_action_id;
+        let mut authoritative = false;
+        if negotiated {
+            if let Some(ack) =
+                ack.filter(|id| *id > self.acked_action_id && *id <= self.sent_action_id)
+            {
+                self.acked_action_id = ack;
+                if ack == self.sent_action_id
+                    && self.scroll_top == Some(top)
+                    && self.pending.is_none()
+                {
+                    self.scroll_top = None;
+                }
+            } else if !outstanding && top != self.observed_top {
+                authoritative = true;
             }
         } else if top != self.observed_top {
+            authoritative = true;
+        }
+        if authoritative {
             self.reset_scroll_tracking();
             if matches!(self.pending, Some(Navigation::Scroll(_))) {
                 self.pending = None;
-                self.scheduled = false;
             }
         }
         self.observed_top = top;
-        self.pending.is_some() && !self.scheduled && self.scroll_acks.len() < MAX_SCROLL_ACKS
     }
 }
 #[derive(Default)]
@@ -259,7 +274,7 @@ impl NativeMinimap {
             f32::from(size.height),
         );
         let current = identity(document);
-        let resume_scroll = {
+        {
             let mut input = self.interaction.borrow_mut();
             if input.identity.as_ref() != Some(&current) || model.is_staging() {
                 input.press = None;
@@ -271,18 +286,13 @@ impl NativeMinimap {
             }
             input.identity = Some(current.clone());
             input.geometry = Some(geometry);
-            let resume = input.observe_scroll(viewport[0], state_revision);
-            if resume {
-                input.scheduled = true;
-            }
-            resume
+            input.observe_scroll(
+                viewport[0],
+                state_revision,
+                state.and_then(|s| s.action_id()),
+                document.action_ack(),
+            );
         };
-        if resume_scroll {
-            let view = cx.entity().downgrade();
-            cx.defer(move |cx| {
-                view.update(cx, |view, _| view.flush_minimap(surface)).ok();
-            });
-        }
         let rows: Vec<_> =
             document.rows()[geometry.offset..geometry.offset + geometry.rows].to_vec();
         let palette = document.palette().to_vec();
@@ -667,7 +677,12 @@ impl TerminalView {
             return;
         }
         input.scheduled = true;
+        drop(input);
+        self.flush_minimap(id);
         cx.on_next_frame(window, move |view, _, _| {
+            if let Some((input, _)) = view.minimap_input(id) {
+                input.borrow_mut().scheduled = false;
+            }
             view.flush_minimap(id);
         });
     }
@@ -676,7 +691,6 @@ impl TerminalView {
             return;
         };
         let mut input = input.borrow_mut();
-        input.scheduled = false;
         let Some(action) = input.take_navigation() else {
             return;
         };
@@ -695,6 +709,12 @@ impl TerminalView {
             .state()
             .map_or(document.revision(), |s| s.revision());
         let mut event = serde_json::json!({"type":"minimap_action","revision":revision,"target":document.target(),"generation":document.generation()});
+        if document.action_ack() {
+            let Some(action_id) = input.sent() else {
+                return;
+            };
+            event["action_id"] = action_id.into();
+        }
         match action {
             Navigation::Reveal(line) => {
                 event["action"] = "reveal".into();
@@ -713,7 +733,9 @@ impl TerminalView {
         if let Some((input, _)) = self.minimap_input(id) {
             input.borrow_mut().reset_scroll_tracking();
             self.flush_minimap(id);
-            input.borrow_mut().reset_scroll_tracking();
+            let mut input = input.borrow_mut();
+            input.reset_scroll_tracking();
+            input.scheduled = false;
         }
     }
     fn minimap_wheel(
@@ -841,68 +863,75 @@ mod tests {
     fn native_minimap_wheel_retains_intent_across_flushes_and_old_acks() {
         let mut input = Interaction::default();
         input.observed_top = 10;
-        input.observed_revision = Some(1);
         for expected in [12, 14] {
             input.scroll_rows(2, 100, 10, 10);
             assert_eq!(input.take_navigation(), Some(Navigation::Scroll(expected)));
+            input.sent();
         }
-        input.observe_scroll(12, Some(2));
+        input.observe_scroll(12, Some(2), Some(1), true);
         input.scroll_rows(2, 100, 10, 12);
         assert_eq!(input.take_navigation(), Some(Navigation::Scroll(16)));
-        input.observe_scroll(14, Some(3));
+        input.sent();
+        input.observe_scroll(14, Some(3), Some(2), true);
         assert_eq!(input.scroll_top, Some(16));
-        input.observe_scroll(16, Some(4));
+        input.observe_scroll(16, Some(4), Some(3), true);
         assert_eq!(input.scroll_top, None);
         input.scroll_rows(-1000, 100, 10, 16);
         assert_eq!(input.take_navigation(), Some(Navigation::Scroll(1)));
+        input.sent();
         input.scroll_rows(1000, 100, 10, 16);
         assert_eq!(input.take_navigation(), Some(Navigation::Scroll(91)));
-        input.observe_scroll(50, Some(5));
-        assert!(input.scroll_acks.is_empty());
-        assert!(input.pending.is_none());
+        input.sent();
+        input.reset_scroll_tracking();
+        input.observe_scroll(50, Some(5), Some(3), true);
         input.scroll_rows(2, 100, 10, 50);
         assert_eq!(input.take_navigation(), Some(Navigation::Scroll(52)));
     }
     #[test]
-    fn native_minimap_reversed_duplicate_ack_and_bounded_resume() {
+    fn native_minimap_folded_same_top_ack_has_no_queue_or_stall() {
         let mut input = Interaction::default();
         input.observed_top = 10;
-        input.observed_revision = Some(1);
-        for rows in [2, 2, -2] {
-            input.scroll_rows(rows, 1000, 10, 10);
-            input.take_navigation();
-        }
-        input.observe_scroll(12, Some(2));
-        assert_eq!(
-            input.scroll_acks.iter().copied().collect::<Vec<_>>(),
-            [14, 12]
-        );
-        assert_eq!(input.scroll_top, Some(12));
-        input.reset_scroll_tracking();
-        input.observed_top = 1;
-        input.observed_revision = Some(3);
-        for _ in 0..MAX_SCROLL_ACKS {
-            input.scroll_rows(1, 1000, 10, 1);
+        for id in 1..=128 {
+            input.scroll_rows(2, 1000, 10, 10);
             assert!(input.take_navigation().is_some());
+            assert_eq!(input.sent(), Some(id));
+            input.observe_scroll(10, Some(id), Some(id), true);
+            assert_eq!(input.acked_action_id, id);
         }
-        input.scroll_rows(5, 1000, 10, 1);
-        assert!(input.take_navigation().is_none());
-        assert_eq!(input.scroll_acks.len(), MAX_SCROLL_ACKS);
-        assert!(
-            input.observe_scroll(2, Some(4)),
-            "ack must schedule retained navigation without a fresh wheel"
-        );
-        assert_eq!(
-            input.take_navigation(),
-            Some(Navigation::Scroll(MAX_SCROLL_ACKS + 6))
-        );
+        assert_eq!(input.scroll_top, Some(266));
+        input.scroll_rows(-2, 1000, 10, 10);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(264)));
+        let counter = input.next_action_id;
         let mut minimap = NativeMinimap::default();
         *minimap.interaction.borrow_mut() = input;
         minimap.cancel();
-        let input = minimap.interaction.borrow();
-        assert!(
-            input.scroll_top.is_none() && input.scroll_acks.is_empty() && input.pending.is_none()
-        );
+        let mut input = minimap.interaction.borrow_mut();
+        assert!(input.scroll_top.is_none());
+        assert_eq!(input.sent(), Some(counter + 1));
+    }
+    #[test]
+    fn native_minimap_reversal_acks_and_legacy_authoritative_navigation() {
+        let mut input = Interaction::default();
+        input.observed_top = 10;
+        for rows in [2, 2, -2] {
+            input.scroll_rows(rows, 1000, 10, 10);
+            input.take_navigation();
+            input.sent();
+        }
+        input.observe_scroll(12, Some(1), Some(1), true);
+        assert_eq!(input.scroll_top, Some(12));
+        assert_eq!(input.acked_action_id, 1);
+        input.observe_scroll(14, Some(2), Some(2), true);
+        assert_eq!(input.scroll_top, Some(12));
+        input.observe_scroll(12, Some(3), Some(3), true);
+        assert_eq!(input.scroll_top, None);
+        input.observe_scroll(40, Some(4), Some(3), true);
+        input.scroll_rows(2, 1000, 10, 40);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(42)));
+        input.scroll_rows(2, 1000, 10, 40);
+        input.observe_scroll(90, Some(5), None, false);
+        assert!(input.pending.is_none());
+        assert_eq!(input.scroll_top, None);
     }
 
     #[test]

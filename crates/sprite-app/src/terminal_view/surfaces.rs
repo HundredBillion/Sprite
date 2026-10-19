@@ -532,7 +532,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.accept_surface_input(id, window, cx) {
+        if !self.accept_surface_event_owner(id, window, cx) {
             return;
         }
         if let Some(surface) = self.surfaces.iter().find(|surface| surface.id == id) {
@@ -1547,7 +1547,7 @@ impl TerminalView {
                         event.modifiers.platform,
                         cx,
                     );
-                    if !view.accept_surface_input(id, window, cx) {
+                    if !view.accept_surface_event_owner(id, window, cx) {
                         cx.stop_propagation();
                         return;
                     }
@@ -1567,6 +1567,7 @@ impl TerminalView {
                             return;
                         }
                     };
+                    view.prepare_minimap_editor_input(id);
                     if view.report_grid_gesture(
                         id,
                         event.position,
@@ -3773,7 +3774,7 @@ mod tests {
             )
         };
         send(
-            serde_json::json!({"type":"minimap","kind":"begin","revision":1,"target":"long","generation":1,"base":null,"start":1,"delete":0,"insert":1000,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22"}),
+            serde_json::json!({"type":"minimap","kind":"begin","revision":1,"target":"long","generation":1,"base":null,"start":1,"delete":0,"insert":1000,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22","action_ack":true}),
             cx,
         );
         for (chunk, start) in (0..1000).step_by(250).enumerate() {
@@ -3834,21 +3835,23 @@ mod tests {
                 ..Default::default()
             });
         }
-        draw_test_window(cx);
-        assert!(
-            !events(&mut peer)
+        let first = events(&mut peer);
+        assert_eq!(
+            first
                 .iter()
-                .any(|e| e["type"] == "minimap_action")
+                .find(|e| e["type"] == "minimap_action")
+                .unwrap()["topline"],
+            12,
+            "first wheel flushes immediately"
         );
         host.update(cx, |h, _| h.flush_minimap(id));
         let wheel = events(&mut peer);
-        let wheel_actions: Vec<_> = wheel
+        let last = wheel
             .iter()
-            .filter(|e| e["type"] == "minimap_action")
-            .collect();
-        assert_eq!(wheel_actions.len(), 1, "{wheel:?}");
-        assert_eq!(wheel_actions[0]["topline"], 16);
-        assert!(!wheel.iter().any(|e| e["type"] == "mouse"));
+            .find(|e| e["type"] == "minimap_action")
+            .unwrap();
+        assert_eq!(last["topline"], 16);
+        let ack16 = last["action_id"].as_u64().unwrap();
         let wheel_step = |cx: &mut gpui::VisualTestContext| {
             cx.simulate_event(ScrollWheelEvent {
                 position: start,
@@ -3865,8 +3868,19 @@ mod tests {
                 .unwrap()["topline"],
             18
         );
-        send(state(9, [16, 45]), cx);
+        let mut ack = state(9, [16, 45]);
+        ack["action_id"] = ack16.into();
+        send(ack, cx);
         draw_test_window(cx);
+        cx.simulate_mouse_move(
+            bounds.origin - point(px(20.0), px(0.0)),
+            None,
+            Default::default(),
+        );
+        host.update_in(cx, |h, w, c| {
+            h.dispatch_surface_event(id, &event_focus(), w, c);
+            h.dispatch_surface_event(id, &event_blur(), w, c);
+        });
         wheel_step(cx);
         host.update(cx, |h, _| h.flush_minimap(id));
         assert_eq!(
@@ -3874,46 +3888,27 @@ mod tests {
                 .iter()
                 .find(|e| e["type"] == "minimap_action")
                 .unwrap()["topline"],
-            20
+            20,
+            "passive hover/focus preserve newer intent after an older ack"
         );
         host.update(cx, |h, _| h.prepare_minimap_editor_input(id));
         send(state(10, [10, 39]), cx);
         draw_test_window(cx);
         events(&mut peer);
-        for _ in 0..64 {
+        for step in 0..128 {
             wheel_step(cx);
             host.update(cx, |h, _| h.flush_minimap(id));
+            let sent = events(&mut peer);
+            let action = sent.iter().find(|e| e["type"] == "minimap_action").unwrap();
+            assert_eq!(action["topline"], 12 + step * 2);
+            let mut ack = state(11 + step, [10, 39]);
+            ack["action_id"] = action["action_id"].clone();
+            send(ack, cx);
+            draw_test_window(cx);
         }
-        let sent = events(&mut peer);
-        assert_eq!(
-            sent.iter()
-                .filter(|e| e["type"] == "minimap_action")
-                .count(),
-            64
-        );
-        for _ in 0..4 {
-            wheel_step(cx);
-            host.update(cx, |h, _| h.flush_minimap(id));
-        }
-        assert!(
-            !events(&mut peer)
-                .iter()
-                .any(|e| e["type"] == "minimap_action")
-        );
-        send(state(11, [12, 41]), cx);
-        draw_test_window(cx);
-        // Advance the callback scheduled by the acknowledgment, without another wheel event.
-        host.update(cx, |h, _| h.flush_minimap(id));
-        assert_eq!(
-            events(&mut peer)
-                .iter()
-                .find(|e| e["type"] == "minimap_action")
-                .unwrap()["topline"],
-            146
-        );
         cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
         send(
-            serde_json::json!({"type":"minimap","kind":"begin","revision":12,"target":"long","generation":2,"base":1,"start":1,"delete":1,"insert":1,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22"}),
+            serde_json::json!({"type":"minimap","kind":"begin","revision":140,"target":"long","generation":2,"base":1,"start":1,"delete":1,"insert":1,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22"}),
             cx,
         );
         draw_test_window(cx);

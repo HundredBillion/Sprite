@@ -31,6 +31,7 @@ pub struct Document {
     palette: Vec<String>,
     background: String,
     rows: Vec<Line>,
+    action_ack: bool,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +61,7 @@ pub struct State {
     occurrences: Vec<usize>,
     changes: Vec<Change>,
     word: Option<String>,
+    action_id: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct Begin {
@@ -72,6 +74,8 @@ struct Begin {
     total: usize,
     palette: Vec<String>,
     background: String,
+    #[serde(default)]
+    action_ack: bool,
 }
 #[derive(Clone, Debug, PartialEq)]
 struct Pending {
@@ -115,6 +119,9 @@ impl Document {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    pub fn action_ack(&self) -> bool {
+        self.action_ack
+    }
     pub fn total(&self) -> usize {
         self.total
     }
@@ -151,6 +158,9 @@ impl Change {
     }
 }
 impl State {
+    pub fn action_id(&self) -> Option<u64> {
+        self.action_id
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -288,6 +298,8 @@ impl Minimap {
         let object = value.as_object().ok_or_else(bad)?;
         require(object.keys().all(|k| {
             matches!(k.as_str(), "type" | "revision" | "kind" | "version")
+                || (kind == "begin" && k == "action_ack")
+                || (kind == "state" && k == "action_id")
                 || allowed.contains(&k.as_str())
         }))?;
         require(allowed.iter().all(|k| object.contains_key(*k)))?;
@@ -368,6 +380,7 @@ impl Minimap {
                         occurrences: decode(&value["occurrences"])?,
                         changes: decode(&value["changes"])?,
                         word,
+                        action_id: value.get("action_id").map(positive).transpose()?,
                     },
                 }
             }
@@ -494,6 +507,7 @@ impl Minimap {
                     palette: b.palette,
                     background: b.background,
                     rows,
+                    action_ack: b.action_ack,
                 });
                 self.state = None;
             }
@@ -504,6 +518,7 @@ impl Minimap {
             } => {
                 require(self.pending.is_none())?;
                 let d = self.document.as_ref().ok_or_else(bad)?;
+                require(state.action_id.is_none() || d.action_ack)?;
                 require(
                     d.target == target
                         && d.generation == generation
@@ -545,6 +560,35 @@ mod tests {
     }
     fn send(model: &mut Minimap, value: &Value) -> Result<(), super::super::Refusal> {
         Minimap::parse(value).and_then(|op| model.apply(op))
+    }
+    #[test]
+    fn native_minimap_action_ack_is_optional_negotiated_and_bounded() {
+        for enabled in [false, true] {
+            let mut model = Minimap::default();
+            let mut ops = fixture()["valid"].as_array().unwrap()[..4].to_vec();
+            if enabled {
+                ops[0]["action_ack"] = true.into();
+            }
+            for op in &ops[..3] {
+                send(&mut model, op).unwrap();
+            }
+            assert_eq!(model.document().unwrap().action_ack(), enabled);
+            let mut state = ops[3].clone();
+            state["action_id"] = 17.into();
+            assert_eq!(send(&mut model, &state).is_ok(), enabled);
+            if enabled {
+                assert_eq!(model.state().unwrap().action_id(), Some(17));
+            }
+            for invalid in [
+                serde_json::json!(0),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!(9007199254740992_u64),
+            ] {
+                state["action_id"] = invalid;
+                assert!(Minimap::parse(&state).is_err());
+            }
+        }
     }
     #[test]
     fn source_display_controls_cross_the_real_parser() {
