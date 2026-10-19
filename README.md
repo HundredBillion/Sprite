@@ -1,445 +1,61 @@
 # Sprite
 
-A terminal built to be read by programs as well as by people.
+Sprite started with a question: **“What if a terminal and an Electron app had
+a baby?”** What if the place where you run your tools could also show the
+rich, interactive interfaces those tools need?
 
-Sprite is an ordinary terminal emulator — panes, tabs, colour, Unicode,
-full-screen applications — with one addition: a local, authenticated,
-read-only interface that lets a tool ask what another pane is currently
-showing. That interface is the reason the project exists; everything else is
-what a terminal has to get right before the interesting part is worth having.
+Sprite is a terminal with tabs and panes, built on Ghostty’s terminal engine.
+It aims to make the terminal a home for your whole workspace: shells, editors,
+and small visual tools can share a window, while each remains a program you
+choose to run.
 
-Where that leads is an inversion. VS Code and Zed are editors that contain a
-terminal, which is why their terminal is always the weakest panel in the
-window. Sprite is meant to be a terminal that can host a complete development
-environment without ceasing to be a terminal — real programs first, the editor
-an ordinary child process you can close without losing your shell. None of that
-is in this directory, and it is a plan rather than a claim.
+## What Sprite is working toward
 
-This directory is Phase 1. It is a working terminal, not a finished product,
-and **Not yet** below says what that costs you in ordinary use.
+An assistant should be able to understand what is happening across your
+workspace and help without taking it over. Sprite lets programs read the text
+shown in other panes in the same window. A program can also create, update,
+and remove a visual interface in its own pane: a file tree, an editor, or a
+small control panel. Reading a pane does not grant permission to change it.
 
-## Why this and not another terminal
+The longer-term goal is a channel through which an LLM can work across panes:
+read context from one, create a useful view in another, update it as work
+changes, and remove it when it is no longer needed. You stay in control of the
+tools. Sprite is still in development; the [technical reference](docs/technical-reference.md)
+describes what works today and its current limits.
 
-Sprite does not claim to emulate a terminal better than the terminals it
-learned from, and it is not a fork of one. It embeds libghostty, so its VT
-behaviour *is* Ghostty's, deliberately: terminal semantics are the
-correctness-hard part, decades of them, and reimplementing that would buy
-nothing a user could see. What is worth building is the layer above.
+Sprite is available under either the MIT or Apache 2.0 license.
 
-It makes no speed claim either. Checkpoint 5 measured this phase and froze no
-budget — six metrics still exceed the ones carried forward, with the numbers
-and the reading in
-[`docs/performance/checkpoint-5.md`](docs/performance/checkpoint-5.md). A
-terminal's speed is a measurement rather than an adjective, and there is no
-honest version of that sentence yet.
+## Download and install
 
-Against the terminals worth comparing it to:
+Sprite’s [releases](https://github.com/HundredBillion/Sprite/releases/latest)
+currently provide source code. Building requires the pinned Rust toolchain,
+Zig 0.17, and Python. On macOS you also need Xcode; on Arch Linux you need the
+usual package-building tools and `ncurses`.
 
-**Alacritty** has no splits, and its tabs are macOS's rather than its own; the
-documented answer is to run a multiplexer. That is a coherent position and it is
-why Alacritty is small. It also means the panes on your screen belong to a
-program that does not know what a pane is, so nothing in that arrangement can be
-asked what one of them is showing.
-
-**Ghostty** is where Sprite's terminal behaviour comes from, and on emulation
-there is nothing to choose between them, because it is the same code. Ghostty
-has tabs, splits and a graphics protocol, and it is finished in a way this is
-not. The difference is one interface it does not offer and has no reason to:
-Ghostty is a terminal, and Sprite is a terminal with a read surface and an
-IDE-shaped plan behind it.
-
-**kitty** can already do this, through the same channel it uses to drive the
-terminal: `kitty @ get-text` reads a window and `kitty @ send-text` types into
-one. What keeps those apart is configured rather than structural — passwords
-scoped to named commands, or a Python hook that vets each one — so a read-only
-kitty is something you assemble correctly and then keep that way. Sprite's is
-read-only because the grammar has no write in it to switch off.
-
-**WezTerm** is the closest prior art and deserves the credit: `wezterm cli
-get-text` genuinely hands a program the contents of a pane. The difference is
-shape rather than existence. That arrives as text, from a CLI that can equally
-spawn, kill and write to panes. Sprite's arrives as versioned JSON, from a
-grammar with no write in it, over a socket keyed per window, with the content
-declared untrusted in the payload.
-
-The trust boundary is the pane's process tree. Anything you run in a pane
-inherits that pane's keys from its environment, so it can read what the
-window shows and draw into any pane of that window; nothing outside the
-window's process trees holds a key, and the keys are never written anywhere a
-later process could find them.
-
-**Warp** shares the premise and is more open than it is usually given credit
-for: the client is on GitHub under AGPL v3, and the account is optional. The
-difference is what the product is. Warp is an agentic development environment —
-it supplies the intelligence, rebuilds the shell interaction model around it,
-and reaches its own servers for the parts that matter. Sprite supplies none of
-that and changes nothing about how your shell works. It exposes a surface, keys
-it per window, and lets whichever agent you already run be the one that reads.
-
-What holds that together is that the read surface is read-only by construction
-rather than by policy. The request grammar has no variant that means write, so a
-mutating request cannot be built, let alone refused; scope resolves against the
-issuing window, so a pane in another window is not addressable rather than
-forbidden; no TCP socket is ever opened, and a test asserts the process holds
-none. The reply is serialised field by field in hand-written code, so adding a
-field to an internal snapshot for the renderer's benefit cannot put it on the
-wire — colours, fonts, image bytes, control sequences, environment values and
-filenames are absent because no line of the serialiser writes them. And every
-pane carries `content_trust: "untrusted_terminal_output"`, because a tool
-feeding this to a language model is feeding it text an arbitrary program chose.
-
-Agents living in the terminal are what make that worth having now. The usual
-options are to scrape the screen or to paste it. Sprite offers a third: ask,
-over a local socket, with a key, and get back something with a schema.
-
-## Install
-
-On Arch, from a checkout:
+Clone Sprite with its Ghostty source:
 
 ```sh
-packaging/update.sh
+git clone --recurse-submodules https://github.com/HundredBillion/Sprite.git
+cd Sprite
 ```
 
-That builds Sprite, packages it, and installs it with `pacman`, so
-`pacman -Qo /usr/bin/sprite` answers and `pacman -R sprite` removes it whole.
-It asks for your password once, at the install step.
-
-To pick up later changes, run it again.
-
-### Doing it by hand
-
-The script is three commands, and running them yourself is fine:
+For a fixed release, select its tag from the [releases page](https://github.com/HundredBillion/Sprite/releases)
+and update the submodules before building. On **Arch Linux**, build and
+install the package with:
 
 ```sh
-cargo build --release -p sprite-app --locked --offline
-cd packaging && makepkg -p PKGBUILD.local -fC
-sudo pacman -U sprite-0.2.8-1-x86_64.pkg.tar.zst
+(cd packaging && makepkg -si)
 ```
 
-`-C` matters. Without it `makepkg` can reuse a stale staging directory and
-package a binary you have since rebuilt — which installs cleanly and behaves
-like the old build.
-
-### Not from a checkout
-
-`packaging/PKGBUILD` builds from a clean clone rather than from your working
-tree, which is what a distribution recipe should do. Sprite is not in any
-repository yet, so there is no `pacman -S sprite`.
-
-### On a Mac
+The resulting x86-64 package is named `sprite-0.2.8-1-x86_64.pkg.tar.zst`.
+On **macOS**, fetch the build dependencies and install the app with:
 
 ```sh
+cargo fetch --locked
+(cd vendor/ghostty && zig build --fetch=all -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none)
 packaging/macos/update.sh
 ```
 
-That builds Sprite, wraps it as `Sprite.app`, puts it in `/Applications`, and
-links `/usr/local/bin/sprite` to the binary inside it, so Sprite opens from
-Launchpad and the Dock and the `sprite` command keeps working for anything that
-reads panes. It asks for your password once, for the link. Xcode is needed for
-the Metal shaders; `zig` for the terminfo source.
-
-To pick up later changes, run it again. If you installed with
-`packaging/install.sh` before this existed, the link replaces the binary it left
-at `/usr/local/bin/sprite`; `/usr/local/share/sprite` is yours to remove.
-
-### Do not just copy the binary
-
-`target/release/sprite` on its own will start, and its children will get
-`TERM=xterm-ghostty` with no terminfo database behind it — so `less`, `htop`
-and `ssh` misbehave in ways that look like terminal bugs. Sprite finds its
-terminfo relative to the installed binary, or through `SPRITE_TERMINFO_DIR`
-under `cargo run`. A loose copy has neither. Install the package instead.
-
-## Building
-
-Requires the toolchain pinned in `rust-toolchain.toml` (Rust 1.97.1), plus
-`zig` and `ncurses` to build and compile the vendored terminfo, and `python`
-for the third-party notices.
-
-The Ghostty source is a submodule:
-
-```sh
-git submodule update --init --recursive
-```
-
-Then:
-
-```sh
-cargo build --release -p sprite-app --locked --offline
-cargo test --workspace --locked --offline
-```
-
-`--locked --offline` is the house default: the dependency set is pinned and
-builds do not reach the network.
-
-## Keys
-
-| | |
-|---|---|
-| `Ctrl+Shift+D` / `Ctrl+Shift+E` | Split right / split down |
-| `Ctrl+Shift+←↑↓→` | Move focus between panes |
-| `Cmd/Super+[` / `Cmd/Super+]` | Move focus left / right between panes |
-| `Cmd+Q` (macOS) / `Super+W` (Linux) | Hold or press twice to quit Sprite |
-| `Ctrl+Shift+T` / `Ctrl+Shift+Q` | New tab / close tab |
-| `Ctrl+Shift+PageUp` / `PageDown` | Previous / next tab |
-| `Ctrl+Shift+W` | Close pane |
-| `Ctrl+Shift+R` | Rename the tab; Enter keeps, Escape abandons, empty removes |
-| `Ctrl+Shift+±` / `Ctrl+Shift+0` | Font size, and reset |
-| `Cmd/Super+C` / `Cmd/Super+V` | Copy the selection / paste |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste compatibility bindings |
-
-Every application quit, including an idle shell, first shows a rounded message:
-“Hold ⌘Q or press twice to quit” on macOS, or “Hold Super+W or press twice to
-quit” on Linux. Hold for 1.2 seconds or press twice within half a second.
-After a hold, Sprite waits for key release before quitting. Escape, another
-input, or changing focus cancels an unconfirmed quit. Closing the window or
-quitting from the Dock uses the same confirmation; repeat that request within
-half a second to confirm.
-
-Omarchy's default Super+W binding closes windows in the compositor, so it
-cannot deliver the held key to an application. On Hyprland **0.56.2** with
-Omarchy's Lua configuration, add this to `~/.config/hypr/bindings.lua`, after
-any other Super+W binding:
-
-```lua
-dofile("/absolute/path/to/Sprite/extras/hyprland/sprite-super-w.lua")
-```
-
-Replace the path with your checkout's path, then reload Hyprland. This forwards
-Super+W only when Sprite is focused and keeps the normal close action for other
-applications. Without it, two quick window-close requests still confirm quit,
-but holding Super+W cannot be detected. See the
-[configuration notes](extras/hyprland/README.md) for verification and rollback.
-
-Closing a pane or tab that is running a program asks first: the banner
-names what would be interrupted, and repeating the same gesture confirms.
-Escape keeps it.
-
-A tab shows the name you gave it, else what its focused pane is running — the
-title the program set, or the program's name — else its number. The window
-title follows the focused pane.
-
-## Terminal links
-
-Sprite opens visible `http://` and `https://` URLs, with one open per click.
-OSC 8 metadata does not make descriptive labels clickable or replace a printed URL's destination.
-Ordinary clicks belong to a program that has enabled mouse reporting, so Sprite does not also open its links.
-Use Cmd-click or Ctrl-click to ask Sprite to open a URL directly; Sprite consumes that whole gesture.
-Dragging text selects it instead of opening a link.
-
-## Configuration
-
-TOML, read once at startup and re-readable at runtime. An absent or invalid
-setting produces the default rather than an error — one mistyped value never
-costs you the rest of the file, and Sprite says what it ignored and why.
-
-```sh
-sprite config print     # what this window is actually using
-sprite config reload    # re-read, and report what changed
-```
-
-Colours, cursor, font, and grid spacing apply immediately. Shell and
-scrollback apply to the next session, because changing them under a running
-program would not be honest about what that program is attached to.
-
-Every colour Sprite draws has a name — `terminal.background`, `ansi.4` — and
-a program can add its own, such as `scm.addedForeground`. The `[colors]` keys
-override the built-in names; `[colors.tokens]` overrides any name:
-
-```toml
-[colors.tokens]
-"scm.addedForeground" = "#40a02b"
-```
-
-## Not yet
-
-The settings above are the whole list, which makes two absences worth stating
-plainly rather than leaving you to find them.
-
-**Keybindings are not configurable.** The table under Keys is compiled in.
-Every terminal Sprite is compared against lets you remap keys, and for many
-people that alone settles it.
-
-**There is no scrollback search.** Nothing finds text in history — no search
-box, no vi mode, no regex.
-
-Both are ordinary expectations rather than exotic ones, and the opening
-sentence of this file calls Sprite an ordinary terminal emulator. It is one in
-most respects. These are the respects in which it is not, and they are the two
-you would meet on the first day.
-
-## Reading a pane from a program
-
-```sh
-sprite panes snapshot            # the rest of this tab
-sprite panes snapshot --window   # every pane in this window
-```
-
-Read-only, authenticated by a per-window key, and scoped to the window that
-issued it — a pane in another window is not merely refused, it is not
-addressable. Responses declare their content untrusted, because terminal
-output is whatever a program chose to print.
-
-## Drawing in a pane from a program
-
-```sh
-sprite surface open --dock left < tree.json   # a strip beside the grid
-sprite surface open --fill      < editor.json # in place of the grid
-sprite surface open --overlay   < picker.json # floating over it
-sprite token register scm.added '#40a02b' 'Added lines'
-```
-
-A description is a small JSON tree — box, text, list, image (inline SVG),
-button — styled with Tailwind-shaped utility tokens (`flex flex_col gap_2
-p_3`) and coloured by token name, so the theme restyles it. The command
-holds the Surface open, prints each click, keystroke, resize, and focus
-change as one JSON line, sends each further document on standard input as a
-replacement, and closes the Surface when standard input closes. A Surface
-takes the keyboard when it opens; the program hands it back with
-`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Reading and drawing travel
-on separate sockets with separate keys: nothing that holds only the
-observation credentials can draw.
-
-What a Surface hears is what a terminal program hears. A key press arrives with
-the text it typed (`{"type":"input","key":"shift-1","text":"!"}`), so a program
-reads `text` for what the person typed and `key` for which key it was; a
-dead-key sequence or an input-method conversion arrives as text with no key once
-it is committed; and the paste shortcut delivers the clipboard as
-`{"type":"paste","text":"..."}` to the Surface, never to the shell underneath.
-With a Surface focused, the copy shortcut does nothing, since a Surface has no
-terminal selection to copy from. A grid Surface also hears the mouse in cells —
-`{"type":"mouse","button":"left","action":"press","modifiers":"S","row":3,"col":17}`
-— for every press, drag, release, and wheel turn of a gesture that began on it,
-so an editor behind it can place its cursor and scroll. A selection dragged
-across it from the terminal began on the terminal and is not reported.
-
-Grid Surfaces can show a native file-tab row when `opened.features` contains
-`"grid-tabs-v1"` (also advertised by `capabilities`). Send a standalone operation
-or include it in a grid batch:
-
-```json
-{"type":"tabs","revision":1,"height":35,"active":"b12","items":[{"id":"b12","label":"core.lua","modified":false,"icon":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"/>"}]}
-```
-
-The row uses system text at 13 pixels and 16-pixel icons, scrolls horizontally,
-and brings the active item into view. `height` defaults to 35 and accepts 24–64;
-empty `items` hides the row. Grid resize events report the remaining content
-height and cell count, and pointer and input-method coordinates use that same
-content origin. Optional `colors` accepts `#rrggbb` values for `background`,
-`active_background`, `inactive_background`, `foreground`, `active_foreground`,
-`border`, and `accent`.
-
-Revisions must increase and fit a positive JavaScript safe integer. A snapshot
-allows at most 256 items, unique nonempty IDs up to 256 bytes, labels up to
-1024 bytes, and inline SVG icons up to 64KiB each, within the channel's message
-limit. `active` must name an item or be null. A refused snapshot leaves the
-previous tabs intact. Clicking emits
-`{"type":"tab_action","revision":1,"id":"b12","action":"select"}` or `"close"`.
-The owning program decides what those actions do, including whether a modified
-file may close; Sprite never evaluates labels or opens icon paths.
-
-An `image` element's SVG is rendered from the bytes given, with no resource
-directory, so an `href` that points at a file resolves to nothing; embed
-what the picture needs.
-
-Programs that want a native dock first send an authenticated `capabilities`
-request with the pane id, their PID, and a `return_target` of `"terminal"` or
-the id of a live fill Surface in that pane. The answer lists supported feature
-names and limits without opening anything. Unknown panes, unsupported versions,
-invalid owners, or owners outside the pane's foreground process group receive
-`refused`; an unknown foreground state is ineligible. Sprite checks ownership
-again when opening and before delivering input or focus. A dock whose owner
-leaves that group closes; focus returns to its still-live target or the terminal.
-
-An owned dock opens with `owner_pid`, `return_target`, and `resizable:true`.
-Closing it while focused returns focus to that target. Closing its fill Surface
-also closes dependent docks; closing after focus has moved elsewhere leaves
-focus where it is. Connection EOF closes a Surface. A client should close its
-dock before suspending its editor, reopen it on resume only if it was open,
-and close on exit. Clients unable to establish ownership can keep drawing in
-the terminal. These additions do not change Surface Channel version 1, its
-authentication or NDJSON framing, or the behavior of older grid and element
-clients that omit ownership fields.
-
-The root-only `virtual_list` kind draws fixed-height rows in a dock. The
-optional `border_side` field controls its one-pixel outer border: `all`
-(the default), `left`, `right`, or `none`. A left dock uses `right` for its
-editor-facing separator; a right dock uses `left`. The border consumes layout
-space only on the selected edge, so header and row metrics stay unchanged.
-The [list demo](scripts/surface-list-demo.py) shows discovery, asset registration,
-row replacement, selection, scroll, header actions, and resize. The
-[wire fixture](tests/fixtures/surface-list-v1.json) gives example requests,
-acknowledgements, refusals, and events for other clients. Send `assets` before
-rows, then `list_rows` with a strictly increasing revision; use `list_state`
-at that revision for selection, status, and reveal or exact scroll. Each
-successful mutation replies `applied`. A malformed or stale mutation replies
-`refused` and leaves the last valid list intact. Wait for the content
-acknowledgements before focusing the dock or reporting it ready, and ignore
-events from stale revisions. On a theme replacement, reopen the Surface to
-release its scoped assets. Current limits are 16 MiB per message, 100,000 rows,
-4,096 assets, and 64 MiB of SVG text per Surface; batch assets below 8 MiB.
-
-An editor draws differently: it opens a *grid* Surface (`{"kind":"grid",
-"cols":80,"rows":24}`) and streams cells with highlight ids — `rows`,
-`highlights`, `cursor`, `scroll`, and friends, alone or in a `batch` that
-lands in one frame — mirroring Neovim's own redraw stream so an adapter keeps
-no state of its own. Highlight attributes may include `definition: true` to
-mark callable symbols. Sprite shows a pointing hand over their text while
-Cmd/Super is held; omitted attributes retain the normal pointer. This is a
-navigation affordance, not confirmation that a language server has a target.
-Highlight attributes can also set `ui_font: true` for short UI labels, such as
-popup headings. Those spans use the native system UI font at 14px and retain
-their bold weight, color, grid allocation, and background; ordinary code keeps
-the terminal font. Older hosts ignore both optional hints.
-The grid is painted by the terminal's painter with the
-pane's font and cell size, and the theme styles it by highlight-group name:
-
-```toml
-[highlights]
-"Comment" = { color = "#6c7086", italic = true }
-"Keyword" = { color = "#cba6f7", bold = true }
-"DiagnosticUnderlineError" = { underline = "curly", color = "#f38ba8" }
-```
-
-## Platform
-
-Linux is the supported platform and the one this is tested on.
-
-macOS builds. Its observation tests used to fail there, and the cause was
-Sprite's own: a socket-path guard set at a flat 100 bytes, stricter than either
-platform requires — `sun_path` holds 104 on macOS and 108 on Linux. What
-exceeded it was the *test* harness, which nests a scratch directory inside
-`$TMPDIR`, itself a ~48-byte path under `/var/folders` there. The guard now
-comes from the platform, the harness leaves room for a macOS `$TMPDIR`, and a
-test pins that budget so it cannot drift back.
-
-That is now measured, not inferred. The whole workspace — format, lints, every
-test, the build — was run on real hardware on 2026-09-07: an Apple-silicon Mac
-on macOS 26 with Xcode installed for the Metal shaders. The observation tests
-pass there. The same run found two dozen engine-test failures that Linux had
-hidden. Most were the harness assuming GNU `od` spacing, `/proc`, or a bash
-newer than the 3.2 Apple ships. One was Sprite's: the worker wrote PTY input
-inline with a blocking call, and macOS's 1 KiB PTY input queue turned a large
-paste into a pane frozen for good. Input now goes through the PTY pump, which
-is the subject of ADR 0015. After those fixes the whole suite passes on macOS.
-
-Linux remains the supported platform, and the only one with a distribution
-package. macOS builds, is tested on every CI run, and installs as `Sprite.app`
-with `packaging/macos/update.sh`.
-
-## Layout
-
-| | |
-|---|---|
-| `crates/sprite-term` | The terminal engine — PTY, child lifecycle, libghostty, projections. Imports no GPUI. |
-| `crates/sprite-app` | The application shell — window, panes, tabs, the observation endpoint. |
-| `docs/adr` | Decisions, with the reasoning that produced them. |
-| `docs/PRD`, `docs/TSP` | What was built and how it was planned. |
-| `packaging` | Everything needed to install it. |
-
-The seam between the two crates is deliberate: the engine has no idea a window
-exists, which is what makes it testable without one.
-
-## Licence
-
-MIT or Apache-2.0, at your option.
+The macOS installer puts `Sprite.app` in Applications and adds the `sprite`
+command. For build details and other installation options, see the
+[packaging guide](packaging/README.md).
