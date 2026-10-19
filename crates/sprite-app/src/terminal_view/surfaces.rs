@@ -1384,11 +1384,16 @@ impl TerminalView {
                     cx.stop_propagation();
                     return;
                 }
-                let Some(keys) = view
+                let Some((keys, is_grid)) = view
                     .surfaces
                     .iter()
                     .find(|surface| surface.id == id)
-                    .map(|surface| surface.connection.clone())
+                    .map(|surface| {
+                        (
+                            surface.connection.clone(),
+                            matches!(&surface.body, Body::Grid { .. }),
+                        )
+                    })
                 else {
                     return;
                 };
@@ -1397,9 +1402,10 @@ impl TerminalView {
                 // focused, but they act on the Surface: a paste goes to the
                 // program that holds the keyboard, never to the pty, whose
                 // reader is the shell that will run after that program exits;
-                // and copy reaches the program that owns the selection.
+                // and copy reaches grid editors, which own their selections.
+                // Other Surface kinds keep consuming copy without forwarding.
                 if let Some(shortcut) = application_shortcut(&event.keystroke) {
-                    if shortcut == Shortcut::Copy {
+                    if shortcut == Shortcut::Copy && is_grid {
                         keys.send(&event_input(&event.keystroke));
                     } else if shortcut == Shortcut::Paste {
                         let text = cx
@@ -2423,6 +2429,27 @@ mod tests {
 
     #[gpui::test]
     fn grid_surface_receives_copy_shortcut(cx: &mut gpui::TestAppContext) {
+        surface_copy_trace(
+            cx,
+            serde_json::json!({"version": 1, "root": {"kind": "grid", "cols": 20, "rows": 10}}),
+            1,
+        );
+    }
+
+    #[gpui::test]
+    fn element_surface_keeps_copy_shortcut_consumed(cx: &mut gpui::TestAppContext) {
+        surface_copy_trace(
+            cx,
+            serde_json::json!({"version": 1, "root": {"kind": "text", "text": "probe"}}),
+            0,
+        );
+    }
+
+    fn surface_copy_trace(
+        cx: &mut gpui::TestAppContext,
+        description: serde_json::Value,
+        expected_inputs: usize,
+    ) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
         cx.set_global(TokenRegistry::new(&settings.colors));
@@ -2430,14 +2457,7 @@ mod tests {
             TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
         });
         let id = SurfaceId(997);
-        let (answer, mut peer) = open_request(
-            &host,
-            cx,
-            id,
-            open_description(serde_json::json!({
-                "version": 1, "root": {"kind": "grid", "cols": 20, "rows": 10}
-            })),
-        );
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(description));
         assert_eq!(answer, Ok(()));
         host.update_in(cx, |host, window, cx| {
             host.focus_target(FocusTarget::Surface(id), window, cx)
@@ -2464,10 +2484,12 @@ mod tests {
             .collect();
         assert_eq!(
             inputs.len(),
-            1,
-            "copy must reach the native editor exactly once"
+            expected_inputs,
+            "unexpected copy input events"
         );
-        assert_eq!(inputs[0]["key"], "cmd-c");
+        if expected_inputs > 0 {
+            assert_eq!(inputs[0]["key"], "cmd-c");
+        }
     }
 
     fn native_surface_trace(cx: &mut gpui::TestAppContext, description: serde_json::Value) {
