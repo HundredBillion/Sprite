@@ -8,6 +8,7 @@ pub mod grid;
 pub mod host;
 pub(crate) mod lanes;
 pub mod list;
+pub mod minimap;
 pub mod render;
 mod socket_reader;
 pub mod style;

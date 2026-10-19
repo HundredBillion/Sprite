@@ -473,6 +473,32 @@ pub fn event_closed() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn minimap_fixture_routes_without_advertising_renderer_support() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
+        for message in fixture["valid"].as_array().unwrap() {
+            assert!(matches!(
+                super::parse_message(message).unwrap(),
+                super::Message::Grid(_)
+            ));
+        }
+        for features in [
+            super::capabilities(true)["features"].clone(),
+            serde_json::from_str::<serde_json::Value>(&super::event_opened(super::SurfaceId(1)))
+                .unwrap()["features"]
+                .clone(),
+        ] {
+            assert!(
+                !features
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v == "grid-minimap-v1")
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

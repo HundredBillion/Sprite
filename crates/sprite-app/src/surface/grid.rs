@@ -149,6 +149,7 @@ impl RowChunk {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
+    Minimap(super::minimap::MinimapOp),
     Tabs(super::tabs::Tabs),
     Rows(Vec<RowChunk>),
     Highlights {
@@ -175,7 +176,8 @@ pub enum Op {
 pub fn is_op(kind: &str) -> bool {
     matches!(
         kind,
-        "tabs"
+        "minimap"
+            | "tabs"
             | "rows"
             | "highlights"
             | "defaults"
@@ -221,6 +223,7 @@ fn parse_op(message: &Value) -> Result<Op, Refusal> {
         .and_then(Value::as_str)
         .ok_or_else(|| malformed("an operation needs a type"))?;
     match kind {
+        "minimap" => Ok(Op::Minimap(super::minimap::Minimap::parse(message)?)),
         "tabs" => Ok(Op::Tabs(super::tabs::Tabs::parse(message)?)),
         "rows" => {
             let chunks = object
@@ -496,6 +499,7 @@ pub struct UiLabel {
 /// A program's grid as Sprite holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridSurface {
+    pub minimap: super::minimap::Minimap,
     pub tabs: super::tabs::Tabs,
     cols: u16,
     rows: u16,
@@ -535,6 +539,7 @@ impl GridSurface {
         let empty_row = Arc::new(Vec::new());
         Self {
             tabs: Default::default(),
+            minimap: Default::default(),
             cols,
             rows,
             cells: vec![vec![Cell { text: blank, hl: 0 }; usize::from(cols)]; usize::from(rows)],
@@ -617,6 +622,7 @@ impl GridSurface {
 
     pub fn apply(&mut self, op: Op) -> Result<(), Refusal> {
         match op {
+            Op::Minimap(op) => self.minimap.apply(op)?,
             Op::Tabs(tabs) => {
                 if tabs.revision <= self.tabs.revision {
                     return Err(malformed("tabs revision must increase"));
