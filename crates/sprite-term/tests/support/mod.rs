@@ -78,6 +78,9 @@ impl EventPump {
             .spawn(move || {
                 loop {
                     let item = stream.next_blocking();
+                    if let Ok(TerminalEvent::Error(error)) = &item {
+                        eprintln!("terminal worker error: {error}");
+                    }
                     let ended = item.is_err();
                     if sender.send(item).is_err() || ended {
                         break;
@@ -143,11 +146,19 @@ impl SnapshotPump {
 
     /// The next bundle, whatever it holds.
     pub fn next(&self) -> Arc<SnapshotBundle> {
+        self.next_waiting_for("the next snapshot", None)
+    }
+
+    fn next_waiting_for(&self, what: &str, last: Option<&SnapshotBundle>) -> Arc<SnapshotBundle> {
         match self.receiver.recv_timeout(watchdog()) {
             Ok(Ok(bundle)) => bundle,
             Ok(Err(error)) => panic!("snapshot stream ended early: {error}"),
             Err(RecvTimeoutError::Timeout) => {
-                panic!("watchdog: no snapshot within {:?}", watchdog())
+                panic!(
+                    "watchdog: no snapshot within {:?} while waiting for {what}; last snapshot: {:?}",
+                    watchdog(),
+                    last.map(|bundle| (bundle.generation, pane_text(bundle)))
+                )
             }
             Err(RecvTimeoutError::Disconnected) => panic!("snapshot pump thread died"),
         }
@@ -169,8 +180,9 @@ impl SnapshotPump {
     ) -> Arc<SnapshotBundle> {
         let started = Instant::now();
         let mut seen = 0_u32;
+        let mut last = None;
         loop {
-            let bundle = self.next();
+            let bundle = self.next_waiting_for(what, last.as_deref());
             seen += 1;
             if predicate(&bundle) {
                 return bundle;
@@ -181,6 +193,7 @@ impl SnapshotPump {
                      over {PROGRESS_CEILING:?}"
                 );
             }
+            last = Some(bundle);
         }
     }
 }
