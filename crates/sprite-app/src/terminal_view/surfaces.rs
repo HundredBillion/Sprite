@@ -814,6 +814,54 @@ impl TerminalView {
         }
     }
 
+    pub(super) fn native_tab_drag_move(
+        &mut self,
+        id: SurfaceId,
+        event: &gpui::DragMoveEvent<super::native_tabs::TabDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = event.drag(cx);
+        if drag.owner != cx.entity().entity_id() || drag.surface != id {
+            return;
+        }
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let Body::Grid { grid, tabs, .. } = &mut surface.body else {
+            return;
+        };
+        if tabs.drag_move(&grid.tabs, event.event.position) {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn native_tab_drop(
+        &mut self,
+        drag: &super::native_tabs::TabDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if drag.owner != cx.entity().entity_id()
+            || !self.accept_surface_input(drag.surface, window, cx)
+        {
+            return;
+        }
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == drag.surface) else {
+            return;
+        };
+        let Body::Grid { grid, tabs, .. } = &mut surface.body else {
+            return;
+        };
+        let index = tabs.insertion_index(&grid.tabs, window.mouse_position().x);
+        let before = grid.tabs.items.get(index).map(|item| item.id.as_str());
+        if let Some(event) = grid.tabs.reorder_action(drag.revision, &drag.id, before) {
+            window.focus(&surface.focus);
+            surface.connection.send(&event);
+        }
+        tabs.drop_index = None;
+        cx.notify();
+    }
+
     pub(super) fn native_tab_action(
         &mut self,
         id: SurfaceId,
@@ -2291,6 +2339,170 @@ mod tests {
         });
     }
 
+    fn drag_native_tab(
+        cx: &mut gpui::VisualTestContext,
+        start: gpui::Point<Pixels>,
+        end: gpui::Point<Pixels>,
+    ) {
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + point(px(12.0), px(0.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        draw_test_window(cx);
+        cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+    }
+
+    #[gpui::test]
+    fn native_tabs_drag_reorders_without_selecting_closing_or_grid_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(996);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops: crate::surface::grid::parse_ops(
+            &serde_json::json!({"type":"tabs","revision":1,"reorderable":true,"active":"b",
+                "items":[{"id":"a","label":"a.lua"},{"id":"b","label":"b.lua"},{"id":"c","label":"c.lua"}]})
+        ).unwrap() });
+        draw_test_window(cx);
+        let (first, last) = host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            (tabs.item_bounds(0), tabs.item_bounds(2))
+        });
+        events(&mut peer);
+        let start = point(first.left() + px(30.0), first.top() + px(17.0));
+        let end = point(last.right() - px(5.0), last.top() + px(17.0));
+        drag_native_tab(cx, start, end);
+        let actions = events(&mut peer);
+        assert_eq!(
+            actions,
+            vec![serde_json::json!({"type":"tab_action","revision":1,
+            "id":"a","action":"reorder","before":null})]
+        );
+        host.read_with(cx, |host, _| {
+            let Body::Grid { grid, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert_eq!(grid.tabs.active.as_deref(), Some("b"));
+        });
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops: crate::surface::grid::parse_ops(
+            &serde_json::json!({"type":"tabs","revision":2,"reorderable":true,"active":"b",
+                "items":[{"id":"b","label":"b.lua"},{"id":"c","label":"c.lua"},{"id":"a","label":"a.lua"}]})
+        ).unwrap() });
+        draw_test_window(cx);
+        let (first, second) = host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            (tabs.item_bounds(0), tabs.item_bounds(1))
+        });
+        drag_native_tab(
+            cx,
+            point(second.left() + px(30.0), second.top() + px(17.0)),
+            point(first.left() + px(5.0), first.top() + px(17.0)),
+        );
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"tab_action","revision":2,
+            "id":"c","action":"reorder","before":"b"})]
+        );
+        let close = point(first.right() - px(20.0), first.top() + px(17.0));
+        cx.simulate_mouse_down(close, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(close, MouseButton::Left, Default::default());
+        assert_eq!(
+            events(&mut peer),
+            vec![serde_json::json!({"type":"tab_action","revision":2,
+            "id":"b","action":"close"})],
+            "close button remains a click target"
+        );
+        drag_native_tab(
+            cx,
+            point(first.left() + px(30.0), first.top() + px(17.0)),
+            point(first.left() + px(30.0), first.bottom() + px(80.0)),
+        );
+        assert!(
+            events(&mut peer).is_empty(),
+            "dropping outside the tab bar cancels without editor input"
+        );
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+        let mut updated = host.read_with(cx, |host, _| {
+            let Body::Grid { grid, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            grid.tabs.clone()
+        });
+        updated.revision = 3;
+        let start = point(first.left() + px(30.0), first.top() + px(17.0));
+        let end = point(second.right() - px(4.0), second.top() + px(17.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + point(px(12.0), px(0.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![crate::surface::grid::Op::Tabs(updated)],
+            },
+        );
+        draw_test_window(cx);
+        cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        assert!(
+            events(&mut peer).is_empty(),
+            "a newer snapshot cancels a stale drag"
+        );
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops: crate::surface::grid::parse_ops(
+            &serde_json::json!({"type":"tabs","revision":4,"reorderable":true,"active":"b0",
+                "items":(0..20).map(|i|serde_json::json!({"id":format!("b{i}"),"label":format!("file-{i}.lua")})).collect::<Vec<_>>()})
+        ).unwrap() });
+        draw_test_window(cx);
+        let (first, viewport) = host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            (tabs.item_bounds(0), tabs.viewport())
+        });
+        let start = point(first.left() + px(30.0), first.top() + px(17.0));
+        let end = point(viewport.right() - px(4.0), first.top() + px(17.0));
+        drag_native_tab(cx, start, end);
+        let actions = events(&mut peer);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0]["action"], "reorder");
+        assert_eq!(actions[0]["id"], "b0");
+        host.read_with(cx, |host, _| {
+            let Body::Grid { tabs, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert!(
+                tabs.offset().x < px(0.0),
+                "dragging near the edge scrolls overflowing tabs"
+            );
+        });
+    }
+
     #[gpui::test]
     fn native_tabs_reserve_space_route_clicks_and_hide(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
@@ -2565,7 +2777,12 @@ mod tests {
             "unexpected copy input events"
         );
         if expected_inputs > 0 {
-            assert_eq!(inputs[0]["key"], "cmd-c");
+            let expected = if cfg!(target_os = "macos") {
+                "cmd-c"
+            } else {
+                "super-c"
+            };
+            assert_eq!(inputs[0]["key"], expected);
         }
     }
 

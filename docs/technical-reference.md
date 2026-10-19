@@ -364,6 +364,16 @@ previous tabs intact. Clicking emits
 The owning program decides what those actions do, including whether a modified
 file may close; Sprite never evaluates labels or opens icon paths.
 
+A snapshot can opt into dragging by setting `reorderable: true` (default false).
+Dragging shows an insertion marker and scrolls overflowing tabs near either
+edge. A drop emits
+`{"type":"tab_action","revision":1,"id":"b12","action":"reorder","before":"b7"}`.
+`before` is the stable ID of the next tab, or null to append. The owning program
+applies the order and sends a newer snapshot; the host never changes the active
+file or moves tabs between surfaces. Stale revisions, unknown IDs, and moves
+that leave the order unchanged emit no action. Clients without a reorder
+handler omit the flag and retain selection and close controls.
+
 An `image` element's SVG is rendered from the bytes given, with no resource
 directory, so an `href` that points at a file resolves to nothing; embed
 what the picture needs.

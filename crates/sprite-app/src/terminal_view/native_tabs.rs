@@ -2,7 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, MouseButton, ScrollHandle, SharedString, div, img, px, rgb};
+use gpui::{
+    AnyElement, Context, EntityId, MouseButton, Pixels, Point, Render, ScrollHandle, SharedString,
+    Window, div, img, px, rgb,
+};
 
 use super::TerminalView;
 use crate::surface::{SurfaceId, svg_decode::SvgDecodes, tabs::Tabs};
@@ -12,6 +15,38 @@ pub(super) struct NativeTabs {
     scroll: ScrollHandle,
     revision: u64,
     width: f32,
+    pub(super) drop_index: Option<usize>,
+}
+
+#[derive(Clone)]
+pub(super) struct TabDrag {
+    pub(super) owner: EntityId,
+    pub(super) surface: SurfaceId,
+    pub(super) id: String,
+    pub(super) revision: u64,
+    label: SharedString,
+    colors: crate::surface::tabs::TabColors,
+}
+
+impl Render for TabDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(10.0))
+            .h(px(35.0))
+            .flex()
+            .items_center()
+            .font_family(".SystemUIFont")
+            .text_size(px(13.0))
+            .bg(color(&self.colors.active_background))
+            .text_color(color(&self.colors.active_foreground))
+            .border_1()
+            .border_color(color(&self.colors.accent))
+            .child(self.label.clone())
+    }
+}
+
+fn color(value: &str) -> gpui::Rgba {
+    rgb(u32::from_str_radix(&value[1..], 16).unwrap_or(0))
 }
 
 impl Default for NativeTabs {
@@ -21,6 +56,7 @@ impl Default for NativeTabs {
             scroll: ScrollHandle::default(),
             revision: 0,
             width: 0.0,
+            drop_index: None,
         }
     }
 }
@@ -43,6 +79,45 @@ impl NativeTabs {
         bounds
     }
 
+    pub(super) fn insertion_index(&self, tabs: &Tabs, x: Pixels) -> usize {
+        for index in 0..tabs.items.len() {
+            if let Some(bounds) = self.scroll.bounds_for_item(index)
+                && x < bounds.left() + self.scroll.offset().x + bounds.size.width / 2.0
+            {
+                return index;
+            }
+        }
+        tabs.items.len()
+    }
+
+    pub(super) fn drag_move(&mut self, tabs: &Tabs, position: Point<Pixels>) -> bool {
+        let viewport = self.scroll.bounds();
+        let index = viewport
+            .contains(&position)
+            .then(|| self.insertion_index(tabs, position.x));
+        let changed = index != self.drop_index;
+        self.drop_index = index;
+        let target = if index.is_some() && position.x < viewport.left() + px(24.0) {
+            (0..tabs.items.len()).rfind(|index| {
+                self.scroll
+                    .bounds_for_item(*index)
+                    .is_some_and(|bounds| bounds.left() + self.scroll.offset().x < viewport.left())
+            })
+        } else if index.is_some() && position.x > viewport.right() - px(24.0) {
+            (0..tabs.items.len()).find(|index| {
+                self.scroll.bounds_for_item(*index).is_some_and(|bounds| {
+                    bounds.right() + self.scroll.offset().x > viewport.right()
+                })
+            })
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            self.scroll.scroll_to_item(target);
+        }
+        changed || target.is_some()
+    }
+
     pub(super) fn render(
         &mut self,
         tabs: &Tabs,
@@ -62,7 +137,10 @@ impl NativeTabs {
             self.revision = tabs.revision;
             self.width = width;
         }
-        let color = |value: &str| rgb(u32::from_str_radix(&value[1..], 16).unwrap_or(0));
+        if !cx.has_active_drag() {
+            self.drop_index = None;
+        }
+        let owner = cx.entity().entity_id();
         let mut bar = div()
             .id(("grid-tabs", surface.0))
             .flex()
@@ -109,12 +187,14 @@ impl NativeTabs {
                 .rounded(px(3.0))
                 .hover(|style| style.bg(color(&tabs.colors.border)))
                 .child(if item.modified { "●" } else { "×" })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |view, _, window, cx| {
                     view.native_tab_action(surface, revision, &close_id, "close", window, cx);
                     cx.stop_propagation();
                 }));
             let tab = div()
                 .id(SharedString::from(item.id.clone()))
+                .relative()
                 .flex()
                 .items_center()
                 .gap(px(7.0))
@@ -147,6 +227,41 @@ impl NativeTabs {
                         .child(SharedString::from(item.label.clone())),
                 )
                 .child(close)
+                .children((self.drop_index == Some(index)).then(|| {
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .h_full()
+                        .w(px(2.0))
+                        .bg(color(&tabs.colors.accent))
+                }))
+                .children(
+                    (index + 1 == tabs.items.len() && self.drop_index == Some(index + 1)).then(
+                        || {
+                            div()
+                                .absolute()
+                                .right_0()
+                                .top_0()
+                                .h_full()
+                                .w(px(2.0))
+                                .bg(color(&tabs.colors.accent))
+                        },
+                    ),
+                )
+                .when(tabs.reorderable, |tab| {
+                    tab.on_drag(
+                        TabDrag {
+                            owner,
+                            surface,
+                            id: item.id.clone(),
+                            revision: tabs.revision,
+                            label: item.label.clone().into(),
+                            colors: tabs.colors.clone(),
+                        },
+                        |drag: &TabDrag, _, _, cx| cx.new(|_| drag.clone()),
+                    )
+                })
                 .on_click(cx.listener(move |view, _, window, cx| {
                     view.native_tab_action(surface, revision, &select_id, "select", window, cx);
                     cx.stop_propagation();
@@ -157,8 +272,23 @@ impl NativeTabs {
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
             bar = bar.on_mouse_down(button, |_, _, cx| cx.stop_propagation());
         }
-        bar.on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .into_any_element()
+        bar.when(tabs.reorderable, |bar| {
+            bar.can_drop(move |value, _, _| {
+                value
+                    .downcast_ref::<TabDrag>()
+                    .is_some_and(|drag| drag.owner == owner && drag.surface == surface)
+            })
+            .on_drag_move(
+                cx.listener(move |view, event: &gpui::DragMoveEvent<TabDrag>, _, cx| {
+                    view.native_tab_drag_move(surface, event, cx);
+                }),
+            )
+            .on_drop(cx.listener(move |view, drag: &TabDrag, window, cx| {
+                view.native_tab_drop(drag, window, cx);
+            }))
+        })
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .into_any_element()
     }
 }
 
@@ -181,6 +311,7 @@ mod tests {
         let images = SvgDecodes::<Arc<str>>::new(Some(32.0));
         let mut tabs = Tabs {
             revision: 1,
+            reorderable: false,
             height: 35,
             active: None,
             items: Vec::new(),
