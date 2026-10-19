@@ -94,6 +94,15 @@ def main():
     out.write(GHOSTTY_LICENSE.read_text())
     out.write("```\n\n")
 
+    assets = pathlib.Path("crates/sprite-app/assets/markdown")
+    out.write("## Markdown toolbar glyphs\n\n")
+    out.write((assets / "ATTRIBUTION.md").read_text().partition("\n\n")[2])
+    out.write("\n")
+    for filename in ("LICENSE-codicons", "LICENSE-zed-icons"):
+        out.write(f"### {filename}\n\n```\n")
+        out.write("\n".join(line.rstrip() for line in (assets / filename).read_text().splitlines()))
+        out.write("\n```\n\n")
+
     out.write(f"## Rust packages ({len(packages)})\n\n")
     out.write("| Package | Version | Licence | Source |\n")
     out.write("|---|---|---|---|\n")

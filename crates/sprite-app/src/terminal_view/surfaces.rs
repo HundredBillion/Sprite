@@ -37,6 +37,7 @@ pub(super) enum Body {
         grid: Box<GridSurface>,
         tabs: super::native_tabs::NativeTabs,
         minimap: super::native_minimap::NativeMinimap,
+        markdown: super::native_markdown::NativeMarkdown,
         /// The description's root element, kept for the `bg` and `color` it
         /// may carry: a grid's wrapper takes its colours from them, the way an
         /// element root's box does. A grid root refuses `style` and `border`,
@@ -62,6 +63,7 @@ impl Body {
                 grid: Box::new(GridSurface::new(size.cols, size.rows)),
                 tabs: Default::default(),
                 minimap: Default::default(),
+                markdown: Default::default(),
                 root,
                 shapes: Default::default(),
             },
@@ -862,6 +864,74 @@ impl TerminalView {
         cx.notify();
     }
 
+    pub(super) fn native_markdown_focus(
+        &mut self,
+        id: SurfaceId,
+        revision: u64,
+        target: &crate::surface::markdown::MarkdownWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_surface_event_owner(id, window, cx) {
+            return;
+        }
+        let Some(surface) = self.surfaces.get_mut(|s| s.id == id) else {
+            return;
+        };
+        let Body::Grid { grid, markdown, .. } = &mut surface.body else {
+            return;
+        };
+        let Some(event) = grid.markdown.action(revision, target, "focus", None) else {
+            return;
+        };
+        markdown.focus_target(revision, target);
+        if grid.markdown.active() != Some(target) {
+            surface.connection.send(&event);
+        }
+        window.focus(&surface.focus);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn native_markdown_action(
+        &mut self,
+        id: SurfaceId,
+        revision: u64,
+        target: &crate::surface::markdown::MarkdownWindow,
+        action: &str,
+        destination: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_surface_event_owner(id, window, cx) {
+            return;
+        }
+        let Some(surface) = self.surfaces.get_mut(|s| s.id == id) else {
+            return;
+        };
+        let Body::Grid { grid, .. } = &surface.body else {
+            return;
+        };
+        if let Some(event) = grid.markdown.action(revision, target, action, destination) {
+            if action == "open"
+                && destination.is_some_and(|s| {
+                    s.starts_with("https://")
+                        || s.starts_with("http://")
+                        || s.starts_with("mailto:")
+                })
+            {
+                if let Some(destination) = destination {
+                    cx.open_url(destination);
+                }
+            } else if action != "open"
+                || destination.is_some_and(|s| super::native_markdown::local_destination(s))
+            {
+                surface.connection.send(&event);
+            }
+            window.focus(&surface.focus);
+            cx.notify();
+        }
+    }
+
     pub(super) fn native_tab_action(
         &mut self,
         id: SurfaceId,
@@ -1249,11 +1319,23 @@ impl TerminalView {
         fills: bool,
     ) -> AnyElement {
         let tab_height = match &surface.body {
-            Body::Grid { grid, .. } => grid.tabs.visible_height(),
+            Body::Grid { grid, .. } => {
+                if grid.markdown.active().is_some() {
+                    grid.tabs.visible_height().max(35.0)
+                } else {
+                    grid.tabs.visible_height()
+                }
+            }
             Body::Elements(_) | Body::List { .. } => 0.0,
         };
         let minimap_width = match &surface.body {
-            Body::Grid { grid, .. } => grid.minimap.visible_width(f32::from(size.width)),
+            Body::Grid { grid, .. } => {
+                if grid.markdown.active().is_some_and(|w| w.preview) {
+                    0.0
+                } else {
+                    grid.minimap.visible_width(f32::from(size.width))
+                }
+            }
             Body::Elements(_) | Body::List { .. } => 0.0,
         };
         let grid_size = Size {
@@ -1300,9 +1382,40 @@ impl TerminalView {
                 shapes,
                 tabs,
                 minimap,
+                markdown,
                 ..
             } => {
-                let bar = tabs.render(&grid.tabs, surface.id, f32::from(size.width), cx);
+                let toolbar = markdown.toolbar(&grid.markdown, surface.id, cx);
+                let toolbar_width = if toolbar.is_some() { 36.0 } else { 0.0 };
+                let bar = div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .h(px(tab_height))
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(tabs.render(
+                                &grid.tabs,
+                                surface.id,
+                                f32::from(size.width) - toolbar_width,
+                                cx,
+                            )),
+                    )
+                    .children(toolbar);
+                let previews = markdown.render(
+                    &grid.markdown,
+                    surface.id,
+                    grid.cols(),
+                    grid.rows(),
+                    metrics.cells.width(),
+                    metrics.cells.height(),
+                    px(grid_slack),
+                    cx,
+                );
                 let footer_row = grid.footer_row(footer_cols);
                 let map_height = footer_row.map_or(grid_size.height, |row| {
                     px(grid_slack) + metrics.cells.height() * f32::from(row)
@@ -1400,7 +1513,8 @@ impl TerminalView {
                                     .pt(px(grid_slack))
                                     .overflow_hidden()
                                     .child(cells)
-                                    .children(labels),
+                                    .children(labels)
+                                    .children(previews),
                             )
                             .children(map)
                             .children(footer),
@@ -1528,6 +1642,18 @@ impl TerminalView {
                 // reader is the shell that will run after that program exits;
                 // and copy reaches grid editors, which own their selections.
                 // Other Surface kinds keep consuming copy without forwarding.
+                let preview_copy = event.keystroke.modifiers.platform
+                    && matches!(event.keystroke.key.as_str(), "c" | "a");
+                if preview_copy {
+                    if let Some(surface) = view.surfaces.get_mut(|s| s.id == id) {
+                        if let Body::Grid { grid, markdown, .. } = &surface.body {
+                            if markdown.copy(&grid.markdown, event.keystroke.key == "a", cx) {
+                                cx.stop_propagation();
+                                return;
+                            }
+                        }
+                    }
+                }
                 if let Some(shortcut) = application_shortcut(&event.keystroke) {
                     if shortcut == Shortcut::Copy && is_grid {
                         keys.send(&event_input(&event.keystroke));
@@ -4561,5 +4687,382 @@ mod tests {
                 }
             }
         }
+    }
+    #[gpui::test]
+    fn native_markdown_toolbar_pointer_copy_links_and_source_transition(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use serde_json::json;
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(997);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}})),
+        );
+        assert_eq!(answer, Ok(()));
+        let send = |value: serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(&value).unwrap(),
+                },
+            )
+        };
+        send(
+            json!({"type":"tabs","revision":1,"active":"b39","items":(0..40).map(|n| json!({"id":format!("b{n}"),"label":format!("long-file-{n}.md")})).collect::<Vec<_>>()}),
+            cx,
+        );
+        let text = format!(
+            "[Open local](next.md)\n\n{}",
+            "A long readable paragraph with Unicode: café.\n\n".repeat(80)
+        );
+        send(
+            json!({"type":"markdown","kind":"document","revision":1,"buffer":1,"generation":3,"path":"/tmp/README.md","text":text}),
+            cx,
+        );
+        let state = |revision, preview, width, background: &str| json!({"type":"markdown","kind":"state","revision":revision,"active":1000,"windows":[{"window":1000,"buffer":1,"generation":3,"preview":preview,"row":1,"column":3,"width":width,"height":15}],"colors":{"background":background,"foreground":"#bcbec4","muted":"#9da0a8","accent":"#589df6","code":"#2b2d30"}});
+        send(state(2, true, 60, "#1e1f22"), cx);
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        let button = cx
+            .debug_bounds("Open Markdown Source")
+            .expect("source toolbar button");
+        let bounds = cx
+            .debug_bounds("markdown-preview-1000")
+            .expect("preview bounds");
+        host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let expected =
+                surface.origin.unwrap() + point(host.metrics.width() * 3.0, host.metrics.height());
+            assert!(
+                (f32::from(bounds.origin.x - expected.x)).abs() <= 1.0
+                    && (f32::from(bounds.origin.y - expected.y)).abs() <= 1.0
+            );
+            assert!((f32::from(bounds.size.width - host.metrics.width() * 60.0)).abs() <= 1.0);
+            assert!((f32::from(bounds.size.height - host.metrics.height() * 15.0)).abs() <= 1.0);
+            let Body::Grid { tabs, .. } = &surface.body else {
+                panic!("grid")
+            };
+            assert!(tabs.viewport().right() <= button.left());
+        });
+        events(&mut peer);
+        let text_position = bounds.origin + point(px(28.0), px(32.0));
+        cx.simulate_mouse_down(text_position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(text_position, MouseButton::Left, Default::default());
+        let emitted = events(&mut peer);
+        assert!(
+            emitted.iter().any(|e| e["type"] == "markdown_action"
+                && e["action"] == "open"
+                && e["destination"] == "next.md"),
+            "{emitted:?}"
+        );
+        assert!(!emitted.iter().any(|e| e["type"] == "mouse"), "{emitted:?}");
+        let key = |key: &str, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_event(KeyDownEvent {
+                keystroke: gpui::Keystroke {
+                    key: key.into(),
+                    key_char: None,
+                    modifiers: gpui::Modifiers {
+                        platform: true,
+                        ..Default::default()
+                    },
+                },
+                is_held: false,
+            })
+        };
+        let (select_start, select_end) = host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            (
+                markdown.text_position(1000, 1, 0, 0).unwrap(),
+                markdown.text_position(1000, 1, 0, 4).unwrap(),
+            )
+        });
+        cx.simulate_mouse_down(
+            select_start + point(px(0.0), px(8.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            select_end + point(px(0.0), px(8.0)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            select_end + point(px(0.0), px(8.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        key("c", cx);
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "Open");
+        cx.simulate_mouse_down(
+            select_start + point(px(0.0), px(8.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            select_end + point(px(0.0), px(8.0)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            bounds.origin + point(px(4.0), px(4.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            select_end + point(px(60.0), px(8.0)),
+            None,
+            Default::default(),
+        );
+        key("c", cx);
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "Open");
+        key("a", cx);
+        key("c", cx);
+        assert!(
+            cx.read_from_clipboard()
+                .unwrap()
+                .text()
+                .unwrap()
+                .starts_with("Open local\n")
+        );
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "input" || e["type"] == "mouse")
+        );
+        cx.simulate_event(ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-150.0))),
+            ..Default::default()
+        });
+        draw_test_window(cx);
+        assert!(!events(&mut peer).iter().any(|e| e["type"] == "mouse"));
+        let offset = host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            markdown.offset(1000, 1).unwrap()
+        });
+        assert!(offset.y < px(0.0), "preview wheel must scroll: {offset:?}");
+        cx.simulate_mouse_down(button.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(button.center(), MouseButton::Left, Default::default());
+        let emitted = events(&mut peer);
+        assert_eq!(
+            emitted
+                .iter()
+                .filter(|e| e["type"] == "markdown_action"
+                    && e["action"] == "toggle"
+                    && e["revision"] == 2)
+                .count(),
+            1,
+            "{emitted:?}"
+        );
+        send(state(3, false, 60, "#1e1f22"), cx);
+        draw_test_window(cx);
+        host.read_with(cx, |h, _| {
+            let Body::Grid { grid, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert!(!grid.markdown.active().is_some_and(|w| w.preview));
+        });
+        assert!(cx.debug_bounds("Open Markdown Preview").is_some());
+        cx.simulate_mouse_down(text_position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(text_position, MouseButton::Left, Default::default());
+        assert!(events(&mut peer).iter().any(|e| e["type"] == "mouse"));
+        send(state(4, true, 45, "#ffffff"), cx);
+        draw_test_window(cx);
+        host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert_eq!(markdown.offset(1000, 1).unwrap(), offset);
+        });
+        assert!(
+            (f32::from(
+                cx.debug_bounds("markdown-preview-1000").unwrap().size.width
+                    - host.read_with(cx, |h, _| h.metrics.width() * 45.0)
+            ))
+            .abs()
+                <= 1.0
+        );
+        send(json!({"type":"markdown","kind":"hide","revision":5}), cx);
+        draw_test_window(cx);
+        host.read_with(cx, |h, _| {
+            let Body::Grid { grid, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert!(!grid.markdown.active().is_some_and(|w| w.preview));
+        });
+        host.read_with(cx, |h, _| {
+            let Body::Grid { grid, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert!(grid.markdown.active().is_none());
+        });
+        send(
+            json!({"type":"markdown","kind":"document","revision":6,"buffer":1,"generation":3,"path":"/tmp/first.md","text":"First pane"}),
+            cx,
+        );
+        send(
+            json!({"type":"markdown","kind":"document","revision":7,"buffer":2,"generation":4,"path":"/tmp/second.md","text":"Second pane"}),
+            cx,
+        );
+        let mut two = state(8, true, 30, "#1e1f22");
+        two["windows"].as_array_mut().unwrap().push(json!({"window":1001,"buffer":2,"generation":4,"preview":true,"row":1,"column":40,"width":30,"height":15}));
+        send(two.clone(), cx);
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        let second = cx.debug_bounds("markdown-preview-1001").unwrap();
+        events(&mut peer);
+        let press = second.origin + point(px(30.0), px(32.0));
+        cx.simulate_mouse_down(press, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(press, MouseButton::Left, Default::default());
+        let emitted = events(&mut peer);
+        assert!(
+            emitted.iter().any(|e| e["type"] == "markdown_action"
+                && e["action"] == "focus"
+                && e["window"] == 1001
+                && e["buffer"] == 2
+                && e["generation"] == 4
+                && e["revision"] == 8),
+            "{emitted:?}"
+        );
+        assert!(!emitted.iter().any(|e| e["type"] == "mouse"));
+        key("a", cx);
+        key("c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "Second pane\n"
+        );
+        two["revision"] = json!(9);
+        two["active"] = json!(1001);
+        send(two, cx);
+        draw_test_window(cx);
+        key("c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "Second pane\n"
+        );
+        send(
+            json!({"type":"markdown","kind":"document","revision":10,"buffer":2,"generation":4,"path":"/renamed/second.md","text":"Second pane"}),
+            cx,
+        );
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            let paths = markdown.cached_paths();
+            assert!(paths.contains(&"/renamed/second.md".to_string()));
+            assert!(!paths.contains(&"/tmp/second.md".to_string()));
+        });
+        send(
+            json!({"type":"markdown","kind":"document","revision":11,"buffer":2,"generation":5,"path":"/renamed/second.md","text":format!("[External](https://example.com)\n\n[Jump](#target)\n\n{}\n# Target", "Paragraph.\n\n".repeat(60))}),
+            cx,
+        );
+        let mut new_state = state(12, true, 30, "#1e1f22");
+        new_state["active"] = json!(1001);
+        new_state["windows"][0]["window"] = json!(1001);
+        new_state["windows"][0]["buffer"] = json!(2);
+        new_state["windows"][0]["generation"] = json!(5);
+        new_state["windows"][0]["column"] = json!(40);
+        send(new_state.clone(), cx);
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        let external = host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            markdown.text_position(1001, 2, 0, 1).unwrap() + point(px(0.0), px(8.0))
+        });
+        events(&mut peer);
+        cx.simulate_mouse_down(external, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(external, MouseButton::Left, Default::default());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "markdown_action" && e["action"] == "open")
+        );
+        let jump = host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            markdown.text_position(1001, 2, 1, 1).unwrap() + point(px(0.0), px(8.0))
+        });
+        cx.simulate_mouse_down(jump, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(jump, MouseButton::Left, Default::default());
+        draw_test_window(cx);
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "markdown_action" && e["action"] == "open")
+        );
+        host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert!(markdown.offset(1001, 2).unwrap().y < px(-500.0));
+        });
+        let before_update = host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            markdown.offset(1001, 2).unwrap()
+        });
+        send(
+            json!({"type":"markdown","kind":"document","revision":13,"buffer":2,"generation":6,"path":"/renamed/second.md","text":format!("[External](https://example.com)\n\n[Jump](#target)\n\n{}\n# Target", "Paragraph.\n\n".repeat(60))}),
+            cx,
+        );
+        new_state["revision"] = json!(14);
+        new_state["windows"][0]["generation"] = json!(6);
+        send(new_state, cx);
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert_eq!(markdown.offset(1001, 2).unwrap(), before_update);
+        });
+        send(
+            json!({"type":"markdown","kind":"document","revision":15,"buffer":2,"generation":7,"path":"/renamed/second.md","text":"Short updated document"}),
+            cx,
+        );
+        let mut short_state = state(16, true, 30, "#1e1f22");
+        short_state["active"] = json!(1001);
+        short_state["windows"][0]["window"] = json!(1001);
+        short_state["windows"][0]["buffer"] = json!(2);
+        short_state["windows"][0]["generation"] = json!(7);
+        short_state["windows"][0]["column"] = json!(40);
+        send(short_state, cx);
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            assert_eq!(markdown.offset(1001, 2).unwrap().y, px(0.0));
+        });
     }
 }

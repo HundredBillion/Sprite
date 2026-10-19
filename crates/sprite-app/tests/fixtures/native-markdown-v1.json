@@ -1,0 +1,66 @@
+{
+  "document": {
+    "type": "markdown",
+    "kind": "document",
+    "revision": 1,
+    "buffer": 1,
+    "generation": 3,
+    "path": "/project/README.md",
+    "text": "# Hello\n"
+  },
+  "state": {
+    "type": "markdown",
+    "kind": "state",
+    "revision": 2,
+    "active": 1000,
+    "windows": [
+      {
+        "window": 1000,
+        "buffer": 1,
+        "generation": 3,
+        "preview": true,
+        "row": 0,
+        "column": 0,
+        "width": 80,
+        "height": 22
+      }
+    ],
+    "colors": {
+      "background": "#1e1f22",
+      "foreground": "#bcbec4",
+      "muted": "#9da0a8",
+      "accent": "#589df6",
+      "code": "#2b2d30"
+    }
+  },
+  "toggle": {
+    "type": "markdown_action",
+    "revision": 2,
+    "window": 1000,
+    "buffer": 1,
+    "generation": 3,
+    "action": "toggle"
+  },
+  "open": {
+    "type": "markdown_action",
+    "revision": 2,
+    "window": 1000,
+    "buffer": 1,
+    "generation": 3,
+    "action": "open",
+    "destination": "next.md"
+  },
+  "hide": {
+    "type": "markdown",
+    "kind": "hide",
+    "revision": 3
+  },
+  "focus": {
+    "type": "markdown_action",
+    "revision": 2,
+    "window": 1000,
+    "buffer": 1,
+    "generation": 3,
+    "action": "focus"
+  }
+}

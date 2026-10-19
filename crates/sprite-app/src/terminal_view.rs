@@ -7,6 +7,7 @@
 mod geometry;
 mod input;
 mod list_view;
+mod native_markdown;
 mod native_minimap;
 mod native_tabs;
 mod pane_focus;

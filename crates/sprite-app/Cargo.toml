@@ -24,10 +24,11 @@ name = "sprite-paint-bench"
 path = "src/bin/sprite-paint-bench.rs"
 
 [dependencies]
+pulldown-cmark = { version = "=0.13.0", default-features = false }
 nix = { workspace = true }
 serde = { workspace = true }
 async-channel = { workspace = true }
-image = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 serde_json = { workspace = true }
 toml = { workspace = true }

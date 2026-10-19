@@ -151,6 +151,7 @@ impl RowChunk {
 pub enum Op {
     Footer(Option<Box<Footer>>),
     Minimap(super::minimap::MinimapOp),
+    Markdown(super::markdown::MarkdownOp),
     Tabs(super::tabs::Tabs),
     Rows(Vec<RowChunk>),
     Highlights {
@@ -179,6 +180,7 @@ pub fn is_op(kind: &str) -> bool {
         kind,
         "footer"
             | "minimap"
+            | "markdown"
             | "tabs"
             | "rows"
             | "highlights"
@@ -270,6 +272,7 @@ fn parse_op(message: &Value) -> Result<Op, Refusal> {
                 grid,
             }))))
         }
+        "markdown" => Ok(Op::Markdown(super::markdown::Markdown::parse(message)?)),
         "minimap" => Ok(Op::Minimap(super::minimap::Minimap::parse(message)?)),
         "tabs" => Ok(Op::Tabs(super::tabs::Tabs::parse(message)?)),
         "rows" => {
@@ -557,6 +560,7 @@ pub struct Footer {
 pub struct GridSurface {
     pub footer: Option<Box<Footer>>,
     pub minimap: super::minimap::Minimap,
+    pub markdown: super::markdown::Markdown,
     pub tabs: super::tabs::Tabs,
     cols: u16,
     rows: u16,
@@ -598,6 +602,7 @@ impl GridSurface {
             footer: None,
             tabs: Default::default(),
             minimap: Default::default(),
+            markdown: Default::default(),
             cols,
             rows,
             cells: vec![vec![Cell { text: blank, hl: 0 }; usize::from(cols)]; usize::from(rows)],
@@ -697,6 +702,7 @@ impl GridSurface {
         match op {
             Op::Footer(footer) => self.footer = footer,
             Op::Minimap(op) => self.minimap.apply(op)?,
+            Op::Markdown(op) => self.markdown.apply(op, self.cols, self.rows)?,
             Op::Tabs(tabs) => {
                 if tabs.revision <= self.tabs.revision {
                     return Err(malformed("tabs revision must increase"));
@@ -2146,5 +2152,50 @@ mod tests {
             assert!(is_op(kind), "{kind}");
         }
         assert!(!is_op("update"));
+    }
+}
+
+#[cfg(test)]
+mod markdown_integration_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn markdown_grid_accepts_preview_and_refuses_stale_or_invalid_updates_atomically() {
+        let mut grid = GridSurface::new(80, 24);
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/native-markdown-v1.json"))
+                .unwrap();
+        grid.apply_all(parse_ops(&fixture["document"]).unwrap())
+            .unwrap();
+        let state = fixture["state"].clone();
+        grid.apply_all(parse_ops(&state).unwrap()).unwrap();
+        assert!(grid.markdown.active().unwrap().preview);
+        assert!(grid.markdown.document(1, 3).is_some());
+        let before = grid.markdown.clone();
+        assert!(grid.apply_all(parse_ops(&state).unwrap()).is_err());
+        let mut invalid = state.clone();
+        invalid["revision"] = json!(3);
+        invalid["windows"][0]["width"] = json!(81);
+        assert!(grid.apply_all(parse_ops(&invalid).unwrap()).is_err());
+        assert_eq!(grid.markdown, before);
+        let target = grid.markdown.active().unwrap();
+        let emitted: serde_json::Value =
+            serde_json::from_str(&grid.markdown.action(2, target, "toggle", None).unwrap())
+                .unwrap();
+        assert_eq!(emitted, fixture["toggle"]);
+        let emitted: serde_json::Value = serde_json::from_str(
+            &grid
+                .markdown
+                .action(2, target, "open", Some("next.md"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(emitted, fixture["open"]);
+        let emitted: serde_json::Value =
+            serde_json::from_str(&grid.markdown.action(2, target, "focus", None).unwrap()).unwrap();
+        assert_eq!(emitted, fixture["focus"]);
+        grid.apply_all(parse_ops(&fixture["hide"]).unwrap())
+            .unwrap();
+        assert!(grid.markdown.active().is_none());
     }
 }
