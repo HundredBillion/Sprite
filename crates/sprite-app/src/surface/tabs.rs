@@ -43,6 +43,8 @@ impl Default for TabColors {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Tabs {
     pub revision: u64,
+    #[serde(default)]
+    pub reorderable: bool,
     #[serde(default = "default_height")]
     pub height: u16,
     pub active: Option<String>,
@@ -59,6 +61,7 @@ impl Default for Tabs {
     fn default() -> Self {
         Self {
             revision: 0,
+            reorderable: false,
             height: 35,
             active: None,
             items: Vec::new(),
@@ -120,6 +123,25 @@ impl Tabs {
         } else {
             f32::from(self.height)
         }
+    }
+
+    pub fn reorder_action(&self, revision: u64, id: &str, before: Option<&str>) -> Option<String> {
+        if !self.reorderable || revision != self.revision {
+            return None;
+        }
+        let from = self.items.iter().position(|item| item.id == id)?;
+        let to = match before {
+            Some(id) => self.items.iter().position(|item| item.id == id)?,
+            None => self.items.len(),
+        };
+        if to == from || to == from + 1 {
+            return None;
+        }
+        Some(
+            json!({"type":"tab_action", "revision":revision, "id":id,
+            "action":"reorder", "before":before})
+            .to_string(),
+        )
     }
 
     pub fn action(&self, revision: u64, id: &str, action: &str) -> Option<String> {
@@ -195,6 +217,35 @@ mod tests {
         assert_eq!(grid.tabs.visible_height(), 0.0);
         assert!(grid.apply_all(parse_ops(&message()).unwrap()).is_err());
         assert_eq!((grid.cols(), grid.rows()), (4, 2));
+    }
+
+    #[test]
+    fn reorder_actions_use_stable_ids_and_validate_destinations() {
+        let tabs = Tabs::parse(&json!({"type":"tabs","revision":4,"active":"b",
+            "reorderable":true,"items":[{"id":"a","label":"a"},{"id":"b","label":"b"},{"id":"c","label":"c"}]
+        })).unwrap();
+        let event: Value =
+            serde_json::from_str(&tabs.reorder_action(4, "c", Some("a")).unwrap()).unwrap();
+        assert_eq!(
+            event,
+            json!({"type":"tab_action","revision":4,"action":"reorder","id":"c","before":"a"})
+        );
+        assert_eq!(tabs.active.as_deref(), Some("b"));
+        assert!(tabs.reorder_action(3, "c", Some("a")).is_none());
+        assert!(tabs.reorder_action(4, "missing", Some("a")).is_none());
+        assert!(tabs.reorder_action(4, "c", Some("missing")).is_none());
+        assert!(tabs.reorder_action(4, "a", Some("a")).is_none());
+        assert!(tabs.reorder_action(4, "a", Some("b")).is_none());
+        assert!(tabs.reorder_action(4, "c", None).is_none());
+        let event: Value =
+            serde_json::from_str(&tabs.reorder_action(4, "a", None).unwrap()).unwrap();
+        assert_eq!(event["before"], Value::Null);
+        assert!(
+            Tabs::parse(&message())
+                .unwrap()
+                .reorder_action(1, "b1", None)
+                .is_none()
+        );
     }
 
     #[test]

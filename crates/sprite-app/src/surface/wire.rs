@@ -172,7 +172,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1"],
+        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
@@ -331,7 +331,7 @@ fn parse_token(message: &Value) -> Result<FirstRequest, Refusal> {
 // can tell what a line is without scanning the rest of it.
 
 pub fn event_opened(id: SurfaceId) -> String {
-    json!({ "type": "opened", "surface": id.0, "features": ["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1"] })
+    json!({ "type": "opened", "surface": id.0, "features": ["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1"] })
         .to_string()
 }
 
@@ -447,8 +447,14 @@ pub fn event_resize(width: u32, height: u32) -> String {
 
 /// A grid Surface's size in cells as well as pixels, so an editor's adapter
 /// can resize its grid without knowing the pane's cell metrics.
-pub fn event_grid_resize(width: u32, height: u32, cols: u16, rows: u16) -> String {
-    json!({ "type": "resize", "width": width, "height": height, "cols": cols, "rows": rows })
+pub fn event_grid_resize(
+    width: u32,
+    height: u32,
+    cols: u16,
+    rows: u16,
+    footer_cols: u16,
+) -> String {
+    json!({ "type": "resize", "width": width, "height": height, "cols": cols, "rows": rows, "footer_cols": footer_cols })
         .to_string()
 }
 
@@ -761,7 +767,7 @@ mod tests {
             event_registered(),
             event_focused(),
             event_resize(240, 812),
-            event_grid_resize(240, 812, 30, 40),
+            event_grid_resize(240, 812, 30, 40, 50),
             event_click("row-1"),
             event_paste("x"),
             event_text("x"),
@@ -783,15 +789,15 @@ mod tests {
         // are about is the shape rather than the order.
         assert_eq!(
             serde_json::from_str::<Value>(&event_opened(SurfaceId(7))).expect("json"),
-            json!({"surface":7,"type":"opened","features":["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1"]})
+            json!({"surface":7,"type":"opened","features":["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1"]})
         );
         assert_eq!(
             serde_json::from_str::<Value>(&event_click("row-1")).expect("json"),
             json!({"name":"row-1","type":"event"})
         );
         assert_eq!(
-            event_grid_resize(240, 812, 30, 40),
-            r#"{"type":"resize","width":240,"height":812,"cols":30,"rows":40}"#
+            event_grid_resize(240, 812, 30, 40, 50),
+            r#"{"type":"resize","width":240,"height":812,"cols":30,"rows":40,"footer_cols":50}"#
         );
     }
 

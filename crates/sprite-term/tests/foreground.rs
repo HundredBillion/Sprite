@@ -128,6 +128,11 @@ fn a_program_that_replaces_the_idle_shell_requires_confirmation() {
     session
         .send(TerminalCommand::Input(b"exec /bin/cat\n".to_vec()))
         .expect("replace the shell with cat");
+    // Bash can read ahead and discard queued input while replacing itself.
+    // Wait for exec to finish before sending the line cat must answer.
+    wait_for(&session, "cat to replace the shell", |state| {
+        state.program() == Some("cat")
+    });
     cat_has_answered(&mut session, &snapshots);
 
     assert_eq!(

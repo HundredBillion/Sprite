@@ -258,8 +258,8 @@ impl Minimap {
         self.state.as_ref()
     }
     pub fn visible_width(&self, surface_width: f32) -> f32 {
-        if self.document().is_some() && surface_width >= 480.0 {
-            160.0
+        if self.document().is_some() && surface_width.is_finite() && surface_width >= 192.0 {
+            (surface_width * 0.25).min(120.0)
         } else {
             0.0
         }
@@ -713,10 +713,26 @@ mod tests {
         refuse(&mut m, state);
     }
     #[test]
+    fn minimap_stays_visible_in_half_width_panes() {
+        let map = committed();
+        for (surface, width) in [
+            (191.9, 0.0),
+            (192.0, 48.0),
+            (240.0, 60.0),
+            (360.0, 90.0),
+            (480.0, 120.0),
+            (800.0, 120.0),
+        ] {
+            assert_eq!(map.visible_width(surface), width, "surface width {surface}");
+        }
+        assert_eq!(map.visible_width(f32::NAN), 0.0);
+        assert_eq!(map.visible_width(f32::INFINITY), 0.0);
+    }
+
+    #[test]
     fn new_target_hides_old_source_and_cancels_pending_transaction() {
         let mut m = committed();
-        assert_eq!(m.visible_width(479.9), 0.0);
-        assert_eq!(m.visible_width(480.0), 160.0);
+        assert_eq!(m.visible_width(480.0), 120.0);
         let mut b = fixture()["valid"][0].clone();
         b["revision"] = 5.into();
         b["generation"] = 2.into();
