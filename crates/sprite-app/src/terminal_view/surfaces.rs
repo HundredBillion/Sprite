@@ -5065,4 +5065,109 @@ mod tests {
             assert_eq!(markdown.offset(1001, 2).unwrap().y, px(0.0));
         });
     }
+    #[gpui::test]
+    fn native_markdown_linked_images_decode_urls_stay_inside_table_cells_and_open_links(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use serde_json::json;
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(998);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}})),
+        );
+        assert_eq!(answer, Ok(()));
+        let path = std::env::temp_dir().join(format!(
+            "sprite-native-markdown-{} image.png",
+            std::process::id()
+        ));
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+        let url = path.to_str().unwrap().replace(' ', "%20");
+        let source = format!(
+            "[![linked]({url})](next.md)\n\n| A | B |\n|---|---|\n| ![plain]({url}) | [![cell]({url})](table.md) |"
+        );
+        for value in [
+            json!({"type":"markdown","kind":"document","revision":1,"buffer":1,"generation":1,"path":"/tmp/README.md","text":source}),
+            json!({"type":"markdown","kind":"state","revision":2,"active":1000,"windows":[{"window":1000,"buffer":1,"generation":1,"preview":true,"row":0,"column":0,"width":60,"height":20}],"colors":{"background":"#1e1f22","foreground":"#bcbec4","muted":"#9da0a8","accent":"#589df6","code":"#2b2d30"}}),
+        ] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(&value).unwrap(),
+                },
+            );
+        }
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        std::fs::remove_file(path).unwrap();
+        let linked = cx
+            .debug_bounds("markdown-image-1000-0-0")
+            .expect("linked native image");
+        let table = cx
+            .debug_bounds("markdown-image-1000-2-1")
+            .expect("native image in table");
+        let cell = cx
+            .debug_bounds("markdown-cell-1000-2-1")
+            .expect("second table cell");
+        let plain = cx
+            .debug_bounds("markdown-image-1000-2-0")
+            .expect("unlinked table image");
+        let first_cell = cx
+            .debug_bounds("markdown-cell-1000-2-0")
+            .expect("first table cell");
+        assert!(plain.size.height >= px(8.0));
+        assert!(
+            plain.left() >= first_cell.left()
+                && plain.right() <= first_cell.right()
+                && plain.bottom() <= first_cell.bottom()
+        );
+        events(&mut peer);
+        cx.simulate_mouse_down(plain.center(), MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(plain.center(), MouseButton::Left, Default::default());
+        assert!(
+            !events(&mut peer).iter().any(|e| e["type"] == "mouse"
+                || (e["type"] == "markdown_action" && e["action"] == "open"))
+        );
+        assert!(linked.size.height >= px(8.0));
+        assert!(table.size.height >= px(8.0));
+        assert!(
+            table.left() >= cell.left()
+                && table.right() <= cell.right()
+                && table.top() >= cell.top()
+                && table.bottom() <= cell.bottom(),
+            "image {table:?} must be inside cell {cell:?}"
+        );
+        events(&mut peer);
+        for (bounds, destination) in [(linked, "next.md"), (table, "table.md")] {
+            cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Default::default());
+            let emitted = events(&mut peer);
+            assert_eq!(
+                emitted
+                    .iter()
+                    .filter(|e| e["type"] == "markdown_action"
+                        && e["action"] == "open"
+                        && e["destination"] == destination
+                        && e["revision"] == 2)
+                    .count(),
+                1,
+                "{emitted:?}"
+            );
+            assert!(!emitted.iter().any(|e| e["type"] == "mouse"));
+        }
+    }
 }

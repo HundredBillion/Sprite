@@ -31,7 +31,7 @@ struct ParseCache {
 }
 struct Prepared {
     parsed: Parsed,
-    images: HashMap<usize, Arc<RenderImage>>,
+    images: HashMap<(usize, usize), Arc<RenderImage>>,
 }
 #[derive(Default)]
 struct Presentation {
@@ -80,7 +80,7 @@ impl Prepared {
             || parsed
                 .blocks
                 .iter()
-                .map(|b| b.spans.len() + b.links.len())
+                .map(|b| b.spans.len() + b.links.len() + b.inline_images.len())
                 .sum::<usize>()
                 > 20_000
         {
@@ -91,16 +91,22 @@ impl Prepared {
         }
         let mut images = HashMap::new();
         let mut remaining = 4 * 1024 * 1024;
-        for (index, block) in parsed
+        let sources = parsed
             .blocks
             .iter()
             .enumerate()
-            .filter(|(_, b)| b.image.is_some())
-            .take(32)
-        {
-            let Some((_, destination)) = block.image.as_ref() else {
-                continue;
-            };
+            .flat_map(|(block_index, block)| {
+                block
+                    .image
+                    .iter()
+                    .map(move |(_, destination)| (block_index, 0, destination.as_str()))
+                    .chain(block.inline_images.iter().enumerate().map(
+                        move |(image_index, image)| {
+                            (block_index, image_index + 1, image.destination.as_str())
+                        },
+                    ))
+            });
+        for (block_index, image_index, destination) in sources.take(32) {
             let Some(path) = resource_path(path, destination) else {
                 continue;
             };
@@ -140,7 +146,7 @@ impl Prepared {
             }
             remaining -= decoded_bytes;
             images.insert(
-                index,
+                (block_index, image_index),
                 Arc::new(RenderImage::new(vec![image::Frame::new(image.to_rgba8())])),
             );
         }
@@ -429,10 +435,37 @@ impl NativeMarkdown {
                             .child(div().h(px(1.0)).my(px(16.0)).bg(color(&state.colors.muted)));
                         continue;
                     }
+                    let image_elements = block
+                        .inline_images
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(image_index, image)| {
+                            let picture = prepared.images.get(&(index, image_index + 1))?;
+                            let actions = InlineImageActions {
+                                surface,
+                                revision: state.revision,
+                                target: target.clone(),
+                                presentation: presentation.clone(),
+                                prepared: prepared.clone(),
+                            };
+                            Some((
+                                image.range.clone(),
+                                Some(inline_image(
+                                    picture.clone(),
+                                    image.link.clone(),
+                                    (target.window, index, image_index),
+                                    actions,
+                                    cx,
+                                )),
+                            ))
+                        })
+                        .collect();
                     let (content, layouts) = block_content(
                         block,
                         &state.colors,
                         presentation.borrow().selection.as_ref(),
+                        image_elements,
+                        (target.window, index),
                     );
                     for (start, layout) in &layouts {
                         presentation
@@ -555,7 +588,7 @@ impl NativeMarkdown {
                                 cx.notify();
                             }),
                         );
-                    if let Some(image) = prepared.images.get(&index) {
+                    if let Some(image) = prepared.images.get(&(index, 0)) {
                         item = item.child(img(image.clone()).max_w_full().max_h(px(480.0)));
                     }
                     pane = pane.child(item);
@@ -695,20 +728,112 @@ pub(super) fn local_destination(destination: &str) -> bool {
         && !destination.contains('\0')
 }
 
+#[derive(Clone)]
+struct InlineImageActions {
+    surface: SurfaceId,
+    revision: u64,
+    target: MarkdownWindow,
+    presentation: Rc<RefCell<Presentation>>,
+    prepared: Arc<Prepared>,
+}
+fn inline_image(
+    picture: Arc<RenderImage>,
+    destination: Option<String>,
+    selector: (u64, usize, usize),
+    actions: InlineImageActions,
+    cx: &mut Context<TerminalView>,
+) -> AnyElement {
+    let press = actions.clone();
+    div()
+        .id(SharedString::from(format!(
+            "markdown-inline-image-{}-{}-{}",
+            selector.0, selector.1, selector.2
+        )))
+        .debug_selector(move || {
+            format!(
+                "markdown-image-{}-{}-{}",
+                selector.0, selector.1, selector.2
+            )
+        })
+        .max_w_full()
+        .when(destination.is_some(), |image| image.cursor_pointer())
+        .child(img(picture).max_w_full().max_h(px(480.0)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |view, _, window, cx| {
+                view.native_markdown_focus(
+                    press.surface,
+                    press.revision,
+                    &press.target,
+                    window,
+                    cx,
+                );
+                press.presentation.borrow_mut().dragging = false;
+                cx.stop_propagation();
+            }),
+        )
+        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |view, _, window, cx| {
+            if let Some(destination) = destination.as_deref() {
+                if let Some(anchor) = destination.strip_prefix('#') {
+                    if let Some((_, item)) = actions
+                        .prepared
+                        .parsed
+                        .anchors
+                        .iter()
+                        .find(|(name, _)| name == anchor)
+                    {
+                        actions
+                            .presentation
+                            .borrow()
+                            .scroll
+                            .scroll_to_top_of_item(*item);
+                    }
+                } else {
+                    view.native_markdown_action(
+                        actions.surface,
+                        actions.revision,
+                        &actions.target,
+                        "open",
+                        Some(destination),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
 fn block_content(
     block: &document::Block,
     colors: &Colors,
     selection: Option<&Range<usize>>,
+    mut images: Vec<(Range<usize>, Option<AnyElement>)>,
+    selector: (u64, usize),
 ) -> (AnyElement, Vec<(usize, TextLayout)>) {
     let all_runs = runs(block, colors, selection);
     if block.cells.is_empty() {
         let text = StyledText::new(SharedString::from(block.text.clone())).with_runs(all_runs);
         let layout = text.layout().clone();
-        return (text.into_any_element(), vec![(0, layout)]);
+        let content = if images.is_empty() {
+            text.into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(text)
+                .children(images.into_iter().filter_map(|(_, element)| element))
+                .into_any_element()
+        };
+        return (content, vec![(0, layout)]);
     }
     let mut row = div().flex().flex_row().w_full();
     let mut layouts = Vec::new();
-    for cell in &block.cells {
+    for (cell_index, cell) in block.cells.iter().enumerate() {
         let mut offset = 0;
         let cell_runs = all_runs
             .iter()
@@ -729,12 +854,20 @@ fn block_content(
         layouts.push((cell.start, text.layout().clone()));
         row = row.child(
             div()
+                .debug_selector(move || {
+                    format!("markdown-cell-{}-{}-{cell_index}", selector.0, selector.1)
+                })
                 .w(gpui::relative(1.0 / block.cells.len() as f32))
                 .min_w_0()
                 .p(px(6.0))
                 .border_r_1()
                 .border_color(color(&colors.muted))
-                .child(text),
+                .child(text)
+                .children(images.iter_mut().filter_map(|(range, element)| {
+                    (range.start >= cell.start && range.end <= cell.end)
+                        .then(|| element.take())
+                        .flatten()
+                })),
         );
     }
     (row.into_any_element(), layouts)
@@ -751,6 +884,28 @@ fn layout_index(layouts: &[(usize, TextLayout)], position: gpui::Point<Pixels>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn markdown_review_linked_and_table_images_are_prepared_from_local_urls() {
+        let path = std::env::temp_dir().join(format!(
+            "sprite-markdown-review-{} image.png",
+            std::process::id()
+        ));
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+        let encoded = path.to_str().unwrap().replace(' ', "%20");
+        let prepared = Prepared::load(
+            &format!(
+                "[![linked]({encoded})](next.md)\n\n| A | B |\n|---|---|\n| text | [![cell]({encoded})](table.md) |"
+            ),
+            "/tmp/readme.md",
+        );
+        let empty_alt = Prepared::load(&format!("[![]({encoded})](empty.md)"), "/tmp/readme.md");
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(prepared.images.len(), 2);
+        assert_eq!(empty_alt.images.len(), 1);
+        assert!(empty_alt.parsed.blocks[0].inline_images[0].range.is_empty());
+    }
     #[test]
     fn markdown_resource_loading_bounds_rich_documents_and_keeps_failed_image_alternatives() {
         let started = std::time::Instant::now();
