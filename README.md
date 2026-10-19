@@ -9,6 +9,31 @@ It aims to make the terminal a home for your whole workspace: shells, editors,
 and small visual tools can share a window, while each remains a program you
 choose to run.
 
+## Why Sprite is different
+
+[VS Code](https://code.visualstudio.com/docs/terminal/getting-started) and
+[Zed](https://zed.dev/docs/terminal) start with an editor and include a terminal.
+Sprite starts with the terminal. Its panes belong to the terminal, and an editor
+can be a program you open in one of them. The aim is to let you close that
+editor without losing the shell or the rest of your workspace.
+
+Other terminals make different choices. [Alacritty](https://github.com/alacritty/alacritty)
+leaves tabs and splits to a window manager or multiplexer. Sprite owns its tabs
+and panes, so it can let programs ask what those panes show.
+[Ghostty](https://ghostty.org/docs/features) already has excellent terminal
+behavior, tabs, and splits; Sprite uses its terminal engine and builds its pane
+interfaces around it.
+
+[kitty](https://sw.kovidgoyal.net/kitty/remote-control/) and
+[WezTerm](https://wezterm.org/cli/cli/get-text.html) can also let programs read
+pane text. Their control tools can send text to panes too. Sprite keeps reading
+separate from drawing: a program allowed to read another pane cannot type into
+it, while a program can draw an interface in its own pane.
+
+[Warp](https://docs.warp.dev/agents/) includes a built-in coding agent.
+Sprite supplies no agent of its own. It gives the assistant you choose a way
+to read pane context and present an interface beside your work.
+
 ## What Sprite is working toward
 
 An assistant should be able to understand what is happening across your
