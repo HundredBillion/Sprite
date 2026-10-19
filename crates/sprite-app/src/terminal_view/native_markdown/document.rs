@@ -31,6 +31,8 @@ pub(super) struct Block {
     pub image: Option<(String, String)>,
     pub inline_images: Vec<InlineImage>,
     pub cells: Vec<Range<usize>>,
+    pub front_matter: bool,
+    pub front_matter_start: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub(super) struct Parsed {
@@ -46,6 +48,7 @@ impl Parsed {
         let mut styles = Vec::new();
         let mut link: Option<(usize, String)> = None;
         let mut images: Vec<(usize, String, bool)> = Vec::new();
+        let mut metadata: Option<String> = None;
         let mut in_table = false;
         let mut lists: Vec<Option<u64>> = Vec::new();
         let mut quote = 0;
@@ -64,9 +67,25 @@ impl Parsed {
             Options::ENABLE_TABLES
                 | Options::ENABLE_STRIKETHROUGH
                 | Options::ENABLE_TASKLISTS
-                | Options::ENABLE_HEADING_ATTRIBUTES,
+                | Options::ENABLE_HEADING_ATTRIBUTES
+                | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
         ) {
+            if let Some(raw) = metadata.as_mut() {
+                match event {
+                    Event::End(TagEnd::MetadataBlock(_)) => {
+                        blocks.extend(front_matter_blocks(raw));
+                        metadata = None;
+                    }
+                    Event::Text(text) => raw.push_str(&text),
+                    _ => (),
+                }
+                continue;
+            }
             match event {
+                Event::Start(Tag::MetadataBlock(_)) => {
+                    flush(&mut block, &mut blocks);
+                    metadata = Some(String::new());
+                }
                 Event::Start(tag) => match tag {
                     Tag::Heading { level, .. } => {
                         flush(&mut block, &mut blocks);
@@ -240,6 +259,140 @@ impl Parsed {
         }
     }
 }
+struct YamlBudget {
+    bytes: usize,
+    nodes: usize,
+}
+struct BoundedYaml<'a> {
+    budget: &'a mut YamlBudget,
+    depth: usize,
+}
+impl<'de> serde::de::DeserializeSeed<'de> for BoundedYaml<'_> {
+    type Value = serde_yaml_ng::Value;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        if self.depth > 64 || self.budget.nodes == 0 {
+            return Err(serde::de::Error::custom("front matter is too complex"));
+        }
+        self.budget.nodes -= 1;
+        deserializer.deserialize_any(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for BoundedYaml<'_> {
+    type Value = serde_yaml_ng::Value;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("bounded YAML metadata")
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(serde_yaml_ng::Value::Null)
+    }
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(value.into())
+    }
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(value.into())
+    }
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(value.into())
+    }
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        Ok(value.into())
+    }
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        if value.len() > self.budget.bytes {
+            return Err(E::custom("front matter is too large"));
+        }
+        self.budget.bytes -= value.len();
+        Ok(serde_yaml_ng::Value::String(value.to_owned()))
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(value) = seq.next_element_seed(BoundedYaml {
+            budget: self.budget,
+            depth: self.depth + 1,
+        })? {
+            values.push(value);
+        }
+        Ok(serde_yaml_ng::Value::Sequence(values))
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut values = serde_yaml_ng::Mapping::new();
+        while let Some(key) = map.next_key_seed(BoundedYaml {
+            budget: self.budget,
+            depth: self.depth + 1,
+        })? {
+            let value = map.next_value_seed(BoundedYaml {
+                budget: self.budget,
+                depth: self.depth + 1,
+            })?;
+            if values.insert(key, value).is_some() {
+                return Err(serde::de::Error::custom("duplicate metadata key"));
+            }
+        }
+        Ok(serde_yaml_ng::Value::Mapping(values))
+    }
+}
+
+fn front_matter_blocks(raw: &str) -> Vec<Block> {
+    let value_text = |value: &serde_yaml_ng::Value| match value {
+        serde_yaml_ng::Value::String(text) => text.clone(),
+        value => serde_yaml_ng::to_string(value)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string(),
+    };
+    use serde::de::DeserializeSeed;
+    let mut budget = YamlBudget {
+        bytes: 2 * 1024 * 1024,
+        nodes: 20_000,
+    };
+    let value = BoundedYaml {
+        budget: &mut budget,
+        depth: 0,
+    }
+    .deserialize(serde_yaml_ng::Deserializer::from_str(raw));
+    let mut rows = match value {
+        Ok(serde_yaml_ng::Value::Mapping(mapping)) => mapping
+            .iter()
+            .map(|(key, value)| {
+                let key = value_text(key);
+                let value = value_text(value);
+                let value_start = key.len() + 1;
+                let text = format!("{key}\t{value}");
+                let end = text.len();
+                Block {
+                    text,
+                    cells: vec![0..key.len(), value_start..end],
+                    spans: vec![
+                        (
+                            0..key.len(),
+                            InlineStyle {
+                                bold: true,
+                                ..InlineStyle::default()
+                            },
+                        ),
+                        (value_start..end, InlineStyle::default()),
+                    ],
+                    front_matter: true,
+                    ..Block::default()
+                }
+            })
+            .collect::<Vec<_>>(),
+        _ => vec![Block {
+            text: raw.trim_end().to_string(),
+            cells: vec![0..raw.trim_end().len()],
+            front_matter: true,
+            ..Block::default()
+        }],
+    };
+    if let Some(first) = rows.first_mut() {
+        first.front_matter_start = true;
+    }
+    rows
+}
+
 fn slug(text: &str) -> String {
     text.to_lowercase()
         .chars()
@@ -288,6 +441,75 @@ pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn markdown_yaml_front_matter_is_a_metadata_table_instead_of_a_setext_heading() {
+        let parsed = super::Parsed::parse(
+            "---\nname: code-review\ndescription: \"Review changes: keep **literal** text.\"\n---\n\nBody paragraph.\n",
+            "/tmp/SKILL.md",
+        );
+        assert_eq!(parsed.blocks.len(), 3);
+        let cells = |block: &super::Block| {
+            block
+                .cells
+                .iter()
+                .map(|range| block.text[range.clone()].to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cells(&parsed.blocks[0]), vec!["name", "code-review"]);
+        assert_eq!(
+            cells(&parsed.blocks[1]),
+            vec!["description", "Review changes: keep **literal** text."]
+        );
+        for row in &parsed.blocks[..2] {
+            assert_eq!(row.heading, 0);
+            assert!(!row.rule);
+            assert!(row.spans[0].1.bold);
+            assert!(!row.spans[1].1.bold);
+        }
+        assert_eq!(parsed.blocks[2].text, "Body paragraph.");
+    }
+
+    #[test]
+    fn markdown_yaml_front_matter_preserves_multiline_nested_and_invalid_values() {
+        let parsed = super::Parsed::parse(
+            "---\nname: 'café'\ndescription: >\n  first line\n  second line\noptions: [one, two]\n---\n\nHeading\n---\n",
+            "/tmp/SKILL.md",
+        );
+        assert!(parsed.blocks[0].front_matter_start);
+        assert_eq!(parsed.blocks[0].text, "name\tcafé");
+        assert_eq!(
+            parsed.blocks[1].text,
+            "description\tfirst line second line\n"
+        );
+        assert!(parsed.blocks[2].text.contains("one"));
+        assert!(!parsed.blocks[2].front_matter_start);
+        assert_eq!(parsed.blocks[3].heading, 2);
+        assert!(!parsed.blocks[3].front_matter);
+        let invalid = super::Parsed::parse("---\nname: [broken\n---\n\nBody", "/tmp/a.md");
+        assert_eq!(invalid.blocks[0].text, "name: [broken");
+        assert!(invalid.blocks[0].front_matter);
+        assert_eq!(invalid.blocks[1].text, "Body");
+        let ordinary = super::Parsed::parse("Paragraph\n\n---\n\nTitle\n---", "/tmp/a.md");
+        assert!(ordinary.blocks.iter().all(|block| !block.front_matter));
+        assert!(ordinary.blocks.iter().any(|block| block.rule));
+        assert_eq!(ordinary.blocks.last().unwrap().heading, 2);
+    }
+
+    #[test]
+    fn markdown_yaml_front_matter_bounds_alias_expansion_before_allocating_rows() {
+        let raw = format!(
+            "a: &a {}\n{}",
+            "x".repeat(32 * 1024),
+            (0..1000).map(|n| format!("k{n}: *a\n")).collect::<String>()
+        );
+        let rows = super::front_matter_blocks(&raw);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, raw.trim_end());
+        let small = super::front_matter_blocks("name: &name review\ncopy: *name\n");
+        assert_eq!(small.len(), 2);
+        assert_eq!(small[1].text, "copy\treview");
+    }
+
     #[test]
     fn markdown_review_local_resource_urls_decode_utf8_and_reject_invalid_escapes() {
         assert_eq!(

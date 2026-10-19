@@ -5170,4 +5170,66 @@ mod tests {
             assert!(!emitted.iter().any(|e| e["type"] == "mouse"));
         }
     }
+    #[gpui::test]
+    fn native_markdown_front_matter_wraps_values_in_contiguous_table_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use serde_json::json;
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(999);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}})),
+        );
+        assert_eq!(answer, Ok(()));
+        let source = format!(
+            "---\nname: code-review\ndescription: \"{}\"\n---\n\nBody paragraph.",
+            "Review changes with a long description. ".repeat(10)
+        );
+        for value in [
+            json!({"type":"markdown","kind":"document","revision":1,"buffer":1,"generation":1,"path":"/tmp/SKILL.md","text":source}),
+            json!({"type":"markdown","kind":"state","revision":2,"active":1000,"windows":[{"window":1000,"buffer":1,"generation":1,"preview":true,"row":0,"column":0,"width":60,"height":20}],"colors":{"background":"#1e1f22","foreground":"#bcbec4","muted":"#9da0a8","accent":"#589df6","code":"#2b2d30"}}),
+        ] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(&value).unwrap(),
+                },
+            );
+        }
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        let name = cx
+            .debug_bounds("markdown-cell-1000-0-0")
+            .expect("name label");
+        let name_value = cx
+            .debug_bounds("markdown-cell-1000-0-1")
+            .expect("name value");
+        let description = cx
+            .debug_bounds("markdown-cell-1000-1-0")
+            .expect("description label");
+        let value = cx
+            .debug_bounds("markdown-cell-1000-1-1")
+            .expect("wrapped description");
+        assert_eq!(name.size.width, px(136.0));
+        assert_eq!(name.left(), description.left());
+        assert_eq!(name_value.left(), value.left());
+        assert_eq!(name.right(), name_value.left());
+        assert_eq!(name_value.right(), value.right());
+        assert_eq!(description.top() - name.bottom(), px(1.0));
+        assert_eq!(description.size.height, value.size.height);
+        assert!(value.size.height > name.size.height * 2.0);
+    }
 }

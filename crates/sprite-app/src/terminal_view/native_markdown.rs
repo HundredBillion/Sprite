@@ -515,6 +515,19 @@ impl NativeMarkdown {
                                 .border_b_1()
                                 .border_color(color(&state.colors.muted))
                         })
+                        .when(block.front_matter, |s| {
+                            s.border_l_1()
+                                .border_r_1()
+                                .when(block.front_matter_start, |s| s.border_t_1())
+                                .when(
+                                    prepared
+                                        .parsed
+                                        .blocks
+                                        .get(index + 1)
+                                        .is_none_or(|next| !next.front_matter),
+                                    |s| s.mb(px(12.0)),
+                                )
+                        })
                         .child(content)
                         .on_mouse_down(
                             MouseButton::Left,
@@ -857,10 +870,22 @@ fn block_content(
                 .debug_selector(move || {
                     format!("markdown-cell-{}-{}-{cell_index}", selector.0, selector.1)
                 })
-                .w(gpui::relative(1.0 / block.cells.len() as f32))
+                .when(!block.front_matter || block.cells.len() == 1, |s| {
+                    s.w(gpui::relative(1.0 / block.cells.len() as f32))
+                })
+                .when(block.front_matter && block.cells.len() == 2, |s| {
+                    if cell_index == 0 {
+                        s.w(px(136.0)).max_w(gpui::relative(0.4)).flex_shrink_0()
+                    } else {
+                        s.flex_1()
+                    }
+                })
                 .min_w_0()
                 .p(px(6.0))
-                .border_r_1()
+                .when(
+                    !block.front_matter || cell_index + 1 < block.cells.len(),
+                    |s| s.border_r_1(),
+                )
                 .border_color(color(&colors.muted))
                 .child(text)
                 .children(images.iter_mut().filter_map(|(range, element)| {

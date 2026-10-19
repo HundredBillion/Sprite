@@ -26,6 +26,7 @@ path = "src/bin/sprite-paint-bench.rs"
 [dependencies]
 pulldown-cmark = { version = "=0.13.0", default-features = false }
 nix = { workspace = true }
+serde_yaml_ng = "=0.10.0"
 serde = { workspace = true }
 async-channel = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
