@@ -149,6 +149,7 @@ impl RowChunk {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
+    Footer(Option<Box<Footer>>),
     Minimap(super::minimap::MinimapOp),
     Tabs(super::tabs::Tabs),
     Rows(Vec<RowChunk>),
@@ -176,7 +177,8 @@ pub enum Op {
 pub fn is_op(kind: &str) -> bool {
     matches!(
         kind,
-        "minimap"
+        "footer"
+            | "minimap"
             | "tabs"
             | "rows"
             | "highlights"
@@ -223,6 +225,51 @@ fn parse_op(message: &Value) -> Result<Op, Refusal> {
         .and_then(Value::as_str)
         .ok_or_else(|| malformed("an operation needs a type"))?;
     match kind {
+        "footer" => {
+            if object.get("visible") == Some(&Value::Bool(false)) {
+                return Ok(Op::Footer(None));
+            }
+            let cols = cell_index(object, "cols")?;
+            let row = cell_index(object, "row")?;
+            let grid_cols = cell_index(object, "grid_cols")?;
+            let grid_rows = cell_index(object, "grid_rows")?;
+            let source = object
+                .get("source")
+                .and_then(Value::as_str)
+                .filter(|source| source.len() <= 65536)
+                .ok_or_else(|| malformed("footer needs bounded source row text"))?
+                .to_owned();
+            if !(1..=MAX_COLS).contains(&cols)
+                || !(1..=MAX_COLS).contains(&grid_cols)
+                || !(1..=MAX_ROWS).contains(&grid_rows)
+                || row >= grid_rows
+            {
+                return Err(malformed("invalid footer dimensions"));
+            }
+            let mut grid = GridSurface::new(cols, 1);
+            let empty = serde_json::json!({});
+            grid.apply_all(parse_ops(&serde_json::json!({
+                "type":"highlights",
+                "define": object.get("define").unwrap_or(&empty),
+                "groups": object.get("groups").unwrap_or(&empty)
+            }))?)?;
+            grid.apply(Op::Defaults(Defaults {
+                fg: color_field(object, "fg")?,
+                bg: color_field(object, "bg")?,
+                sp: color_field(object, "sp")?,
+            }))?;
+            grid.apply_all(parse_ops(&serde_json::json!({
+                "type":"rows", "rows":[{"row":0,"cells":object.get("cells")}]
+            }))?)?;
+            grid.cursor.visible = false;
+            Ok(Op::Footer(Some(Box::new(Footer {
+                row,
+                grid_cols,
+                grid_rows,
+                source,
+                grid,
+            }))))
+        }
         "minimap" => Ok(Op::Minimap(super::minimap::Minimap::parse(message)?)),
         "tabs" => Ok(Op::Tabs(super::tabs::Tabs::parse(message)?)),
         "rows" => {
@@ -496,9 +543,19 @@ pub struct UiLabel {
     pub style: CellStyle,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Footer {
+    pub source: String,
+    pub row: u16,
+    pub grid_cols: u16,
+    pub grid_rows: u16,
+    pub grid: GridSurface,
+}
+
 /// A program's grid as Sprite holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridSurface {
+    pub footer: Option<Box<Footer>>,
     pub minimap: super::minimap::Minimap,
     pub tabs: super::tabs::Tabs,
     cols: u16,
@@ -538,6 +595,7 @@ impl GridSurface {
         texts.entry_mut(blank).references = usize::from(cols) * usize::from(rows) + 1;
         let empty_row = Arc::new(Vec::new());
         Self {
+            footer: None,
             tabs: Default::default(),
             minimap: Default::default(),
             cols,
@@ -581,6 +639,21 @@ impl GridSurface {
         self.rows
     }
 
+    pub fn footer_row(&self, columns: u16) -> Option<u16> {
+        let footer = self.footer.as_ref()?;
+        if footer.grid_cols != self.cols
+            || footer.grid_rows != self.rows
+            || footer.grid.cols() != columns
+        {
+            return None;
+        }
+        self.cells[usize::from(footer.row)]
+            .iter()
+            .flat_map(|cell| self.texts.text(cell.text).as_str().bytes())
+            .eq(footer.source.bytes())
+            .then_some(footer.row)
+    }
+
     pub fn is_definition_symbol(&self, row: u16, col: u16) -> bool {
         let Some(cell) = self
             .cells
@@ -622,6 +695,7 @@ impl GridSurface {
 
     pub fn apply(&mut self, op: Op) -> Result<(), Refusal> {
         match op {
+            Op::Footer(footer) => self.footer = footer,
             Op::Minimap(op) => self.minimap.apply(op)?,
             Op::Tabs(tabs) => {
                 if tabs.revision <= self.tabs.revision {
@@ -862,7 +936,7 @@ impl GridSurface {
         self.dirty.fill(true);
     }
 
-    pub fn positioned_rows(&mut self, theme: &Highlights) -> crate::grid::PositionedRows {
+    pub(crate) fn positioned_rows(&mut self, theme: &Highlights) -> crate::grid::PositionedRows {
         if self.theme.as_ref() != Some(theme) {
             self.invalidate();
             self.theme = Some(theme.clone());
@@ -1068,6 +1142,38 @@ mod tests {
             grid.texts.free.len() + grid.texts.ids.len(),
             grid.texts.entries.len()
         );
+    }
+
+    #[test]
+    fn footer_uses_full_width_without_resizing_editor() {
+        let mut grid = GridSurface::new(80, 24);
+        grid.apply_all(parse_ops(&serde_json::json!({
+            "type": "footer", "row": 23, "cols": 100, "grid_cols":80,"grid_rows":24,"source":" ".repeat(80),
+            "cells": [[" ", 1, 95], ["L", 1], ["u", 1], ["a", 1], [" ", 1, 2]],
+            "define": {"1": {"fg":"#ffffff", "bg":"#202020"}},
+            "groups": {"StatusLine": 1}
+        })).unwrap()).unwrap();
+        assert_eq!(grid.cols(), 80);
+        assert_eq!(grid.footer_row(100), Some(23));
+        assert_eq!(grid.footer_row(120), None, "stale width is hidden");
+        let footer = grid.footer.as_mut().unwrap();
+        assert_eq!(footer.row, 23);
+        assert_eq!(footer.grid.cols(), 100);
+        let rows = footer.grid.positioned_rows(&Highlights::default());
+        assert_eq!(rows[0][95].text.as_str(), "L");
+        grid.apply_all(
+            parse_ops(&serde_json::json!({"type":"rows", "rows":[{"row":23,"cells":[[":"]]}]}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            grid.footer_row(100),
+            None,
+            "command input must cover the footer"
+        );
+        grid.apply_all(parse_ops(&serde_json::json!({"type":"footer", "visible":false})).unwrap())
+            .unwrap();
+        assert!(grid.footer.is_none());
     }
 
     #[test]

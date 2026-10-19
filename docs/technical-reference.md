@@ -313,6 +313,32 @@ terminal selection to copy from. A grid Surface also hears the mouse in cells â€
 so an editor behind it can place its cursor and scroll. A selection dragged
 across it from the terminal began on the terminal and is not reported.
 
+The native minimap uses at most 120 pixels and at most one quarter of the
+editor surface after side docks. It stays visible down to a 192-pixel editor
+surface, where it takes 48 pixels. This lets an explorer, file, and minimap
+share a half-width terminal pane. Smaller surfaces hide it to keep the file usable.
+
+Grid Surfaces can overlay a full-width footer when `opened.features` includes
+`"grid-footer-v1"`. Grid resize events include `footer_cols`, the number of cells
+across the complete surface including its minimap. The ordinary `cols` continues
+to describe the editor grid beside the minimap. Older clients can ignore the
+additional field.
+
+```json
+{"type":"footer","row":23,"cols":100,"grid_cols":80,"grid_rows":24,"source":"                                                                                ","cells":[[" ",1,95],["R",1],["e",1],["a",1],["d",1],["y",1]],"define":{"1":{"fg":"#ffffff","bg":"#303030"}},"groups":{"StatusLine":1}}
+```
+
+`row` identifies the zero-based grid row to cover. `cells`, `define`, `groups`,
+and optional `fg`, `bg`, `sp` use the existing grid encodings. A footer is one
+row, at most 1024 columns, and never changes the main grid's dimensions. Its
+source dimensions must match the current grid, and its `cols` must match the
+surface's current `footer_cols`. `source` is the complete text of the grid row
+it replaces, including padding and omitting wide-character spacer cells; it is
+limited to 64 KiB. A footer paints only while that text still matches, so a
+command prompt, message, or popup can overwrite the row without waiting for a
+new footer operation. The minimap ends above a painted footer. Send
+`{"type":"footer","visible":false}` to remove it.
+
 Grid Surfaces can show a native file-tab row when `opened.features` contains
 `"grid-tabs-v1"` (also advertised by `capabilities`). Send a standalone operation
 or include it in a grid batch:

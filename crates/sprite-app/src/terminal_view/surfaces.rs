@@ -52,7 +52,7 @@ pub(super) enum Body {
     },
 }
 
-type ResizeDimensions = (u32, u32, Option<(u16, u16)>);
+type ResizeDimensions = (u32, u32, Option<(u16, u16)>, Option<u16>);
 
 impl Body {
     fn new(description: Description, id: SurfaceId, cx: &mut Context<TerminalView>) -> Self {
@@ -1223,12 +1223,17 @@ impl TerminalView {
             f32::from(grid_size.width).round() as u32,
             f32::from(grid_size.height).round() as u32,
         );
+        let (footer_cols, _) = crate::surface::render::cells_that_fit(
+            gpui::size(size.width, grid_size.height),
+            metrics,
+        );
+        let footer_cols = footer_cols.min(crate::surface::grid::MAX_COLS);
         let cells = matches!(surface.body, Body::Grid { .. })
             .then(|| crate::surface::render::cells_that_fit(grid_size, metrics));
-        let told = (told.0, told.1, cells);
+        let told = (told.0, told.1, cells, cells.map(|_| footer_cols));
         if surface.told != Some(told) {
             let event = match cells {
-                Some((cols, rows)) => event_grid_resize(told.0, told.1, cols, rows),
+                Some((cols, rows)) => event_grid_resize(told.0, told.1, cols, rows, footer_cols),
                 None => event_resize(told.0, told.1),
             };
             surface.connection.send(&event);
@@ -1250,11 +1255,37 @@ impl TerminalView {
                 ..
             } => {
                 let bar = tabs.render(&grid.tabs, surface.id, f32::from(size.width), cx);
+                let footer_row = grid.footer_row(footer_cols);
+                let map_height = footer_row.map_or(grid_size.height, |row| {
+                    px(grid_slack) + metrics.cells.height() * f32::from(row)
+                });
+                let footer = grid
+                    .footer
+                    .as_mut()
+                    .filter(|footer| Some(footer.row) == footer_row)
+                    .map(|footer| {
+                        let (_, background) = footer.grid.default_colors(metrics.defaults);
+                        div()
+                            .debug_selector(|| format!("grid-footer-{}", surface.id.0))
+                            .absolute()
+                            .left_0()
+                            .bg(rgb(crate::grid_paint::pack(background)))
+                            .top(px(grid_slack) + metrics.cells.height() * f32::from(footer.row))
+                            .w_full()
+                            .h(metrics.cells.height())
+                            .overflow_hidden()
+                            .child(crate::surface::render::render_grid(
+                                &mut footer.grid,
+                                highlights,
+                                metrics,
+                                shapes,
+                            ))
+                    });
                 let map = if minimap_width > 0.0 {
                     Some(minimap.render(
                         &grid.minimap,
                         surface.id,
-                        gpui::size(px(minimap_width), grid_size.height),
+                        gpui::size(px(minimap_width), map_height),
                         metrics.cells.family(),
                         metrics.cells.height(),
                         cx,
@@ -1306,6 +1337,7 @@ impl TerminalView {
                     .child(bar)
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .flex_row()
                             .min_h_0()
@@ -1322,7 +1354,8 @@ impl TerminalView {
                                     .child(cells)
                                     .children(labels),
                             )
-                            .children(map),
+                            .children(map)
+                            .children(footer),
                     )
                     .into_any_element()
             }
@@ -2685,7 +2718,7 @@ mod tests {
         draw_test_window(cx);
         let (cols, rows) = host.read_with(cx, |host, _| {
             let surface = host.surfaces.fill.as_ref().unwrap();
-            let (width, height, cells) = surface.told.unwrap();
+            let (width, height, cells, _) = surface.told.unwrap();
             let cells = cells.unwrap();
             assert_eq!(
                 cells.0,
@@ -2937,9 +2970,9 @@ mod tests {
         assert_eq!(
             messages,
             vec![
-                serde_json::json!({"type":"resize","width":160,"height":160,"cols":20,"rows":10}),
-                serde_json::json!({"type":"resize","width":240,"height":160,"cols":30,"rows":10}),
-                serde_json::json!({"type":"resize","width":240,"height":160,"cols":24,"rows":10}),
+                serde_json::json!({"type":"resize","width":160,"height":160,"cols":20,"rows":10,"footer_cols":20}),
+                serde_json::json!({"type":"resize","width":240,"height":160,"cols":30,"rows":10,"footer_cols":30}),
+                serde_json::json!({"type":"resize","width":240,"height":160,"cols":24,"rows":10,"footer_cols":24}),
             ]
         );
         cx.update(|window, _| window.remove_window());
@@ -3632,6 +3665,140 @@ mod tests {
         drop(host);
     }
     #[gpui::test]
+    fn native_footer_spans_minimap_and_keeps_editor_width(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(640.0), px(480.0)));
+        let id = SurfaceId(992);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        let mut explorer = open_description(serde_json::json!({
+            "version":1,"root":{"kind":"text","text":"EXPLORER"}
+        }));
+        explorer.placement = Placement::Dock {
+            side: Side::Left,
+            size: crate::surface::DockSize::try_from(280.0).unwrap(),
+            ownership: Ownership::Unowned,
+        };
+        let (answer, _explorer_peer) = open_request(&host, cx, SurfaceId(993), explorer);
+        assert_eq!(answer, Ok(()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
+        for message in &fixture["valid"].as_array().unwrap()[..4] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(message).unwrap(),
+                },
+            );
+        }
+        draw_test_window(cx);
+        let resize = events(&mut peer)
+            .into_iter()
+            .rfind(|e| e["type"] == "resize")
+            .unwrap();
+        let (cols, rows, full_cols) = (
+            resize["cols"].as_u64().unwrap() as u16,
+            resize["rows"].as_u64().unwrap() as u16,
+            resize["footer_cols"].as_u64().unwrap() as u16,
+        );
+        assert!(full_cols > cols);
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![crate::surface::grid::Op::Resize { cols, rows }],
+            },
+        );
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(&serde_json::json!({
+                    "type":"footer", "cols":full_cols, "row":rows-1,
+                    "grid_cols":cols, "grid_rows":rows,"source":" ".repeat(cols as usize),
+                    "cells":[[" ",1,full_cols]], "define":{"1":{"bg":"#303030"}}
+                }))
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        let footer = cx
+            .debug_bounds("grid-footer-992")
+            .expect("footer is painted");
+        host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let Body::Grid { grid, minimap, .. } = &surface.body else {
+                panic!("grid")
+            };
+            assert_eq!(grid.cols(), cols);
+            let map = minimap.bounds().unwrap();
+            assert!(
+                map.size.width < px(120.0),
+                "minimap shrinks beside explorer in a half-width pane"
+            );
+            assert!(footer.left() >= px(280.0), "explorer keeps its space");
+            assert_eq!(footer.left(), surface.origin.unwrap().x);
+            assert_eq!(footer.right(), map.right());
+            assert_eq!(map.bottom(), footer.top());
+            assert_eq!(
+                footer.bottom(),
+                surface.origin.unwrap().y + host.metrics.height() * f32::from(rows)
+            );
+        });
+        events(&mut peer);
+        let position = point(footer.right() - px(20.0), footer.top() + px(3.0));
+        cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "minimap_action")
+        );
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(
+                    &serde_json::json!({"type":"footer", "visible":false}),
+                )
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        host.read_with(cx, |host, _| {
+            let Body::Grid { grid, minimap, .. } = &host.surfaces.fill.as_ref().unwrap().body
+            else {
+                panic!("grid")
+            };
+            assert_eq!(grid.cols(), cols);
+            assert!(grid.footer.is_none());
+            assert_eq!(minimap.bounds().unwrap().bottom(), footer.bottom());
+        });
+    }
+
+    #[gpui::test]
     fn native_minimap_reserves_columns_and_routes_one_hunk_click(cx: &mut gpui::TestAppContext) {
         let settings = crate::config::Settings::default();
         cx.set_global(crate::config::ActiveSettings(settings.clone()));
@@ -3674,7 +3841,7 @@ mod tests {
             let bounds = minimap.bounds().unwrap();
             (s.told.unwrap(), bounds.origin + point(px(20.0), px(7.5)))
         });
-        assert_eq!(after.0 + 160, before.0);
+        assert_eq!(after.0 + 120, before.0);
         assert_eq!(after.1, before.1);
         assert!(after.2.unwrap().0 < before.2.unwrap().0);
         assert_eq!(after.2.unwrap().1, before.2.unwrap().1);
@@ -3709,7 +3876,14 @@ mod tests {
                 ..h.grid_metrics()
             };
             let surface = h.surfaces.fill.as_mut().unwrap();
-            for (width, expected) in [(479.0, 479), (480.0, 320), (800.0, 640)] {
+            for (width, expected) in [
+                (144.0, 144),
+                (192.0, 144),
+                (239.0, 179),
+                (320.0, 240),
+                (480.0, 360),
+                (800.0, 680),
+            ] {
                 let _ = TerminalView::surface_element(
                     surface,
                     gpui::size(px(width), px(355.0)),
@@ -3723,6 +3897,7 @@ mod tests {
                 );
                 let told = surface.told.unwrap();
                 assert_eq!(told.0, expected);
+                assert_eq!(told.3, Some((width / 8.0_f32).floor() as u16));
                 assert_eq!(told.1, 320);
                 assert_eq!(told.2.unwrap(), ((expected / 8) as u16, 20));
             }
