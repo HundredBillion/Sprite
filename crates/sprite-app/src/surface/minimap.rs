@@ -136,9 +136,7 @@ impl Line {
         &self.spans
     }
     fn bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.text.len()
-            + self.spans.len() * std::mem::size_of::<[usize; 3]>()
+        48 + self.text.len() + self.spans.len() * 24
     }
 }
 impl Change {
@@ -322,7 +320,7 @@ impl Minimap {
                         && b.palette.iter().all(|s| color(s))
                         && color(&b.background),
                 )?;
-                require(b.insert * std::mem::size_of::<Line>() <= SOURCE_BYTES)?;
+                require(b.insert * 48 <= SOURCE_BYTES)?;
                 Kind::Begin(b)
             }
             "lines" => {
@@ -549,6 +547,30 @@ mod tests {
         Minimap::parse(value).and_then(|op| model.apply(op))
     }
     #[test]
+    fn source_display_controls_cross_the_real_parser() {
+        let cases: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/minimap-display-controls.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            let mut model = Minimap::default();
+            let mut begin = fixture()["valid"][0].clone();
+            begin["insert"] = 1.into();
+            begin["total"] = 1.into();
+            send(&mut model, &begin).unwrap();
+            let mut lines = fixture()["valid"][1].clone();
+            lines["lines"] = serde_json::json!([case["row"].clone()]);
+            send(&mut model, &lines).unwrap();
+            send(&mut model, &fixture()["valid"][2]).unwrap();
+            let expected: Line = serde_json::from_value(case["row"].clone()).unwrap();
+            assert_eq!(model.document().unwrap().rows()[0], expected);
+        }
+        let plain: Line =
+            serde_json::from_value(serde_json::json!({"text":"x".repeat(20),"spans":[]})).unwrap();
+        assert_eq!(plain.bytes(), 68);
+    }
+
+    #[test]
     fn fixture_commits_code_and_overlays_atomically() {
         let fixture = fixture();
         let mut model = Minimap::default();
@@ -738,7 +760,7 @@ mod tests {
     #[test]
     fn source_storage_caps_apply_to_staging_and_final_splice() {
         let row = serde_json::json!({"text":"x".repeat(512),"spans":(0..256).map(|i|[i,i+1,i%2]).collect::<Vec<_>>()});
-        let row_size = std::mem::size_of::<Line>() + 512 + 256 * std::mem::size_of::<[usize; 3]>();
+        let row_size = 48 + 512 + 256 * 24;
         let count = SOURCE_BYTES / row_size;
         let mut m = Minimap::default();
         let mut b = fixture()["valid"][0].clone();

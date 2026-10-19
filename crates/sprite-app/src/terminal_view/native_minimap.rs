@@ -9,7 +9,12 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollWheelEvent, ShapedLine, SharedString, Size,
     TextRun, Window, canvas, div, fill, outline, point, px, rgb,
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+    sync::Arc,
+};
 
 const LINE_HEIGHT: f32 = 3.0;
 const FONT_SIZE: f32 = 2.5;
@@ -90,7 +95,7 @@ struct Press {
     grab: Option<f32>,
     moved: bool,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Navigation {
     Reveal(usize),
     Scroll(usize),
@@ -104,7 +109,63 @@ struct Interaction {
     pending: Option<Navigation>,
     scheduled: bool,
     wheel: crate::grid::ScrollAccumulator,
+    scroll_top: Option<usize>,
+    scroll_acks: VecDeque<usize>,
+    observed_top: usize,
+    observed_revision: Option<u64>,
     hover: Option<(usize, String)>,
+}
+const MAX_SCROLL_ACKS: usize = 64;
+impl Interaction {
+    fn reset_scroll_tracking(&mut self) {
+        self.scroll_top = None;
+        self.scroll_acks.clear();
+        self.wheel.reset();
+    }
+    fn scroll_rows(&mut self, rows: i32, total: usize, visible: usize, authoritative: usize) {
+        let top = match self.pending {
+            Some(Navigation::Scroll(top)) => top,
+            _ => self.scroll_top.unwrap_or(authoritative),
+        };
+        let top = (top as i64 + rows as i64).clamp(1, (total - visible + 1) as i64) as usize;
+        self.scroll_top = Some(top);
+        self.pending = Some(Navigation::Scroll(top));
+    }
+    fn take_navigation(&mut self) -> Option<Navigation> {
+        if let Some(Navigation::Scroll(top)) = self.pending {
+            if self.scroll_acks.back() == Some(&top) {
+                self.pending = None;
+                return None;
+            }
+            if self.scroll_acks.len() == MAX_SCROLL_ACKS {
+                return None;
+            }
+            self.scroll_top = Some(top);
+            self.scroll_acks.push_back(top);
+        }
+        self.pending.take()
+    }
+    fn observe_scroll(&mut self, top: usize, revision: Option<u64>) -> bool {
+        if self.observed_revision == revision {
+            return false;
+        }
+        self.observed_revision = revision;
+        if let Some(index) = self.scroll_acks.iter().position(|sent| *sent == top) {
+            // States can coalesce repeated targets; consume the oldest match without dropping newer intent.
+            self.scroll_acks.drain(..=index);
+            if self.scroll_acks.is_empty() && !matches!(self.pending, Some(Navigation::Scroll(_))) {
+                self.scroll_top = None;
+            }
+        } else if top != self.observed_top {
+            self.reset_scroll_tracking();
+            if matches!(self.pending, Some(Navigation::Scroll(_))) {
+                self.pending = None;
+                self.scheduled = false;
+            }
+        }
+        self.observed_top = top;
+        self.pending.is_some() && !self.scheduled && self.scroll_acks.len() < MAX_SCROLL_ACKS
+    }
 }
 #[derive(Default)]
 struct Shapes {
@@ -189,7 +250,6 @@ impl NativeMinimap {
             return div().into_any_element();
         };
         let state = model.state();
-        #[cfg(feature = "minimap-benchmark")]
         let state_revision = state.map(|state| state.revision());
         let viewport = state.map_or([1, 1], |s| s.viewport());
         let geometry = MapGeometry::new(
@@ -199,16 +259,29 @@ impl NativeMinimap {
             f32::from(size.height),
         );
         let current = identity(document);
-        {
+        let resume_scroll = {
             let mut input = self.interaction.borrow_mut();
             if input.identity.as_ref() != Some(&current) || model.is_staging() {
                 input.press = None;
                 input.pending = None;
-                input.wheel.reset();
+                input.reset_scroll_tracking();
                 input.hover = None;
+                input.observed_revision = None;
+                input.observed_top = viewport[0];
             }
             input.identity = Some(current.clone());
             input.geometry = Some(geometry);
+            let resume = input.observe_scroll(viewport[0], state_revision);
+            if resume {
+                input.scheduled = true;
+            }
+            resume
+        };
+        if resume_scroll {
+            let view = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                view.update(cx, |view, _| view.flush_minimap(surface)).ok();
+            });
         }
         let rows: Vec<_> =
             document.rows()[geometry.offset..geometry.offset + geometry.rows].to_vec();
@@ -354,7 +427,7 @@ impl NativeMinimap {
                     "event":"paint", "generation":generation,
                     "viewport":viewport, "offset":geometry.offset, "rows":geometry.rows,
                     "state_revision":state_revision, "change_bands":changes.len(), "first_line_change":first_line_change, "occurrences":occurrences.len(), "selection":selection.is_some(),
-                    "scale":window.scale_factor(),
+                    "scale":window.scale_factor(), "active":window.is_window_active(),
                     "ms":paint_started.elapsed().as_secs_f64()*1000.0,
                 }));
                 let entity_move = entity.clone();
@@ -436,7 +509,9 @@ impl NativeMinimap {
         input.scheduled = false;
         input.identity = None;
         input.hover = None;
-        input.wheel.reset();
+        input.reset_scroll_tracking();
+        input.observed_revision = None;
+        input.observed_top = 0;
         self.shapes.borrow_mut().rows.clear();
     }
 }
@@ -602,7 +677,7 @@ impl TerminalView {
         };
         let mut input = input.borrow_mut();
         input.scheduled = false;
-        let Some(action) = input.pending.take() else {
+        let Some(action) = input.take_navigation() else {
             return;
         };
         let surface = self.surfaces.get_mut(|s| s.id() == id).unwrap();
@@ -634,6 +709,13 @@ impl TerminalView {
         crate::minimap_benchmark::record(serde_json::json!({"event":"flush", "action":event}));
         connection.send(&event.to_string());
     }
+    pub(super) fn prepare_minimap_editor_input(&mut self, id: SurfaceId) {
+        if let Some((input, _)) = self.minimap_input(id) {
+            input.borrow_mut().reset_scroll_tracking();
+            self.flush_minimap(id);
+            input.borrow_mut().reset_scroll_tracking();
+        }
+    }
     fn minimap_wheel(
         &mut self,
         id: SurfaceId,
@@ -644,7 +726,7 @@ impl TerminalView {
     ) {
         #[cfg(feature = "minimap-benchmark")]
         crate::minimap_benchmark::record(serde_json::json!({"event":"input", "kind":"wheel"}));
-        if !self.accept_surface_input(id, window, cx) {
+        if !self.accept_surface_event_owner(id, window, cx) {
             return;
         }
         let Some((input, _)) = self.minimap_input(id) else {
@@ -663,14 +745,13 @@ impl TerminalView {
         let Some(g) = input.geometry else {
             return;
         };
-        let top = match input.pending {
-            Some(Navigation::Scroll(top)) => top,
-            _ => grid.minimap.state().map_or(1, |s| s.viewport()[0]),
-        };
         if rows != 0 {
-            input.pending = Some(Navigation::Scroll(
-                (top as i64 + rows as i64).clamp(1, (g.total - g.visible + 1) as i64) as usize,
-            ));
+            input.scroll_rows(
+                rows,
+                g.total,
+                g.visible,
+                grid.minimap.state().map_or(1, |s| s.viewport()[0]),
+            );
         }
         drop(input);
         self.schedule_minimap(id, window, cx);
@@ -756,6 +837,74 @@ mod tests {
         assert_eq!(short.line_at(-99.0), 1);
         assert_eq!(short.height, 6.0);
     }
+    #[test]
+    fn native_minimap_wheel_retains_intent_across_flushes_and_old_acks() {
+        let mut input = Interaction::default();
+        input.observed_top = 10;
+        input.observed_revision = Some(1);
+        for expected in [12, 14] {
+            input.scroll_rows(2, 100, 10, 10);
+            assert_eq!(input.take_navigation(), Some(Navigation::Scroll(expected)));
+        }
+        input.observe_scroll(12, Some(2));
+        input.scroll_rows(2, 100, 10, 12);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(16)));
+        input.observe_scroll(14, Some(3));
+        assert_eq!(input.scroll_top, Some(16));
+        input.observe_scroll(16, Some(4));
+        assert_eq!(input.scroll_top, None);
+        input.scroll_rows(-1000, 100, 10, 16);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(1)));
+        input.scroll_rows(1000, 100, 10, 16);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(91)));
+        input.observe_scroll(50, Some(5));
+        assert!(input.scroll_acks.is_empty());
+        assert!(input.pending.is_none());
+        input.scroll_rows(2, 100, 10, 50);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(52)));
+    }
+    #[test]
+    fn native_minimap_reversed_duplicate_ack_and_bounded_resume() {
+        let mut input = Interaction::default();
+        input.observed_top = 10;
+        input.observed_revision = Some(1);
+        for rows in [2, 2, -2] {
+            input.scroll_rows(rows, 1000, 10, 10);
+            input.take_navigation();
+        }
+        input.observe_scroll(12, Some(2));
+        assert_eq!(
+            input.scroll_acks.iter().copied().collect::<Vec<_>>(),
+            [14, 12]
+        );
+        assert_eq!(input.scroll_top, Some(12));
+        input.reset_scroll_tracking();
+        input.observed_top = 1;
+        input.observed_revision = Some(3);
+        for _ in 0..MAX_SCROLL_ACKS {
+            input.scroll_rows(1, 1000, 10, 1);
+            assert!(input.take_navigation().is_some());
+        }
+        input.scroll_rows(5, 1000, 10, 1);
+        assert!(input.take_navigation().is_none());
+        assert_eq!(input.scroll_acks.len(), MAX_SCROLL_ACKS);
+        assert!(
+            input.observe_scroll(2, Some(4)),
+            "ack must schedule retained navigation without a fresh wheel"
+        );
+        assert_eq!(
+            input.take_navigation(),
+            Some(Navigation::Scroll(MAX_SCROLL_ACKS + 6))
+        );
+        let mut minimap = NativeMinimap::default();
+        *minimap.interaction.borrow_mut() = input;
+        minimap.cancel();
+        let input = minimap.interaction.borrow();
+        assert!(
+            input.scroll_top.is_none() && input.scroll_acks.is_empty() && input.pending.is_none()
+        );
+    }
+
     #[test]
     fn native_minimap_text_runs_preserve_utf8_span_lengths_and_plain_gaps() {
         let row: Line =

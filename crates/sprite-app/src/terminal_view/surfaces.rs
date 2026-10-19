@@ -504,6 +504,19 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.accept_surface_event_owner(id, window, cx) {
+            return false;
+        }
+        self.prepare_minimap_editor_input(id);
+        true
+    }
+
+    pub(super) fn accept_surface_event_owner(
+        &mut self,
+        id: SurfaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.validate_surface_owner(id).is_ok() {
             true
         } else {
@@ -3803,6 +3816,15 @@ mod tests {
         assert_eq!(scroll.last().unwrap()["topline"], 971);
         assert_eq!(scroll.last().unwrap()["revision"], 8);
         assert!(!actions.iter().any(|e| e["type"] == "mouse"), "{actions:?}");
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: "up".into(),
+                key_char: None,
+                modifiers: Default::default(),
+            },
+            is_held: false,
+        });
+        events(&mut peer);
         cx.simulate_mouse_move(start, None, Default::default());
         let wheel_height = host.read_with(cx, |h, _| h.grid_metrics().cells.height());
         for _ in 0..3 {
@@ -3827,9 +3849,71 @@ mod tests {
         assert_eq!(wheel_actions.len(), 1, "{wheel:?}");
         assert_eq!(wheel_actions[0]["topline"], 16);
         assert!(!wheel.iter().any(|e| e["type"] == "mouse"));
+        let wheel_step = |cx: &mut gpui::VisualTestContext| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: start,
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), wheel_height * -2.0)),
+                ..Default::default()
+            })
+        };
+        wheel_step(cx);
+        host.update(cx, |h, _| h.flush_minimap(id));
+        assert_eq!(
+            events(&mut peer)
+                .iter()
+                .find(|e| e["type"] == "minimap_action")
+                .unwrap()["topline"],
+            18
+        );
+        send(state(9, [16, 45]), cx);
+        draw_test_window(cx);
+        wheel_step(cx);
+        host.update(cx, |h, _| h.flush_minimap(id));
+        assert_eq!(
+            events(&mut peer)
+                .iter()
+                .find(|e| e["type"] == "minimap_action")
+                .unwrap()["topline"],
+            20
+        );
+        host.update(cx, |h, _| h.prepare_minimap_editor_input(id));
+        send(state(10, [10, 39]), cx);
+        draw_test_window(cx);
+        events(&mut peer);
+        for _ in 0..64 {
+            wheel_step(cx);
+            host.update(cx, |h, _| h.flush_minimap(id));
+        }
+        let sent = events(&mut peer);
+        assert_eq!(
+            sent.iter()
+                .filter(|e| e["type"] == "minimap_action")
+                .count(),
+            64
+        );
+        for _ in 0..4 {
+            wheel_step(cx);
+            host.update(cx, |h, _| h.flush_minimap(id));
+        }
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "minimap_action")
+        );
+        send(state(11, [12, 41]), cx);
+        draw_test_window(cx);
+        // Advance the callback scheduled by the acknowledgment, without another wheel event.
+        host.update(cx, |h, _| h.flush_minimap(id));
+        assert_eq!(
+            events(&mut peer)
+                .iter()
+                .find(|e| e["type"] == "minimap_action")
+                .unwrap()["topline"],
+            146
+        );
         cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
         send(
-            serde_json::json!({"type":"minimap","kind":"begin","revision":9,"target":"long","generation":2,"base":1,"start":1,"delete":1,"insert":1,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22"}),
+            serde_json::json!({"type":"minimap","kind":"begin","revision":12,"target":"long","generation":2,"base":1,"start":1,"delete":1,"insert":1,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22"}),
             cx,
         );
         draw_test_window(cx);
@@ -3905,6 +3989,12 @@ mod tests {
         host.update_in(cx, |h, w, _| {
             assert!(h.surfaces.fill.as_ref().unwrap().focus.is_focused(w))
         });
+        let wheel_height = host.read_with(cx, |h, _| h.grid_metrics().cells.height());
+        cx.simulate_event(ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), wheel_height * -2.0)),
+            ..Default::default()
+        });
         cx.simulate_event(gpui::KeyDownEvent {
             keystroke: gpui::Keystroke {
                 key: "a".into(),
@@ -3920,7 +4010,7 @@ mod tests {
                 .iter()
                 .filter(|e| e["type"] == "minimap_action")
                 .count(),
-            1,
+            2,
             "{editor:?}"
         );
         assert_eq!(
@@ -3930,6 +4020,18 @@ mod tests {
                 .count(),
             1,
             "{editor:?}"
+        );
+        let navigation = editor
+            .iter()
+            .rposition(|e| e["type"] == "minimap_action")
+            .unwrap();
+        let key = editor
+            .iter()
+            .position(|e| e["type"] == "input" && e["key"] == "a")
+            .unwrap();
+        assert!(
+            navigation < key,
+            "pending minimap navigation precedes the following native key: {editor:?}"
         );
         assert!(!editor.iter().any(|e| e["type"] == "mouse"), "{editor:?}");
         assert!(!dock.iter().any(|e| e["type"] == "input"), "{dock:?}");
