@@ -649,7 +649,7 @@ impl TerminalView {
         position: gpui::Point<Pixels>,
         button: &str,
         action: &str,
-        modifiers: &gpui::Modifiers,
+        modifiers: &str,
     ) {
         let metrics = self.grid_metrics();
         let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
@@ -667,30 +667,27 @@ impl TerminalView {
         ) else {
             return;
         };
-        surface.connection.send(&event_mouse(
-            button,
-            action,
-            &neovim_modifiers(modifiers),
-            row,
-            col,
-        ));
+        surface
+            .connection
+            .send(&event_mouse(button, action, modifiers, row, col));
     }
 
     /// Reports a press and remembers the button, so the drag and the release
     /// that follow can be told from a gesture this Surface never saw. The
     /// record is kept for an element Surface too, whose press is not reported
     /// but whose wrapper still swallows the whole gesture.
-    fn report_grid_press(
-        &mut self,
-        id: SurfaceId,
-        position: gpui::Point<Pixels>,
-        button: &'static str,
-        modifiers: &gpui::Modifiers,
-    ) {
+    fn report_grid_press(&mut self, id: SurfaceId, event: &MouseDownEvent, button: &'static str) {
         if let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) {
             surface.pressed = Some(button);
         }
-        self.report_grid_mouse(id, position, button, "press", modifiers);
+        let mut modifiers = neovim_modifiers(&event.modifiers);
+        if (2..=4).contains(&event.click_count) {
+            if !modifiers.is_empty() {
+                modifiers.push('-');
+            }
+            modifiers.push_str(&event.click_count.to_string());
+        }
+        self.report_grid_mouse(id, event.position, button, "press", &modifiers);
     }
 
     /// Reports a drag or a release to the Surface that saw the press, clearing
@@ -715,7 +712,7 @@ impl TerminalView {
         if action == "release" {
             surface.pressed = None;
         }
-        self.report_grid_mouse(id, position, button, action, modifiers);
+        self.report_grid_mouse(id, position, button, action, &neovim_modifiers(modifiers));
         true
     }
 
@@ -1499,7 +1496,7 @@ impl TerminalView {
                         return;
                     }
                     window.focus(&focus);
-                    view.report_grid_press(id, event.position, "left", &event.modifiers);
+                    view.report_grid_press(id, event, "left");
                     cx.stop_propagation();
                 }),
             )
@@ -1510,7 +1507,7 @@ impl TerminalView {
                         cx.stop_propagation();
                         return;
                     }
-                    view.report_grid_press(id, event.position, "right", &event.modifiers);
+                    view.report_grid_press(id, event, "right");
                     cx.stop_propagation();
                 }),
             )
@@ -1521,7 +1518,7 @@ impl TerminalView {
                         cx.stop_propagation();
                         return;
                     }
-                    view.report_grid_press(id, event.position, "middle", &event.modifiers);
+                    view.report_grid_press(id, event, "middle");
                     cx.stop_propagation();
                 }),
             )
@@ -2376,7 +2373,7 @@ mod tests {
                 point(origin.x + px(1.0), origin.y + px(1.0)),
                 "left",
                 "press",
-                &Default::default(),
+                "",
             );
         });
         let actions = events(&mut peer);
@@ -3999,5 +3996,83 @@ mod tests {
             initial,
             "an unchanged visible window must not reshape cached rows"
         );
+    }
+    #[gpui::test]
+    fn native_grid_mouse_preserves_multiple_clicks_and_keyboard_modifiers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|w, c| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), w, c)
+        });
+        let id = SurfaceId(998);
+        let (_, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        draw_test_window(cx);
+        let position = host.read_with(cx, |h, _| {
+            h.surfaces.fill.as_ref().unwrap().origin.unwrap()
+                + point(h.metrics.width() * 2.5, h.metrics.height() * 1.5)
+        });
+        events(&mut peer);
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            for (click_count, modified, expected) in [
+                (1, false, ""),
+                (2, false, "2"),
+                (3, false, "3"),
+                (4, false, "4"),
+                (2, true, "C-S-A-D-2"),
+            ] {
+                let modifiers = gpui::Modifiers {
+                    control: modified,
+                    shift: modified,
+                    alt: modified,
+                    platform: modified,
+                    ..Default::default()
+                };
+                cx.simulate_event(MouseDownEvent {
+                    position,
+                    button,
+                    click_count,
+                    modifiers,
+                    ..Default::default()
+                });
+                cx.simulate_event(MouseMoveEvent {
+                    position,
+                    pressed_button: Some(button),
+                    modifiers,
+                    ..Default::default()
+                });
+                cx.simulate_event(MouseUpEvent {
+                    position,
+                    button,
+                    click_count,
+                    modifiers,
+                    ..Default::default()
+                });
+                let mouse: Vec<_> = events(&mut peer)
+                    .into_iter()
+                    .filter(|e| e["type"] == "mouse")
+                    .collect();
+                assert_eq!(mouse.len(), 3, "{button:?} count {click_count}: {mouse:?}");
+                assert_eq!(mouse[0]["action"], "press");
+                assert_eq!(
+                    mouse[0]["modifiers"], expected,
+                    "{button:?} count {click_count}: {mouse:?}"
+                );
+                assert_eq!(mouse[1]["action"], "drag");
+                assert_eq!(mouse[2]["action"], "release");
+                for event in &mouse[1..] {
+                    assert_eq!(event["modifiers"], if modified { "C-S-A-D" } else { "" });
+                }
+            }
+        }
     }
 }
