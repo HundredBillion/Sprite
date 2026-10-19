@@ -40,10 +40,434 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Rust packages (714)
+## Markdown toolbar glyphs
+
+- `file-code.svg`: Microsoft VS Code Codicons, https://github.com/microsoft/vscode-codicons/blob/main/src/icons/file-code.svg . Copyright Microsoft Corporation, Creative Commons Attribution 4.0 International; full terms in `LICENSE-codicons`. The glyph is used by VS Code's `markdown.showSource` command. The packaged SVG is unchanged; its color is adapted at render time.
+- `eye.svg`: Zed Industries, https://github.com/zed-industries/zed/blob/main/assets/icons/eye.svg . Zed's `assets/icons/LICENSES` attributes its icons to Lucide (ISC), including portions by Cole Bemis/Feather (MIT). Full upstream notice in `LICENSE-zed-icons`. The packaged SVG is unchanged; its stroke is adapted at render time.
+
+### LICENSE-codicons
+
+```
+Attribution 4.0 International
+
+=======================================================================
+
+Creative Commons Corporation ("Creative Commons") is not a law firm and
+does not provide legal services or legal advice. Distribution of
+Creative Commons public licenses does not create a lawyer-client or
+other relationship. Creative Commons makes its licenses and related
+information available on an "as-is" basis. Creative Commons gives no
+warranties regarding its licenses, any material licensed under their
+terms and conditions, or any related information. Creative Commons
+disclaims all liability for damages resulting from their use to the
+fullest extent possible.
+
+Using Creative Commons Public Licenses
+
+Creative Commons public licenses provide a standard set of terms and
+conditions that creators and other rights holders may use to share
+original works of authorship and other material subject to copyright
+and certain other rights specified in the public license below. The
+following considerations are for informational purposes only, are not
+exhaustive, and do not form part of our licenses.
+
+     Considerations for licensors: Our public licenses are
+     intended for use by those authorized to give the public
+     permission to use material in ways otherwise restricted by
+     copyright and certain other rights. Our licenses are
+     irrevocable. Licensors should read and understand the terms
+     and conditions of the license they choose before applying it.
+     Licensors should also secure all rights necessary before
+     applying our licenses so that the public can reuse the
+     material as expected. Licensors should clearly mark any
+     material not subject to the license. This includes other CC-
+     licensed material, or material used under an exception or
+     limitation to copyright. More considerations for licensors:
+	wiki.creativecommons.org/Considerations_for_licensors
+
+     Considerations for the public: By using one of our public
+     licenses, a licensor grants the public permission to use the
+     licensed material under specified terms and conditions. If
+     the licensor's permission is not necessary for any reason--for
+     example, because of any applicable exception or limitation to
+     copyright--then that use is not regulated by the license. Our
+     licenses grant only permissions under copyright and certain
+     other rights that a licensor has authority to grant. Use of
+     the licensed material may still be restricted for other
+     reasons, including because others have copyright or other
+     rights in the material. A licensor may make special requests,
+     such as asking that all changes be marked or described.
+     Although not required by our licenses, you are encouraged to
+     respect those requests where reasonable. More_considerations
+     for the public:
+	wiki.creativecommons.org/Considerations_for_licensees
+
+=======================================================================
+
+Creative Commons Attribution 4.0 International Public License
+
+By exercising the Licensed Rights (defined below), You accept and agree
+to be bound by the terms and conditions of this Creative Commons
+Attribution 4.0 International Public License ("Public License"). To the
+extent this Public License may be interpreted as a contract, You are
+granted the Licensed Rights in consideration of Your acceptance of
+these terms and conditions, and the Licensor grants You such rights in
+consideration of benefits the Licensor receives from making the
+Licensed Material available under these terms and conditions.
+
+
+Section 1 -- Definitions.
+
+  a. Adapted Material means material subject to Copyright and Similar
+     Rights that is derived from or based upon the Licensed Material
+     and in which the Licensed Material is translated, altered,
+     arranged, transformed, or otherwise modified in a manner requiring
+     permission under the Copyright and Similar Rights held by the
+     Licensor. For purposes of this Public License, where the Licensed
+     Material is a musical work, performance, or sound recording,
+     Adapted Material is always produced where the Licensed Material is
+     synched in timed relation with a moving image.
+
+  b. Adapter's License means the license You apply to Your Copyright
+     and Similar Rights in Your contributions to Adapted Material in
+     accordance with the terms and conditions of this Public License.
+
+  c. Copyright and Similar Rights means copyright and/or similar rights
+     closely related to copyright including, without limitation,
+     performance, broadcast, sound recording, and Sui Generis Database
+     Rights, without regard to how the rights are labeled or
+     categorized. For purposes of this Public License, the rights
+     specified in Section 2(b)(1)-(2) are not Copyright and Similar
+     Rights.
+
+  d. Effective Technological Measures means those measures that, in the
+     absence of proper authority, may not be circumvented under laws
+     fulfilling obligations under Article 11 of the WIPO Copyright
+     Treaty adopted on December 20, 1996, and/or similar international
+     agreements.
+
+  e. Exceptions and Limitations means fair use, fair dealing, and/or
+     any other exception or limitation to Copyright and Similar Rights
+     that applies to Your use of the Licensed Material.
+
+  f. Licensed Material means the artistic or literary work, database,
+     or other material to which the Licensor applied this Public
+     License.
+
+  g. Licensed Rights means the rights granted to You subject to the
+     terms and conditions of this Public License, which are limited to
+     all Copyright and Similar Rights that apply to Your use of the
+     Licensed Material and that the Licensor has authority to license.
+
+  h. Licensor means the individual(s) or entity(ies) granting rights
+     under this Public License.
+
+  i. Share means to provide material to the public by any means or
+     process that requires permission under the Licensed Rights, such
+     as reproduction, public display, public performance, distribution,
+     dissemination, communication, or importation, and to make material
+     available to the public including in ways that members of the
+     public may access the material from a place and at a time
+     individually chosen by them.
+
+  j. Sui Generis Database Rights means rights other than copyright
+     resulting from Directive 96/9/EC of the European Parliament and of
+     the Council of 11 March 1996 on the legal protection of databases,
+     as amended and/or succeeded, as well as other essentially
+     equivalent rights anywhere in the world.
+
+  k. You means the individual or entity exercising the Licensed Rights
+     under this Public License. Your has a corresponding meaning.
+
+
+Section 2 -- Scope.
+
+  a. License grant.
+
+       1. Subject to the terms and conditions of this Public License,
+          the Licensor hereby grants You a worldwide, royalty-free,
+          non-sublicensable, non-exclusive, irrevocable license to
+          exercise the Licensed Rights in the Licensed Material to:
+
+            a. reproduce and Share the Licensed Material, in whole or
+               in part; and
+
+            b. produce, reproduce, and Share Adapted Material.
+
+       2. Exceptions and Limitations. For the avoidance of doubt, where
+          Exceptions and Limitations apply to Your use, this Public
+          License does not apply, and You do not need to comply with
+          its terms and conditions.
+
+       3. Term. The term of this Public License is specified in Section
+          6(a).
+
+       4. Media and formats; technical modifications allowed. The
+          Licensor authorizes You to exercise the Licensed Rights in
+          all media and formats whether now known or hereafter created,
+          and to make technical modifications necessary to do so. The
+          Licensor waives and/or agrees not to assert any right or
+          authority to forbid You from making technical modifications
+          necessary to exercise the Licensed Rights, including
+          technical modifications necessary to circumvent Effective
+          Technological Measures. For purposes of this Public License,
+          simply making modifications authorized by this Section 2(a)
+          (4) never produces Adapted Material.
+
+       5. Downstream recipients.
+
+            a. Offer from the Licensor -- Licensed Material. Every
+               recipient of the Licensed Material automatically
+               receives an offer from the Licensor to exercise the
+               Licensed Rights under the terms and conditions of this
+               Public License.
+
+            b. No downstream restrictions. You may not offer or impose
+               any additional or different terms or conditions on, or
+               apply any Effective Technological Measures to, the
+               Licensed Material if doing so restricts exercise of the
+               Licensed Rights by any recipient of the Licensed
+               Material.
+
+       6. No endorsement. Nothing in this Public License constitutes or
+          may be construed as permission to assert or imply that You
+          are, or that Your use of the Licensed Material is, connected
+          with, or sponsored, endorsed, or granted official status by,
+          the Licensor or others designated to receive attribution as
+          provided in Section 3(a)(1)(A)(i).
+
+  b. Other rights.
+
+       1. Moral rights, such as the right of integrity, are not
+          licensed under this Public License, nor are publicity,
+          privacy, and/or other similar personality rights; however, to
+          the extent possible, the Licensor waives and/or agrees not to
+          assert any such rights held by the Licensor to the limited
+          extent necessary to allow You to exercise the Licensed
+          Rights, but not otherwise.
+
+       2. Patent and trademark rights are not licensed under this
+          Public License.
+
+       3. To the extent possible, the Licensor waives any right to
+          collect royalties from You for the exercise of the Licensed
+          Rights, whether directly or through a collecting society
+          under any voluntary or waivable statutory or compulsory
+          licensing scheme. In all other cases the Licensor expressly
+          reserves any right to collect such royalties.
+
+
+Section 3 -- License Conditions.
+
+Your exercise of the Licensed Rights is expressly made subject to the
+following conditions.
+
+  a. Attribution.
+
+       1. If You Share the Licensed Material (including in modified
+          form), You must:
+
+            a. retain the following if it is supplied by the Licensor
+               with the Licensed Material:
+
+                 i. identification of the creator(s) of the Licensed
+                    Material and any others designated to receive
+                    attribution, in any reasonable manner requested by
+                    the Licensor (including by pseudonym if
+                    designated);
+
+                ii. a copyright notice;
+
+               iii. a notice that refers to this Public License;
+
+                iv. a notice that refers to the disclaimer of
+                    warranties;
+
+                 v. a URI or hyperlink to the Licensed Material to the
+                    extent reasonably practicable;
+
+            b. indicate if You modified the Licensed Material and
+               retain an indication of any previous modifications; and
+
+            c. indicate the Licensed Material is licensed under this
+               Public License, and include the text of, or the URI or
+               hyperlink to, this Public License.
+
+       2. You may satisfy the conditions in Section 3(a)(1) in any
+          reasonable manner based on the medium, means, and context in
+          which You Share the Licensed Material. For example, it may be
+          reasonable to satisfy the conditions by providing a URI or
+          hyperlink to a resource that includes the required
+          information.
+
+       3. If requested by the Licensor, You must remove any of the
+          information required by Section 3(a)(1)(A) to the extent
+          reasonably practicable.
+
+       4. If You Share Adapted Material You produce, the Adapter's
+          License You apply must not prevent recipients of the Adapted
+          Material from complying with this Public License.
+
+
+Section 4 -- Sui Generis Database Rights.
+
+Where the Licensed Rights include Sui Generis Database Rights that
+apply to Your use of the Licensed Material:
+
+  a. for the avoidance of doubt, Section 2(a)(1) grants You the right
+     to extract, reuse, reproduce, and Share all or a substantial
+     portion of the contents of the database;
+
+  b. if You include all or a substantial portion of the database
+     contents in a database in which You have Sui Generis Database
+     Rights, then the database in which You have Sui Generis Database
+     Rights (but not its individual contents) is Adapted Material; and
+
+  c. You must comply with the conditions in Section 3(a) if You Share
+     all or a substantial portion of the contents of the database.
+
+For the avoidance of doubt, this Section 4 supplements and does not
+replace Your obligations under this Public License where the Licensed
+Rights include other Copyright and Similar Rights.
+
+
+Section 5 -- Disclaimer of Warranties and Limitation of Liability.
+
+  a. UNLESS OTHERWISE SEPARATELY UNDERTAKEN BY THE LICENSOR, TO THE
+     EXTENT POSSIBLE, THE LICENSOR OFFERS THE LICENSED MATERIAL AS-IS
+     AND AS-AVAILABLE, AND MAKES NO REPRESENTATIONS OR WARRANTIES OF
+     ANY KIND CONCERNING THE LICENSED MATERIAL, WHETHER EXPRESS,
+     IMPLIED, STATUTORY, OR OTHER. THIS INCLUDES, WITHOUT LIMITATION,
+     WARRANTIES OF TITLE, MERCHANTABILITY, FITNESS FOR A PARTICULAR
+     PURPOSE, NON-INFRINGEMENT, ABSENCE OF LATENT OR OTHER DEFECTS,
+     ACCURACY, OR THE PRESENCE OR ABSENCE OF ERRORS, WHETHER OR NOT
+     KNOWN OR DISCOVERABLE. WHERE DISCLAIMERS OF WARRANTIES ARE NOT
+     ALLOWED IN FULL OR IN PART, THIS DISCLAIMER MAY NOT APPLY TO YOU.
+
+  b. TO THE EXTENT POSSIBLE, IN NO EVENT WILL THE LICENSOR BE LIABLE
+     TO YOU ON ANY LEGAL THEORY (INCLUDING, WITHOUT LIMITATION,
+     NEGLIGENCE) OR OTHERWISE FOR ANY DIRECT, SPECIAL, INDIRECT,
+     INCIDENTAL, CONSEQUENTIAL, PUNITIVE, EXEMPLARY, OR OTHER LOSSES,
+     COSTS, EXPENSES, OR DAMAGES ARISING OUT OF THIS PUBLIC LICENSE OR
+     USE OF THE LICENSED MATERIAL, EVEN IF THE LICENSOR HAS BEEN
+     ADVISED OF THE POSSIBILITY OF SUCH LOSSES, COSTS, EXPENSES, OR
+     DAMAGES. WHERE A LIMITATION OF LIABILITY IS NOT ALLOWED IN FULL OR
+     IN PART, THIS LIMITATION MAY NOT APPLY TO YOU.
+
+  c. The disclaimer of warranties and limitation of liability provided
+     above shall be interpreted in a manner that, to the extent
+     possible, most closely approximates an absolute disclaimer and
+     waiver of all liability.
+
+
+Section 6 -- Term and Termination.
+
+  a. This Public License applies for the term of the Copyright and
+     Similar Rights licensed here. However, if You fail to comply with
+     this Public License, then Your rights under this Public License
+     terminate automatically.
+
+  b. Where Your right to use the Licensed Material has terminated under
+     Section 6(a), it reinstates:
+
+       1. automatically as of the date the violation is cured, provided
+          it is cured within 30 days of Your discovery of the
+          violation; or
+
+       2. upon express reinstatement by the Licensor.
+
+     For the avoidance of doubt, this Section 6(b) does not affect any
+     right the Licensor may have to seek remedies for Your violations
+     of this Public License.
+
+  c. For the avoidance of doubt, the Licensor may also offer the
+     Licensed Material under separate terms or conditions or stop
+     distributing the Licensed Material at any time; however, doing so
+     will not terminate this Public License.
+
+  d. Sections 1, 5, 6, 7, and 8 survive termination of this Public
+     License.
+
+
+Section 7 -- Other Terms and Conditions.
+
+  a. The Licensor shall not be bound by any additional or different
+     terms or conditions communicated by You unless expressly agreed.
+
+  b. Any arrangements, understandings, or agreements regarding the
+     Licensed Material not stated herein are separate from and
+     independent of the terms and conditions of this Public License.
+
+
+Section 8 -- Interpretation.
+
+  a. For the avoidance of doubt, this Public License does not, and
+     shall not be interpreted to, reduce, limit, restrict, or impose
+     conditions on any use of the Licensed Material that could lawfully
+     be made without permission under this Public License.
+
+  b. To the extent possible, if any provision of this Public License is
+     deemed unenforceable, it shall be automatically reformed to the
+     minimum extent necessary to make it enforceable. If the provision
+     cannot be reformed, it shall be severed from this Public License
+     without affecting the enforceability of the remaining terms and
+     conditions.
+
+  c. No term or condition of this Public License will be waived and no
+     failure to comply consented to unless expressly agreed to by the
+     Licensor.
+
+  d. Nothing in this Public License constitutes or may be interpreted
+     as a limitation upon, or waiver of, any privileges and immunities
+     that apply to the Licensor or You, including from the legal
+     processes of any jurisdiction or authority.
+
+
+=======================================================================
+
+Creative Commons is not a party to its public
+licenses. Notwithstanding, Creative Commons may elect to apply one of
+its public licenses to material it publishes and in those instances
+will be considered the “Licensor.” The text of the Creative Commons
+public licenses is dedicated to the public domain under the CC0 Public
+Domain Dedication. Except for the limited purpose of indicating that
+material is shared under a Creative Commons public license or as
+otherwise permitted by the Creative Commons policies published at
+creativecommons.org/policies, Creative Commons does not authorize the
+use of the trademark "Creative Commons" or any other trademark or logo
+of Creative Commons without its prior written consent including,
+without limitation, in connection with any unauthorized modifications
+to any of its public licenses or any other arrangements,
+understandings, or agreements concerning use of licensed material. For
+the avoidance of doubt, this paragraph does not form part of the
+public licenses.
+
+Creative Commons may be contacted at creativecommons.org.
+
+---
+
+Git Logo by [Jason Long](https://bsky.app/profile/jasonlong.me) is licensed under the [Creative Commons Attribution 3.0 Unported License](https://creativecommons.org/licenses/by/3.0/).
+```
+
+### LICENSE-zed-icons
+
+```
+Lucide License
+
+ISC License
+
+Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022.
+
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+## Rust packages (753)
 
 | Package | Version | Licence | Source |
 |---|---|---|---|
+| `addr2line` | 0.25.1 | Apache-2.0 OR MIT | https://github.com/gimli-rs/addr2line |
 | `adler2` | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | https://github.com/oyvindln/adler2 |
 | `aes` | 0.8.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
 | `ahash` | 0.8.12 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
@@ -85,7 +509,9 @@ SOFTWARE.
 | `av-scenechange` | 0.14.1 | MIT | https://github.com/rust-av/av-scenechange |
 | `av1-grain` | 0.2.5 | BSD-2-Clause | https://github.com/rust-av/av1-grain |
 | `avif-serialize` | 0.8.9 | BSD-3-Clause | https://github.com/kornelski/avif-serialize |
+| `backtrace` | 0.3.76 | MIT OR Apache-2.0 | https://github.com/rust-lang/backtrace-rs |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
+| `bincode` | 1.3.3 | MIT | https://github.com/servo/bincode |
 | `bindgen` | 0.71.1 | BSD-3-Clause | https://github.com/rust-lang/rust-bindgen |
 | `bit-set` | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-set |
 | `bit-vec` | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
@@ -160,11 +586,15 @@ SOFTWARE.
 | `crunchy` | 0.2.4 | MIT | https://github.com/eira-fransham/crunchy |
 | `crypto-common` | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `crypto-common` | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| `cssparser` | 0.35.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
+| `cssparser-macros` | 0.6.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
 | `ctor` | 0.4.3 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `ctor-proc-macro` | 0.0.6 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `data-url` | 0.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | `deflate64` | 0.1.12 | MIT | https://github.com/anatawa12/deflate64-rs |
 | `derive_more` | 0.99.20 | MIT | https://github.com/JelteF/derive_more |
+| `derive_more` | 2.1.1 | MIT | https://github.com/JelteF/derive_more |
+| `derive_more-impl` | 2.1.1 | MIT | https://github.com/JelteF/derive_more |
 | `digest` | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `digest` | 0.11.3 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `dirs` | 4.0.0 | MIT OR Apache-2.0 | https://github.com/soc/dirs-rs |
@@ -176,11 +606,14 @@ SOFTWARE.
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 | https://github.com/yaahc/displaydoc |
 | `dlib` | 0.5.3 | MIT | https://github.com/elinorbgr/dlib |
 | `downcast-rs` | 1.2.1 | MIT/Apache-2.0 | https://github.com/marcianx/downcast-rs |
+| `dtoa` | 1.0.11 | MIT OR Apache-2.0 | https://github.com/dtolnay/dtoa |
+| `dtoa-short` | 0.3.5 | MPL-2.0 | https://github.com/upsuper/dtoa-short |
 | `dtor` | 0.0.6 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `dtor-proc-macro` | 0.0.5 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://gitlab.com/kornelski/dunce |
 | `dwrote` | 0.11.5 | MPL-2.0 | https://github.com/servo/dwrote-rs |
 | `dyn-clone` | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
+| `ego-tree` | 0.10.0 | ISC | https://github.com/rust-scraper/ego-tree |
 | `either` | 1.17.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/either |
 | `embed-resource` | 3.0.11 | MIT | https://github.com/nabijaczleweli/rust-embed-resource |
 | `encoding_rs` | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | https://github.com/hsivonen/encoding_rs |
@@ -198,6 +631,7 @@ SOFTWARE.
 | `event-listener` | 5.4.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener |
 | `event-listener-strategy` | 0.5.4 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener-strategy |
 | `exr` | 1.74.2 | BSD-3-Clause | https://github.com/johannesvollmer/exrs |
+| `fancy-regex` | 0.16.2 | MIT | https://github.com/fancy-regex/fancy-regex |
 | `fastrand` | 1.9.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | `fax` | 0.2.7 | MIT | https://github.com/pdf-rs/fax |
@@ -233,12 +667,15 @@ SOFTWARE.
 | `futures-sink` | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | `futures-task` | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | `futures-util` | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| `fxhash` | 0.2.1 | Apache-2.0/MIT | https://github.com/cbreeden/fxhash |
 | `generic-array` | 0.14.7 | MIT | https://github.com/fizyk20/generic-array.git |
 | `gethostname` | 1.1.0 | Apache-2.0 | https://codeberg.org/swsnr/gethostname.rs.git |
 | `getrandom` | 0.2.17 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | `getrandom` | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | `gif` | 0.14.2 | MIT OR Apache-2.0 | https://github.com/image-rs/image-gif |
+| `gimli` | 0.32.3 | MIT OR Apache-2.0 | https://github.com/gimli-rs/gimli |
+| `git2` | 0.20.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/git2-rs |
 | `glob` | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/glob |
 | `globset` | 0.4.20 | Unlicense OR MIT | https://github.com/BurntSushi/ripgrep/tree/master/crates/globset |
 | `gloo-timers` | 0.3.0 | MIT OR Apache-2.0 | https://github.com/rustwasm/gloo/tree/master/crates/timers |
@@ -273,6 +710,7 @@ SOFTWARE.
 | `hkdf` | 0.12.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/KDFs/ |
 | `hmac` | 0.12.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/MACs |
 | `home` | 0.5.12 | MIT OR Apache-2.0 | https://github.com/rust-lang/cargo |
+| `html5ever` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | `http` | 1.5.0 | MIT OR Apache-2.0 | https://github.com/hyperium/http |
 | `http-body` | 1.1.0 | MIT | https://github.com/hyperium/http-body |
 | `http-body-util` | 0.1.5 | MIT | https://github.com/hyperium/http-body |
@@ -318,11 +756,13 @@ SOFTWARE.
 | `lebe` | 0.5.3 | BSD-3-Clause | https://github.com/johannesvollmer/lebe |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
 | `libfuzzer-sys` | 0.4.13 | (MIT OR Apache-2.0) AND NCSA | https://github.com/rust-fuzz/libfuzzer |
-| `libghostty-vt` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/HundredBillion/libghostty-rs (fork of uzaaft/libghostty-rs) |
-| `libghostty-vt-sys` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/HundredBillion/libghostty-rs (fork of uzaaft/libghostty-rs) |
+| `libghostty-vt` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/uzaaft/libghostty-rs |
+| `libghostty-vt-sys` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/uzaaft/libghostty-rs |
+| `libgit2-sys` | 0.18.8+1.9.7 | MIT OR Apache-2.0 | https://github.com/rust-lang/git2-rs |
 | `libloading` | 0.8.9 | ISC | https://github.com/nagisa/rust_libloading/ |
 | `libm` | 0.2.16 | MIT | https://github.com/rust-lang/compiler-builtins |
 | `libredox` | 0.1.20 | MIT | https://gitlab.redox-os.org/redox-os/libredox.git |
+| `libz-sys` | 1.1.29 | MIT OR Apache-2.0 | https://github.com/rust-lang/libz-sys |
 | `linux-raw-sys` | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/sunfishcode/linux-raw-sys |
 | `linux-raw-sys` | 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/sunfishcode/linux-raw-sys |
 | `litemap` | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
@@ -337,6 +777,8 @@ SOFTWARE.
 | `lyon_tessellation` | 1.0.20 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
 | `mac` | 0.1.1 | MIT/Apache-2.0 | https://github.com/reem/rust-mac.git |
 | `malloc_buf` | 0.0.6 | MIT | https://github.com/SSheldon/malloc_buf |
+| `markup5ever` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
+| `match_token` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | `maybe-rayon` | 0.1.1 | MIT | https://github.com/shssoichiro/maybe-rayon |
 | `md-5` | 0.10.6 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `memchr` | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
@@ -383,6 +825,7 @@ SOFTWARE.
 | `objc2-ui-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | `objc_exception` | 0.1.2 | MIT | http://github.com/SSheldon/rust-objc-exception |
 | `objc_id` | 0.1.1 | MIT | http://github.com/SSheldon/rust-objc-id |
+| `object` | 0.37.3 | Apache-2.0 OR MIT | https://github.com/gimli-rs/object |
 | `object` | 0.39.1 | Apache-2.0 OR MIT | https://github.com/gimli-rs/object |
 | `once_cell` | 1.21.4 | MIT OR Apache-2.0 | https://github.com/matklad/once_cell |
 | `oo7` | 0.5.0 | MIT | https://github.com/bilelmoussaoui/oo7 |
@@ -399,6 +842,11 @@ SOFTWARE.
 | `pathfinder_simd` | 0.5.6 | MIT OR Apache-2.0 | https://github.com/servo/pathfinder |
 | `pbkdf2` | 0.12.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/password-hashes/tree/master/pbkdf2 |
 | `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
+| `phf` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_codegen` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_generator` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_macros` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_shared` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
 | `pico-args` | 0.5.0 | MIT | https://github.com/RazrFalcon/pico-args |
 | `pin-project` | 1.1.13 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
 | `pin-project-internal` | 1.1.13 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
@@ -414,6 +862,7 @@ SOFTWARE.
 | `postage` | 0.5.0 | MIT | https://github.com/austinjones/postage-rs |
 | `potential_utf` | 0.1.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 | https://github.com/cryptocorrosion/cryptocorrosion |
+| `precomputed-hash` | 0.1.1 | MIT | https://github.com/emilio/precomputed-hash |
 | `prettyplease` | 0.2.37 | MIT OR Apache-2.0 | https://github.com/dtolnay/prettyplease |
 | `proc-macro-crate` | 3.5.0 | MIT OR Apache-2.0 | https://github.com/bkchr/proc-macro-crate |
 | `proc-macro-error-attr2` | 2.0.0 | MIT OR Apache-2.0 | https://github.com/GnomedDev/proc-macro-error-2 |
@@ -423,6 +872,7 @@ SOFTWARE.
 | `profiling` | 1.0.18 | MIT OR Apache-2.0 | https://github.com/aclysma/profiling |
 | `profiling-procmacros` | 1.0.18 | MIT OR Apache-2.0 | https://github.com/aclysma/profiling |
 | `psm` | 0.1.32 | MIT OR Apache-2.0 | https://github.com/rust-lang/stacker/ |
+| `pulldown-cmark` | 0.13.0 | MIT | https://github.com/raphlinus/pulldown-cmark |
 | `pulp` | 0.22.3 | MIT | https://github.com/sarah-quinones/pulp/ |
 | `pulp-wasm-simd-flag` | 0.1.1 | MIT | https://github.com/sarah-quinones/pulp/ |
 | `pxfm` | 0.1.30 | BSD-3-Clause OR Apache-2.0 | https://github.com/awxkee/pxfm |
@@ -469,6 +919,7 @@ SOFTWARE.
 | `rust-embed` | 8.12.0 | MIT | https://pyrossh.dev/repos/rust-embed |
 | `rust-embed-impl` | 8.12.0 | MIT | https://pyrossh.dev/repos/rust-embed |
 | `rust-embed-utils` | 8.12.0 | MIT | https://pyrossh.dev/repos/rust-embed |
+| `rustc-demangle` | 0.1.28 | MIT/Apache-2.0 | https://github.com/rust-lang/rustc-demangle |
 | `rustc-hash` | 1.1.0 | Apache-2.0/MIT | https://github.com/rust-lang-nursery/rustc-hash |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 | https://github.com/djc/rustc-version-rs |
@@ -489,11 +940,13 @@ SOFTWARE.
 | `schemars_derive` | 1.2.2 | MIT | https://github.com/GREsau/schemars |
 | `scoped-tls` | 1.0.1 | MIT/Apache-2.0 | https://github.com/alexcrichton/scoped-tls |
 | `scopeguard` | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
+| `scraper` | 0.24.0 | ISC | https://github.com/causal-agent/scraper |
 | `screencapturekit` | 0.2.8 | MIT OR Apache-2.0 | https://github.com/svtlabs/screencapturekit-rs/tree/main/screencapturekit |
 | `screencapturekit-sys` | 0.2.8 | MIT OR Apache-2.0 | https://github.com/svtlabs/screencapturekit-rs/tree/main/screencapturekit-sys |
 | `seahash` | 4.1.0 | MIT | https://gitlab.redox-os.org/redox-os/seahash |
 | `security-framework` | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
 | `security-framework-sys` | 2.17.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
+| `selectors` | 0.31.0 | MPL-2.0 | https://github.com/servo/stylo |
 | `self_cell` | 1.3.0 | Apache-2.0 OR GPL-2.0-only | https://github.com/Voultapher/self_cell |
 | `semver` | 1.0.28 | MIT OR Apache-2.0 | https://github.com/dtolnay/semver |
 | `serde` | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
@@ -507,7 +960,9 @@ SOFTWARE.
 | `serde_spanned` | 0.6.9 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | `serde_spanned` | 1.1.1 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | `serde_urlencoded` | 0.7.1 | MIT/Apache-2.0 | https://github.com/nox/serde_urlencoded |
+| `serde_yaml_ng` | 0.10.0 | MIT | https://github.com/acatton/serde-yaml-ng |
 | `serial2` | 0.2.38 | BSD-2-Clause OR Apache-2.0 | https://github.com/de-vri-es/serial2-rs |
+| `servo_arc` | 0.4.3 | MIT OR Apache-2.0 | https://github.com/servo/stylo |
 | `sha1_smol` | 1.0.1 | BSD-3-Clause | https://github.com/mitsuhiko/sha1-smol |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `sha2` | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
@@ -529,12 +984,15 @@ SOFTWARE.
 | `socket2` | 0.6.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/socket2 |
 | `spin` | 0.9.9 | MIT | https://github.com/mvdnes/spin-rs.git |
 | `spirv` | 0.3.0+sdk-1.3.268.0 | Apache-2.0 | https://github.com/gfx-rs/rspirv |
+| `sprite-pane` | 0.2.8 | MIT OR Apache-2.0 |  |
 | `stable_deref_trait` | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
 | `stacker` | 0.1.25 | MIT OR Apache-2.0 | https://github.com/rust-lang/stacker |
 | `stacksafe` | 0.1.4 | Apache-2.0 | https://github.com/fast/stacksafe |
 | `stacksafe-macro` | 0.1.4 | Apache-2.0 | https://github.com/fast/stacksafe |
 | `static_assertions` | 1.1.0 | MIT OR Apache-2.0 | https://github.com/nvzqz/static-assertions-rs |
 | `strict-num` | 0.1.1 | MIT | https://github.com/RazrFalcon/strict-num |
+| `string_cache` | 0.8.9 | MIT OR Apache-2.0 | https://github.com/servo/string-cache |
+| `string_cache_codegen` | 0.5.4 | MIT OR Apache-2.0 | https://github.com/servo/string-cache |
 | `strum` | 0.26.3 | MIT | https://github.com/Peternator7/strum |
 | `strum` | 0.27.2 | MIT | https://github.com/Peternator7/strum |
 | `strum_macros` | 0.26.4 | MIT | https://github.com/Peternator7/strum |
@@ -556,6 +1014,7 @@ SOFTWARE.
 | `syn` | 3.0.3 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | `sync_wrapper` | 1.0.2 | Apache-2.0 | https://github.com/Actyx/sync_wrapper |
 | `synstructure` | 0.13.2 | MIT | https://github.com/mystor/synstructure |
+| `syntect` | 5.3.0 | MIT | https://github.com/trishume/syntect |
 | `sys-locale` | 0.3.2 | MIT OR Apache-2.0 | https://github.com/1Password/sys-locale |
 | `sysinfo` | 0.31.4 | MIT | https://github.com/GuillaumeGomez/sysinfo |
 | `system-configuration` | 0.6.1 | MIT OR Apache-2.0 | https://github.com/mullvad/system-configuration-rs |
@@ -616,6 +1075,7 @@ SOFTWARE.
 | `unicode-segmentation` | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | `unicode-vo` | 0.1.0 | MIT/Apache-2.0 | https://github.com/RazrFalcon/unicode-vo |
 | `unicode-width` | 0.2.2 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
+| `unsafe-libyaml` | 0.2.11 | MIT | https://github.com/dtolnay/unsafe-libyaml |
 | `untrusted` | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
 | `url` | 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | `usvg` | 0.45.1 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
@@ -626,6 +1086,7 @@ SOFTWARE.
 | `value-bag` | 1.13.2 | Apache-2.0 OR MIT | https://github.com/sval-rs/value-bag |
 | `value-bag-serde1` | 1.13.2 | Apache-2.0 OR MIT |  |
 | `value-bag-sval2` | 1.13.2 | Apache-2.0 OR MIT |  |
+| `vcpkg` | 0.2.15 | MIT/Apache-2.0 | https://github.com/mcgoo/vcpkg-rs |
 | `version_check` | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
 | `vswhom` | 0.1.0 | MIT | https://github.com/nabijaczleweli/vswhom.rs |
 | `vswhom-sys` | 0.1.3 | MIT | https://github.com/nabijaczleweli/vswhom-sys.rs |
@@ -650,6 +1111,7 @@ SOFTWARE.
 | `wayland-sys` | 0.31.11 | MIT | https://github.com/smithay/wayland-rs |
 | `web-sys` | 0.3.104 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
+| `web_atoms` | 0.1.3 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | `weezl` | 0.1.12 | MIT OR Apache-2.0 | https://github.com/image-rs/weezl |
 | `which` | 6.0.3 | MIT | https://github.com/harryfei/which-rs.git |
 | `winapi` | 0.3.9 | MIT/Apache-2.0 | https://github.com/retep998/winapi-rs |
