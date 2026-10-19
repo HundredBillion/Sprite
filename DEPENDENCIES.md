@@ -311,9 +311,11 @@ trusting the default. All three are worth reporting upstream.
 whose only changes are the Ghostty pin and bindings regenerated for it. No
 crates.io release is built against a Ghostty that accepts Zig 0.17 yet.
 
-**Pin policy.** A git dependency at an exact revision, paired with the exact
-Ghostty source commit below; the fork's own `GHOSTTY_COMMIT` names the same
-commit. The pair moves together and only through ADR 0003 review. Sprite
+**Pin policy.** A git dependency at an exact revision, built against the exact
+Ghostty source commit below through `GHOSTTY_SOURCE_DIR`. The fork's generated
+bindings target Ghostty `92fb5d0`, and the newer pinned source adds C API entries
+without changing the layout or values used by Sprite. The compatibility suite
+guards this pairing; changes to either pin go through ADR 0003 review. Sprite
 returns to a crates.io release once one is built against a Ghostty that
 supports Zig 0.17 (ADR 0009, amended).
 
@@ -403,10 +405,10 @@ interface directly.
 These are not runtime Rust dependencies.
 
 - **Ghostty source**, submodule `vendor/ghostty` pinned to
-  `92fb5d0b67b762211728975865d00eb2503df6da`, the head of
-  ghostty-org/ghostty#14519 ("Update to Zig 0.17") on 2026-10-15. The
+  `5064b3265e500d55f5f44ff48ca59b8685543bb8`, the head of
+  ghostty-org/ghostty#14519 ("Update to Zig 0.17") on 2026-10-18. The
   submodule is fetched from <https://github.com/HundredBillion/ghostty>, branch
-  `sprite/zig-0.17-92fb5d0`, so the commit stays reachable if the PR is
+  `sprite/zig-0.17-5064b32`, so the commit stays reachable if the PR is
   rebased. `.cargo/config.toml` forces `GHOSTTY_SOURCE_DIR` to the submodule so
   the pin in this ledger is what actually compiles. Ghostty v1.3.1 lacks the
   terminal/render C interface the binding uses; Sprite returns to stable tags

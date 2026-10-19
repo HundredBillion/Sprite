@@ -28,3 +28,12 @@ This trades the reviewed-pair rule for an unreleased pair, knowingly, so that
 Sprite exercises the Zig 0.17 build while upstream reviews it. Sprite returns
 to a merged Ghostty commit and a crates.io release of libghostty-vt once both
 exist.
+
+## Amended (2026-10-18): newer PR head
+
+Sprite now pins `5064b3265e500d55f5f44ff48ca59b8685543bb8` from the same PR,
+mirrored in HundredBillion/ghostty branch `sprite/zig-0.17-5064b32`. The
+libghostty-rs fork remains pinned to bindings generated for `92fb5d0`: changes
+to the VT C headers since then add entries while preserving the values and
+layout Sprite uses. Sprite's terminal integration tests pass against the new
+source on macOS. Regenerate the bindings if Sprite needs a newly added C API.
