@@ -21,8 +21,8 @@ serde = { version = "=1.0.229", features = ["derive"] }
 async-channel = "=2.5.0"
 gpui = { version = "=0.2.2", default-features = false }
 # From the HundredBillion fork of libghostty-rs until a release is built
-# against a Ghostty that supports Zig 0.17: its bindings match the Ghostty
-# commit in vendor/ghostty, which a crates.io release does not.
+# against a Ghostty that supports Zig 0.17: its bindings cover the C interface
+# Sprite uses from vendor/ghostty, which a crates.io release does not.
 # `png` is deliberately not enabled: the decoder it provides,
 # `RustPngDecoder`, has a private field and no constructor, so it cannot be
 # built from outside the crate — and its `decode_png` reserves capacity without
