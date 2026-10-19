@@ -503,6 +503,13 @@ fn write_events(shared: &Shared) {
         std::mem::swap(&mut outgoing, &mut queue.queued);
         queue.in_flight = outgoing.len();
         drop(queue);
+        #[cfg(feature = "minimap-benchmark")]
+        if outgoing
+            .windows(b"minimap_action".len())
+            .any(|part| part == b"minimap_action")
+        {
+            crate::minimap_benchmark::record(serde_json::json!({"event":"socket_write"}));
+        }
         let written = write_within(&shared.stream, &outgoing, drain_deadline(outgoing.len()));
         outgoing.clear();
         if outgoing.capacity() > KEPT_WRITE_BUFFER_BYTES {

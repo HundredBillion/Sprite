@@ -53,6 +53,7 @@ gpui = { workspace = true, features = ["font-kit"] }
 
 [features]
 startup-benchmark = []
+minimap-benchmark = []
 
 [[bin]]
 name = "sprite-startup-bench"
