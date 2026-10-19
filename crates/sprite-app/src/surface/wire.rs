@@ -172,7 +172,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1"],
+        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
@@ -331,7 +331,8 @@ fn parse_token(message: &Value) -> Result<FirstRequest, Refusal> {
 // can tell what a line is without scanning the rest of it.
 
 pub fn event_opened(id: SurfaceId) -> String {
-    json!({ "type": "opened", "surface": id.0, "features": ["grid-tabs-v1"] }).to_string()
+    json!({ "type": "opened", "surface": id.0, "features": ["grid-tabs-v1", "grid-minimap-v1"] })
+        .to_string()
 }
 
 pub fn event_refused(reason: &str) -> String {
@@ -474,7 +475,7 @@ pub fn event_closed() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn minimap_fixture_routes_without_advertising_renderer_support() {
+    fn minimap_fixture_routes_and_advertises_renderer_support() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
         for message in fixture["valid"].as_array().unwrap() {
@@ -490,7 +491,7 @@ mod tests {
                 .clone(),
         ] {
             assert!(
-                !features
+                features
                     .as_array()
                     .unwrap()
                     .iter()
@@ -782,7 +783,7 @@ mod tests {
         // are about is the shape rather than the order.
         assert_eq!(
             serde_json::from_str::<Value>(&event_opened(SurfaceId(7))).expect("json"),
-            json!({"surface":7,"type":"opened","features":["grid-tabs-v1"]})
+            json!({"surface":7,"type":"opened","features":["grid-tabs-v1", "grid-minimap-v1"]})
         );
         assert_eq!(
             serde_json::from_str::<Value>(&event_click("row-1")).expect("json"),

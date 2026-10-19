@@ -36,6 +36,7 @@ pub(super) enum Body {
     Grid {
         grid: Box<GridSurface>,
         tabs: super::native_tabs::NativeTabs,
+        minimap: super::native_minimap::NativeMinimap,
         /// The description's root element, kept for the `bg` and `color` it
         /// may carry: a grid's wrapper takes its colours from them, the way an
         /// element root's box does. A grid root refuses `style` and `border`,
@@ -60,6 +61,7 @@ impl Body {
             Element::Grid { size, .. } => Body::Grid {
                 grid: Box::new(GridSurface::new(size.cols, size.rows)),
                 tabs: Default::default(),
+                minimap: Default::default(),
                 root,
                 shapes: Default::default(),
             },
@@ -1192,8 +1194,12 @@ impl TerminalView {
             Body::Grid { grid, .. } => grid.tabs.visible_height(),
             Body::Elements(_) | Body::List { .. } => 0.0,
         };
+        let minimap_width = match &surface.body {
+            Body::Grid { grid, .. } => grid.minimap.visible_width(f32::from(size.width)),
+            _ => 0.0,
+        };
         let grid_size = Size {
-            width: size.width,
+            width: px((f32::from(size.width) - minimap_width).max(0.0)),
             height: px((f32::from(size.height) - tab_height).max(0.0)),
         };
         let grid_slack = match &surface.body {
@@ -1204,7 +1210,7 @@ impl TerminalView {
         };
         let grid_top = tab_height + grid_slack;
         let told = (
-            f32::from(size.width).round() as u32,
+            f32::from(grid_size.width).round() as u32,
             f32::from(grid_size.height).round() as u32,
         );
         let cells = matches!(surface.body, Body::Grid { .. })
@@ -1227,9 +1233,26 @@ impl TerminalView {
                 body
             }
             Body::Grid {
-                grid, shapes, tabs, ..
+                grid,
+                shapes,
+                tabs,
+                minimap,
+                ..
             } => {
                 let bar = tabs.render(&grid.tabs, surface.id, f32::from(size.width), cx);
+                let map = if minimap_width > 0.0 {
+                    Some(minimap.render(
+                        &grid.minimap,
+                        surface.id,
+                        gpui::size(px(minimap_width), grid_size.height),
+                        metrics.cells.family(),
+                        metrics.cells.height(),
+                        cx,
+                    ))
+                } else {
+                    minimap.cancel();
+                    None
+                };
                 let cells = crate::surface::render::render_grid(grid, highlights, metrics, shapes);
                 let labels: Vec<_> = grid
                     .ui_labels()
@@ -1273,13 +1296,23 @@ impl TerminalView {
                     .child(bar)
                     .child(
                         div()
-                            .relative()
+                            .flex()
+                            .flex_row()
                             .min_h_0()
                             .flex_1()
-                            .pt(px(grid_slack))
-                            .overflow_hidden()
-                            .child(cells)
-                            .children(labels),
+                            .w_full()
+                            .child(
+                                div()
+                                    .relative()
+                                    .min_w_0()
+                                    .w(grid_size.width)
+                                    .h_full()
+                                    .pt(px(grid_slack))
+                                    .overflow_hidden()
+                                    .child(cells)
+                                    .children(labels),
+                            )
+                            .children(map),
                     )
                     .into_any_element()
             }
@@ -2616,6 +2649,19 @@ mod tests {
             ),
         );
         assert_eq!(answer, Ok(()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
+        for message in &fixture["valid"].as_array().unwrap()[..4] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane: crate::pane_tree::PaneId(1),
+                    ops: crate::surface::grid::parse_ops(message).unwrap(),
+                },
+            );
+        }
         host.update_in(cx, |host, window, cx| {
             host.focus_target(FocusTarget::Surface(id), window, cx).unwrap();
             host.grid_operations(id, crate::surface::grid::parse_ops(&serde_json::json!({
@@ -3573,5 +3619,234 @@ mod tests {
         assert!(host.read_with(cx, |host, _| host.surfaces.iter().next().is_none()));
         cx.update(|window, _| window.remove_window());
         drop(host);
+    }
+    #[gpui::test]
+    fn native_minimap_reserves_columns_and_routes_one_hunk_click(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(991);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        draw_test_window(cx);
+        let before = host.read_with(cx, |h, _| h.surfaces.fill.as_ref().unwrap().told.unwrap());
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
+        for message in &fixture["valid"].as_array().unwrap()[..4] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(message).unwrap(),
+                },
+            );
+        }
+        draw_test_window(cx);
+        let (after, position) = host.read_with(cx, |h, _| {
+            let s = h.surfaces.fill.as_ref().unwrap();
+            let Body::Grid { minimap, .. } = &s.body else {
+                panic!("grid")
+            };
+            let bounds = minimap.bounds().unwrap();
+            (s.told.unwrap(), bounds.origin + point(px(20.0), px(7.5)))
+        });
+        assert_eq!(after.0 + 160, before.0);
+        assert_eq!(after.1, before.1);
+        assert!(after.2.unwrap().0 < before.2.unwrap().0);
+        assert_eq!(after.2.unwrap().1, before.2.unwrap().1);
+        events(&mut peer);
+        cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        let actions = events(&mut peer);
+        let navigation: Vec<_> = actions
+            .iter()
+            .filter(|e| e["type"] == "minimap_action")
+            .collect();
+        assert_eq!(navigation.len(), 1, "{actions:?}");
+        assert_eq!(navigation[0]["line"], 3);
+        assert_eq!(navigation[0]["revision"], 4);
+        assert!(!actions.iter().any(|e| e["type"] == "mouse"), "{actions:?}");
+        cx.simulate_mouse_move(position, None, Default::default());
+        assert_eq!(
+            host.read_with(cx, |h, _| {
+                let Body::Grid { minimap, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                    panic!("grid")
+                };
+                minimap.hover_text()
+            }),
+            Some("Line 3 · modified · title".into())
+        );
+        dispatch(&host,cx,SurfaceRequest::Grid{id,pane,ops:crate::surface::grid::parse_ops(&serde_json::json!({"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"}]})).unwrap()});
+        draw_test_window(cx);
+        let registry = TokenRegistry::new(&settings.colors);
+        host.update(cx, |h, cx| {
+            let metrics = crate::surface::render::GridMetrics {
+                cells: super::super::CellMetrics::fixture(8.0, 16.0),
+                ..h.grid_metrics()
+            };
+            let surface = h.surfaces.fill.as_mut().unwrap();
+            for (width, expected) in [(479.0, 479), (480.0, 320), (800.0, 640)] {
+                let _ = TerminalView::surface_element(
+                    surface,
+                    gpui::size(px(width), px(355.0)),
+                    &registry,
+                    &metrics,
+                    &settings.highlights,
+                    None,
+                    None,
+                    cx,
+                    true,
+                );
+                let told = surface.told.unwrap();
+                assert_eq!(told.0, expected);
+                assert_eq!(told.1, 320);
+                assert_eq!(told.2.unwrap(), ((expected / 8) as u16, 20));
+            }
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(&fixture["valid"][4]).unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        let hidden = host.read_with(cx, |h, _| h.surfaces.fill.as_ref().unwrap().told.unwrap());
+        assert_eq!(hidden.0, before.0);
+        assert_eq!(hidden.1, before.1 - 35);
+    }
+
+    #[gpui::test]
+    fn native_minimap_drag_survives_state_and_stops_for_source_staging(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|w, c| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), w, c)
+        });
+        let id = SurfaceId(992);
+        let pane = crate::pane_tree::PaneId(1);
+        let (_, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        let send = |value: serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(&value).unwrap(),
+                },
+            )
+        };
+        send(
+            serde_json::json!({"type":"minimap","kind":"begin","revision":1,"target":"long","generation":1,"base":null,"start":1,"delete":0,"insert":1000,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22"}),
+            cx,
+        );
+        for (chunk, start) in (0..1000).step_by(250).enumerate() {
+            send(
+                serde_json::json!({"type":"minimap","kind":"lines","revision":chunk+2,"target":"long","generation":1,"offset":start,"lines":vec![serde_json::json!({"text":"return title","spans":[]});250]}),
+                cx,
+            );
+        }
+        send(
+            serde_json::json!({"type":"minimap","kind":"commit","revision":6,"target":"long","generation":1}),
+            cx,
+        );
+        let state = |revision, viewport| serde_json::json!({"type":"minimap","kind":"state","revision":revision,"target":"long","generation":1,"viewport":viewport,"selection":[1,3],"occurrences":[1],"changes":[],"word":"title"});
+        send(state(7, [1, 30]), cx);
+        draw_test_window(cx);
+        let bounds = host.read_with(cx, |h, _| {
+            let Body::Grid { minimap, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            minimap.bounds().unwrap()
+        });
+        events(&mut peer);
+        let start = bounds.origin + point(px(20.0), px(10.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        send(state(8, [10, 39]), cx);
+        draw_test_window(cx);
+        let finish = point(bounds.origin.x - px(200.0), bounds.bottom() + px(100.0));
+        cx.simulate_event(MouseMoveEvent {
+            position: finish,
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        });
+        cx.simulate_mouse_up(finish, MouseButton::Left, Default::default());
+        let actions = events(&mut peer);
+        let scroll: Vec<_> = actions
+            .iter()
+            .filter(|e| e["type"] == "minimap_action")
+            .collect();
+        assert!(!scroll.is_empty(), "{actions:?}");
+        assert_eq!(scroll.last().unwrap()["topline"], 971);
+        assert_eq!(scroll.last().unwrap()["revision"], 8);
+        assert!(!actions.iter().any(|e| e["type"] == "mouse"), "{actions:?}");
+        cx.simulate_mouse_move(start, None, Default::default());
+        let wheel_height = host.read_with(cx, |h, _| h.grid_metrics().cells.height());
+        for _ in 0..3 {
+            cx.simulate_event(ScrollWheelEvent {
+                position: start,
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), wheel_height * -2.0)),
+                ..Default::default()
+            });
+        }
+        draw_test_window(cx);
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "minimap_action")
+        );
+        host.update(cx, |h, _| h.flush_minimap(id));
+        let wheel = events(&mut peer);
+        let wheel_actions: Vec<_> = wheel
+            .iter()
+            .filter(|e| e["type"] == "minimap_action")
+            .collect();
+        assert_eq!(wheel_actions.len(), 1, "{wheel:?}");
+        assert_eq!(wheel_actions[0]["topline"], 16);
+        assert!(!wheel.iter().any(|e| e["type"] == "mouse"));
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        send(
+            serde_json::json!({"type":"minimap","kind":"begin","revision":9,"target":"long","generation":2,"base":1,"start":1,"delete":1,"insert":1,"total":1000,"palette":["#bcbec4"],"background":"#1e1f22"}),
+            cx,
+        );
+        draw_test_window(cx);
+        events(&mut peer);
+        cx.simulate_event(MouseMoveEvent {
+            position: finish,
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        });
+        cx.simulate_mouse_up(finish, MouseButton::Left, Default::default());
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "minimap_action")
+        );
     }
 }
