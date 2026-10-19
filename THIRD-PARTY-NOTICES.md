@@ -463,7 +463,7 @@ Permission to use, copy, modify, and/or distribute this software for any purpose
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## Rust packages (727)
+## Rust packages (753)
 
 | Package | Version | Licence | Source |
 |---|---|---|---|
@@ -511,6 +511,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `avif-serialize` | 0.8.9 | BSD-3-Clause | https://github.com/kornelski/avif-serialize |
 | `backtrace` | 0.3.76 | MIT OR Apache-2.0 | https://github.com/rust-lang/backtrace-rs |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
+| `bincode` | 1.3.3 | MIT | https://github.com/servo/bincode |
 | `bindgen` | 0.71.1 | BSD-3-Clause | https://github.com/rust-lang/rust-bindgen |
 | `bit-set` | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-set |
 | `bit-vec` | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
@@ -585,11 +586,15 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `crunchy` | 0.2.4 | MIT | https://github.com/eira-fransham/crunchy |
 | `crypto-common` | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `crypto-common` | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| `cssparser` | 0.35.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
+| `cssparser-macros` | 0.6.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
 | `ctor` | 0.4.3 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `ctor-proc-macro` | 0.0.6 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `data-url` | 0.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | `deflate64` | 0.1.12 | MIT | https://github.com/anatawa12/deflate64-rs |
 | `derive_more` | 0.99.20 | MIT | https://github.com/JelteF/derive_more |
+| `derive_more` | 2.1.1 | MIT | https://github.com/JelteF/derive_more |
+| `derive_more-impl` | 2.1.1 | MIT | https://github.com/JelteF/derive_more |
 | `digest` | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `digest` | 0.11.3 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | `dirs` | 4.0.0 | MIT OR Apache-2.0 | https://github.com/soc/dirs-rs |
@@ -601,11 +606,14 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 | https://github.com/yaahc/displaydoc |
 | `dlib` | 0.5.3 | MIT | https://github.com/elinorbgr/dlib |
 | `downcast-rs` | 1.2.1 | MIT/Apache-2.0 | https://github.com/marcianx/downcast-rs |
+| `dtoa` | 1.0.11 | MIT OR Apache-2.0 | https://github.com/dtolnay/dtoa |
+| `dtoa-short` | 0.3.5 | MPL-2.0 | https://github.com/upsuper/dtoa-short |
 | `dtor` | 0.0.6 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `dtor-proc-macro` | 0.0.5 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://gitlab.com/kornelski/dunce |
 | `dwrote` | 0.11.5 | MPL-2.0 | https://github.com/servo/dwrote-rs |
 | `dyn-clone` | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
+| `ego-tree` | 0.10.0 | ISC | https://github.com/rust-scraper/ego-tree |
 | `either` | 1.17.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/either |
 | `embed-resource` | 3.0.11 | MIT | https://github.com/nabijaczleweli/rust-embed-resource |
 | `encoding_rs` | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | https://github.com/hsivonen/encoding_rs |
@@ -623,6 +631,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `event-listener` | 5.4.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener |
 | `event-listener-strategy` | 0.5.4 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener-strategy |
 | `exr` | 1.74.2 | BSD-3-Clause | https://github.com/johannesvollmer/exrs |
+| `fancy-regex` | 0.16.2 | MIT | https://github.com/fancy-regex/fancy-regex |
 | `fastrand` | 1.9.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | `fax` | 0.2.7 | MIT | https://github.com/pdf-rs/fax |
@@ -658,6 +667,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `futures-sink` | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | `futures-task` | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | `futures-util` | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
+| `fxhash` | 0.2.1 | Apache-2.0/MIT | https://github.com/cbreeden/fxhash |
 | `generic-array` | 0.14.7 | MIT | https://github.com/fizyk20/generic-array.git |
 | `gethostname` | 1.1.0 | Apache-2.0 | https://codeberg.org/swsnr/gethostname.rs.git |
 | `getrandom` | 0.2.17 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
@@ -700,6 +710,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `hkdf` | 0.12.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/KDFs/ |
 | `hmac` | 0.12.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/MACs |
 | `home` | 0.5.12 | MIT OR Apache-2.0 | https://github.com/rust-lang/cargo |
+| `html5ever` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | `http` | 1.5.0 | MIT OR Apache-2.0 | https://github.com/hyperium/http |
 | `http-body` | 1.1.0 | MIT | https://github.com/hyperium/http-body |
 | `http-body-util` | 0.1.5 | MIT | https://github.com/hyperium/http-body |
@@ -766,6 +777,8 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `lyon_tessellation` | 1.0.20 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
 | `mac` | 0.1.1 | MIT/Apache-2.0 | https://github.com/reem/rust-mac.git |
 | `malloc_buf` | 0.0.6 | MIT | https://github.com/SSheldon/malloc_buf |
+| `markup5ever` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
+| `match_token` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | `maybe-rayon` | 0.1.1 | MIT | https://github.com/shssoichiro/maybe-rayon |
 | `md-5` | 0.10.6 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `memchr` | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
@@ -829,6 +842,11 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `pathfinder_simd` | 0.5.6 | MIT OR Apache-2.0 | https://github.com/servo/pathfinder |
 | `pbkdf2` | 0.12.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/password-hashes/tree/master/pbkdf2 |
 | `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
+| `phf` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_codegen` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_generator` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_macros` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
+| `phf_shared` | 0.11.3 | MIT | https://github.com/rust-phf/rust-phf |
 | `pico-args` | 0.5.0 | MIT | https://github.com/RazrFalcon/pico-args |
 | `pin-project` | 1.1.13 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
 | `pin-project-internal` | 1.1.13 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
@@ -844,6 +862,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `postage` | 0.5.0 | MIT | https://github.com/austinjones/postage-rs |
 | `potential_utf` | 0.1.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 | https://github.com/cryptocorrosion/cryptocorrosion |
+| `precomputed-hash` | 0.1.1 | MIT | https://github.com/emilio/precomputed-hash |
 | `prettyplease` | 0.2.37 | MIT OR Apache-2.0 | https://github.com/dtolnay/prettyplease |
 | `proc-macro-crate` | 3.5.0 | MIT OR Apache-2.0 | https://github.com/bkchr/proc-macro-crate |
 | `proc-macro-error-attr2` | 2.0.0 | MIT OR Apache-2.0 | https://github.com/GnomedDev/proc-macro-error-2 |
@@ -921,11 +940,13 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `schemars_derive` | 1.2.2 | MIT | https://github.com/GREsau/schemars |
 | `scoped-tls` | 1.0.1 | MIT/Apache-2.0 | https://github.com/alexcrichton/scoped-tls |
 | `scopeguard` | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
+| `scraper` | 0.24.0 | ISC | https://github.com/causal-agent/scraper |
 | `screencapturekit` | 0.2.8 | MIT OR Apache-2.0 | https://github.com/svtlabs/screencapturekit-rs/tree/main/screencapturekit |
 | `screencapturekit-sys` | 0.2.8 | MIT OR Apache-2.0 | https://github.com/svtlabs/screencapturekit-rs/tree/main/screencapturekit-sys |
 | `seahash` | 4.1.0 | MIT | https://gitlab.redox-os.org/redox-os/seahash |
 | `security-framework` | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
 | `security-framework-sys` | 2.17.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
+| `selectors` | 0.31.0 | MPL-2.0 | https://github.com/servo/stylo |
 | `self_cell` | 1.3.0 | Apache-2.0 OR GPL-2.0-only | https://github.com/Voultapher/self_cell |
 | `semver` | 1.0.28 | MIT OR Apache-2.0 | https://github.com/dtolnay/semver |
 | `serde` | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
@@ -941,6 +962,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `serde_urlencoded` | 0.7.1 | MIT/Apache-2.0 | https://github.com/nox/serde_urlencoded |
 | `serde_yaml_ng` | 0.10.0 | MIT | https://github.com/acatton/serde-yaml-ng |
 | `serial2` | 0.2.38 | BSD-2-Clause OR Apache-2.0 | https://github.com/de-vri-es/serial2-rs |
+| `servo_arc` | 0.4.3 | MIT OR Apache-2.0 | https://github.com/servo/stylo |
 | `sha1_smol` | 1.0.1 | BSD-3-Clause | https://github.com/mitsuhiko/sha1-smol |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `sha2` | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
@@ -969,6 +991,8 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `stacksafe-macro` | 0.1.4 | Apache-2.0 | https://github.com/fast/stacksafe |
 | `static_assertions` | 1.1.0 | MIT OR Apache-2.0 | https://github.com/nvzqz/static-assertions-rs |
 | `strict-num` | 0.1.1 | MIT | https://github.com/RazrFalcon/strict-num |
+| `string_cache` | 0.8.9 | MIT OR Apache-2.0 | https://github.com/servo/string-cache |
+| `string_cache_codegen` | 0.5.4 | MIT OR Apache-2.0 | https://github.com/servo/string-cache |
 | `strum` | 0.26.3 | MIT | https://github.com/Peternator7/strum |
 | `strum` | 0.27.2 | MIT | https://github.com/Peternator7/strum |
 | `strum_macros` | 0.26.4 | MIT | https://github.com/Peternator7/strum |
@@ -990,6 +1014,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `syn` | 3.0.3 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | `sync_wrapper` | 1.0.2 | Apache-2.0 | https://github.com/Actyx/sync_wrapper |
 | `synstructure` | 0.13.2 | MIT | https://github.com/mystor/synstructure |
+| `syntect` | 5.3.0 | MIT | https://github.com/trishume/syntect |
 | `sys-locale` | 0.3.2 | MIT OR Apache-2.0 | https://github.com/1Password/sys-locale |
 | `sysinfo` | 0.31.4 | MIT | https://github.com/GuillaumeGomez/sysinfo |
 | `system-configuration` | 0.6.1 | MIT OR Apache-2.0 | https://github.com/mullvad/system-configuration-rs |
@@ -1086,6 +1111,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `wayland-sys` | 0.31.11 | MIT | https://github.com/smithay/wayland-rs |
 | `web-sys` | 0.3.104 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
+| `web_atoms` | 0.1.3 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | `weezl` | 0.1.12 | MIT OR Apache-2.0 | https://github.com/image-rs/weezl |
 | `which` | 6.0.3 | MIT | https://github.com/harryfei/which-rs.git |
 | `winapi` | 0.3.9 | MIT/Apache-2.0 | https://github.com/retep998/winapi-rs |

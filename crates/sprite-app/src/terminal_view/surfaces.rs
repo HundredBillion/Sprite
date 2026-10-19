@@ -5232,4 +5232,166 @@ mod tests {
         assert_eq!(description.size.height, value.size.height);
         assert!(value.size.height > name.size.height * 2.0);
     }
+    #[gpui::test]
+    fn native_markdown_reading_layout_centers_wraps_lists_and_scrolls_tables(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use serde_json::json;
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1600.0), px(1200.0)));
+        let id = SurfaceId(1001);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(json!({"version":1,"root":{"kind":"grid","cols":200,"rows":80}})),
+        );
+        assert_eq!(answer, Ok(()));
+        let source = "A comfortable reading column.\n\n- Parent item\n  - A nested item with enough text to wrap over several lines in a narrow pane, keeping its marker beside the first line.\n\n| Item | Description | Count |\n|:---|:---:|---:|\n| One | A longer description needs more room | 12 |\n\n# Last {#last}\n\nA final paragraph.";
+        let send = |value: serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(&value).unwrap(),
+                },
+            );
+        };
+        send(
+            json!({"type":"markdown","kind":"document","revision":1,"buffer":1,"generation":1,"path":"/tmp/reading.md","text":source}),
+            cx,
+        );
+        for (revision, width, background) in
+            [(2, 160, "#1e1f22"), (3, 32, "#1e1f22"), (4, 20, "#ffffff")]
+        {
+            send(
+                json!({"type":"markdown","kind":"state","revision":revision,"active":1000,"windows":[{"window":1000,"buffer":1,"generation":1,"preview":true,"row":0,"column":0,"width":width,"height":70}],"colors":{"background":background,"foreground":"#bcbec4","muted":"#9da0a8","accent":"#589df6","code":"#2b2d30"}}),
+                cx,
+            );
+            draw_test_window(cx);
+            cx.run_until_parked();
+            draw_test_window(cx);
+            let preview = cx.debug_bounds("markdown-preview-1000").unwrap();
+            let paragraph = cx.debug_bounds("markdown-block-1000-0").unwrap();
+            assert!(paragraph.size.width <= px(820.0));
+            assert!(paragraph.left() >= preview.left() && paragraph.right() <= preview.right());
+            assert!((f32::from(paragraph.center().x - preview.center().x)).abs() < 1.0);
+            let parent = cx.debug_bounds("markdown-list-body-1000-1").unwrap();
+            let nested = cx.debug_bounds("markdown-list-body-1000-2").unwrap();
+            let marker = cx.debug_bounds("markdown-list-marker-1000-2").unwrap();
+            assert_eq!(nested.left() - parent.left(), px(24.0));
+            assert_eq!(marker.right(), nested.left());
+            assert_eq!(marker.top(), nested.top());
+            let first = cx.debug_bounds("markdown-cell-1000-3-0").unwrap();
+            let description = cx.debug_bounds("markdown-cell-1000-3-1").unwrap();
+            let value = cx.debug_bounds("markdown-cell-1000-4-1").unwrap();
+            assert!(description.size.width > first.size.width);
+            assert_eq!(description.left(), value.left());
+            assert_eq!(description.size.width, value.size.width);
+            if width == 160 {
+                assert!(paragraph.left() > preview.left() + px(24.0));
+            } else {
+                assert!(nested.size.height > px(25.0));
+                let table = cx.debug_bounds("markdown-table-1000-4").unwrap();
+                events(&mut peer);
+                cx.simulate_event(ScrollWheelEvent {
+                    position: table.center(),
+                    delta: gpui::ScrollDelta::Pixels(point(px(-80.0), px(0.0))),
+                    ..Default::default()
+                });
+                draw_test_window(cx);
+                let after = cx.debug_bounds("markdown-cell-1000-3-0").unwrap();
+                assert!(
+                    after.left() < first.left(),
+                    "table must scroll horizontally: {first:?} -> {after:?}"
+                );
+                assert!(
+                    !events(&mut peer)
+                        .iter()
+                        .any(|event| event["type"] == "mouse")
+                );
+            }
+        }
+    }
+    #[gpui::test]
+    fn native_markdown_duplicate_heading_link_scrolls_past_a_grouped_table(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use serde_json::json;
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(1002);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(json!({"version":1,"root":{"kind":"grid","cols":80,"rows":30}})),
+        );
+        assert_eq!(answer, Ok(()));
+        let source = format!(
+            "[Jump](#same-1)\n\n# Same\n\n| A | B |\n|---|---|\n| one | two |\n\n{}# Same\n\n{}",
+            "A spacer paragraph.\n\n".repeat(20),
+            "A final paragraph.\n\n".repeat(20)
+        );
+        for value in [
+            json!({"type":"markdown","kind":"document","revision":1,"buffer":1,"generation":1,"path":"/tmp/reading.md","text":source}),
+            json!({"type":"markdown","kind":"state","revision":2,"active":1000,"windows":[{"window":1000,"buffer":1,"generation":1,"preview":true,"row":0,"column":0,"width":60,"height":20}],"colors":{"background":"#1e1f22","foreground":"#bcbec4","muted":"#9da0a8","accent":"#589df6","code":"#2b2d30"}}),
+        ] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(&value).unwrap(),
+                },
+            );
+        }
+        draw_test_window(cx);
+        cx.run_until_parked();
+        draw_test_window(cx);
+        let position = host.read_with(cx, |h, _| {
+            let Body::Grid { markdown, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            markdown.text_position(1000, 1, 0, 1).unwrap()
+        });
+        events(&mut peer);
+        cx.simulate_mouse_down(
+            position + point(px(0.0), px(8.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            position + point(px(0.0), px(8.0)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        draw_test_window(cx);
+        let preview = cx.debug_bounds("markdown-preview-1000").unwrap();
+        let heading = cx.debug_bounds("markdown-block-1000-24").unwrap();
+        assert!(
+            (f32::from(heading.top() - preview.top())).abs() < 65.0,
+            "heading must scroll into view: {heading:?}, preview {preview:?}"
+        );
+        assert!(
+            !events(&mut peer)
+                .iter()
+                .any(|event| event["type"] == "mouse"
+                    || (event["type"] == "markdown_action" && event["action"] == "open"))
+        );
+    }
 }

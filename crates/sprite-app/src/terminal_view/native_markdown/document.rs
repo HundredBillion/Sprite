@@ -1,5 +1,6 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::{
+    collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,14 +24,27 @@ pub(super) struct Block {
     pub text: String,
     pub start: usize,
     pub heading: u8,
+    pub heading_id: Option<String>,
+    pub ids: Vec<String>,
+    pub indent: usize,
+    pub list: bool,
+    pub marker: Option<Range<usize>>,
     pub quote: bool,
     pub code: bool,
+    pub language: String,
+    pub highlights: super::highlight::Highlights,
     pub rule: bool,
     pub spans: Vec<(Range<usize>, InlineStyle)>,
     pub links: Vec<(Range<usize>, String)>,
     pub image: Option<(String, String)>,
     pub inline_images: Vec<InlineImage>,
     pub cells: Vec<Range<usize>>,
+    pub cell_alignments: Vec<pulldown_cmark::Alignment>,
+    pub cell_widths: Arc<[f32]>,
+    pub table_width: f32,
+    pub table_start: bool,
+    pub table_end: bool,
+    pub table_header: bool,
     pub front_matter: bool,
     pub front_matter_start: bool,
 }
@@ -41,6 +55,21 @@ pub(super) struct Parsed {
     pub anchors: Vec<(String, usize)>,
 }
 impl Parsed {
+    pub fn anchor(&self, encoded: &str) -> Option<usize> {
+        let name = percent_decode(encoded)?;
+        self.anchors
+            .iter()
+            .find(|(id, _)| id == &name)
+            .map(|(_, index)| {
+                self.blocks
+                    .iter()
+                    .take(*index)
+                    .filter(|block| {
+                        block.cells.is_empty() || block.front_matter || block.table_start
+                    })
+                    .count()
+            })
+    }
     pub fn parse(source: &str, _path: &str) -> Self {
         let mut blocks = Vec::new();
         let mut block = Block::default();
@@ -50,11 +79,15 @@ impl Parsed {
         let mut images: Vec<(usize, String, bool)> = Vec::new();
         let mut metadata: Option<String> = None;
         let mut in_table = false;
+        let mut table_alignments = Vec::new();
         let mut lists: Vec<Option<u64>> = Vec::new();
         let mut quote = 0;
         let mut cell_start = 0;
+        let mut html_styles = Vec::new();
+        let mut hidden_html: Option<String> = None;
         let flush = |block: &mut Block, blocks: &mut Vec<Block>| {
             if !block.text.is_empty()
+                || !block.ids.is_empty()
                 || block.rule
                 || block.image.is_some()
                 || !block.inline_images.is_empty()
@@ -62,14 +95,41 @@ impl Parsed {
                 blocks.push(std::mem::take(block));
             }
         };
-        for event in Parser::new_ext(
+        let mut events = Parser::new_ext(
             source,
             Options::ENABLE_TABLES
                 | Options::ENABLE_STRIKETHROUGH
                 | Options::ENABLE_TASKLISTS
                 | Options::ENABLE_HEADING_ATTRIBUTES
                 | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
-        ) {
+        )
+        .peekable();
+        while let Some(event) = events.next() {
+            if let Event::InlineHtml(raw) = &event {
+                let raw = raw.trim();
+                let closing = raw.starts_with("</");
+                let name = raw
+                    .trim_start_matches('<')
+                    .trim_start_matches('/')
+                    .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if hidden_html.as_deref() == Some(&name) && closing {
+                    hidden_html = None;
+                    continue;
+                }
+                if hidden_html.is_none()
+                    && !closing
+                    && matches!(name.as_str(), "script" | "style" | "template")
+                {
+                    hidden_html = Some(name);
+                    continue;
+                }
+            }
+            if hidden_html.is_some() {
+                continue;
+            }
             if let Some(raw) = metadata.as_mut() {
                 match event {
                     Event::End(TagEnd::MetadataBlock(_)) => {
@@ -87,13 +147,21 @@ impl Parsed {
                     metadata = Some(String::new());
                 }
                 Event::Start(tag) => match tag {
-                    Tag::Heading { level, .. } => {
+                    Tag::Heading { level, id, .. } => {
                         flush(&mut block, &mut blocks);
                         block.heading = level as u8;
+                        block.heading_id = id.map(|id| id.to_string());
                     }
-                    Tag::CodeBlock(_) => {
+                    Tag::CodeBlock(kind) => {
                         flush(&mut block, &mut blocks);
                         block.code = true;
+                        if let pulldown_cmark::CodeBlockKind::Fenced(info) = kind {
+                            block.language = info
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or_default()
+                                .to_ascii_lowercase();
+                        }
                     }
                     Tag::BlockQuote(_) => {
                         flush(&mut block, &mut blocks);
@@ -107,15 +175,13 @@ impl Parsed {
                     Tag::Item => {
                         flush(&mut block, &mut blocks);
                         block.quote = quote > 0;
-                        block
-                            .text
-                            .push_str(&"  ".repeat(lists.len().saturating_sub(1)));
                         if let Some(Some(n)) = lists.last_mut() {
                             block.text.push_str(&format!("{n}. "));
                             *n += 1;
                         } else {
                             block.text.push_str("• ");
                         }
+                        block.marker = Some(0..block.text.len());
                     }
                     Tag::Emphasis => {
                         styles.push(style);
@@ -140,15 +206,22 @@ impl Parsed {
                         images.push((block.text.len(), dest_url.to_string(), standalone));
                     }
                     Tag::TableCell => cell_start = block.text.len(),
-                    Tag::Table(_) => {
+                    Tag::Table(alignments) => {
                         flush(&mut block, &mut blocks);
                         in_table = true;
+                        table_alignments = alignments;
                     }
                     Tag::TableHead => {
                         flush(&mut block, &mut blocks);
                         style.bold = true;
+                        block.table_header = true;
+                        block.table_start = true;
+                        block.cell_alignments = table_alignments.clone();
                     }
-                    Tag::TableRow => flush(&mut block, &mut blocks),
+                    Tag::TableRow => {
+                        flush(&mut block, &mut blocks);
+                        block.cell_alignments = table_alignments.clone();
+                    }
                     _ => (),
                 },
                 Event::End(tag) => match tag {
@@ -196,6 +269,9 @@ impl Parsed {
                     TagEnd::Table => {
                         flush(&mut block, &mut blocks);
                         in_table = false;
+                        if let Some(last) = blocks.last_mut() {
+                            last.table_end = true;
+                        }
                     }
                     TagEnd::TableCell => {
                         block.cells.push(cell_start..block.text.len());
@@ -237,19 +313,68 @@ impl Parsed {
                     block.rule = true;
                     flush(&mut block, &mut blocks);
                 }
-                Event::Html(_) | Event::InlineHtml(_) => (),
+                Event::Html(raw) => {
+                    flush(&mut block, &mut blocks);
+                    let mut raw = raw.to_string();
+                    while matches!(events.peek(), Some(Event::Html(_))) {
+                        if let Some(Event::Html(next)) = events.next() {
+                            raw.push_str(&next);
+                        }
+                    }
+                    blocks.extend(super::html::blocks(&raw));
+                }
+                Event::InlineHtml(raw) => {
+                    super::html::inline(&raw, &mut block, &mut style, &mut html_styles, &mut link)
+                }
                 _ => (),
             }
+            block.list = !lists.is_empty();
+            block.indent = lists.len().saturating_sub(1);
         }
         flush(&mut block, &mut blocks);
+        size_tables(&mut blocks);
         let mut text = String::new();
         let mut anchors = Vec::new();
+        let mut used = HashSet::new();
+        let reserved: HashSet<_> = blocks
+            .iter()
+            .flat_map(|block| block.ids.iter().chain(block.heading_id.iter()))
+            .cloned()
+            .collect();
+        let mut suffixes = HashMap::<String, usize>::new();
         for (index, block) in blocks.iter_mut().enumerate() {
             block.start = text.len();
             text.push_str(&block.text);
             text.push('\n');
+            for id in &block.ids {
+                if used.insert(id.clone()) {
+                    anchors.push((id.clone(), index));
+                }
+            }
             if block.heading > 0 {
-                anchors.push((slug(&block.text), index));
+                let base = block
+                    .heading_id
+                    .clone()
+                    .unwrap_or_else(|| slug(&block.text));
+                let mut suffix = if block.heading_id.is_some() {
+                    0
+                } else {
+                    *suffixes.get(&base).unwrap_or(&0)
+                };
+                let mut name = if suffix == 0 {
+                    base.clone()
+                } else {
+                    format!("{base}-{suffix}")
+                };
+                while used.contains(&name)
+                    || (block.heading_id.is_none() && reserved.contains(&name))
+                {
+                    suffix += 1;
+                    name = format!("{base}-{suffix}");
+                }
+                suffixes.insert(base, suffix + 1);
+                used.insert(name.clone());
+                anchors.push((name, index));
             }
         }
         Self {
@@ -259,6 +384,50 @@ impl Parsed {
         }
     }
 }
+fn size_tables(blocks: &mut [Block]) {
+    let mut start = 0;
+    while start < blocks.len() {
+        if blocks[start].cells.is_empty() || blocks[start].front_matter {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while !blocks[end - 1].table_end
+            && end < blocks.len()
+            && !blocks[end].cells.is_empty()
+            && !blocks[end].front_matter
+            && !blocks[end].table_start
+        {
+            end += 1;
+        }
+        let columns = blocks[start..end]
+            .iter()
+            .map(|row| row.cells.len())
+            .max()
+            .unwrap_or(0);
+        let mut widths = vec![80.0_f32; columns];
+        for row in &blocks[start..end] {
+            for (index, cell) in row.cells.iter().enumerate() {
+                let chars = row.text[cell.clone()]
+                    .lines()
+                    .map(|line| line.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                widths[index] = widths[index].max((chars as f32 * 8.0 + 24.0).clamp(80.0, 320.0));
+            }
+        }
+        blocks[start].table_start = true;
+        blocks[end - 1].table_end = true;
+        let table_width = widths.iter().sum();
+        let widths: Arc<[f32]> = widths.into();
+        for row in &mut blocks[start..end] {
+            row.table_width = table_width;
+            row.cell_widths = widths.clone();
+        }
+        start = end;
+    }
+}
+
 struct YamlBudget {
     bytes: usize,
     nodes: usize,
@@ -407,11 +576,7 @@ fn slug(text: &str) -> String {
         })
         .collect()
 }
-pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf> {
-    if destination.starts_with('#') {
-        return None;
-    }
-    let encoded = destination.split(['?', '#']).next()?;
+fn percent_decode(encoded: &str) -> Option<String> {
     let mut decoded = Vec::with_capacity(encoded.len());
     let mut bytes = encoded.bytes();
     while let Some(byte) = bytes.next() {
@@ -427,6 +592,15 @@ pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf
     if decoded.contains('\0') {
         return None;
     }
+    Some(decoded)
+}
+
+pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf> {
+    if destination.starts_with('#') {
+        return None;
+    }
+    let encoded = destination.split(['?', '#']).next()?;
+    let decoded = percent_decode(encoded)?;
     let destination = decoded.strip_prefix("file://").unwrap_or(&decoded);
     if destination.contains(':') || destination.starts_with("//") {
         return None;
@@ -441,6 +615,213 @@ pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn markdown_nested_lists_keep_markers_and_continuation_indentation() {
+        let parsed = super::Parsed::parse(
+            "1. Parent with text\n   - Nested child with text\n\n     A second paragraph in the nested item.\n\n2. Next parent\n",
+            "/tmp/readme.md",
+        );
+        let nested = parsed
+            .blocks
+            .iter()
+            .find(|block| block.text.contains("Nested child"))
+            .unwrap();
+        assert!(nested.list);
+        assert_eq!(nested.indent, 1);
+        assert_eq!(&nested.text[nested.marker.clone().unwrap()], "• ");
+        let continuation = parsed
+            .blocks
+            .iter()
+            .find(|block| block.text.contains("second paragraph"))
+            .unwrap();
+        assert!(continuation.list);
+        assert_eq!(continuation.indent, 1);
+        assert!(continuation.marker.is_none());
+        assert!(parsed.text.contains("2. Next parent"));
+    }
+
+    #[test]
+    fn markdown_tables_keep_alignment_and_share_content_sized_columns() {
+        let parsed = super::Parsed::parse(
+            "| Item | Description | Count |\n|:---|:---:|---:|\n| One | A description that needs more room | 12 |\n\nAfter the table.\n",
+            "/tmp/readme.md",
+        );
+        let rows = &parsed.blocks[..2];
+        assert_eq!(
+            rows[0].cell_alignments,
+            vec![
+                pulldown_cmark::Alignment::Left,
+                pulldown_cmark::Alignment::Center,
+                pulldown_cmark::Alignment::Right
+            ]
+        );
+        assert_eq!(rows[0].cell_widths, rows[1].cell_widths);
+        assert!(rows[0].cell_widths[1] > rows[0].cell_widths[0]);
+        assert!(rows[0].table_start && rows[0].table_header && rows[1].table_end);
+        assert_eq!(parsed.blocks[2].text, "After the table.");
+    }
+
+    #[test]
+    fn markdown_html_keeps_readable_content_links_and_details_without_execution() {
+        let parsed = super::Parsed::parse(
+            "<div><h2 id=\"intro\">An introduction</h2><p>Read <strong>carefully</strong> &amp; <a href=\"next.md\">continue</a>.</p><details><summary>More notes</summary><p>Keep these details visible.</p></details><script>bad()</script></div>\n\nAn <kbd>inline</kbd> detail.<br>Next line.",
+            "/tmp/readme.md",
+        );
+        assert!(parsed.text.contains("An introduction"));
+        assert!(parsed.text.contains("Read carefully & continue."));
+        assert!(parsed.text.contains("Keep these details visible."));
+        assert!(parsed.text.contains("inline"));
+        assert!(!parsed.text.contains("bad()"));
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .any(|block| block.links.iter().any(|(_, target)| target == "next.md"))
+        );
+        assert!(parsed.blocks.iter().any(|block| {
+            block
+                .spans
+                .iter()
+                .any(|(range, style)| style.bold && &block.text[range.clone()] == "carefully")
+        }));
+        assert_eq!(parsed.anchor("intro"), Some(0));
+    }
+
+    #[test]
+    fn markdown_heading_fragments_decode_unicode_and_keep_explicit_ids_reserved() {
+        let parsed = super::Parsed::parse(
+            "# Code\n\n# Named {#code}\n\n| A | B |\n|---|---|\n| one | two |\n\n# Café\n",
+            "/tmp/a.md",
+        );
+        assert_eq!(parsed.anchors[0].0, "code-1");
+        assert_eq!(parsed.anchor("code"), Some(1));
+        assert_eq!(parsed.anchor("caf%C3%A9"), Some(3));
+        assert_eq!(parsed.anchor("bad%FF"), None);
+    }
+
+    #[test]
+    fn markdown_html_tables_lists_and_linked_images_keep_valid_ranges() {
+        let parsed = super::Parsed::parse(
+            "<div><ul><li>Parent<ul><li>Nested</li></ul></li></ul><table><tr><th>Name</th><th align='right'>Count</th></tr><tr><td><a href='next.md'>Next</a></td><td>12</td></tr></table><a href='image.md'><img src='local.png' alt='Picture'></a></div>",
+            "/tmp/a.md",
+        );
+        assert!(parsed.text.contains("Parent"));
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .any(|b| b.text.contains("Nested") && b.indent == 1 && b.list)
+        );
+        let rows: Vec<_> = parsed
+            .blocks
+            .iter()
+            .filter(|b| !b.cells.is_empty())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].cell_alignments[1], pulldown_cmark::Alignment::Right);
+        assert!(rows[0].table_start && rows[1].table_end);
+        assert_eq!(rows[0].cell_widths, rows[1].cell_widths);
+        assert!(parsed.blocks.iter().any(|b| {
+            b.inline_images
+                .iter()
+                .any(|i| i.link.as_deref() == Some("image.md"))
+        }));
+        for block in &parsed.blocks {
+            for (range, _) in &block.spans {
+                assert!(block.text.get(range.clone()).is_some());
+            }
+            for (range, _) in &block.links {
+                assert!(block.text.get(range.clone()).is_some());
+            }
+            for range in &block.cells {
+                assert!(block.text.get(range.clone()).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_html_cell_paragraphs_keep_separation_and_local_styles() {
+        let parsed = super::Parsed::parse(
+            "<table><tr><td><p>First</p><p>Second</p><h3>Small heading</h3><pre><code>literal code</code></pre></td><td>Other</td></tr></table>",
+            "/tmp/a.md",
+        );
+        assert_eq!(parsed.blocks.len(), 1);
+        let row = &parsed.blocks[0];
+        assert_eq!(row.heading, 0);
+        assert!(!row.code);
+        assert!(row.text.contains("First\nSecond"), "{:?}", row.text);
+        assert!(row.text.contains("literal code"));
+        assert_eq!(row.cells.len(), 2);
+    }
+
+    #[test]
+    fn markdown_html_ragged_tables_share_column_storage() {
+        let raw = format!(
+            "<table><tr>{}</tr>{}</table>",
+            "<td></td>".repeat(1000),
+            "<tr><td></td></tr>".repeat(1000)
+        );
+        let parsed = super::Parsed::parse(&raw, "/tmp/a.md");
+        assert_eq!(parsed.blocks.len(), 1001);
+        assert!(std::sync::Arc::ptr_eq(
+            &parsed.blocks[0].cell_widths,
+            &parsed.blocks[1000].cell_widths
+        ));
+    }
+
+    #[test]
+    fn markdown_html_local_rules_empty_alt_images_and_list_tails_keep_their_content() {
+        let parsed = super::Parsed::parse(
+            "<table><tr><td>Before<hr>After</td><td>Other</td></tr></table><p><img src='local.png' alt=''></p><ul><li>First<ul><li>Nested</li></ul>Parent tail</li></ul>",
+            "/tmp/a.md",
+        );
+        assert!(parsed.text.contains("Before"));
+        assert!(parsed.text.contains("After"));
+        assert!(!parsed.blocks[0].rule);
+        assert!(parsed.blocks.iter().any(|b| {
+            b.inline_images
+                .iter()
+                .any(|image| image.destination == "local.png" && image.range.is_empty())
+        }));
+        let tail = parsed
+            .blocks
+            .iter()
+            .find(|b| b.text == "Parent tail")
+            .unwrap();
+        assert!(tail.list);
+        assert_eq!(tail.indent, 0);
+    }
+
+    #[test]
+    fn markdown_inline_executable_html_is_inert_and_does_not_hide_following_content() {
+        let parsed = super::Parsed::parse(
+            "Before <script>alert('x')</script> and <style>body{}</style> after.\n\n# Visible",
+            "/tmp/a.md",
+        );
+        assert!(parsed.text.contains("Before"));
+        assert!(parsed.text.contains("after."));
+        assert!(parsed.text.contains("Visible"));
+        assert!(!parsed.text.contains("alert"));
+        assert!(!parsed.text.contains("body{}"));
+    }
+
+    #[test]
+    fn markdown_heading_links_have_unique_anchors_and_keep_explicit_ids() {
+        let parsed = super::Parsed::parse(
+            "# Same title\n\n# Same title\n\n# Same title {#custom}\n\n# Café & code!\n",
+            "/tmp/readme.md",
+        );
+        assert_eq!(
+            parsed.anchors,
+            vec![
+                ("same-title".into(), 0),
+                ("same-title-1".into(), 1),
+                ("custom".into(), 2),
+                ("café--code".into(), 3),
+            ]
+        );
+    }
+
     #[test]
     fn markdown_yaml_front_matter_is_a_metadata_table_instead_of_a_setext_heading() {
         let parsed = super::Parsed::parse(
@@ -619,6 +1000,8 @@ mod tests {
             Just("[link](next.md)".to_string()),
             Just("![alternative](missing.png)".to_string()),
             Just("[![linked](missing.png)](next.md)".to_string()),
+            Just("<strong>HTML café</strong> <a href='next.md'>link</a>".to_string()),
+            Just("<div><p>HTML <em>paragraph</em></p><ul><li>item</li></ul></div>".to_string()),
             "[a-zA-Z0-9_*`!\\[\\]()<> ]{0,60}",
         ]
     }

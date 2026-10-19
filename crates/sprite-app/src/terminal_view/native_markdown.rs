@@ -1,4 +1,6 @@
 mod document;
+mod highlight;
+mod html;
 
 use super::TerminalView;
 use crate::surface::{
@@ -80,7 +82,7 @@ impl Prepared {
             || parsed
                 .blocks
                 .iter()
-                .map(|b| b.spans.len() + b.links.len() + b.inline_images.len())
+                .map(|b| b.spans.len() + b.links.len() + b.inline_images.len() + b.cells.len())
                 .sum::<usize>()
                 > 20_000
         {
@@ -89,6 +91,7 @@ impl Prepared {
                 path,
             );
         }
+        highlight::prepare(&mut parsed.blocks);
         let mut images = HashMap::new();
         let mut remaining = 4 * 1024 * 1024;
         let sources = parsed
@@ -426,13 +429,25 @@ impl NativeMarkdown {
                 .overflow_y_scroll()
                 .overflow_x_hidden()
                 .track_scroll(&scroll)
-                .p(px(24.0));
+                .px(px(if target.width < 40 { 12.0 } else { 24.0 }))
+                .py(px(28.0));
             presentation.borrow_mut().layouts.clear();
             if let Some(prepared) = prepared {
+                let mut table_rows = Vec::new();
                 for (index, block) in prepared.parsed.blocks.iter().enumerate() {
                     if block.rule {
-                        pane = pane
-                            .child(div().h(px(1.0)).my(px(16.0)).bg(color(&state.colors.muted)));
+                        pane = pane.child(
+                            div()
+                                .h(px(1.0))
+                                .w_full()
+                                .max_w(px(820.0))
+                                .mx_auto()
+                                .my(px(24.0))
+                                .bg(gpui::Rgba {
+                                    a: 0.45,
+                                    ..color(&state.colors.muted)
+                                }),
+                        );
                         continue;
                     }
                     let image_elements = block
@@ -467,6 +482,19 @@ impl NativeMarkdown {
                         image_elements,
                         (target.window, index),
                     );
+                    let content = if block.list {
+                        div()
+                            .pl(px((block.indent as f32 * 24.0).min(
+                                (f32::from(cell_width * f32::from(target.width))
+                                    - if target.width < 40 { 24.0 } else { 48.0 }
+                                    - 80.0)
+                                    .max(0.0),
+                            ) + if block.marker.is_none() { 28.0 } else { 0.0 }))
+                            .child(content)
+                            .into_any_element()
+                    } else {
+                        content
+                    };
                     for (start, layout) in &layouts {
                         presentation
                             .borrow_mut()
@@ -486,16 +514,35 @@ impl NativeMarkdown {
                     let parsed = prepared.clone();
                     let mut item = div()
                         .id(SharedString::from(format!("markdown-block-{index}")))
-                        .mb(px(12.0))
+                        .debug_selector(move || format!("markdown-block-{window_id}-{index}"))
+                        .mb(px(if block.list { 6.0 } else { 16.0 }))
                         .w_full()
+                        .when(block.cells.is_empty() || block.front_matter, |s| {
+                            s.max_w(px(820.0)).mx_auto()
+                        })
                         .when(block.heading > 0, |s| {
                             s.text_size(px(match block.heading {
-                                1 => 32.0,
-                                2 => 26.0,
+                                1 => 34.0,
+                                2 => 27.0,
                                 3 => 22.0,
-                                _ => 18.0,
+                                4 => 19.0,
+                                5 => 17.0,
+                                _ => 16.0,
                             }))
-                            .line_height(px(40.0))
+                            .line_height(px(match block.heading {
+                                1 => 44.0,
+                                2 => 36.0,
+                                3 => 30.0,
+                                _ => 26.0,
+                            }))
+                            .mt(px(if index == 0 { 0.0 } else { 24.0 }))
+                            .mb(px(14.0))
+                            .when(block.heading <= 2, |s| {
+                                s.pb(px(8.0)).border_b_1().border_color(gpui::Rgba {
+                                    a: 0.3,
+                                    ..color(&state.colors.muted)
+                                })
+                            })
                             .font_weight(FontWeight::BOLD)
                         })
                         .when(block.quote, |s| {
@@ -506,7 +553,10 @@ impl NativeMarkdown {
                         })
                         .when(block.code, |s| {
                             s.bg(color(&state.colors.code))
-                                .p(px(12.0))
+                                .p(px(16.0))
+                                .rounded(px(6.0))
+                                .text_size(px(14.0))
+                                .line_height(px(22.0))
                                 .overflow_x_scroll()
                                 .whitespace_nowrap()
                         })
@@ -514,6 +564,12 @@ impl NativeMarkdown {
                             s.mb_0()
                                 .border_b_1()
                                 .border_color(color(&state.colors.muted))
+                        })
+                        .when(!block.cells.is_empty() && !block.front_matter, |s| {
+                            s.border_l_1()
+                                .border_r_1()
+                                .when(block.table_start, |s| s.border_t_1())
+                                .when(block.table_header, |s| s.bg(color(&state.colors.code)))
                         })
                         .when(block.front_matter, |s| {
                             s.border_l_1()
@@ -527,6 +583,16 @@ impl NativeMarkdown {
                                         .is_none_or(|next| !next.front_matter),
                                     |s| s.mb(px(12.0)),
                                 )
+                        })
+                        .when(block.code && !block.language.is_empty(), |s| {
+                            s.child(
+                                div()
+                                    .mb(px(10.0))
+                                    .text_size(px(11.0))
+                                    .line_height(px(16.0))
+                                    .text_color(color(&state.colors.muted))
+                                    .child(block.language.clone()),
+                            )
                         })
                         .child(content)
                         .on_mouse_down(
@@ -576,13 +642,8 @@ impl NativeMarkdown {
                                         links.iter().find(|(range, _)| range.contains(&index))
                                     {
                                         if let Some(anchor) = destination.strip_prefix('#') {
-                                            if let Some((_, item)) = parsed
-                                                .parsed
-                                                .anchors
-                                                .iter()
-                                                .find(|(name, _)| name == anchor)
-                                            {
-                                                value.scroll.scroll_to_top_of_item(*item);
+                                            if let Some(item) = parsed.parsed.anchor(anchor) {
+                                                value.scroll.scroll_to_top_of_item(item);
                                             }
                                         } else {
                                             view.native_markdown_action(
@@ -604,7 +665,30 @@ impl NativeMarkdown {
                     if let Some(image) = prepared.images.get(&(index, 0)) {
                         item = item.child(img(image.clone()).max_w_full().max_h(px(480.0)));
                     }
-                    pane = pane.child(item);
+                    if !block.cells.is_empty() && !block.front_matter {
+                        table_rows.push(item);
+                        if block.table_end {
+                            let table_id = format!("markdown-table-{window_id}-{index}");
+                            pane = pane.child(
+                                div()
+                                    .id(SharedString::from(table_id.clone()))
+                                    .debug_selector(move || table_id.clone())
+                                    .w_full()
+                                    .max_w(px(820.0))
+                                    .mx_auto()
+                                    .mb(px(20.0))
+                                    .overflow_x_scroll()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .min_w(px(block.table_width))
+                                            .children(std::mem::take(&mut table_rows)),
+                                    ),
+                            );
+                        }
+                    } else {
+                        pane = pane.child(item);
+                    }
                 }
             } else {
                 pane = pane.child("Loading Markdown preview…");
@@ -644,7 +728,18 @@ fn runs(
     colors: &Colors,
     selection: Option<&Range<usize>>,
 ) -> Vec<TextRun> {
+    let background = color(&colors.background);
+    let light = background.r * 0.2126 + background.g * 0.7152 + background.b * 0.0722 > 0.5;
+    let syntax = if light {
+        &block.highlights.light
+    } else {
+        &block.highlights.dark
+    };
+    let mut syntax_index = 0;
     let mut boundaries = vec![0, block.text.len()];
+    for (range, _) in syntax {
+        boundaries.extend([range.start, range.end]);
+    }
     for (range, _) in &block.spans {
         boundaries.extend([range.start, range.end]);
     }
@@ -669,6 +764,12 @@ fn runs(
         .filter(|range| range[0] < range[1])
         .map(|range| {
             let start = range[0];
+            while syntax
+                .get(syntax_index)
+                .is_some_and(|(range, _)| range.end <= start)
+            {
+                syntax_index += 1;
+            }
             while block
                 .spans
                 .get(span_index)
@@ -703,19 +804,26 @@ fn runs(
             TextRun {
                 len: range[1] - start,
                 font,
-                color: color(
-                    if block
-                        .links
-                        .get(link_index)
-                        .is_some_and(|(r, _)| r.contains(&start))
-                    {
-                        &colors.accent
-                    } else if block.quote {
-                        &colors.muted
-                    } else {
-                        &colors.foreground
-                    },
-                )
+                color: if let Some((_, foreground)) = syntax
+                    .get(syntax_index)
+                    .filter(|(range, _)| range.contains(&start))
+                {
+                    rgb(*foreground)
+                } else {
+                    color(
+                        if block
+                            .links
+                            .get(link_index)
+                            .is_some_and(|(r, _)| r.contains(&start))
+                        {
+                            &colors.accent
+                        } else if block.quote {
+                            &colors.muted
+                        } else {
+                            &colors.foreground
+                        },
+                    )
+                }
                 .into(),
                 background_color: if selection.is_some_and(|r| r.contains(&(block.start + start))) {
                     Some(color(&colors.accent).into())
@@ -789,18 +897,12 @@ fn inline_image(
         .on_click(cx.listener(move |view, _, window, cx| {
             if let Some(destination) = destination.as_deref() {
                 if let Some(anchor) = destination.strip_prefix('#') {
-                    if let Some((_, item)) = actions
-                        .prepared
-                        .parsed
-                        .anchors
-                        .iter()
-                        .find(|(name, _)| name == anchor)
-                    {
+                    if let Some(item) = actions.prepared.parsed.anchor(anchor) {
                         actions
                             .presentation
                             .borrow()
                             .scroll
-                            .scroll_to_top_of_item(*item);
+                            .scroll_to_top_of_item(item);
                     }
                 } else {
                     view.native_markdown_action(
@@ -829,6 +931,45 @@ fn block_content(
 ) -> (AnyElement, Vec<(usize, TextLayout)>) {
     let all_runs = runs(block, colors, selection);
     if block.cells.is_empty() {
+        if let Some(marker) = &block.marker {
+            let label = StyledText::new(SharedString::from(block.text[marker.clone()].to_string()))
+                .with_runs(slice_runs(&all_runs, marker));
+            let text = StyledText::new(SharedString::from(block.text[marker.end..].to_string()))
+                .with_runs(slice_runs(&all_runs, &(marker.end..block.text.len())));
+            let layouts = vec![
+                (marker.start, label.layout().clone()),
+                (marker.end, text.layout().clone()),
+            ];
+            return (
+                div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .child(
+                        div()
+                            .debug_selector(move || {
+                                format!("markdown-list-marker-{}-{}", selector.0, selector.1)
+                            })
+                            .w(px(28.0))
+                            .flex_shrink_0()
+                            .pr(px(6.0))
+                            .text_align(gpui::TextAlign::Right)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(move || {
+                                format!("markdown-list-body-{}-{}", selector.0, selector.1)
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .child(text)
+                            .children(images.into_iter().filter_map(|(_, image)| image)),
+                    )
+                    .into_any_element(),
+                layouts,
+            );
+        }
         let text = StyledText::new(SharedString::from(block.text.clone())).with_runs(all_runs);
         let layout = text.layout().clone();
         let content = if images.is_empty() {
@@ -847,21 +988,7 @@ fn block_content(
     let mut row = div().flex().flex_row().w_full();
     let mut layouts = Vec::new();
     for (cell_index, cell) in block.cells.iter().enumerate() {
-        let mut offset = 0;
-        let cell_runs = all_runs
-            .iter()
-            .filter_map(|run| {
-                let start = offset;
-                offset += run.len;
-                let overlap_start = start.max(cell.start);
-                let overlap_end = offset.min(cell.end);
-                (overlap_start < overlap_end).then(|| {
-                    let mut run = run.clone();
-                    run.len = overlap_end - overlap_start;
-                    run
-                })
-            })
-            .collect();
+        let cell_runs = slice_runs(&all_runs, cell);
         let text = StyledText::new(SharedString::from(block.text[cell.clone()].to_string()))
             .with_runs(cell_runs);
         layouts.push((cell.start, text.layout().clone()));
@@ -870,8 +997,18 @@ fn block_content(
                 .debug_selector(move || {
                     format!("markdown-cell-{}-{}-{cell_index}", selector.0, selector.1)
                 })
-                .when(!block.front_matter || block.cells.len() == 1, |s| {
-                    s.w(gpui::relative(1.0 / block.cells.len() as f32))
+                .when(!block.front_matter, |s| {
+                    let sum = block.table_width.max(1.0);
+                    let width = block.cell_widths.get(cell_index).copied().unwrap_or(80.0);
+                    s.w(gpui::relative(width / sum)).flex_shrink_0()
+                })
+                .when(block.front_matter && block.cells.len() == 1, |s| s.w_full())
+                .when(!block.front_matter, |s| {
+                    s.text_align(match block.cell_alignments.get(cell_index) {
+                        Some(pulldown_cmark::Alignment::Center) => gpui::TextAlign::Center,
+                        Some(pulldown_cmark::Alignment::Right) => gpui::TextAlign::Right,
+                        _ => gpui::TextAlign::Left,
+                    })
                 })
                 .when(block.front_matter && block.cells.len() == 2, |s| {
                     if cell_index == 0 {
@@ -882,10 +1019,7 @@ fn block_content(
                 })
                 .min_w_0()
                 .p(px(6.0))
-                .when(
-                    !block.front_matter || cell_index + 1 < block.cells.len(),
-                    |s| s.border_r_1(),
-                )
+                .when(cell_index + 1 < block.cells.len(), |s| s.border_r_1())
                 .border_color(color(&colors.muted))
                 .child(text)
                 .children(images.iter_mut().filter_map(|(range, element)| {
@@ -897,6 +1031,23 @@ fn block_content(
     }
     (row.into_any_element(), layouts)
 }
+fn slice_runs(runs: &[TextRun], range: &Range<usize>) -> Vec<TextRun> {
+    let mut offset = 0;
+    runs.iter()
+        .filter_map(|run| {
+            let start = offset;
+            offset += run.len;
+            let overlap_start = start.max(range.start);
+            let overlap_end = offset.min(range.end);
+            (overlap_start < overlap_end).then(|| {
+                let mut run = run.clone();
+                run.len = overlap_end - overlap_start;
+                run
+            })
+        })
+        .collect()
+}
+
 fn layout_index(layouts: &[(usize, TextLayout)], position: gpui::Point<Pixels>) -> usize {
     let (start, layout) = layouts
         .iter()
@@ -909,6 +1060,30 @@ fn layout_index(layouts: &[(usize, TextLayout)], position: gpui::Point<Pixels>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn markdown_code_fences_preserve_source_and_have_theme_aware_syntax_colors() {
+        let source = "fn main() {\n    let greeting = \"hello\"; // café\n    println!(\"{}\", greeting);\n}\n";
+        let prepared = Prepared::load(&format!("```rust\n{source}```"), "/tmp/readme.md");
+        let block = &prepared.parsed.blocks[0];
+        assert_eq!(block.text, source);
+        let mut colors = Colors {
+            background: "#1e1f22".into(),
+            foreground: "#bcbec4".into(),
+            muted: "#9da0a8".into(),
+            accent: "#589df6".into(),
+            code: "#2b2d30".into(),
+        };
+        let dark = runs(block, &colors, None);
+        assert!(dark.iter().any(|run| run.color != dark[0].color));
+        assert_eq!(dark.iter().map(|run| run.len).sum::<usize>(), source.len());
+        colors.background = "#ffffff".into();
+        let light = runs(block, &colors, None);
+        assert!(light.iter().any(|run| run.color != light[0].color));
+        assert_ne!(dark[0].color, light[0].color);
+        let unknown = Prepared::load("```unknown-language\nliteral **stars**\n```", "/tmp/a.md");
+        assert_eq!(unknown.parsed.blocks[0].text, "literal **stars**\n");
+    }
+
     #[test]
     fn markdown_review_linked_and_table_images_are_prepared_from_local_urls() {
         let path = std::env::temp_dir().join(format!(
