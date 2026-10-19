@@ -225,6 +225,12 @@ impl NativeMinimap {
             .filter_map(|row| geometry.row_range(*row, *row))
             .collect();
         let hunks = state.map_or(&[][..], |s| s.changes());
+        #[cfg(feature = "minimap-benchmark")]
+        let first_line_change = hunks.iter().any(|hunk| {
+            hunk.start() == 1
+                && hunk.kind() == ChangeKind::Modified
+                && geometry.row_range(hunk.start(), hunk.end()).is_some()
+        });
         let first = hunks.partition_point(|h| h.end() <= geometry.offset);
         let last = hunks.partition_point(|h| h.start() <= geometry.offset + geometry.rows);
         let changes: Vec<_> = hunks[first..last]
@@ -347,7 +353,7 @@ impl NativeMinimap {
                 crate::minimap_benchmark::record(serde_json::json!({
                     "event":"paint", "generation":generation,
                     "viewport":viewport, "offset":geometry.offset, "rows":geometry.rows,
-                    "state_revision":state_revision, "change_bands":changes.len(), "occurrences":occurrences.len(), "selection":selection.is_some(),
+                    "state_revision":state_revision, "change_bands":changes.len(), "first_line_change":first_line_change, "occurrences":occurrences.len(), "selection":selection.is_some(),
                     "scale":window.scale_factor(),
                     "ms":paint_started.elapsed().as_secs_f64()*1000.0,
                 }));
