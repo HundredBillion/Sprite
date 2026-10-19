@@ -1,0 +1,965 @@
+use super::{TerminalView, surfaces::Body};
+use crate::surface::{
+    SurfaceId,
+    minimap::{ChangeKind, Document, Line, Minimap},
+};
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, Bounds, ContentMask, Context, DispatchPhase, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollWheelEvent, ShapedLine, SharedString, Size,
+    TextRun, Window, canvas, div, fill, outline, point, px, rgb,
+};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+
+const LINE_HEIGHT: f32 = 3.0;
+const FONT_SIZE: f32 = 2.5;
+const MAX_SHAPED_ROWS: usize = 2048;
+
+#[derive(Clone, Copy, Debug)]
+struct MapGeometry {
+    total: usize,
+    visible: usize,
+    height: f32,
+    offset: usize,
+    rows: usize,
+    thumb_top: f32,
+    thumb_height: f32,
+}
+impl MapGeometry {
+    fn new(total: usize, topline: usize, visible: usize, height: f32) -> Self {
+        let total = total.max(1);
+        let visible = visible.clamp(1, total);
+        let height = if height.is_finite() {
+            height.max(0.0).min(total as f32 * LINE_HEIGHT)
+        } else {
+            0.0
+        };
+        let rows = ((height / LINE_HEIGHT).floor() as usize).max(1).min(total);
+        let ratio = (topline.saturating_sub(1) as f64
+            / total.saturating_sub(visible).max(1) as f64)
+            .clamp(0.0, 1.0);
+        let offset = (ratio * total.saturating_sub(rows) as f64).floor() as usize;
+        let thumb_height = if total == visible {
+            height
+        } else {
+            (visible as f32 * LINE_HEIGHT)
+                .max(height.min(12.0))
+                .min(height * 0.8)
+        };
+        Self {
+            total,
+            visible,
+            height,
+            offset,
+            rows,
+            thumb_top: ratio as f32 * (height - thumb_height),
+            thumb_height,
+        }
+    }
+    fn line_at(&self, y: f32) -> usize {
+        (self.offset + (y.max(0.0) / LINE_HEIGHT).floor() as usize + 1).min(self.total)
+    }
+    fn topline_at_thumb(&self, y: f32, grab_offset: f32) -> usize {
+        let travel = self.height - self.thumb_height;
+        if travel <= 0.0 {
+            return 1;
+        }
+        let ratio = ((y - grab_offset) / travel).clamp(0.0, 1.0);
+        (ratio as f64 * (self.total - self.visible) as f64).round() as usize + 1
+    }
+    fn row_range(&self, start: usize, end: usize) -> Option<(f32, f32)> {
+        let first = start.max(self.offset + 1);
+        let last = end.min(self.offset + self.rows);
+        (first <= last).then(|| {
+            (
+                (first - self.offset - 1) as f32 * LINE_HEIGHT,
+                (last - first + 1) as f32 * LINE_HEIGHT,
+            )
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Identity {
+    target: String,
+    generation: u64,
+}
+#[derive(Clone, Copy)]
+struct Press {
+    y: f32,
+    grab: Option<f32>,
+    moved: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Navigation {
+    Reveal(usize),
+    Scroll(usize),
+}
+#[derive(Default)]
+struct Interaction {
+    bounds: Option<Bounds<Pixels>>,
+    geometry: Option<MapGeometry>,
+    identity: Option<Identity>,
+    press: Option<Press>,
+    pending: Option<Navigation>,
+    scheduled: bool,
+    wheel: crate::grid::ScrollAccumulator,
+    scroll_top: Option<usize>,
+    next_action_id: u64,
+    sent_action_id: u64,
+    acked_action_id: u64,
+    observed_top: usize,
+    observed_revision: Option<u64>,
+    hover: Option<(usize, String)>,
+}
+impl Interaction {
+    fn reset_scroll_tracking(&mut self) {
+        self.scroll_top = None;
+        self.sent_action_id = self.next_action_id;
+        self.acked_action_id = self.next_action_id;
+        self.wheel.reset();
+    }
+    fn scroll_rows(&mut self, rows: i32, total: usize, visible: usize, authoritative: usize) {
+        let top = match self.pending {
+            Some(Navigation::Scroll(top)) => top,
+            _ => self.scroll_top.unwrap_or(authoritative),
+        };
+        let top = (top as i64 + rows as i64).clamp(1, (total - visible + 1) as i64) as usize;
+        self.scroll_top = Some(top);
+        self.pending = Some(Navigation::Scroll(top));
+    }
+    fn take_navigation(&mut self) -> Option<Navigation> {
+        let action = self.pending.take();
+        if let Some(Navigation::Scroll(top)) = action {
+            self.scroll_top = Some(top);
+        }
+        action
+    }
+    fn sent(&mut self) -> Option<u64> {
+        self.next_action_id = self
+            .next_action_id
+            .checked_add(1)
+            .filter(|id| *id <= 9_007_199_254_740_991)?;
+        self.sent_action_id = self.next_action_id;
+        Some(self.next_action_id)
+    }
+    fn observe_scroll(
+        &mut self,
+        top: usize,
+        revision: Option<u64>,
+        ack: Option<u64>,
+        negotiated: bool,
+    ) {
+        if self.observed_revision == revision {
+            return;
+        }
+        self.observed_revision = revision;
+        let outstanding = self.sent_action_id > self.acked_action_id;
+        let mut authoritative = false;
+        if negotiated {
+            if let Some(ack) =
+                ack.filter(|id| *id > self.acked_action_id && *id <= self.sent_action_id)
+            {
+                self.acked_action_id = ack;
+                if ack == self.sent_action_id
+                    && self.scroll_top == Some(top)
+                    && self.pending.is_none()
+                {
+                    self.scroll_top = None;
+                }
+            } else if !outstanding && top != self.observed_top {
+                authoritative = true;
+            }
+        } else if top != self.observed_top {
+            authoritative = true;
+        }
+        if authoritative {
+            self.reset_scroll_tracking();
+            if matches!(self.pending, Some(Navigation::Scroll(_))) {
+                self.pending = None;
+            }
+        }
+        self.observed_top = top;
+    }
+}
+#[derive(Default)]
+struct Shapes {
+    context: Option<(Identity, u64, SharedString, u32)>,
+    rows: HashMap<usize, Arc<ShapedLine>>,
+    #[cfg(test)]
+    shaped: usize,
+}
+#[derive(Default)]
+pub(super) struct NativeMinimap {
+    interaction: Rc<RefCell<Interaction>>,
+    shapes: Rc<RefCell<Shapes>>,
+}
+
+fn color(value: &str) -> Rgba {
+    rgb(u32::from_str_radix(&value[1..], 16).unwrap_or(0))
+}
+fn alpha(mut color: Rgba, opacity: f32) -> Rgba {
+    color.a = opacity;
+    color
+}
+fn text_runs(line: &Line, palette: &[String], family: &SharedString) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut offset = 0;
+    let mut append = |length: usize, index: usize| {
+        if length > 0 {
+            runs.push(TextRun {
+                len: length,
+                font: crate::grid_paint::terminal_font(family, false, false),
+                color: color(&palette[index]).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+    };
+    for &[start, end, index] in line.spans() {
+        append(start - offset, 0);
+        append(end - start, index);
+        offset = end;
+    }
+    append(line.text().len() - offset, 0);
+    runs
+}
+fn identity(document: &Document) -> Identity {
+    Identity {
+        target: document.target().into(),
+        generation: document.generation(),
+    }
+}
+
+impl NativeMinimap {
+    #[cfg(test)]
+    pub(super) fn bounds(&self) -> Option<Bounds<Pixels>> {
+        self.interaction.borrow().bounds
+    }
+    #[cfg(test)]
+    pub(super) fn hover_text(&self) -> Option<String> {
+        self.interaction
+            .borrow()
+            .hover
+            .as_ref()
+            .map(|(_, s)| s.clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn shaped_count(&self) -> usize {
+        self.shapes.borrow().shaped
+    }
+
+    pub(super) fn render(
+        &mut self,
+        model: &Minimap,
+        surface: SurfaceId,
+        size: Size<Pixels>,
+        family: SharedString,
+        wheel_height: Pixels,
+        cx: &mut Context<TerminalView>,
+    ) -> AnyElement {
+        let Some(document) = model.document() else {
+            self.cancel();
+            return div().into_any_element();
+        };
+        let state = model.state();
+        let state_revision = state.map(|state| state.revision());
+        let viewport = state.map_or([1, 1], |s| s.viewport());
+        let geometry = MapGeometry::new(
+            document.total(),
+            viewport[0],
+            viewport[1] - viewport[0] + 1,
+            f32::from(size.height),
+        );
+        let current = identity(document);
+        {
+            let mut input = self.interaction.borrow_mut();
+            if input.identity.as_ref() != Some(&current) || model.is_staging() {
+                input.press = None;
+                input.pending = None;
+                input.reset_scroll_tracking();
+                input.hover = None;
+                input.observed_revision = None;
+                input.observed_top = viewport[0];
+            }
+            input.identity = Some(current.clone());
+            input.geometry = Some(geometry);
+            input.observe_scroll(
+                viewport[0],
+                state_revision,
+                state.and_then(|s| s.action_id()),
+                document.action_ack(),
+            );
+        };
+        let rows: Vec<_> =
+            document.rows()[geometry.offset..geometry.offset + geometry.rows].to_vec();
+        let palette = document.palette().to_vec();
+        let background = color(document.background());
+        let selection = state
+            .and_then(|s| s.selection())
+            .and_then(|[first, last]| geometry.row_range(first, last));
+        let occurrence_rows = state.map_or(&[][..], |s| s.occurrences());
+        let first = occurrence_rows.partition_point(|row| *row <= geometry.offset);
+        let last = occurrence_rows.partition_point(|row| *row <= geometry.offset + geometry.rows);
+        let occurrences: Vec<_> = occurrence_rows[first..last]
+            .iter()
+            .filter_map(|row| geometry.row_range(*row, *row))
+            .collect();
+        let hunks = state.map_or(&[][..], |s| s.changes());
+        #[cfg(feature = "minimap-benchmark")]
+        let first_line_change = hunks.iter().any(|hunk| {
+            hunk.start() == 1
+                && hunk.kind() == ChangeKind::Modified
+                && geometry.row_range(hunk.start(), hunk.end()).is_some()
+        });
+        let first = hunks.partition_point(|h| h.end() <= geometry.offset);
+        let last = hunks.partition_point(|h| h.start() <= geometry.offset + geometry.rows);
+        let changes: Vec<_> = hunks[first..last]
+            .iter()
+            .filter_map(|hunk| {
+                geometry
+                    .row_range(hunk.start(), hunk.end())
+                    .map(|range| (range, hunk.kind(), hunk.start() > geometry.offset))
+            })
+            .collect();
+        let input = self.interaction.clone();
+        let shapes = self.shapes.clone();
+        let generation = document.generation();
+        let entity = cx.entity().downgrade();
+        let hovered = self.interaction.borrow().hover.clone();
+        let paint = canvas(
+            |_, _, _| (),
+            move |bounds, (), window, cx| {
+                #[cfg(feature = "minimap-benchmark")]
+                let paint_started = std::time::Instant::now();
+                input.borrow_mut().bounds = Some(bounds);
+                let context = (
+                    current.clone(),
+                    generation,
+                    family.clone(),
+                    window.scale_factor().to_bits(),
+                );
+                let mut cache = shapes.borrow_mut();
+                if cache.context.as_ref() != Some(&context) {
+                    cache.context = Some(context);
+                    cache.rows.clear();
+                }
+                cache.rows.retain(|row, _| {
+                    *row >= geometry.offset && *row < geometry.offset + geometry.rows
+                });
+                let rect = |y: f32, height: f32| Bounds {
+                    origin: point(bounds.origin.x, bounds.origin.y + px(y)),
+                    size: gpui::size(bounds.size.width, px(height)),
+                };
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    window.paint_quad(fill(bounds, background));
+                    let thumb = rect(geometry.thumb_top, geometry.thumb_height);
+                    window.paint_quad(fill(thumb, alpha(color("#cad2e0"), 0.08)));
+                    for &((y, h), kind, _) in &changes {
+                        if kind != ChangeKind::Deleted {
+                            window.paint_quad(fill(
+                                rect(y, h),
+                                alpha(
+                                    color(if kind == ChangeKind::Added {
+                                        "#448cff"
+                                    } else {
+                                        "#e8bb55"
+                                    }),
+                                    0.18,
+                                ),
+                            ));
+                        }
+                    }
+                    for &(y, h) in &occurrences {
+                        window.paint_quad(fill(rect(y, h), alpha(color("#aab0bc"), 0.22)));
+                    }
+                    if let Some((y, h)) = selection {
+                        window.paint_quad(fill(rect(y, h), alpha(color("#448cff"), 0.27)));
+                    }
+                    for &((y, _), kind, starts_here) in &changes {
+                        if starts_here {
+                            window.paint_quad(fill(
+                                rect(y, 0.75),
+                                alpha(
+                                    color(if kind == ChangeKind::Added {
+                                        "#559cff"
+                                    } else {
+                                        "#f0c15a"
+                                    }),
+                                    0.9,
+                                ),
+                            ));
+                        }
+                    }
+                    for (index, row) in rows.iter().enumerate() {
+                        if row.text().is_empty() {
+                            continue;
+                        }
+                        let key = geometry.offset + index;
+                        let shaped = if let Some(shaped) = cache.rows.get(&key) {
+                            shaped.clone()
+                        } else {
+                            #[cfg(test)]
+                            {
+                                cache.shaped += 1;
+                            }
+                            let shaped = Arc::new(window.text_system().shape_line(
+                                SharedString::new(row.text()),
+                                px(FONT_SIZE),
+                                &text_runs(row, &palette, &family),
+                                None,
+                            ));
+                            if cache.rows.len() < MAX_SHAPED_ROWS {
+                                cache.rows.insert(key, shaped.clone());
+                            }
+                            shaped
+                        };
+                        shaped.paint(
+                            point(
+                                bounds.origin.x + px(3.0),
+                                bounds.origin.y + px(index as f32 * LINE_HEIGHT),
+                            ),
+                            px(LINE_HEIGHT),
+                            window,
+                            cx,
+                        ).ok();
+                    }
+                    window.paint_quad(outline(
+                        thumb,
+                        alpha(color("#c5d5ef"), 0.55),
+                        gpui::BorderStyle::Solid,
+                    ));
+                });
+                #[cfg(feature = "minimap-benchmark")]
+                crate::minimap_benchmark::record(serde_json::json!({
+                    "event":"paint", "generation":generation,
+                    "viewport":viewport, "offset":geometry.offset, "rows":geometry.rows,
+                    "state_revision":state_revision, "change_bands":changes.len(), "first_line_change":first_line_change, "occurrences":occurrences.len(), "selection":selection.is_some(),
+                    "scale":window.scale_factor(), "active":window.is_window_active(),
+                    "ms":paint_started.elapsed().as_secs_f64()*1000.0,
+                }));
+                let entity_move = entity.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        entity_move
+                            .update(cx, |view, cx| view.minimap_move(surface, event, window, cx)).ok();
+                    }
+                });
+                let entity_up = entity.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                        entity_up
+                            .update(cx, |view, cx| view.minimap_up(surface, event, window, cx)).ok();
+                    }
+                });
+            },
+        )
+        .size_full();
+        let mut strip = div()
+            .id(("native-minimap", surface.0))
+            .relative()
+            .w(size.width)
+            .h(size.height)
+            .flex_shrink_0()
+            .overflow_hidden()
+            .child(paint)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                    view.minimap_down(surface, event, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _, cx| {
+                view.minimap_hover(surface, event, cx);
+                cx.stop_propagation();
+            }))
+            .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                if !hovered
+                    && let Some((input, _)) = view.minimap_input(surface)
+                    && input.borrow_mut().hover.take().is_some()
+                {
+                    cx.notify();
+                }
+            }))
+            .on_scroll_wheel(
+                cx.listener(move |view, event: &ScrollWheelEvent, window, cx| {
+                    view.minimap_wheel(surface, event, wheel_height, window, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            strip = strip.on_mouse_down(button, |_, _, cx| cx.stop_propagation());
+        }
+        if let Some((row, text)) = hovered {
+            strip = strip.child(
+                div()
+                    .absolute()
+                    .left(px(3.0))
+                    .top(px(((row.saturating_sub(geometry.offset + 1)) as f32
+                        * LINE_HEIGHT
+                        + 12.0)
+                        .min((f32::from(size.height) - 24.0).max(0.0))))
+                    .px(px(4.0))
+                    .bg(rgb(0x303642))
+                    .text_color(rgb(0xe0e5ee))
+                    .text_size(px(10.0))
+                    .child(text),
+            );
+        }
+        strip.into_any_element()
+    }
+    pub(super) fn cancel(&mut self) {
+        let mut input = self.interaction.borrow_mut();
+        input.press = None;
+        input.pending = None;
+        input.scheduled = false;
+        input.identity = None;
+        input.hover = None;
+        input.reset_scroll_tracking();
+        input.observed_revision = None;
+        input.observed_top = 0;
+        self.shapes.borrow_mut().rows.clear();
+    }
+}
+
+impl TerminalView {
+    fn minimap_input(
+        &mut self,
+        id: SurfaceId,
+    ) -> Option<(
+        Rc<RefCell<Interaction>>,
+        crate::surface::channel::SurfaceConnection,
+    )> {
+        let surface = self.surfaces.get_mut(|s| s.id() == id)?;
+        let connection = surface.connection().clone();
+        let Body::Grid { grid, minimap, .. } = &mut surface.body else {
+            return None;
+        };
+        if grid.minimap.document().is_none() || grid.minimap.is_staging() {
+            minimap.cancel();
+            return None;
+        }
+        if minimap.interaction.borrow().identity.as_ref()
+            != grid.minimap.document().map(identity).as_ref()
+        {
+            minimap.cancel();
+            return None;
+        }
+        Some((minimap.interaction.clone(), connection))
+    }
+    fn minimap_down(
+        &mut self,
+        id: SurfaceId,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_surface_input(id, window, cx) {
+            return;
+        }
+        let Some((input, _)) = self.minimap_input(id) else {
+            return;
+        };
+        if self
+            .focus_target(
+                crate::surface::channel::FocusTarget::Surface(id),
+                window,
+                cx,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let mut input = input.borrow_mut();
+        let (Some(bounds), Some(g)) = (input.bounds, input.geometry) else {
+            return;
+        };
+        let y = f32::from(event.position.y - bounds.origin.y);
+        let grab =
+            (y >= g.thumb_top && y <= g.thumb_top + g.thumb_height).then_some(y - g.thumb_top);
+        input.press = Some(Press {
+            y,
+            grab,
+            moved: false,
+        });
+        cx.notify();
+    }
+    fn minimap_move(
+        &mut self,
+        id: SurfaceId,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((input, _)) = self.minimap_input(id) else {
+            return;
+        };
+        let mut input = input.borrow_mut();
+        let Some(mut press) = input.press else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            input.press = None;
+            return;
+        }
+        let (Some(bounds), Some(g)) = (input.bounds, input.geometry) else {
+            return;
+        };
+        let y = f32::from(event.position.y - bounds.origin.y);
+        press.moved |= (y - press.y).abs() > 1.0;
+        input.press = Some(press);
+        if press.moved
+            && let Some(grab) = press.grab
+        {
+            input.pending = Some(Navigation::Scroll(g.topline_at_thumb(y, grab)));
+        }
+        drop(input);
+        self.schedule_minimap(id, window, cx);
+        cx.stop_propagation();
+    }
+    fn minimap_up(
+        &mut self,
+        id: SurfaceId,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(feature = "minimap-benchmark")]
+        crate::minimap_benchmark::record(serde_json::json!({"event":"input", "kind":"up"}));
+        let Some((input, _)) = self.minimap_input(id) else {
+            return;
+        };
+        let mut input = input.borrow_mut();
+        let Some(press) = input.press.take() else {
+            return;
+        };
+        let (Some(bounds), Some(g)) = (input.bounds, input.geometry) else {
+            return;
+        };
+        let y = f32::from(event.position.y - bounds.origin.y);
+        if press.moved || (y - press.y).abs() > 1.0 {
+            if let Some(grab) = press.grab {
+                input.pending = Some(Navigation::Scroll(g.topline_at_thumb(y, grab)));
+            }
+        } else {
+            let line = g.line_at(y);
+            let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+                return;
+            };
+            let Body::Grid { grid, .. } = &surface.body else {
+                return;
+            };
+            let target = grid
+                .minimap
+                .state()
+                .and_then(|state| {
+                    state
+                        .changes()
+                        .iter()
+                        .find(|h| h.start() <= line && line <= h.end())
+                })
+                .map_or(line, |h| h.start());
+            input.pending = Some(Navigation::Reveal(target));
+        }
+        drop(input);
+        self.flush_minimap(id);
+        cx.notify();
+        cx.stop_propagation();
+    }
+    fn schedule_minimap(&mut self, id: SurfaceId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((input, _)) = self.minimap_input(id) else {
+            return;
+        };
+        let mut input = input.borrow_mut();
+        if input.pending.is_none() || input.scheduled {
+            return;
+        }
+        input.scheduled = true;
+        drop(input);
+        self.flush_minimap(id);
+        cx.on_next_frame(window, move |view, _, _| {
+            if let Some((input, _)) = view.minimap_input(id) {
+                input.borrow_mut().scheduled = false;
+            }
+            view.flush_minimap(id);
+        });
+    }
+    pub(super) fn flush_minimap(&mut self, id: SurfaceId) {
+        let Some((input, connection)) = self.minimap_input(id) else {
+            return;
+        };
+        let mut input = input.borrow_mut();
+        let Some(action) = input.take_navigation() else {
+            return;
+        };
+        let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+            return;
+        };
+        let Body::Grid { grid, .. } = &surface.body else {
+            return;
+        };
+        let Some(document) = grid.minimap.document() else {
+            return;
+        };
+        if input.identity.as_ref() != Some(&identity(document)) {
+            return;
+        }
+        let revision = grid
+            .minimap
+            .state()
+            .map_or(document.revision(), |s| s.revision());
+        let mut event = serde_json::json!({"type":"minimap_action","revision":revision,"target":document.target(),"generation":document.generation()});
+        if document.action_ack() {
+            let Some(action_id) = input.sent() else {
+                return;
+            };
+            event["action_id"] = action_id.into();
+        }
+        match action {
+            Navigation::Reveal(line) => {
+                event["action"] = "reveal".into();
+                event["line"] = line.into();
+            }
+            Navigation::Scroll(topline) => {
+                event["action"] = "scroll".into();
+                event["topline"] = topline.into();
+            }
+        }
+        #[cfg(feature = "minimap-benchmark")]
+        crate::minimap_benchmark::record(serde_json::json!({"event":"flush", "action":event}));
+        connection.send(&event.to_string());
+    }
+    pub(super) fn prepare_minimap_editor_input(&mut self, id: SurfaceId) {
+        if let Some((input, _)) = self.minimap_input(id) {
+            input.borrow_mut().reset_scroll_tracking();
+            self.flush_minimap(id);
+            let mut input = input.borrow_mut();
+            input.reset_scroll_tracking();
+            input.scheduled = false;
+        }
+    }
+    fn minimap_wheel(
+        &mut self,
+        id: SurfaceId,
+        event: &ScrollWheelEvent,
+        height: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(feature = "minimap-benchmark")]
+        crate::minimap_benchmark::record(serde_json::json!({"event":"input", "kind":"wheel"}));
+        if !self.accept_surface_event_owner(id, window, cx) {
+            return;
+        }
+        let Some((input, _)) = self.minimap_input(id) else {
+            return;
+        };
+        let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+            return;
+        };
+        let Body::Grid { grid, .. } = &surface.body else {
+            return;
+        };
+        let mut input = input.borrow_mut();
+        let delta = match event.delta {
+            gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y),
+            gpui::ScrollDelta::Lines(delta) => delta.y * f32::from(height),
+        };
+        let rows = input.wheel.accumulate(delta, height);
+        let Some(g) = input.geometry else {
+            return;
+        };
+        if rows != 0 {
+            input.scroll_rows(
+                rows,
+                g.total,
+                g.visible,
+                grid.minimap.state().map_or(1, |s| s.viewport()[0]),
+            );
+        }
+        drop(input);
+        self.schedule_minimap(id, window, cx);
+    }
+    fn minimap_hover(&mut self, id: SurfaceId, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some((input, _)) = self.minimap_input(id) else {
+            return;
+        };
+        let mut input = input.borrow_mut();
+        let (Some(bounds), Some(g)) = (input.bounds, input.geometry) else {
+            return;
+        };
+        let line = g.line_at(f32::from(event.position.y - bounds.origin.y));
+        let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+            return;
+        };
+        let Body::Grid { grid, .. } = &surface.body else {
+            return;
+        };
+        let mut text = format!("Line {line}");
+        if let Some(state) = grid.minimap.state() {
+            if let Some(hunk) = state
+                .changes()
+                .iter()
+                .find(|h| h.start() <= line && line <= h.end())
+            {
+                text.push_str(match hunk.kind() {
+                    ChangeKind::Added => " · added",
+                    ChangeKind::Modified => " · modified",
+                    ChangeKind::Deleted => " · deleted",
+                });
+            }
+            if state.occurrences().binary_search(&line).is_ok() {
+                text.push_str(" · ");
+                text.push_str(state.word().unwrap_or("occurrence"));
+            }
+        }
+        if input.hover.as_ref() != Some(&(line, text.clone())) {
+            input.hover = Some((line, text));
+            cx.notify();
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_minimap_geometry_reaches_full_file_monotonically() {
+        for total in [1usize, 2, 1000, 10000, 100000] {
+            for height in [1.0, 120.0, 600.0, 980.0] {
+                for visible in [1usize, 30, 80] {
+                    let visible = visible.min(total);
+                    let last = total.saturating_sub(visible) + 1;
+                    for top in [1, last / 2 + 1, last] {
+                        let g = MapGeometry::new(total, top, visible, height);
+                        assert!(g.thumb_top.is_finite() && g.thumb_height.is_finite());
+                        assert!(
+                            g.thumb_top >= 0.0 && g.thumb_top + g.thumb_height <= g.height + 0.001
+                        );
+                        assert_eq!(g.topline_at_thumb(0.0, 0.0), 1);
+                        assert_eq!(g.topline_at_thumb(g.height, 0.0), last);
+                        let mut previous = (0, 0);
+                        for i in 0..=100 {
+                            let y = g.height * i as f32 / 100.0;
+                            let next = (g.line_at(y), g.topline_at_thumb(y, 0.0));
+                            assert!(next.0 >= previous.0 && next.1 >= previous.1);
+                            assert!(next.0 <= total && next.1 <= last);
+                            previous = next;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn native_minimap_ranges_clip_hunks_and_selection_without_fabricating_rows() {
+        let g = MapGeometry::new(1000, 971, 30, 120.0);
+        assert_eq!(g.offset, 960);
+        assert_eq!(g.row_range(1, 30), None);
+        assert_eq!(g.row_range(960, 962), Some((0.0, 6.0)));
+        assert_eq!(g.row_range(999, 1000), Some((114.0, 6.0)));
+        assert_eq!(g.row_range(962, 962), Some((3.0, 3.0)));
+        let short = MapGeometry::new(2, 1, 30, 600.0);
+        assert_eq!(short.line_at(599.0), 2);
+        assert_eq!(short.line_at(-99.0), 1);
+        assert_eq!(short.height, 6.0);
+    }
+    #[test]
+    fn native_minimap_wheel_retains_intent_across_flushes_and_old_acks() {
+        let mut input = Interaction {
+            observed_top: 10,
+            ..Default::default()
+        };
+        for expected in [12, 14] {
+            input.scroll_rows(2, 100, 10, 10);
+            assert_eq!(input.take_navigation(), Some(Navigation::Scroll(expected)));
+            input.sent();
+        }
+        input.observe_scroll(12, Some(2), Some(1), true);
+        input.scroll_rows(2, 100, 10, 12);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(16)));
+        input.sent();
+        input.observe_scroll(14, Some(3), Some(2), true);
+        assert_eq!(input.scroll_top, Some(16));
+        input.observe_scroll(16, Some(4), Some(3), true);
+        assert_eq!(input.scroll_top, None);
+        input.scroll_rows(-1000, 100, 10, 16);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(1)));
+        input.sent();
+        input.scroll_rows(1000, 100, 10, 16);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(91)));
+        input.sent();
+        input.reset_scroll_tracking();
+        input.observe_scroll(50, Some(5), Some(3), true);
+        input.scroll_rows(2, 100, 10, 50);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(52)));
+    }
+    #[test]
+    fn native_minimap_folded_same_top_ack_has_no_queue_or_stall() {
+        let mut input = Interaction {
+            observed_top: 10,
+            ..Default::default()
+        };
+        for id in 1..=128 {
+            input.scroll_rows(2, 1000, 10, 10);
+            assert!(input.take_navigation().is_some());
+            assert_eq!(input.sent(), Some(id));
+            input.observe_scroll(10, Some(id), Some(id), true);
+            assert_eq!(input.acked_action_id, id);
+        }
+        assert_eq!(input.scroll_top, Some(266));
+        input.scroll_rows(-2, 1000, 10, 10);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(264)));
+        let counter = input.next_action_id;
+        let mut minimap = NativeMinimap::default();
+        *minimap.interaction.borrow_mut() = input;
+        minimap.cancel();
+        let mut input = minimap.interaction.borrow_mut();
+        assert!(input.scroll_top.is_none());
+        assert_eq!(input.sent(), Some(counter + 1));
+    }
+    #[test]
+    fn native_minimap_reversal_acks_and_legacy_authoritative_navigation() {
+        let mut input = Interaction {
+            observed_top: 10,
+            ..Default::default()
+        };
+        for rows in [2, 2, -2] {
+            input.scroll_rows(rows, 1000, 10, 10);
+            input.take_navigation();
+            input.sent();
+        }
+        input.observe_scroll(12, Some(1), Some(1), true);
+        assert_eq!(input.scroll_top, Some(12));
+        assert_eq!(input.acked_action_id, 1);
+        input.observe_scroll(14, Some(2), Some(2), true);
+        assert_eq!(input.scroll_top, Some(12));
+        input.observe_scroll(12, Some(3), Some(3), true);
+        assert_eq!(input.scroll_top, None);
+        input.observe_scroll(40, Some(4), Some(3), true);
+        input.scroll_rows(2, 1000, 10, 40);
+        assert_eq!(input.take_navigation(), Some(Navigation::Scroll(42)));
+        input.scroll_rows(2, 1000, 10, 40);
+        input.observe_scroll(90, Some(5), None, false);
+        assert!(input.pending.is_none());
+        assert_eq!(input.scroll_top, None);
+    }
+
+    #[test]
+    fn native_minimap_text_runs_preserve_utf8_span_lengths_and_plain_gaps() {
+        let row: Line =
+            serde_json::from_value(serde_json::json!({"text":"aé中z", "spans":[[1,3,1],[3,6,2]]}))
+                .unwrap();
+        let palette = vec!["#bbbbbb".into(), "#ffaa11".into(), "#1122ff".into()];
+        let runs = text_runs(&row, &palette, &"Menlo".into());
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), [1, 2, 3, 1]);
+        assert_eq!(runs[0].color, color(&palette[0]).into());
+        assert_eq!(runs[1].color, color(&palette[1]).into());
+        assert_eq!(runs[2].color, color(&palette[2]).into());
+        assert!(runs.iter().all(|r| r.background_color.is_none()
+            && r.underline.is_none()
+            && r.strikethrough.is_none()));
+    }
+}

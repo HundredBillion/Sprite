@@ -66,3 +66,6 @@ mod surface_performance;
 #[cfg(any(test, feature = "startup-benchmark"))]
 #[doc(hidden)]
 pub mod startup_benchmark;
+
+#[cfg(feature = "minimap-benchmark")]
+mod minimap_benchmark;
