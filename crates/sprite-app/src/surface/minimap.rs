@@ -235,6 +235,7 @@ impl Minimap {
     pub fn is_staging(&self) -> bool {
         self.pending.is_some()
     }
+    #[cfg(test)]
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -381,6 +382,12 @@ impl Minimap {
         })
     }
     pub fn apply(&mut self, op: MinimapOp) -> Result<(), Refusal> {
+        #[cfg(feature = "minimap-benchmark")]
+        if let Kind::State { state, .. } = &op.kind {
+            crate::minimap_benchmark::record(
+                serde_json::json!({"event":"state_received", "viewport":state.viewport}),
+            );
+        }
         require(op.revision > self.revision)?;
         match op.kind {
             Kind::Begin(b) => {

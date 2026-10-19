@@ -189,6 +189,8 @@ impl NativeMinimap {
             return div().into_any_element();
         };
         let state = model.state();
+        #[cfg(feature = "minimap-benchmark")]
+        let state_revision = state.map(|state| state.revision());
         let viewport = state.map_or([1, 1], |s| s.viewport());
         let geometry = MapGeometry::new(
             document.total(),
@@ -241,6 +243,8 @@ impl NativeMinimap {
         let paint = canvas(
             |_, _, _| (),
             move |bounds, (), window, cx| {
+                #[cfg(feature = "minimap-benchmark")]
+                let paint_started = std::time::Instant::now();
                 input.borrow_mut().bounds = Some(bounds);
                 let context = (
                     current.clone(),
@@ -339,6 +343,14 @@ impl NativeMinimap {
                         gpui::BorderStyle::Solid,
                     ));
                 });
+                #[cfg(feature = "minimap-benchmark")]
+                crate::minimap_benchmark::record(serde_json::json!({
+                    "event":"paint", "generation":generation,
+                    "viewport":viewport, "offset":geometry.offset, "rows":geometry.rows,
+                    "state_revision":state_revision, "change_bands":changes.len(), "occurrences":occurrences.len(), "selection":selection.is_some(),
+                    "scale":window.scale_factor(),
+                    "ms":paint_started.elapsed().as_secs_f64()*1000.0,
+                }));
                 let entity_move = entity.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture {
@@ -525,6 +537,8 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "minimap-benchmark")]
+        crate::minimap_benchmark::record(serde_json::json!({"event":"input", "kind":"up"}));
         let Some((input, _)) = self.minimap_input(id) else {
             return;
         };
@@ -572,9 +586,8 @@ impl TerminalView {
             return;
         }
         input.scheduled = true;
-        cx.on_next_frame(window, move |view, _, cx| {
+        cx.on_next_frame(window, move |view, _, _| {
             view.flush_minimap(id);
-            cx.notify();
         });
     }
     pub(super) fn flush_minimap(&mut self, id: SurfaceId) {
@@ -611,6 +624,8 @@ impl TerminalView {
                 event["topline"] = topline.into();
             }
         }
+        #[cfg(feature = "minimap-benchmark")]
+        crate::minimap_benchmark::record(serde_json::json!({"event":"flush", "action":event}));
         connection.send(&event.to_string());
     }
     fn minimap_wheel(
@@ -621,6 +636,8 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "minimap-benchmark")]
+        crate::minimap_benchmark::record(serde_json::json!({"event":"input", "kind":"wheel"}));
         if !self.accept_surface_input(id, window, cx) {
             return;
         }
