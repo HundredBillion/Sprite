@@ -204,7 +204,7 @@ fn integer_tree(v: &Value) -> Result<(), Refusal> {
                 integer_tree(v)?;
             }
         }
-        _ => (),
+        Value::Null | Value::Bool(_) | Value::String(_) => (),
     }
     Ok(())
 }
@@ -466,7 +466,7 @@ impl Minimap {
                 }
                 let bytes = lines.iter().map(Line::bytes).sum::<usize>();
                 require(bytes <= SOURCE_BYTES - p.bytes)?;
-                let p = self.pending.as_mut().unwrap();
+                let p = self.pending.as_mut().ok_or_else(bad)?;
                 p.bytes += bytes;
                 p.rows.reserve_exact(lines.len());
                 p.rows.extend(lines);
@@ -488,10 +488,10 @@ impl Minimap {
                         .sum::<usize>();
                     require(retained <= SOURCE_BYTES - p.bytes)?;
                 }
-                let p = self.pending.take().unwrap();
+                let p = self.pending.take().ok_or_else(bad)?;
                 let b = p.begin;
                 let rows = if b.base.is_some() {
-                    let mut rows = self.document.take().unwrap().rows;
+                    let mut rows = self.document.take().ok_or_else(bad)?.rows;
                     rows.reserve_exact(b.total.saturating_sub(rows.len()));
                     rows.splice(b.start - 1..b.start - 1 + b.delete, p.rows);
                     rows.shrink_to_fit();

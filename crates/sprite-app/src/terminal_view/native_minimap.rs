@@ -196,7 +196,7 @@ pub(super) struct NativeMinimap {
 }
 
 fn color(value: &str) -> Rgba {
-    rgb(u32::from_str_radix(&value[1..], 16).unwrap_or(0)).into()
+    rgb(u32::from_str_radix(&value[1..], 16).unwrap_or(0))
 }
 fn alpha(mut color: Rgba, opacity: f32) -> Rgba {
     color.a = opacity;
@@ -416,7 +416,7 @@ impl NativeMinimap {
                             }
                             shaped
                         };
-                        let _ = shaped.paint(
+                        shaped.paint(
                             point(
                                 bounds.origin.x + px(3.0),
                                 bounds.origin.y + px(index as f32 * LINE_HEIGHT),
@@ -424,7 +424,7 @@ impl NativeMinimap {
                             px(LINE_HEIGHT),
                             window,
                             cx,
-                        );
+                        ).ok();
                     }
                     window.paint_quad(outline(
                         thumb,
@@ -443,15 +443,15 @@ impl NativeMinimap {
                 let entity_move = entity.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture {
-                        let _ = entity_move
-                            .update(cx, |view, cx| view.minimap_move(surface, event, window, cx));
+                        entity_move
+                            .update(cx, |view, cx| view.minimap_move(surface, event, window, cx)).ok();
                     }
                 });
                 let entity_up = entity.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-                        let _ = entity_up
-                            .update(cx, |view, cx| view.minimap_up(surface, event, window, cx));
+                        entity_up
+                            .update(cx, |view, cx| view.minimap_up(surface, event, window, cx)).ok();
                     }
                 });
             },
@@ -477,12 +477,11 @@ impl NativeMinimap {
                 cx.stop_propagation();
             }))
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
-                if !hovered {
-                    if let Some((input, _)) = view.minimap_input(surface) {
-                        if input.borrow_mut().hover.take().is_some() {
-                            cx.notify();
-                        }
-                    }
+                if !hovered
+                    && let Some((input, _)) = view.minimap_input(surface)
+                    && input.borrow_mut().hover.take().is_some()
+                {
+                    cx.notify();
                 }
             }))
             .on_scroll_wheel(
@@ -612,10 +611,10 @@ impl TerminalView {
         let y = f32::from(event.position.y - bounds.origin.y);
         press.moved |= (y - press.y).abs() > 1.0;
         input.press = Some(press);
-        if press.moved {
-            if let Some(grab) = press.grab {
-                input.pending = Some(Navigation::Scroll(g.topline_at_thumb(y, grab)));
-            }
+        if press.moved
+            && let Some(grab) = press.grab
+        {
+            input.pending = Some(Navigation::Scroll(g.topline_at_thumb(y, grab)));
         }
         drop(input);
         self.schedule_minimap(id, window, cx);
@@ -647,7 +646,9 @@ impl TerminalView {
             }
         } else {
             let line = g.line_at(y);
-            let surface = self.surfaces.get_mut(|s| s.id() == id).unwrap();
+            let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+                return;
+            };
             let Body::Grid { grid, .. } = &surface.body else {
                 return;
             };
@@ -694,7 +695,9 @@ impl TerminalView {
         let Some(action) = input.take_navigation() else {
             return;
         };
-        let surface = self.surfaces.get_mut(|s| s.id() == id).unwrap();
+        let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+            return;
+        };
         let Body::Grid { grid, .. } = &surface.body else {
             return;
         };
@@ -754,7 +757,9 @@ impl TerminalView {
         let Some((input, _)) = self.minimap_input(id) else {
             return;
         };
-        let surface = self.surfaces.get_mut(|s| s.id() == id).unwrap();
+        let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+            return;
+        };
         let Body::Grid { grid, .. } = &surface.body else {
             return;
         };
@@ -787,7 +792,9 @@ impl TerminalView {
             return;
         };
         let line = g.line_at(f32::from(event.position.y - bounds.origin.y));
-        let surface = self.surfaces.get_mut(|s| s.id() == id).unwrap();
+        let Some(surface) = self.surfaces.get_mut(|s| s.id() == id) else {
+            return;
+        };
         let Body::Grid { grid, .. } = &surface.body else {
             return;
         };
@@ -861,8 +868,10 @@ mod tests {
     }
     #[test]
     fn native_minimap_wheel_retains_intent_across_flushes_and_old_acks() {
-        let mut input = Interaction::default();
-        input.observed_top = 10;
+        let mut input = Interaction {
+            observed_top: 10,
+            ..Default::default()
+        };
         for expected in [12, 14] {
             input.scroll_rows(2, 100, 10, 10);
             assert_eq!(input.take_navigation(), Some(Navigation::Scroll(expected)));
@@ -889,8 +898,10 @@ mod tests {
     }
     #[test]
     fn native_minimap_folded_same_top_ack_has_no_queue_or_stall() {
-        let mut input = Interaction::default();
-        input.observed_top = 10;
+        let mut input = Interaction {
+            observed_top: 10,
+            ..Default::default()
+        };
         for id in 1..=128 {
             input.scroll_rows(2, 1000, 10, 10);
             assert!(input.take_navigation().is_some());
@@ -911,8 +922,10 @@ mod tests {
     }
     #[test]
     fn native_minimap_reversal_acks_and_legacy_authoritative_navigation() {
-        let mut input = Interaction::default();
-        input.observed_top = 10;
+        let mut input = Interaction {
+            observed_top: 10,
+            ..Default::default()
+        };
         for rows in [2, 2, -2] {
             input.scroll_rows(rows, 1000, 10, 10);
             input.take_navigation();

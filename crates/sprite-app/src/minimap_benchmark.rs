@@ -39,5 +39,5 @@ pub(crate) fn record(mut value: serde_json::Value) {
     }) else {
         return;
     };
-    let _ = sender.send(value);
+    sender.send(value).ok();
 }

@@ -1206,7 +1206,7 @@ impl TerminalView {
         };
         let minimap_width = match &surface.body {
             Body::Grid { grid, .. } => grid.minimap.visible_width(f32::from(size.width)),
-            _ => 0.0,
+            Body::Elements(_) | Body::List { .. } => 0.0,
         };
         let grid_size = Size {
             width: px((f32::from(size.width) - minimap_width).max(0.0)),
@@ -4145,14 +4145,12 @@ mod tests {
                     position,
                     pressed_button: Some(button),
                     modifiers,
-                    ..Default::default()
                 });
                 cx.simulate_event(MouseUpEvent {
                     position,
                     button,
                     click_count,
                     modifiers,
-                    ..Default::default()
                 });
                 let mouse: Vec<_> = events(&mut peer)
                     .into_iter()
