@@ -1384,11 +1384,16 @@ impl TerminalView {
                     cx.stop_propagation();
                     return;
                 }
-                let Some(keys) = view
+                let Some((keys, is_grid)) = view
                     .surfaces
                     .iter()
                     .find(|surface| surface.id == id)
-                    .map(|surface| surface.connection.clone())
+                    .map(|surface| {
+                        (
+                            surface.connection.clone(),
+                            matches!(&surface.body, Body::Grid { .. }),
+                        )
+                    })
                 else {
                     return;
                 };
@@ -1397,9 +1402,12 @@ impl TerminalView {
                 // focused, but they act on the Surface: a paste goes to the
                 // program that holds the keyboard, never to the pty, whose
                 // reader is the shell that will run after that program exits;
-                // and a Surface has no terminal selection to copy.
+                // and copy reaches grid editors, which own their selections.
+                // Other Surface kinds keep consuming copy without forwarding.
                 if let Some(shortcut) = application_shortcut(&event.keystroke) {
-                    if shortcut == Shortcut::Paste {
+                    if shortcut == Shortcut::Copy && is_grid {
+                        keys.send(&event_input(&event.keystroke));
+                    } else if shortcut == Shortcut::Paste {
                         let text = cx
                             .read_from_clipboard()
                             .and_then(|item| item.text())
@@ -2417,6 +2425,71 @@ mod tests {
             cx,
             serde_json::json!({"version":1,"root":{"kind":"text","text":"probe"}}),
         );
+    }
+
+    #[gpui::test]
+    fn grid_surface_receives_copy_shortcut(cx: &mut gpui::TestAppContext) {
+        surface_copy_trace(
+            cx,
+            serde_json::json!({"version": 1, "root": {"kind": "grid", "cols": 20, "rows": 10}}),
+            1,
+        );
+    }
+
+    #[gpui::test]
+    fn element_surface_keeps_copy_shortcut_consumed(cx: &mut gpui::TestAppContext) {
+        surface_copy_trace(
+            cx,
+            serde_json::json!({"version": 1, "root": {"kind": "text", "text": "probe"}}),
+            0,
+        );
+    }
+
+    fn surface_copy_trace(
+        cx: &mut gpui::TestAppContext,
+        description: serde_json::Value,
+        expected_inputs: usize,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let id = SurfaceId(997);
+        let (answer, mut peer) = open_request(&host, cx, id, open_description(description));
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(id), window, cx)
+                .unwrap();
+        });
+        draw_test_window(cx);
+        events(&mut peer);
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(
+                gpui::Keystroke {
+                    key: "c".into(),
+                    key_char: None,
+                    modifiers: gpui::Modifiers {
+                        platform: true,
+                        ..Default::default()
+                    },
+                },
+                cx,
+            );
+        });
+        let inputs: Vec<_> = events(&mut peer)
+            .into_iter()
+            .filter(|event| event["type"] == "input")
+            .collect();
+        assert_eq!(
+            inputs.len(),
+            expected_inputs,
+            "unexpected copy input events"
+        );
+        if expected_inputs > 0 {
+            assert_eq!(inputs[0]["key"], "cmd-c");
+        }
     }
 
     fn native_surface_trace(cx: &mut gpui::TestAppContext, description: serde_json::Value) {
