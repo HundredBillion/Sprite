@@ -28,3 +28,9 @@ Version evidence: pulldown-cmark =0.13.0 (manifest/lock); GPUI vendored0.2.2; sy
 Reading semantics: script/style/template content is inert and omitted; HTML disclosures show expanded content; CSS, arbitrary browser layout, and embedded media execution are unsupported, with readable text/placeholder fallbacks. Unknown fenced languages and blocks exceeding the bounded highlighting budget retain plain code. TypeScript/TSX/JSX use the JavaScript grammar where no built-in specific grammar exists. Syntax preparation is off the UI thread, limited to 256 KiB/document, 64 KiB/block, 4,096-byte lines, and 20,000 colored spans across both palettes; source text is never altered. New preparation complexity accounting includes table cells.
 
 Integration rerun: 3 tests passed (`/tmp/vsvim-reading-integration-final.log`); an existing Python asyncio transport ResourceWarning was emitted during teardown. No failed integration assertions.
+
+## PR #124 lint gate follow-up
+
+The first CI run (39331181648) failed on both platforms before tests because the new Markdown code violated 16 Clippy checks. Tests and formatting alone had not covered this gate. Enumerated the intentionally ignored parser/DOM variants, collapsed nested conditions, removed a redundant closure, expressed the single fallback cell range without the ambiguous one-range Vec literal, and grouped renderer dimensions using GPUI Size. No lint suppression or CI policy change.
+
+Verified the fix with Clippy 0.1.97 from the pinned Rust 1.97.1 toolchain: `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` passes. Local worktree execution uses the external pinned Ghostty source override. `cargo fmt --all -- --check` and `git diff --check` pass. Complete native app library suite passes again: 850 passed, 0 failed, 1 ignored (`/tmp/sprite-pr124-fix-tests.log`); Clippy evidence is `/tmp/sprite-pr124-clippy-green.log`.

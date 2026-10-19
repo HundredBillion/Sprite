@@ -303,10 +303,10 @@ impl NativeMarkdown {
                 if select_all {
                     presentation.borrow_mut().selection = Some(0..prepared.parsed.text.len());
                     cx.notify();
-                } else if let Some(range) = &presentation.borrow().selection {
-                    if let Some(text) = prepared.parsed.text.get(range.clone()) {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.into()));
-                    }
+                } else if let Some(range) = &presentation.borrow().selection
+                    && let Some(text) = prepared.parsed.text.get(range.clone())
+                {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.into()));
                 }
             }
         }
@@ -371,13 +371,19 @@ impl NativeMarkdown {
         &mut self,
         model: &Markdown,
         surface: SurfaceId,
-        cols: u16,
-        rows: u16,
-        cell_width: Pixels,
-        cell_height: Pixels,
+        grid_size: gpui::Size<u16>,
+        cell_size: gpui::Size<Pixels>,
         slack: Pixels,
         cx: &mut Context<TerminalView>,
     ) -> Vec<AnyElement> {
+        let gpui::Size {
+            width: cols,
+            height: rows,
+        } = grid_size;
+        let gpui::Size {
+            width: cell_width,
+            height: cell_height,
+        } = cell_size;
         self.synchronize(model, cx);
         let Some(state) = model.state() else {
             return Vec::new();
@@ -637,25 +643,24 @@ impl NativeMarkdown {
                                 let index = layout_index(&up_layout, event.position);
                                 let mut value = up_selection.borrow_mut();
                                 value.dragging = false;
-                                if value.selection.as_ref().is_some_and(|r| r.is_empty()) {
-                                    if let Some((_, destination)) =
+                                if value.selection.as_ref().is_some_and(|r| r.is_empty())
+                                    && let Some((_, destination)) =
                                         links.iter().find(|(range, _)| range.contains(&index))
-                                    {
-                                        if let Some(anchor) = destination.strip_prefix('#') {
-                                            if let Some(item) = parsed.parsed.anchor(anchor) {
-                                                value.scroll.scroll_to_top_of_item(item);
-                                            }
-                                        } else {
-                                            view.native_markdown_action(
-                                                surface,
-                                                revision,
-                                                &target,
-                                                "open",
-                                                Some(destination),
-                                                window,
-                                                cx,
-                                            );
+                                {
+                                    if let Some(anchor) = destination.strip_prefix('#') {
+                                        if let Some(item) = parsed.parsed.anchor(anchor) {
+                                            value.scroll.scroll_to_top_of_item(item);
                                         }
+                                    } else {
+                                        view.native_markdown_action(
+                                            surface,
+                                            revision,
+                                            &target,
+                                            "open",
+                                            Some(destination),
+                                            window,
+                                            cx,
+                                        );
                                     }
                                 }
                                 cx.stop_propagation();

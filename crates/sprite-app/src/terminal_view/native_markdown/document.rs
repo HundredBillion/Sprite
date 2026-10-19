@@ -137,7 +137,18 @@ impl Parsed {
                         metadata = None;
                     }
                     Event::Text(text) => raw.push_str(&text),
-                    _ => (),
+                    Event::Start(_)
+                    | Event::End(_)
+                    | Event::Code(_)
+                    | Event::InlineMath(_)
+                    | Event::DisplayMath(_)
+                    | Event::Html(_)
+                    | Event::InlineHtml(_)
+                    | Event::FootnoteReference(_)
+                    | Event::SoftBreak
+                    | Event::HardBreak
+                    | Event::Rule
+                    | Event::TaskListMarker(_) => (),
                 }
                 continue;
             }
@@ -222,7 +233,15 @@ impl Parsed {
                         flush(&mut block, &mut blocks);
                         block.cell_alignments = table_alignments.clone();
                     }
-                    _ => (),
+                    Tag::Paragraph
+                    | Tag::HtmlBlock
+                    | Tag::FootnoteDefinition(_)
+                    | Tag::DefinitionList
+                    | Tag::DefinitionListTitle
+                    | Tag::DefinitionListDefinition
+                    | Tag::Superscript
+                    | Tag::Subscript
+                    | Tag::MetadataBlock(_) => (),
                 },
                 Event::End(tag) => match tag {
                     TagEnd::Paragraph
@@ -281,7 +300,14 @@ impl Parsed {
                         flush(&mut block, &mut blocks);
                         style.bold = false;
                     }
-                    _ => (),
+                    TagEnd::HtmlBlock
+                    | TagEnd::FootnoteDefinition
+                    | TagEnd::DefinitionList
+                    | TagEnd::DefinitionListTitle
+                    | TagEnd::DefinitionListDefinition
+                    | TagEnd::Superscript
+                    | TagEnd::Subscript
+                    | TagEnd::MetadataBlock(_) => (),
                 },
                 Event::Code(text) => {
                     let start = block.text.len();
@@ -326,7 +352,7 @@ impl Parsed {
                 Event::InlineHtml(raw) => {
                     super::html::inline(&raw, &mut block, &mut style, &mut html_styles, &mut link)
                 }
-                _ => (),
+                Event::InlineMath(_) | Event::DisplayMath(_) | Event::FootnoteReference(_) => (),
             }
             block.list = !lists.is_empty();
             block.indent = lists.len().saturating_sub(1);
@@ -507,7 +533,12 @@ impl<'de> serde::de::Visitor<'de> for BoundedYaml<'_> {
 fn front_matter_blocks(raw: &str) -> Vec<Block> {
     let value_text = |value: &serde_yaml_ng::Value| match value {
         serde_yaml_ng::Value::String(text) => text.clone(),
-        value => serde_yaml_ng::to_string(value)
+        value @ (serde_yaml_ng::Value::Null
+        | serde_yaml_ng::Value::Bool(_)
+        | serde_yaml_ng::Value::Number(_)
+        | serde_yaml_ng::Value::Sequence(_)
+        | serde_yaml_ng::Value::Mapping(_)
+        | serde_yaml_ng::Value::Tagged(_)) => serde_yaml_ng::to_string(value)
             .unwrap_or_default()
             .trim_end()
             .to_string(),
@@ -551,7 +582,7 @@ fn front_matter_blocks(raw: &str) -> Vec<Block> {
             .collect::<Vec<_>>(),
         _ => vec![Block {
             text: raw.trim_end().to_string(),
-            cells: vec![0..raw.trim_end().len()],
+            cells: std::iter::once(0..raw.trim_end().len()).collect(),
             front_matter: true,
             ..Block::default()
         }],

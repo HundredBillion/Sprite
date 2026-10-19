@@ -923,7 +923,7 @@ impl TerminalView {
                     cx.open_url(destination);
                 }
             } else if action != "open"
-                || destination.is_some_and(|s| super::native_markdown::local_destination(s))
+                || destination.is_some_and(super::native_markdown::local_destination)
             {
                 surface.connection.send(&event);
             }
@@ -1409,10 +1409,8 @@ impl TerminalView {
                 let previews = markdown.render(
                     &grid.markdown,
                     surface.id,
-                    grid.cols(),
-                    grid.rows(),
-                    metrics.cells.width(),
-                    metrics.cells.height(),
+                    gpui::size(grid.cols(), grid.rows()),
+                    gpui::size(metrics.cells.width(), metrics.cells.height()),
                     px(grid_slack),
                     cx,
                 );
@@ -1644,15 +1642,13 @@ impl TerminalView {
                 // Other Surface kinds keep consuming copy without forwarding.
                 let preview_copy = event.keystroke.modifiers.platform
                     && matches!(event.keystroke.key.as_str(), "c" | "a");
-                if preview_copy {
-                    if let Some(surface) = view.surfaces.get_mut(|s| s.id == id) {
-                        if let Body::Grid { grid, markdown, .. } = &surface.body {
-                            if markdown.copy(&grid.markdown, event.keystroke.key == "a", cx) {
-                                cx.stop_propagation();
-                                return;
-                            }
-                        }
-                    }
+                if preview_copy
+                    && let Some(surface) = view.surfaces.get_mut(|s| s.id == id)
+                    && let Body::Grid { grid, markdown, .. } = &surface.body
+                    && markdown.copy(&grid.markdown, event.keystroke.key == "a", cx)
+                {
+                    cx.stop_propagation();
+                    return;
                 }
                 if let Some(shortcut) = application_shortcut(&event.keystroke) {
                     if shortcut == Shortcut::Copy && is_grid {

@@ -41,10 +41,10 @@ pub(super) fn inline(
             *style = styles[index].1;
             styles.truncate(index);
         }
-        if name == "a" {
-            if let Some((start, destination)) = link.take() {
-                block.links.push((start..block.text.len(), destination));
-            }
+        if name == "a"
+            && let Some((start, destination)) = link.take()
+        {
+            block.links.push((start..block.text.len(), destination));
         }
         return;
     }
@@ -115,12 +115,12 @@ impl Reader {
     fn emit(&mut self, text: &str) {
         let start = self.block.text.len();
         append(&mut self.block, text, self.style);
-        if let Some(target) = &self.link {
-            if start < self.block.text.len() {
-                self.block
-                    .links
-                    .push((start..self.block.text.len(), target.clone()));
-            }
+        if let Some(target) = &self.link
+            && start < self.block.text.len()
+        {
+            self.block
+                .links
+                .push((start..self.block.text.len(), target.clone()));
         }
     }
     fn flush(&mut self) {
@@ -316,7 +316,11 @@ impl Reader {
                             self.element(child, depth + 1);
                         }
                     }
-                    _ => (),
+                    Node::Document
+                    | Node::Fragment
+                    | Node::Doctype(_)
+                    | Node::Comment(_)
+                    | Node::ProcessingInstruction(_) => (),
                 }
             }
         }
