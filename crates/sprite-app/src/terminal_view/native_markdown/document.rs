@@ -37,7 +37,8 @@ impl Parsed {
         let mut block = Block::default();
         let mut style = InlineStyle::default();
         let mut link: Option<(usize, String)> = None;
-        let mut image: Option<(usize, String)> = None;
+        let mut images: Vec<(usize, String, bool)> = Vec::new();
+        let mut in_table = false;
         let mut lists: Vec<Option<u64>> = Vec::new();
         let mut quote = 0;
         let mut cell_start = 0;
@@ -92,11 +93,17 @@ impl Parsed {
                         link = Some((block.text.len(), dest_url.to_string()))
                     }
                     Tag::Image { dest_url, .. } => {
-                        flush(&mut block, &mut blocks);
-                        image = Some((0, dest_url.to_string()));
+                        let standalone = !in_table && link.is_none() && images.is_empty();
+                        if standalone {
+                            flush(&mut block, &mut blocks);
+                        }
+                        images.push((block.text.len(), dest_url.to_string(), standalone));
                     }
                     Tag::TableCell => cell_start = block.text.len(),
-                    Tag::Table(_) => flush(&mut block, &mut blocks),
+                    Tag::Table(_) => {
+                        flush(&mut block, &mut blocks);
+                        in_table = true;
+                    }
                     Tag::TableHead => {
                         flush(&mut block, &mut blocks);
                         style.bold = true;
@@ -131,10 +138,16 @@ impl Parsed {
                         }
                     }
                     TagEnd::Image => {
-                        if let Some((start, destination)) = image.take() {
-                            block.image = Some((block.text[start..].to_string(), destination));
-                            flush(&mut block, &mut blocks);
+                        if let Some((start, destination, standalone)) = images.pop() {
+                            if standalone {
+                                block.image = Some((block.text[start..].to_string(), destination));
+                                flush(&mut block, &mut blocks);
+                            }
                         }
+                    }
+                    TagEnd::Table => {
+                        flush(&mut block, &mut blocks);
+                        in_table = false;
                     }
                     TagEnd::TableCell => {
                         block.cells.push(cell_start..block.text.len());
@@ -231,6 +244,30 @@ pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf
 #[cfg(test)]
 mod tests {
     #[test]
+    fn markdown_inline_images_preserve_table_and_enclosing_link_ranges() {
+        let doc = super::Parsed::parse(
+            "| A | B |\n|---|---|\n| text | ![alt](missing.png) |\n\nBefore [![linked](missing.png)](next.md) after",
+            "/tmp/readme.md",
+        );
+        for block in &doc.blocks {
+            for cell in &block.cells {
+                assert!(
+                    block.text.get(cell.clone()).is_some(),
+                    "invalid cell {cell:?} in {:?}",
+                    block.text
+                );
+            }
+            for (range, _) in &block.links {
+                assert!(
+                    block.text.get(range.clone()).is_some(),
+                    "invalid link {range:?} in {:?}",
+                    block.text
+                );
+            }
+        }
+        assert!(doc.text.contains("linked"));
+    }
+    #[test]
     fn markdown_table_cells_preserve_boundaries_and_multiple_images_keep_alternatives() {
         let doc = super::Parsed::parse(
             "| Name | Value |\n|---|---|\n| **one** | [two](next.md) |\n\n![a](a.png) ![b](b.png)",
@@ -258,5 +295,34 @@ mod tests {
                 .any(|b| b.links.iter().any(|(_, d)| d == "next.md"))
         );
         assert!(doc.blocks.iter().any(|b| b.image.is_some()));
+    }
+    fn fragment() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(String::new()),
+            Just("plain café 🦀".to_string()),
+            Just("**bold** *italic* ~~strike~~ `code`".to_string()),
+            Just("[link](next.md)".to_string()),
+            Just("![alternative](missing.png)".to_string()),
+            Just("[![linked](missing.png)](next.md)".to_string()),
+            "[a-zA-Z0-9_*`!\\[\\]()<> ]{0,60}",
+        ]
+    }
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases:128, rng_seed: proptest::test_runner::RngSeed::Fixed(0x6d61726b646f776e), ..Default::default() })]
+        #[test]
+        fn markdown_composed_inline_and_table_ranges_refer_to_their_own_text(
+            parts in proptest::collection::vec(fragment(), 0..8), left in fragment(), right in fragment()
+        ) {
+            use proptest::prelude::*;
+            let source = format!("{}\n\n| A | B |\n|---|---|\n| {} | {} |", parts.join(" "), left, right);
+            let parsed = super::Parsed::parse(&source, "/tmp/readme.md");
+            for block in &parsed.blocks {
+                prop_assert_eq!(parsed.text.get(block.start..block.start+block.text.len()), Some(block.text.as_str()));
+                for (range, _) in &block.spans { prop_assert!(block.text.get(range.clone()).is_some(), "invalid span {:?} in {:?}", range, source); }
+                for (range, _) in &block.links { prop_assert!(block.text.get(range.clone()).is_some(), "invalid link {:?} in {:?}", range, source); }
+                for range in &block.cells { prop_assert!(block.text.get(range.clone()).is_some(), "invalid cell {:?} in {:?}", range, source); }
+            }
+        }
     }
 }
