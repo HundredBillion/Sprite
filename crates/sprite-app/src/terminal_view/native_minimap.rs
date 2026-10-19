@@ -110,6 +110,8 @@ struct Interaction {
 struct Shapes {
     context: Option<(Identity, u64, SharedString, u32)>,
     rows: HashMap<usize, Arc<ShapedLine>>,
+    #[cfg(test)]
+    shaped: usize,
 }
 #[derive(Default)]
 pub(super) struct NativeMinimap {
@@ -166,6 +168,11 @@ impl NativeMinimap {
             .hover
             .as_ref()
             .map(|(_, s)| s.clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn shaped_count(&self) -> usize {
+        self.shapes.borrow().shaped
     }
 
     pub(super) fn render(
@@ -249,9 +256,6 @@ impl NativeMinimap {
                 cache.rows.retain(|row, _| {
                     *row >= geometry.offset && *row < geometry.offset + geometry.rows
                 });
-                if cache.rows.len() + rows.len() > MAX_SHAPED_ROWS {
-                    cache.rows.clear();
-                }
                 let rect = |y: f32, height: f32| Bounds {
                     origin: point(bounds.origin.x, bounds.origin.y + px(y)),
                     size: gpui::size(bounds.size.width, px(height)),
@@ -304,6 +308,10 @@ impl NativeMinimap {
                         let shaped = if let Some(shaped) = cache.rows.get(&key) {
                             shaped.clone()
                         } else {
+                            #[cfg(test)]
+                            {
+                                cache.shaped += 1;
+                            }
                             let shaped = Arc::new(window.text_system().shape_line(
                                 SharedString::new(row.text()),
                                 px(FONT_SIZE),
@@ -453,6 +461,16 @@ impl TerminalView {
         let Some((input, _)) = self.minimap_input(id) else {
             return;
         };
+        if self
+            .focus_target(
+                crate::surface::channel::FocusTarget::Surface(id),
+                window,
+                cx,
+            )
+            .is_err()
+        {
+            return;
+        }
         let mut input = input.borrow_mut();
         let (Some(bounds), Some(g)) = (input.bounds, input.geometry) else {
             return;

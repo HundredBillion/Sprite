@@ -3849,4 +3849,155 @@ mod tests {
                 .any(|e| e["type"] == "minimap_action")
         );
     }
+    #[gpui::test]
+    fn native_minimap_press_focuses_editor_and_routes_next_key(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|w, c| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), w, c)
+        });
+        let id = SurfaceId(995);
+        let pane = crate::pane_tree::PaneId(1);
+        let (_, mut editor_peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        let mut dock = open_description(
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"Explorer"}}),
+        );
+        dock.placement = Placement::Dock {
+            side: Side::Left,
+            size: crate::surface::DockSize::try_from(64.0).unwrap(),
+            ownership: Ownership::Unowned,
+        };
+        dock.focus = true;
+        let (_, mut dock_peer) = open_request(&host, cx, SurfaceId(996), dock);
+        host.update_in(cx, |h, w, c| {
+            h.focus_target(FocusTarget::Surface(SurfaceId(996)), w, c)
+                .unwrap()
+        });
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
+        for message in &fixture["valid"].as_array().unwrap()[..4] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(message).unwrap(),
+                },
+            );
+        }
+        draw_test_window(cx);
+        let position = host.read_with(cx, |h, _| {
+            let Body::Grid { minimap, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                panic!("grid")
+            };
+            minimap.bounds().unwrap().origin + point(px(20.0), px(7.5))
+        });
+        events(&mut editor_peer);
+        events(&mut dock_peer);
+        cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        host.update_in(cx, |h, w, _| {
+            assert!(h.surfaces.fill.as_ref().unwrap().focus.is_focused(w))
+        });
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: "a".into(),
+                key_char: Some("a".into()),
+                modifiers: Default::default(),
+            },
+            is_held: false,
+        });
+        let editor = events(&mut editor_peer);
+        let dock = events(&mut dock_peer);
+        assert_eq!(
+            editor
+                .iter()
+                .filter(|e| e["type"] == "minimap_action")
+                .count(),
+            1,
+            "{editor:?}"
+        );
+        assert_eq!(
+            editor
+                .iter()
+                .filter(|e| e["type"] == "input" && e["key"] == "a")
+                .count(),
+            1,
+            "{editor:?}"
+        );
+        assert!(!editor.iter().any(|e| e["type"] == "mouse"), "{editor:?}");
+        assert!(!dock.iter().any(|e| e["type"] == "input"), "{dock:?}");
+    }
+
+    #[gpui::test]
+    fn native_minimap_tall_warm_frame_reuses_visible_shapes(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|w, c| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), w, c)
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(4200.0)));
+        let id = SurfaceId(997);
+        let pane = crate::pane_tree::PaneId(1);
+        let (_, _peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        let send = |value: serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(&value).unwrap(),
+                },
+            )
+        };
+        send(
+            serde_json::json!({"type":"minimap","kind":"begin","revision":1,"target":"tall","generation":1,"base":null,"start":1,"delete":0,"insert":1500,"total":1500,"palette":["#bcbec4"],"background":"#1e1f22"}),
+            cx,
+        );
+        for (chunk, start) in (0..1500).step_by(250).enumerate() {
+            send(
+                serde_json::json!({"type":"minimap","kind":"lines","revision":chunk+2,"target":"tall","generation":1,"offset":start,"lines":vec![serde_json::json!({"text":"let cached = true;","spans":[]});250]}),
+                cx,
+            );
+        }
+        send(
+            serde_json::json!({"type":"minimap","kind":"commit","revision":8,"target":"tall","generation":1}),
+            cx,
+        );
+        draw_test_window(cx);
+        let shaped = |cx: &mut gpui::VisualTestContext| {
+            host.read_with(cx, |h, _| {
+                let Body::Grid { minimap, .. } = &h.surfaces.fill.as_ref().unwrap().body else {
+                    panic!("grid")
+                };
+                minimap.shaped_count()
+            })
+        };
+        let initial = shaped(cx);
+        assert!(initial > 1024, "{initial}");
+        draw_test_window(cx);
+        assert_eq!(
+            shaped(cx),
+            initial,
+            "an unchanged visible window must not reshape cached rows"
+        );
+    }
 }
