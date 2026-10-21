@@ -264,12 +264,31 @@ fn parse_op(message: &Value) -> Result<Op, Refusal> {
                 "type":"rows", "rows":[{"row":0,"cells":object.get("cells")}]
             }))?)?;
             grid.cursor.visible = false;
+            let follow = object
+                .get("follow")
+                .map(|value| {
+                    let value = value
+                        .as_object()
+                        .ok_or_else(|| malformed("invalid follow control"))?;
+                    Ok(FollowStatus {
+                        enabled: value
+                            .get("enabled")
+                            .and_then(Value::as_bool)
+                            .ok_or_else(|| malformed("invalid follow enabled state"))?,
+                        ready: value
+                            .get("ready")
+                            .and_then(Value::as_bool)
+                            .ok_or_else(|| malformed("invalid follow ready state"))?,
+                    })
+                })
+                .transpose()?;
             Ok(Op::Footer(Some(Box::new(Footer {
                 row,
                 grid_cols,
                 grid_rows,
                 source,
                 grid,
+                follow,
             }))))
         }
         "markdown" => Ok(Op::Markdown(super::markdown::Markdown::parse(message)?)),
@@ -547,12 +566,19 @@ pub struct UiLabel {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct FollowStatus {
+    pub enabled: bool,
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Footer {
     pub source: String,
     pub row: u16,
     pub grid_cols: u16,
     pub grid_rows: u16,
     pub grid: GridSurface,
+    pub follow: Option<FollowStatus>,
 }
 
 /// A program's grid as Sprite holds it.
@@ -1156,6 +1182,7 @@ mod tests {
         grid.apply_all(parse_ops(&serde_json::json!({
             "type": "footer", "row": 23, "cols": 100, "grid_cols":80,"grid_rows":24,"source":" ".repeat(80),
             "cells": [[" ", 1, 95], ["L", 1], ["u", 1], ["a", 1], [" ", 1, 2]],
+            "follow": {"enabled":true,"ready":true},
             "define": {"1": {"fg":"#ffffff", "bg":"#202020"}},
             "groups": {"StatusLine": 1}
         })).unwrap()).unwrap();
@@ -1165,6 +1192,13 @@ mod tests {
         let footer = grid.footer.as_mut().unwrap();
         assert_eq!(footer.row, 23);
         assert_eq!(footer.grid.cols(), 100);
+        assert_eq!(
+            footer.follow,
+            Some(FollowStatus {
+                enabled: true,
+                ready: true
+            })
+        );
         let rows = footer.grid.positioned_rows(&Highlights::default());
         assert_eq!(rows[0][95].text.as_str(), "L");
         grid.apply_all(

@@ -172,7 +172,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-markdown-v1"],
+        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
@@ -331,7 +331,7 @@ fn parse_token(message: &Value) -> Result<FirstRequest, Refusal> {
 // can tell what a line is without scanning the rest of it.
 
 pub fn event_opened(id: SurfaceId) -> String {
-    json!({ "type": "opened", "surface": id.0, "features": ["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-markdown-v1"] })
+    json!({ "type": "opened", "surface": id.0, "features": ["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"] })
         .to_string()
 }
 
@@ -419,6 +419,10 @@ pub fn event_mouse(button: &str, action: &str, modifiers: &str, row: u16, col: u
         "modifiers": modifiers, "row": row, "col": col,
     })
     .to_string()
+}
+
+pub fn event_follow_toggle() -> String {
+    json!({ "type": "follow_action", "action": "toggle" }).to_string()
 }
 
 /// Modifiers as Neovim's `nvim_input_mouse` spells them: one letter each,
@@ -789,7 +793,7 @@ mod tests {
         // are about is the shape rather than the order.
         assert_eq!(
             serde_json::from_str::<Value>(&event_opened(SurfaceId(7))).expect("json"),
-            json!({"surface":7,"type":"opened","features":["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-markdown-v1"]})
+            json!({"surface":7,"type":"opened","features":["grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"]})
         );
         assert_eq!(
             serde_json::from_str::<Value>(&event_click("row-1")).expect("json"),
