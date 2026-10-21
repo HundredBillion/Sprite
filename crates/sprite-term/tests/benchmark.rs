@@ -70,7 +70,7 @@ fn the_report_carries_every_metric_with_finite_values() {
         // A small volume on purpose: this test validates the report's schema,
         // not its numbers, and the debug build it runs against is far slower
         // than the release build the committed budgets come from.
-        .args(["--samples", "3", "--output-bytes", "262144", "--output"])
+        .args(["--samples", "1", "--output-bytes", "262144", "--output"])
         .arg(&output)
         .status()
         .expect("run the benchmark");
@@ -80,7 +80,7 @@ fn the_report_carries_every_metric_with_finite_values() {
 
     assert_eq!(
         number_after(&report, "sample_count"),
-        Some(3.0),
+        Some(1.0),
         "the report records how many samples produced it"
     );
 
