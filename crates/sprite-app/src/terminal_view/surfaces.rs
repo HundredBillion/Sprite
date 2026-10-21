@@ -19,8 +19,8 @@ use crate::config::Highlights;
 use crate::surface::channel::{
     FocusTarget, Open, Ownership, Placement, Position, ReturnTarget, Side, SurfaceConnection,
     SurfaceRequest, event_applied, event_blur, event_closed, event_dock_size, event_focus,
-    event_grid_resize, event_input, event_mouse, event_paste, event_refused, event_resize,
-    event_warning, neovim_modifiers,
+    event_follow_toggle, event_grid_resize, event_input, event_mouse, event_paste, event_refused,
+    event_resize, event_warning, neovim_modifiers,
 };
 use crate::surface::description::{self, BodyKind, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
@@ -293,6 +293,7 @@ pub(super) struct SurfaceLayers {
     pub(super) fill: Option<AnyElement>,
     pub(super) left: Option<AnyElement>,
     pub(super) right: Option<AnyElement>,
+    pub(super) footer: Option<AnyElement>,
     pub(super) overlays: Vec<AnyElement>,
     pub(super) dock_edges: Vec<AnyElement>,
     pub(super) dock_capture: Option<AnyElement>,
@@ -703,6 +704,41 @@ impl TerminalView {
             modifiers.push_str(&event.click_count.to_string());
         }
         self.report_grid_mouse(id, event.position, button, "press", &modifiers);
+    }
+
+    fn report_footer_mouse(
+        &mut self,
+        id: SurfaceId,
+        position: gpui::Point<Pixels>,
+        left_width: f32,
+        action: &str,
+        modifiers: &gpui::Modifiers,
+    ) {
+        let metrics = self.grid_metrics();
+        let Some(surface) = self.surfaces.get_mut(|surface| surface.id == id) else {
+            return;
+        };
+        let (Body::Grid { grid, .. }, Some(origin)) = (&surface.body, surface.origin) else {
+            return;
+        };
+        let Some(footer) = &grid.footer else { return };
+        let pane_x = f32::from(position.x - origin.x) + left_width;
+        let col = (pane_x / f32::from(metrics.cells.width())).floor().max(0.0) as u16;
+        if footer.follow.is_some() && col < 13 {
+            if action == "press" {
+                surface.connection.send(&event_follow_toggle());
+            }
+            return;
+        }
+        if col < footer.grid.cols() {
+            surface.connection.send(&event_mouse(
+                "left",
+                action,
+                &neovim_modifiers(modifiers),
+                footer.row,
+                col,
+            ));
+        }
     }
 
     /// Reports a drag or a release to the Surface that saw the press, clearing
@@ -1231,7 +1267,16 @@ impl TerminalView {
                 .w(fill_size.width)
                 .h_full()
                 .child(Self::surface_element(
-                    surface, fill_size, registry, metrics, highlights, focused, preedit, cx, true,
+                    surface,
+                    fill_size,
+                    allocated.width,
+                    registry,
+                    metrics,
+                    highlights,
+                    focused,
+                    preedit,
+                    cx,
+                    true,
                 ))
                 .into_any_element()
         });
@@ -1247,7 +1292,16 @@ impl TerminalView {
                 .w(strip.width)
                 .h_full()
                 .child(Self::surface_element(
-                    surface, strip, registry, metrics, highlights, focused, preedit, cx, true,
+                    surface,
+                    strip,
+                    strip.width,
+                    registry,
+                    metrics,
+                    highlights,
+                    focused,
+                    preedit,
+                    cx,
+                    true,
                 ))
                 .into_any_element()
         });
@@ -1263,7 +1317,16 @@ impl TerminalView {
                 .w(strip.width)
                 .h_full()
                 .child(Self::surface_element(
-                    surface, strip, registry, metrics, highlights, focused, preedit, cx, true,
+                    surface,
+                    strip,
+                    strip.width,
+                    registry,
+                    metrics,
+                    highlights,
+                    focused,
+                    preedit,
+                    cx,
+                    true,
                 ))
                 .into_any_element()
         });
@@ -1281,16 +1344,159 @@ impl TerminalView {
                     .items_center()
                     .justify_center()
                     .child(Self::surface_element(
-                        surface, allocated, registry, metrics, highlights, focused, preedit, cx,
+                        surface,
+                        allocated,
+                        allocated.width,
+                        registry,
+                        metrics,
+                        highlights,
+                        focused,
+                        preedit,
+                        cx,
                         false,
                     ))
                     .into_any_element()
             })
             .collect();
+        let footer = self.surfaces.fill.as_mut().and_then(|surface| {
+            let id = surface.id;
+            let Body::Grid { grid, shapes, .. } = &mut surface.body else {
+                return None;
+            };
+            let (footer_cols, _) = crate::surface::render::cells_that_fit(
+                gpui::size(allocated.width, allocated.height),
+                metrics,
+            );
+            let footer_row = grid.footer_row(footer_cols.min(crate::surface::grid::MAX_COLS))?;
+            let tab_height = if grid.markdown.active().is_some() {
+                grid.tabs.visible_height().max(35.0)
+            } else {
+                grid.tabs.visible_height()
+            };
+            let grid_height = (f32::from(allocated.height) - tab_height).max(0.0);
+            let slack =
+                (grid_height - f32::from(grid.rows()) * f32::from(metrics.cells.height())).max(0.0);
+            let footer = grid
+                .footer
+                .as_mut()
+                .filter(|footer| footer.row == footer_row)?;
+            let (_, background) = footer.grid.default_colors(metrics.defaults);
+            let follow = footer.follow.as_ref().map(|state| {
+                let color = if state.enabled { 0x5c8fd6 } else { 0x8e939a };
+                let dot = if state.ready {
+                    0x73c991
+                } else if state.enabled {
+                    0x5c8fd6
+                } else {
+                    0x777d84
+                };
+                div()
+                    .debug_selector(|| format!("grid-follow-{}", id.0))
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .w(metrics.cells.width() * 13.0)
+                    .h(metrics.cells.height())
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .pl(px(9.0))
+                    .bg(rgb(crate::grid_paint::pack(background)))
+                    .border_r_1()
+                    .border_color(rgb(0x45484e))
+                    .font_family(".SystemUIFont")
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(if state.enabled { 0xe5e9ee } else { 0x9a9ea6 }))
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(17.0))
+                            .h(px(17.0))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(1.0))
+                                    .top(px(1.0))
+                                    .w(px(15.0))
+                                    .h(px(15.0))
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(rgb(color)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(7.0))
+                                    .top(px(3.0))
+                                    .w(px(3.0))
+                                    .h(px(11.0))
+                                    .bg(rgb(color)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(3.0))
+                                    .top(px(7.0))
+                                    .w(px(11.0))
+                                    .h(px(3.0))
+                                    .bg(rgb(color)),
+                            ),
+                    )
+                    .child("Follow")
+                    .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(rgb(dot)))
+            });
+            Some(
+                div()
+                    .debug_selector(|| format!("grid-footer-{}", id.0))
+                    .absolute()
+                    .left_0()
+                    .top(px(tab_height + slack) + metrics.cells.height() * f32::from(footer.row))
+                    .w(allocated.width)
+                    .h(metrics.cells.height())
+                    .bg(rgb(crate::grid_paint::pack(background)))
+                    .overflow_hidden()
+                    .child(crate::surface::render::render_grid(
+                        &mut footer.grid,
+                        highlights,
+                        metrics,
+                        shapes,
+                    ))
+                    .children(follow)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                            view.report_footer_mouse(
+                                id,
+                                event.position,
+                                left_width,
+                                "press",
+                                &event.modifiers,
+                            );
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |view, event: &MouseUpEvent, _window, cx| {
+                            view.report_footer_mouse(
+                                id,
+                                event.position,
+                                left_width,
+                                "release",
+                                &event.modifiers,
+                            );
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .into_any_element(),
+            )
+        });
         SurfaceLayers {
             fill,
             left,
             right,
+            footer,
             overlays,
             dock_edges,
             dock_capture,
@@ -1310,6 +1516,7 @@ impl TerminalView {
     pub(super) fn surface_element(
         surface: &mut HostedSurface,
         size: Size<Pixels>,
+        footer_width: Pixels,
         registry: &TokenRegistry,
         metrics: &crate::surface::render::GridMetrics,
         highlights: &Highlights,
@@ -1354,7 +1561,7 @@ impl TerminalView {
             f32::from(grid_size.height).round() as u32,
         );
         let (footer_cols, _) = crate::surface::render::cells_that_fit(
-            gpui::size(size.width, grid_size.height),
+            gpui::size(footer_width, grid_size.height),
             metrics,
         );
         let footer_cols = footer_cols.min(crate::surface::grid::MAX_COLS);
@@ -1418,28 +1625,6 @@ impl TerminalView {
                 let map_height = footer_row.map_or(grid_size.height, |row| {
                     px(grid_slack) + metrics.cells.height() * f32::from(row)
                 });
-                let footer = grid
-                    .footer
-                    .as_mut()
-                    .filter(|footer| Some(footer.row) == footer_row)
-                    .map(|footer| {
-                        let (_, background) = footer.grid.default_colors(metrics.defaults);
-                        div()
-                            .debug_selector(|| format!("grid-footer-{}", surface.id.0))
-                            .absolute()
-                            .left_0()
-                            .bg(rgb(crate::grid_paint::pack(background)))
-                            .top(px(grid_slack) + metrics.cells.height() * f32::from(footer.row))
-                            .w_full()
-                            .h(metrics.cells.height())
-                            .overflow_hidden()
-                            .child(crate::surface::render::render_grid(
-                                &mut footer.grid,
-                                highlights,
-                                metrics,
-                                shapes,
-                            ))
-                    });
                 let map = if minimap_width > 0.0 {
                     Some(minimap.render(
                         &grid.minimap,
@@ -1514,8 +1699,7 @@ impl TerminalView {
                                     .children(labels)
                                     .children(previews),
                             )
-                            .children(map)
-                            .children(footer),
+                            .children(map),
                     )
                     .into_any_element()
             }
@@ -3295,6 +3479,7 @@ mod tests {
                 let _ = TerminalView::surface_element(
                     surface,
                     gpui::size(px(width), px(160.0)),
+                    px(width),
                     &registry,
                     &metrics,
                     &settings.highlights,
@@ -4095,8 +4280,8 @@ mod tests {
                 map.size.width < px(120.0),
                 "minimap shrinks beside explorer in a half-width pane"
             );
-            assert!(footer.left() >= px(280.0), "explorer keeps its space");
-            assert_eq!(footer.left(), surface.origin.unwrap().x);
+            assert_eq!(footer.left(), px(0.0), "footer covers the explorer");
+            assert!(footer.left() < surface.origin.unwrap().x);
             assert_eq!(footer.right(), map.right());
             assert_eq!(map.bottom(), footer.top());
             assert_eq!(
@@ -4112,6 +4297,45 @@ mod tests {
             !events(&mut peer)
                 .iter()
                 .any(|e| e["type"] == "minimap_action")
+        );
+        let position = point(footer.left() + px(3.0), footer.top() + px(3.0));
+        cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        let mouse = events(&mut peer);
+        assert!(
+            mouse.iter().any(|e| e["type"] == "mouse"
+                && e["action"] == "press"
+                && e["row"] == rows - 1
+                && e["col"] == 0),
+            "footer clicks reach the statusline: {mouse:?}"
+        );
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(&serde_json::json!({
+                    "type":"footer", "cols":full_cols, "row":rows-1,
+                    "grid_cols":cols, "grid_rows":rows,"source":" ".repeat(cols as usize),
+                    "cells":[[" ",1,full_cols]], "define":{"1":{"bg":"#303030"}},
+                    "follow":{"enabled":true,"ready":true}
+                }))
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        assert!(
+            cx.debug_bounds("grid-follow-992").is_some(),
+            "native Follow control is painted"
+        );
+        let position = point(footer.left() + px(17.0), footer.top() + px(3.0));
+        cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        assert!(
+            events(&mut peer)
+                .iter()
+                .any(|e| e["type"] == "follow_action" && e["action"] == "toggle")
         );
         dispatch(
             &host,
@@ -4226,6 +4450,7 @@ mod tests {
                 let _ = TerminalView::surface_element(
                     surface,
                     gpui::size(px(width), px(355.0)),
+                    px(width),
                     &registry,
                     &metrics,
                     &settings.highlights,
