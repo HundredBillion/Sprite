@@ -29,6 +29,90 @@ use crate::surface::render::ElementBody;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
 
+fn panther_paws(color: u32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, _| {
+            let scale = f32::from(bounds.size.width) / 24.0;
+            let at = |x: f32, y: f32| {
+                gpui::point(
+                    bounds.origin.x + px(x * scale),
+                    bounds.origin.y + px(y * scale),
+                )
+            };
+            let mut path = gpui::PathBuilder::fill();
+            let k = 0.552_284_8;
+            for (dx, dy) in [(0.0, 0.0), (10.0, 9.0)] {
+                for (x, y, rx, ry) in [
+                    (3.8, 4.5, 1.1, 1.35),
+                    (6.9, 3.6, 1.15, 1.45),
+                    (10.0, 4.5, 1.1, 1.35),
+                ] {
+                    let (x, y) = (x + dx, y + dy);
+                    path.move_to(at(x + rx, y));
+                    path.cubic_bezier_to(
+                        at(x, y + ry),
+                        at(x + rx, y + k * ry),
+                        at(x + k * rx, y + ry),
+                    );
+                    path.cubic_bezier_to(
+                        at(x - rx, y),
+                        at(x - k * rx, y + ry),
+                        at(x - rx, y + k * ry),
+                    );
+                    path.cubic_bezier_to(
+                        at(x, y - ry),
+                        at(x - rx, y - k * ry),
+                        at(x - k * rx, y - ry),
+                    );
+                    path.cubic_bezier_to(
+                        at(x + rx, y),
+                        at(x + k * rx, y - ry),
+                        at(x + rx, y - k * ry),
+                    );
+                    path.close();
+                }
+                path.move_to(at(3.4 + dx, 9.7 + dy));
+                path.cubic_bezier_to(
+                    at(5.3 + dx, 6.9 + dy),
+                    at(3.4 + dx, 8.3 + dy),
+                    at(4.1 + dx, 7.0 + dy),
+                );
+                path.cubic_bezier_to(
+                    at(6.9 + dx, 7.3 + dy),
+                    at(6.1 + dx, 6.8 + dy),
+                    at(6.4 + dx, 7.3 + dy),
+                );
+                path.cubic_bezier_to(
+                    at(8.5 + dx, 6.9 + dy),
+                    at(7.4 + dx, 7.3 + dy),
+                    at(7.7 + dx, 6.8 + dy),
+                );
+                path.cubic_bezier_to(
+                    at(10.4 + dx, 9.7 + dy),
+                    at(9.7 + dx, 7.0 + dy),
+                    at(10.4 + dx, 8.3 + dy),
+                );
+                path.cubic_bezier_to(
+                    at(6.9 + dx, 12.4 + dy),
+                    at(10.4 + dx, 11.4 + dy),
+                    at(8.9 + dx, 12.4 + dy),
+                );
+                path.cubic_bezier_to(
+                    at(3.4 + dx, 9.7 + dy),
+                    at(4.9 + dx, 12.4 + dy),
+                    at(3.4 + dx, 11.4 + dy),
+                );
+                path.close();
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, rgb(color));
+            }
+        },
+    )
+    .size(px(17.0))
+}
+
 /// What a Surface draws: an element tree replaced whole on `update`, or a
 /// grid mutated by operations.
 pub(super) enum Body {
@@ -1408,42 +1492,8 @@ impl TerminalView {
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(if state.enabled { 0xe5e9ee } else { 0x9a9ea6 }))
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(17.0))
-                            .h(px(17.0))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(1.0))
-                                    .top(px(1.0))
-                                    .w(px(15.0))
-                                    .h(px(15.0))
-                                    .rounded_full()
-                                    .border_2()
-                                    .border_color(rgb(color)),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(7.0))
-                                    .top(px(3.0))
-                                    .w(px(3.0))
-                                    .h(px(11.0))
-                                    .bg(rgb(color)),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(3.0))
-                                    .top(px(7.0))
-                                    .w(px(11.0))
-                                    .h(px(3.0))
-                                    .bg(rgb(color)),
-                            ),
-                    )
-                    .child("Follow")
+                    .child(panther_paws(color))
+                    .child("FOLLOW")
                     .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(rgb(dot)))
             });
             Some(
