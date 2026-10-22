@@ -17,3 +17,5 @@ Before rasterising, a decode walks the parsed tree, including clip paths, masks,
 The cap was calibrated on a 512x512 canvas. A document at the cap on a much larger canvas, still within the 4096 px and 16 MiB raster limits, can take longer than 250 ms. That is accepted because decoding is off the UI thread and at most two decodes run per cache.
 
 Parse cost is bounded by the existing Surface Channel message limit (16MiB) and list asset limit (64MiB), not by the cap. CPU time spent on content other than filters, and memory across Surfaces, remain outside this decision.
+
+Memory across Surfaces is now bounded by ADR 0033, which replaces this deferral.

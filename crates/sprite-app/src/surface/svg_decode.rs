@@ -5,10 +5,11 @@
 //! document whose filters would cost too much, and rasterises the rest
 //! within the Surface raster bounds. Each cache runs at most
 //! `MAX_CONCURRENT_SVG_DECODES` at once, oldest request first. A finished
-//! picture is charged to the cache's budget when it is installed, and the
-//! view that asked is told to draw again.
+//! picture is charged to the cache's budget, and to the budget every cache in
+//! the process shares, when it is installed, and the view that asked is told
+//! to draw again.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::rc::Rc;
@@ -19,6 +20,10 @@ use resvg::usvg;
 
 /// Decoded pixels one Surface cache keeps at once.
 const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+/// Decoded pixels every Surface cache in the process keeps at once: four
+/// full Surface caches, or sixteen of the largest single rasters. A 32 px
+/// icon is 4 KiB, so 64 Surfaces of 500 distinct icons each take 125 MiB.
+const MAX_PROCESS_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 /// Pixels one decoded SVG may hold.
 const MAX_SVG_RASTER_BYTES: usize = 16 * 1024 * 1024;
 /// The longest side, in pixels, of one decoded SVG.
@@ -57,8 +62,19 @@ pub(crate) enum RefusalKind {
     /// The raster would be empty, not finite, or larger than one image may
     /// be, however much of the budget is free.
     Unrasterisable,
-    /// The raster fits one image but not what the cache's budget has left.
+    /// The raster fits one image but not what the cache's budget, or the
+    /// process's, has left.
     OverBudget,
+}
+
+thread_local! {
+    /// Pixels the ready pictures of every cache hold together, at most
+    /// `MAX_PROCESS_IMAGE_BYTES`. A cache is shared through `Rc` and never
+    /// leaves the UI thread, so this one ledger is the whole process's; in
+    /// tests, each test thread gets its own.
+    static PROCESS_RETAINED_BYTES: Cell<usize> = const { Cell::new(0) };
+    /// What `PROCESS_RETAINED_BYTES` may reach. Only a test lowers it.
+    static PROCESS_IMAGE_LIMIT: Cell<usize> = const { Cell::new(MAX_PROCESS_IMAGE_BYTES) };
 }
 
 /// What one SVG a cache asked for has come to.
@@ -95,6 +111,8 @@ struct Queue<K> {
     waiting: VecDeque<Job<K>>,
     in_flight: usize,
     /// Pixels the ready pictures hold, at most `MAX_SURFACE_IMAGE_BYTES`.
+    /// Charged to the process budget too: change it only through
+    /// `set_retained`.
     retained_bytes: usize,
     /// How many entries have settled. A cache that remembers what it found
     /// compares this to know when to look again.
@@ -195,10 +213,7 @@ impl<K: Clone + Eq + Hash + 'static> SvgDecodes<K> {
     pub(crate) fn retain(&self, keep: impl Fn(&K) -> bool) {
         let mut queue = self.queue.borrow_mut();
         let Queue {
-            entries,
-            waiting,
-            retained_bytes,
-            ..
+            entries, waiting, ..
         } = &mut *queue;
         entries.retain(|key, entry| {
             keep(key) && !matches!(entry.state, SvgState::Refused(RefusalKind::OverBudget))
@@ -208,11 +223,12 @@ impl<K: Clone + Eq + Hash + 'static> SvgDecodes<K> {
                 .get(&job.key)
                 .is_some_and(|entry| entry.ticket == job.ticket)
         });
-        *retained_bytes = entries
+        let kept = entries
             .values()
             .filter_map(|entry| entry.state.picture())
             .map(|picture| raster_bytes(&picture))
             .sum();
+        queue.set_retained(kept);
     }
 
     /// Forgets every entry and waiting decode, to draw from now on at
@@ -221,8 +237,37 @@ impl<K: Clone + Eq + Hash + 'static> SvgDecodes<K> {
         let mut queue = self.queue.borrow_mut();
         queue.entries.clear();
         queue.waiting.clear();
-        queue.retained_bytes = 0;
+        queue.set_retained(0);
         queue.target_width = target_width;
+    }
+}
+
+impl<K> Queue<K> {
+    /// Pixels the next picture may hold: what is left of this cache's budget
+    /// or of the process's, whichever is less.
+    fn available(&self) -> usize {
+        let process = PROCESS_IMAGE_LIMIT
+            .with(Cell::get)
+            .saturating_sub(PROCESS_RETAINED_BYTES.with(Cell::get));
+        MAX_SURFACE_IMAGE_BYTES
+            .saturating_sub(self.retained_bytes)
+            .min(process)
+    }
+
+    /// Makes `bytes` what this cache retains, charging or refunding the
+    /// difference to the process budget.
+    fn set_retained(&mut self, bytes: usize) {
+        PROCESS_RETAINED_BYTES.with(|process| {
+            process.set(process.get() - self.retained_bytes + bytes);
+        });
+        self.retained_bytes = bytes;
+    }
+}
+
+/// A cache dropped with its Surface gives its pictures back to the process.
+impl<K> Drop for Queue<K> {
+    fn drop(&mut self) {
+        self.set_retained(0);
     }
 }
 
@@ -245,8 +290,7 @@ impl<K: Clone + Eq + Hash> Queue<K> {
                 self.started.push(job.key.clone());
                 self.peak_in_flight = self.peak_in_flight.max(self.in_flight);
             }
-            let available = MAX_SURFACE_IMAGE_BYTES.saturating_sub(self.retained_bytes);
-            return Some((job, self.target_width, available));
+            return Some((job, self.target_width, self.available()));
         }
         None
     }
@@ -255,8 +299,9 @@ impl<K: Clone + Eq + Hash> Queue<K> {
     /// its entry was dropped since it started. A picture the budget can no
     /// longer hold is refused for lack of budget. A decode refused for lack
     /// of the `given_bytes` it started with goes back to the front of the
-    /// queue if an update has since left more than that free, since the
-    /// refusal describes a budget that no longer applies.
+    /// queue if an update, here or on another Surface, has since left more
+    /// than that free, since the refusal describes a budget that no longer
+    /// applies.
     fn finish(
         &mut self,
         job: Job<K>,
@@ -264,13 +309,14 @@ impl<K: Clone + Eq + Hash> Queue<K> {
         outcome: Result<Arc<RenderImage>, RefusalKind>,
     ) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        let available = MAX_SURFACE_IMAGE_BYTES.saturating_sub(self.retained_bytes);
+        let available = self.available();
         let Some(entry) = self.entries.get_mut(&job.key) else {
             return;
         };
         if entry.ticket != job.ticket {
             return;
         }
+        let mut charge = 0;
         entry.state = match outcome {
             Err(RefusalKind::OverBudget) if available > given_bytes => {
                 let ticket = self.next_ticket;
@@ -284,12 +330,13 @@ impl<K: Clone + Eq + Hash> Queue<K> {
                 if bytes > available {
                     SvgState::Refused(RefusalKind::OverBudget)
                 } else {
-                    self.retained_bytes += bytes;
+                    charge = bytes;
                     SvgState::Ready(picture)
                 }
             }
             Err(refusal) => SvgState::Refused(refusal),
         };
+        self.set_retained(self.retained_bytes + charge);
         self.settled += 1;
     }
 }
@@ -364,6 +411,25 @@ impl<K: Clone + Eq + Hash> SvgDecodes<K> {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.queue.borrow().retained_bytes
     }
+}
+
+/// Pixels the ready pictures of every cache hold together.
+#[cfg(test)]
+pub(crate) fn process_retained_bytes() -> usize {
+    PROCESS_RETAINED_BYTES.with(Cell::get)
+}
+
+/// Lowers the process budget to `limit` until the guard is dropped, so a test
+/// can fill it with a few small rasters.
+#[cfg(test)]
+pub(crate) fn limit_process_images(limit: usize) -> impl Drop {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PROCESS_IMAGE_LIMIT.with(|cell| cell.set(self.0));
+        }
+    }
+    Restore(PROCESS_IMAGE_LIMIT.with(|cell| cell.replace(limit)))
 }
 
 /// The picture `svg` draws, `target_width` pixels wide or at its own size,
@@ -541,6 +607,7 @@ pub(crate) fn merged_floods(results: usize, side: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext as _;
 
     #[test]
     fn svg_data_does_not_load_external_files() {
@@ -654,6 +721,173 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// Stands in for the view that draws a Surface.
+    struct Owner;
+
+    /// A distinct `side`-pixel square: `side * side * 4` bytes once drawn.
+    fn square(side: u32, n: usize) -> Arc<str> {
+        Arc::from(format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='{side}' height='{side}'><desc>{n}</desc></svg>"
+        ))
+    }
+
+    /// Asks `cache` for `svgs`, as a frame does, and starts their decodes.
+    fn want_all(
+        cx: &mut gpui::TestAppContext,
+        owner: &gpui::Entity<Owner>,
+        cache: &SvgDecodes<Arc<str>>,
+        svgs: &[Arc<str>],
+    ) {
+        for svg in svgs {
+            cache.want(&**svg, || (Arc::clone(svg), Arc::clone(svg)));
+        }
+        owner.update(cx, |_, cx| cache.start(cx));
+    }
+
+    const RASTER: usize = 1024 * 1024 * 4;
+
+    #[gpui::test]
+    fn surfaces_together_retain_no_more_than_the_process_budget(cx: &mut gpui::TestAppContext) {
+        let _limit = limit_process_images(2 * RASTER);
+        let owner = cx.new(|_| Owner);
+        let surfaces: Vec<SvgDecodes<Arc<str>>> = (0..3).map(|_| SvgDecodes::new(None)).collect();
+        let svgs: Vec<Vec<Arc<str>>> = (0..3)
+            .map(|s| (0..2).map(|n| square(1024, s * 2 + n)).collect())
+            .collect();
+        for (cache, svgs) in surfaces.iter().zip(&svgs) {
+            want_all(cx, &owner, cache, svgs);
+        }
+        cx.run_until_parked();
+
+        let states: Vec<SvgState> = surfaces
+            .iter()
+            .zip(&svgs)
+            .flat_map(|(cache, svgs)| svgs.iter().map(|svg| cache.state(&**svg).unwrap()))
+            .collect();
+        let ready = states
+            .iter()
+            .filter(|state| state.picture().is_some())
+            .count();
+        let refused = states
+            .iter()
+            .filter(|state| matches!(state, SvgState::Refused(RefusalKind::OverBudget)))
+            .count();
+        assert_eq!(
+            (ready, refused),
+            (2, 4),
+            "each Surface fits its own budget, but only two rasters fit the process's"
+        );
+        let per_surface: usize = surfaces.iter().map(SvgDecodes::retained_bytes).sum();
+        assert_eq!(per_surface, 2 * RASTER);
+        assert_eq!(process_retained_bytes(), 2 * RASTER);
+    }
+
+    #[gpui::test]
+    fn every_way_a_cache_lets_go_of_pictures_returns_them_to_the_process_budget(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let owner = cx.new(|_| Owner);
+        let before = process_retained_bytes();
+        let fill = |cx: &mut gpui::TestAppContext, cache: &SvgDecodes<Arc<str>>, first: usize| {
+            want_all(
+                cx,
+                &owner,
+                cache,
+                &[square(1024, first), square(1024, first + 1)],
+            );
+            cx.run_until_parked();
+            assert_eq!(cache.retained_bytes(), 2 * RASTER);
+        };
+        let dropped = SvgDecodes::new(None);
+        let retained = SvgDecodes::new(None);
+        let reset = SvgDecodes::new(None);
+        fill(cx, &dropped, 0);
+        fill(cx, &retained, 2);
+        fill(cx, &reset, 4);
+        assert_eq!(process_retained_bytes(), before + 6 * RASTER);
+
+        drop(dropped);
+        assert_eq!(
+            process_retained_bytes(),
+            before + 4 * RASTER,
+            "a closed Surface"
+        );
+        let keep = square(1024, 2);
+        retained.retain(|svg| *svg == keep);
+        assert_eq!(
+            process_retained_bytes(),
+            before + 3 * RASTER,
+            "an image no longer drawn"
+        );
+        reset.reset(Some(16.0));
+        assert_eq!(
+            process_retained_bytes(),
+            before + RASTER,
+            "a new raster width"
+        );
+        retained.retain(|_| false);
+        assert_eq!(process_retained_bytes(), before);
+    }
+
+    #[gpui::test]
+    fn a_decode_refused_for_the_process_budget_is_tried_again_once_it_frees(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _limit = limit_process_images(RASTER);
+        let owner = cx.new(|_| Owner);
+        let full = SvgDecodes::new(None);
+        want_all(cx, &owner, &full, &[square(1024, 0)]);
+        cx.run_until_parked();
+        let waiting = SvgDecodes::new(None);
+        let refused = square(1024, 1);
+        want_all(cx, &owner, &waiting, std::slice::from_ref(&refused));
+        cx.run_until_parked();
+        assert!(matches!(
+            waiting.state(&*refused),
+            Some(SvgState::Refused(RefusalKind::OverBudget))
+        ));
+
+        // As with a Surface's own budget, the next description forgets the
+        // refusal and asks again against what was freed meanwhile.
+        drop(full);
+        waiting.retain(|_| true);
+        want_all(cx, &owner, &waiting, std::slice::from_ref(&refused));
+        cx.run_until_parked();
+        assert!(waiting.state(&*refused).unwrap().picture().is_some());
+
+        // A decode that started while the budget was full goes back in the
+        // queue if another Surface frees room before it finishes.
+        let late = SvgDecodes::new(None);
+        let started_full = square(1024, 2);
+        want_all(cx, &owner, &late, std::slice::from_ref(&started_full));
+        drop(waiting);
+        cx.run_until_parked();
+        assert!(late.state(&*started_full).unwrap().picture().is_some());
+        assert_eq!(late.started().len(), 2, "refused once, then tried again");
+    }
+
+    #[gpui::test]
+    fn a_window_of_icon_surfaces_fits_the_process_budget(cx: &mut gpui::TestAppContext) {
+        let owner = cx.new(|_| Owner);
+        // The most Surfaces one window hosts, each drawing eight distinct
+        // icons at 64 px, a 32 pt icon on a Retina display.
+        let icons = |surface: usize| -> Vec<Arc<str>> {
+            (0..8).map(|n| square(32, surface * 8 + n)).collect()
+        };
+        let surfaces: Vec<SvgDecodes<Arc<str>>> =
+            (0..64).map(|_| SvgDecodes::new(Some(64.0))).collect();
+        for (surface, cache) in surfaces.iter().enumerate() {
+            want_all(cx, &owner, cache, &icons(surface));
+        }
+        cx.run_until_parked();
+        for (surface, cache) in surfaces.iter().enumerate() {
+            for icon in icons(surface) {
+                assert!(cache.state(&*icon).unwrap().picture().is_some());
+            }
+        }
+        assert_eq!(process_retained_bytes(), 64 * 8 * 64 * 64 * 4);
     }
 
     /// Prints release-build decode times for 512×512 documents of merged
