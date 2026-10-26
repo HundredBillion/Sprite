@@ -1467,13 +1467,6 @@ impl TerminalView {
             let (_, background) = footer.grid.default_colors(metrics.defaults);
             let follow = footer.follow.as_ref().map(|state| {
                 let color = if state.enabled { 0x5c8fd6 } else { 0x8e939a };
-                let dot = if state.ready {
-                    0x73c991
-                } else if state.enabled {
-                    0x5c8fd6
-                } else {
-                    0x777d84
-                };
                 div()
                     .debug_selector(|| format!("grid-follow-{}", id.0))
                     .absolute()
@@ -1491,10 +1484,9 @@ impl TerminalView {
                     .font_family(".SystemUIFont")
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(if state.enabled { 0xe5e9ee } else { 0x9a9ea6 }))
+                    .text_color(rgb(if state.enabled { 0x73c991 } else { 0x9a9ea6 }))
                     .child(panther_paws(color))
                     .child("FOLLOW")
-                    .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(rgb(dot)))
             });
             Some(
                 div()
@@ -4375,9 +4367,13 @@ mod tests {
             },
         );
         draw_test_window(cx);
+        let follow = cx
+            .debug_bounds("grid-follow-992")
+            .expect("native Follow control is painted");
+        assert!(follow.size.width > px(0.0));
         assert!(
-            cx.debug_bounds("grid-follow-992").is_some(),
-            "native Follow control is painted"
+            cx.debug_bounds("grid-follow-dot-992").is_none(),
+            "Follow control has no status dot"
         );
         let position = point(footer.left() + px(17.0), footer.top() + px(3.0));
         cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
