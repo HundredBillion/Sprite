@@ -29,6 +29,7 @@ impl Workspace {
         }
         self.cancel_quit();
         self.stopping = true;
+        self.control.close(None);
         self.surfaces = None;
         if let Some(endpoint) = self.endpoint.as_mut() {
             endpoint.close();
@@ -445,7 +446,7 @@ impl Workspace {
 }
 pub(super) struct PendingCleanup {
     task: gpui::Task<()>,
-    completed: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) completed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A close waiting on a second press.

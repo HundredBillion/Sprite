@@ -947,6 +947,12 @@ impl TerminalView {
 
     /// What this pane is running, asked of the kernel rather than of the
     /// worker — see [`sprite_term::ForegroundWatch`].
+    pub(crate) fn control_info(&self) -> serde_json::Value {
+        serde_json::json!({"kind": "terminal", "terminal_read": true, "terminal_input": true,
+            "lifecycle": match self.session { SessionState::Running(_) => "running", SessionState::Ended(_) => "ended", SessionState::NeverStarted => "failed" },
+            "surface_count": self.surfaces.iter().count(), "native_content": "unavailable", "input_target": "terminal"})
+    }
+
     pub fn foreground(&self) -> sprite_term::ForegroundState {
         #[cfg(test)]
         FOREGROUND_QUERIES.with(|count| count.set(count.get() + 1));

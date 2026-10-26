@@ -21,6 +21,10 @@ use pane_factory::*;
 mod clock;
 mod lane_drain;
 mod surface_routing;
+mod control;
+use control::ControlState;
+#[cfg(test)]
+mod control_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) use reload::{Patience, RelayError, Relayed, ReloadRequest, relay};
@@ -162,6 +166,9 @@ pub struct Workspace {
     _activation: gpui::Subscription,
     /// The window's one clock: blink phase and title discovery for every pane.
     _clock: gpui::Task<()>,
+    control: ControlState,
+    control_sender: async_channel::Sender<crate::control::Message>,
+    _control_task: gpui::Task<()>,
 }
 
 struct PaneTitle {
@@ -213,6 +220,7 @@ impl Workspace {
         // Opened before the first session, so every session this window
         // launches — including the first — is told the key and its own pane.
         let panes = WindowPanes::new();
+        let (control_sender, control_receiver) = async_channel::bounded(16);
         // The endpoint's threads are not the GPUI thread, and a reload has to
         // touch views. So a request crosses back on a channel and is answered
         // from here, with the endpoint thread waiting on a reply of its own.
@@ -220,7 +228,7 @@ impl Workspace {
         let endpoint = settings
             .pane_observation
             .enabled
-            .then(|| open_endpoint(&panes, &reload_tx))
+            .then(|| open_endpoint(&panes, &reload_tx, &control_sender))
             .flatten();
         let reload_sender = reload_tx.clone();
 
@@ -320,7 +328,9 @@ impl Workspace {
             }
         });
         let clock = Self::spawn_clock(cx);
+        let control_task = lane_drain::drain_lane(control_receiver, window, cx, Self::serve_control);
         let mut workspace = Self {
+            control: ControlState::new(), control_sender, _control_task: control_task,
             tabs,
             endpoint,
             panes,
@@ -525,6 +535,7 @@ impl Render for Workspace {
         let divider_children = self.divider_elements(strip, cx);
 
         let tab_children = self.tab_elements(cx);
+        let control_elements = self.control_elements(cx);
         let quit_scroll = cx.listener(|workspace, _: &gpui::ScrollWheelEvent, _window, cx| {
             if workspace.quit_gesture.visible() {
                 workspace.dismiss_pending_close(cx);
@@ -595,6 +606,7 @@ impl Render for Workspace {
                 )
             })
             .child(panes)
+            .children(control_elements)
             .when_some(self.mode.divider_drag(), |element, drag| {
                 element.child(Self::divider_overlay(drag, cx))
             })

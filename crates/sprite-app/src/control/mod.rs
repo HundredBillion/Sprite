@@ -130,6 +130,7 @@ pub(crate) fn open_grant(
     window: String,
     grant: u64,
     sender: async_channel::Sender<Message>,
+    panes: Arc<crate::observation::panes::WindowPanes>,
 ) -> std::io::Result<(LocalSocket, Descriptor)> {
     let key = Arc::new(ObservationKey::generate()?);
     let key_hex = key.to_hex();
@@ -147,12 +148,28 @@ pub(crate) fn open_grant(
             let answer = match serde_json::from_str::<Request>(&connection.body) {
                 Ok(request) if request.id.len() <= 64 && request.protocol == PROTOCOL && request.operation.valid() => {
                     let id = request.id.clone();
+                    let read = match &request.operation {
+                        Operation::Read { pane, lines } => pane.rsplit_once(':').and_then(|(_, local)| local.parse::<u64>().ok()).map(|local| (local, *lines)),
+                        _ => None,
+                    };
                     if request.window != expected_window {
                         failure(&id, "denied")
                     } else {
-                        relay(&sender, Patience::new(crate::timeouts::REPLY_TIMEOUT), |reply| Message::Control {
+                        let mut answer = relay(&sender, Patience::new(crate::timeouts::REPLY_TIMEOUT), |reply| Message::Control {
                             grant, request, reply, connection: Some(connection.reply_connection.clone()),
-                        }).unwrap_or_else(|error| relay_failure(&id, error))
+                        }).unwrap_or_else(|error| relay_failure(&id, error));
+                        if answer["outcome"] == "ok" && let Some((local, lines)) = read {
+                            use crate::observation::{broker, request, schema};
+                            let query = request::Query { from: None, scope: request::Scope::Pane(crate::pane_tree::PaneId(local)), lines: sprite_term::HistoryLines::new(lines.unwrap_or(500)), pretty: false };
+                            match broker::collect(&query, panes.as_ref(), broker::DEADLINE) {
+                                Ok(report) => {
+                                    let encoded = schema::render_limited(&report, false, schema::MAX_RESPONSE_BYTES - 65536);
+                                    answer["result"]["terminal"] = serde_json::from_str(&encoded).unwrap_or(Value::Null);
+                                }
+                                Err(_) => answer = failure(&id, "gone"),
+                            }
+                        }
+                        answer
                     }
                 }
                 _ => failure("", "invalid_request"),

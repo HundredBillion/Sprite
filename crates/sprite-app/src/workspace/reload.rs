@@ -27,7 +27,7 @@ impl Workspace {
         }
         self.settings.pane_observation.enabled = enabled;
         if enabled {
-            self.endpoint = open_endpoint(&self.panes, &self.reload_sender);
+            self.endpoint = open_endpoint(&self.panes, &self.reload_sender, &self.control_sender);
         } else if let Some(mut endpoint) = self.endpoint.take() {
             endpoint.close_after_reply(reply);
         }
@@ -96,10 +96,15 @@ impl Workspace {
 pub(super) fn open_endpoint(
     panes: &Arc<WindowPanes>,
     reload: &async_channel::Sender<ReloadRequest>,
+    control: &async_channel::Sender<crate::control::Message>,
 ) -> Option<Endpoint> {
     let panes = Arc::clone(panes);
     let reload = reload.clone();
+    let control = control.clone();
     Endpoint::open(move |request| {
+        if let Some(body) = request.body.strip_prefix("panes access ") {
+            return crate::control::ask_access(&control, body);
+        }
         crate::observation::request::respond(
             panes.as_ref(),
             &reload,

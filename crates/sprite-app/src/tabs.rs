@@ -229,6 +229,8 @@ impl<T> Tabs<T> {
         self.tabs[index].1.set_divider_ratio(pane, direction, ratio)
     }
 
+    pub(crate) fn was_allocated(&self, pane: PaneId) -> bool { self.panes.was_allocated(pane) }
+
     pub fn tab_of(&self, pane: PaneId) -> Option<TabId> {
         self.tabs.iter().find(|(_, tree)| tree.contains(pane)).map(|(tab, _)| *tab)
     }
