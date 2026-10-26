@@ -1,6 +1,6 @@
 # Authorized pane control
 
-Status: proposed for owner review; production implementation has not started.
+Status: approved by the owner on 2026-10-26; hardened against repository interfaces.
 
 Issue: https://github.com/HundredBillion/Sprite/issues/106
 
@@ -36,7 +36,9 @@ event roadmap is outside this change. A design alone does not close the issue.
 Control is unavailable until the owner approves a grant in Sprite's UI.
 `sprite panes access request` asks for access; possession of observation or
 Surface credentials never approves the request. A bounded pending request shows
-the requesting pane, requested targets and permissions. It has explicit Allow
+the claimed requesting pane, requested targets and permissions. The requester
+identity is self-reported and displayed as such; the observation credential
+authenticates the containing window, not an individual program. It has explicit Allow
 and Deny actions and expires after 60 seconds. Only one pending access request
 per window is retained; another receives `busy`. Repeated requests never count
 as approval. An access request must come through the containing window's
@@ -172,7 +174,7 @@ automatically retry non-idempotent operations. A reply lost after commit also
 has an unknown outcome. Request IDs correlate responses; they do not promise
 durable deduplication or replay storage.
 
-Proposed initial bounds: 16 active grants/window, 16 connections/grant, 16 queued
+Initial bounds: 16 active grants/window, 16 connections/grant, 16 queued
 control operations/window, 8 KiB request lines, 256-byte labels and 4 KiB input
 payloads. Reads retain existing history and broker deadline bounds. Agent-created
 resources count against a limit of 128 live panes and 16 pending cleanups/window;
