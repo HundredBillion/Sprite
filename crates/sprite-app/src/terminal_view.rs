@@ -137,6 +137,9 @@ pub struct TerminalView {
     scroll: ScrollAccumulator,
     /// The selection gesture in progress, if the pointer is down.
     drag: Option<Drag>,
+    edge_scroll_target: Option<(i32, sprite_term::CellPosition)>,
+    edge_scroll_task: Option<Task<()>>,
+    edge_scroll_token: Option<sprite_term::SelectionDragToken>,
     link_click: input::LinkClick,
     /// The most recent click awaiting terminal link resolution.
     pending_link_click: Option<u64>,
@@ -569,6 +572,9 @@ impl TerminalView {
             display_title: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
+            edge_scroll_target: None,
+            edge_scroll_task: None,
+            edge_scroll_token: None,
             link_click: input::LinkClick::default(),
             pending_link_click: None,
             hovered_cell: None,
@@ -661,6 +667,9 @@ impl TerminalView {
             texture_warning: None,
             scroll: ScrollAccumulator::default(),
             drag: None,
+            edge_scroll_target: None,
+            edge_scroll_task: None,
+            edge_scroll_token: None,
             link_click: input::LinkClick::default(),
             pending_link_click: None,
             hovered_cell: None,
@@ -840,6 +849,7 @@ impl TerminalView {
 
     /// Hands over the worker so the window can wait for it off the GPUI thread.
     pub fn begin_shutdown(&mut self) -> Option<ShutdownHandle> {
+        self.stop_edge_scroll();
         self.admission_closed = true;
         self.pending.clear();
         self.pane_focus.forget_pending();

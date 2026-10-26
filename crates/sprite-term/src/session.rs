@@ -284,6 +284,7 @@ fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
         TerminalCommand::Wheel(_)
         | TerminalCommand::Resize(_)
         | TerminalCommand::Scroll(_)
+        | TerminalCommand::ScrollAndSelect { .. }
         | TerminalCommand::Select { .. }
         | TerminalCommand::BeginSelection { .. }
         | TerminalCommand::ClearSelection

@@ -15,13 +15,13 @@ use std::sync::Arc;
 use gpui::prelude::*;
 
 use gpui::{
-    Context, ElementInputHandler, ExternalPaths, ImageSource, InteractiveElement, KeyDownEvent,
-    KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, ScrollDelta, ScrollWheelEvent, SharedString, Window, canvas, div, img, px, rgb,
+    Context, DispatchPhase, ElementInputHandler, ExternalPaths, ImageSource, InteractiveElement,
+    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, SharedString, Window, canvas, div, img,
+    px, rgb,
 };
 use sprite_term::{
-    CellPosition, KeyAction, MouseAction, SelectionMode, SnapshotBundle, TerminalCommand,
-    WheelEvent,
+    CellPosition, KeyAction, MouseAction, SnapshotBundle, TerminalCommand, WheelEvent,
 };
 
 use crate::grid::{PositionedCell, prepare_rows};
@@ -381,6 +381,8 @@ impl Render for TerminalView {
             .filter(|_| self.focused_surface(window).is_none());
         let focus_for_input = self.focus.clone();
         let entity_for_input = cx.entity();
+        let entity_for_drag_move = cx.entity();
+        let entity_for_drag_up = cx.entity();
         let entity_for_hover = cx.entity();
         let entity_for_bounds = cx.entity();
         // Where the grid sits inside the pane, and how much of it it covers.
@@ -502,6 +504,45 @@ impl Render for TerminalView {
                         ElementInputHandler::new(bounds, entity_for_input),
                         cx,
                     );
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        entity_for_drag_move.update(cx, |view, cx| {
+                            if view.drag.is_none() {
+                                return;
+                            }
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                view.drag_to(event.position, window, cx);
+                            } else {
+                                view.drag = None;
+                                view.stop_edge_scroll();
+                            }
+                            cx.stop_propagation();
+                        });
+                    });
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+                        if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                            return;
+                        }
+                        entity_for_drag_up.update(cx, |view, cx| {
+                            let Some(drag) = view.drag.take() else {
+                                return;
+                            };
+                            view.stop_edge_scroll();
+                            if let Some(cell) = view.cell_under(event.position) {
+                                let open_link = view.link_click.release(cell)
+                                    && link_click_behavior(event.modifiers)
+                                        == LinkClickBehavior::Plain;
+                                if !drag.moved && open_link {
+                                    view.request_link_click(cell);
+                                }
+                            } else {
+                                view.link_click.cancel();
+                            }
+                            cx.stop_propagation();
+                        });
+                    });
                 },
             ))
             .children(status.map(|status| {
@@ -598,6 +639,7 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
+                    view.stop_edge_scroll();
                     view.link_click.cancel();
                     let Some(cell) = view.cell_under(event.position) else {
                         return;
@@ -632,8 +674,9 @@ impl Render for TerminalView {
                     }
                 }),
             )
-            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, _cx| {
+            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
                 if event.pressed_button.is_none() {
+                    view.stop_edge_scroll();
                     let cell = view.cell_under(event.position);
                     if view.hovered_cell != cell {
                         view.hovered_cell = cell;
@@ -657,14 +700,17 @@ impl Render for TerminalView {
                     return;
                 }
                 if view.link_click.is_modified() {
+                    view.stop_edge_scroll();
                     return;
                 }
                 let Some(cell) = view.cell_under(event.position) else {
+                    view.stop_edge_scroll();
                     view.link_click.cancel();
                     return;
                 };
                 view.link_click.moved_to(cell);
-                let Some(drag) = view.drag else {
+                if view.drag.is_none() {
+                    view.stop_edge_scroll();
                     view.route_mouse(
                         cell,
                         MouseAction::Motion,
@@ -673,27 +719,12 @@ impl Render for TerminalView {
                     );
                     return;
                 };
-                // Movement inside the cell the press landed in is not yet a
-                // drag; a selection that has already left it stays live even
-                // when the pointer comes back, so it can be shrunk again.
-                if !drag.moved && cell == drag.anchor {
-                    return;
-                }
-                view.drag = Some(Drag {
-                    anchor: drag.anchor,
-                    moved: true,
-                });
-                view.pending_link_click = None;
-                view.send(TerminalCommand::Select {
-                    anchor: drag.anchor,
-                    head: cell,
-                    mode: SelectionMode::Character,
-                    rectangle: false,
-                });
+                view.drag_to(event.position, window, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseUpEvent, _window, _cx| {
+                    view.stop_edge_scroll();
                     if view.link_click.is_modified() {
                         view.link_click.cancel();
                         return;

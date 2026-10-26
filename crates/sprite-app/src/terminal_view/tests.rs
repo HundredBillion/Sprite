@@ -841,6 +841,191 @@ fn pointer_selection_keeps_shift_override_and_click_drag_semantics(cx: &mut gpui
 }
 
 #[gpui::test]
+fn dragging_above_the_grid_scrolls_history_and_extends_selection(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "seq 1 100; sleep 30".into(),
+            ]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let before = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows.iter().any(|row| row.text.contains("100"))
+        });
+        focus_and_draw(&view, cx);
+        let (start, above) = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let height = view.metrics.height();
+            let width = view.metrics.width();
+            (
+                gpui::point(origin.x + width * 0.5, origin.y + height * 0.5),
+                gpui::point(origin.x + width * 0.5, origin.y - height * 2.0),
+            )
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(above, Some(MouseButton::Left), Modifiers::default());
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.drag.is_some_and(|drag| drag.moved),
+                "drag did not reach the pane"
+            );
+            assert!(view.edge_scroll_target.is_some(), "edge was not armed");
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let after = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows[0].text != before.pane.rows[0].text
+        });
+        assert!(after.render.rows[0].cells.iter().any(|cell| cell.selected));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let continued = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows[0].text != after.pane.rows[0].text
+        });
+        assert!(
+            continued.render.rows[0]
+                .cells
+                .iter()
+                .any(|cell| cell.selected)
+        );
+        let below = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let height = view.metrics.height();
+            let rows = view.size.unwrap().rows();
+            gpui::point(start.x, origin.y + height * (f32::from(rows) + 2.0))
+        });
+        cx.simulate_mouse_move(below, Some(MouseButton::Left), Modifiers::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let reversed = wait_for_bundle(&view, cx, |bundle| {
+            bundle.render.viewport.offset > continued.render.viewport.offset
+        });
+        cx.simulate_mouse_move(start, Some(MouseButton::Left), Modifiers::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        let stopped = view.read_with(cx, |view, _| view.bundle.clone().unwrap());
+        assert_eq!(stopped.pane.rows[0].text, reversed.pane.rows[0].text);
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::default());
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[gpui::test]
+fn dragging_below_the_grid_scrolls_toward_live_output_until_release(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "seq 1 100; sleep 30".into(),
+            ]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let live = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows.iter().any(|row| row.text.contains("100"))
+        });
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Scroll(sprite_term::Scroll::Delta(-5)))
+        });
+        let before = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows[0].text != live.pane.rows[0].text
+        });
+        focus_and_draw(&view, cx);
+        let (start, below) = view.read_with(cx, |view, _| {
+            let origin = view.content_origin.unwrap_or(view.origin);
+            let height = view.metrics.height();
+            let width = view.metrics.width();
+            let rows = view.size.unwrap().rows();
+            (
+                gpui::point(
+                    origin.x + width * 0.5,
+                    origin.y + height * (f32::from(rows) - 0.5),
+                ),
+                gpui::point(
+                    origin.x + width * 0.5,
+                    origin.y + height * (f32::from(rows) + 2.0),
+                ),
+            )
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(below, Some(MouseButton::Left), Modifiers::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let after = wait_for_bundle(&view, cx, |bundle| {
+            bundle.pane.rows[0].text != before.pane.rows[0].text
+        });
+        assert!(
+            after
+                .render
+                .rows
+                .last()
+                .unwrap()
+                .cells
+                .iter()
+                .any(|cell| cell.selected)
+        );
+        cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::default());
+        view.read_with(cx, |view, _| {
+            assert!(view.drag.is_none());
+            assert!(view.edge_scroll_target.is_none());
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        let stopped = view.read_with(cx, |view, _| view.bundle.clone().unwrap());
+        assert_eq!(stopped.pane.rows[0].text, after.pane.rows[0].text);
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[gpui::test]
 fn buttonless_reporting_preserves_hyperlink_hover_and_owns_plain_clicks(
     cx: &mut gpui::TestAppContext,
 ) {
