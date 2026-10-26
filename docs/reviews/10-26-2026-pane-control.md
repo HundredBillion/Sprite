@@ -57,10 +57,24 @@ observed failing before their implementation, then passing. During incremental
 implementation the application library reached 859 passing tests. Expanded
 public acceptance checks passed before final toolchain verification.
 
-Final workspace results and independent review are recorded after they run;
-this document is not evidence of checks that have not finished. Live desktop
-interaction has not been claimed; UI actions and hosted Surface behavior are
-covered under GPUI's test platform.
+Final verification on Rust/Cargo 1.97.1 and Clippy 0.1.97:
+
+| Check | Result |
+| --- | --- |
+| Full workspace tests and doctests | 1,209 passed, zero failed, seven ignored across 49 result groups; exit 0. |
+| Public acceptance, grammar and property checks | 22 passed; reviewer independently reran the same checks successfully. |
+| `cargo fmt --all -- --check` | Exit 0. |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | Exit 0. |
+| `python3 scripts/check_findings.py` | Every finding is guarded by a test or tracked by an issue. |
+| `python3 scripts/check_gpui_patch.py` | GPUI archive checksum and exact patched source verified. |
+| `git diff --check` | Exit 0. |
+
+The independent final review examined `921db1b..fac12f4`, rechecked the affected
+consumers and reproduced the 22 passing public tests. Verdict: ready to merge
+once full gates finish; those gates subsequently passed. No unresolved Critical,
+Important or Minor findings remain. The subsequent commit updates delivery docs
+only. Live desktop interaction has not been claimed; UI actions and hosted
+Surface behavior are covered under GPUI's test platform.
 
 ## Independent review fixes
 

@@ -130,17 +130,19 @@ fn moving_between_background_tabs_retains_the_payload() {
 
 **Interfaces:** Consumes the documented client/protocol and real Workspace. Produces recorded acceptance evidence and user documentation.
 
-- [ ] Build a test harness that runs the public client on a worker while the GPUI test executor drains Workspace messages. Approve only via the same owner action used by the UI. Assert protocol results and observable pane content/identity, without mocking a second mutation engine.
-- [ ] Exercise the PRD's 12 acceptance scenarios, including human/background panes, all Surface presentations, two windows, revoked access, session-preserving move, stale IDs, close/control races and resource saturation.
-- [ ] Write runnable CLI examples for grant, create/read/rename/move/focus/resize/close, per-kind capabilities, separate input, revocation, unknown outcomes and cleanup semantics.
-- [ ] Run `cargo fmt --all -- --check`, `cargo test --workspace --locked --offline --no-fail-fast`, and `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`. Record failures explicitly if platform/environment prevents a gate.
-- [ ] Commit `test: verify and document the public pane control workflow`.
-- [ ] Request an independent whole-branch review using the PRD, TSP and ledger; fix substantive findings and rerun affected checks. Keep issue open until implementation and verification are complete.
+- [x] Build a test harness that runs the public client on a worker while the GPUI test executor drains Workspace messages. Approve only via the same owner action used by the UI. Assert protocol results and observable pane content/identity, without mocking a second mutation engine.
+- [x] Exercise the PRD's 12 acceptance scenarios, including human/background panes, all Surface presentations, two windows, revoked access, session-preserving move, stale IDs, close/control races and resource saturation.
+- [x] Write runnable CLI examples for grant, create/read/rename/move/focus/resize/close, per-kind capabilities, separate input, revocation, unknown outcomes and cleanup semantics.
+- [x] Run `cargo fmt --all -- --check`, `cargo test --workspace --locked --offline --no-fail-fast`, and `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`. Record failures explicitly if platform/environment prevents a gate.
+- [x] Commit `test: verify and document the public pane control workflow`.
+- [x] Request an independent whole-branch review using the PRD, TSP and ledger; fix substantive findings and rerun affected checks. Keep issue open until implementation and verification are complete.
 
 ## Source chain and stress-test record
 
-GPUI is declared as 0.2.2 and patched to `vendor/gpui`; vendored source is authoritative for the patch. Existing `workspace/lane_drain.rs`, GPUI `Window::activate_window` and `Div::on_click` are the local interfaces used for draining, activation and owner buttons. Compile and GPUI acceptance tests verify compatibility before any completion claim.
+GPUI is declared as 0.2.2 and patched to `vendor/gpui`; vendored source is authoritative for the patch. Existing `workspace/lane_drain.rs`, GPUI `Window::activate_window` and `Div::on_mouse_down` are the local interfaces used for draining, activation and owner buttons. Compile and GPUI acceptance tests verify compatibility before any completion claim.
 
 Grilling found no requirement requiring another owner decision. The approved scope settles the alternatives: separate endpoint, per-window grants, no cross-window moves, distinct input. Specific probes are assigned above for forged requester IDs, move/exit membership, revocation at confirmation, background resize and final-pane teardown. Public protocol tests must demonstrate behavior; pure policy/parser tests alone do not establish completion.
 
 Execution: inline in the existing isolated worktree; use one independent final reviewer as required by executing-plans. No additional approval gate is needed for routine implementation details within the approved PRD.
+
+Completion: production implementation reviewed at `fac12f4`. Full pinned-toolchain workspace verification: 1,209 passed, zero failed, seven ignored; formatting and Clippy pass. See the evidence report for commands and review outcomes.

@@ -247,8 +247,9 @@ tree mechanics rather than reproducing those suites.
 12. Preserve ordinary keyboard split, focus, tab rename, divider dragging,
     unsafe-paste confirmation, pane close and quit behavior.
 
-Before implementation: owner reviews this design, stress-test it with
-`grill-with-docs`, record accepted decisions, and write a focused TSP against
-the resulting interfaces. Initialize the pinned Ghostty submodule and run the
-workspace baseline before changing production code. This planning step has not
-run a build, tests, or a live workflow and provides no implementation evidence.
+Delivery record: the owner approved this design on 2026-10-26. The focused TSP,
+ADR 0034, implementation, public workflow checks and independent review are
+complete in the isolated feature worktree. See
+`docs/reviews/10-26-2026-pane-control.md` for verification and review evidence,
+and `docs/pane-control.md` for the public contract. Desktop interaction is tested
+under GPUI's test platform; no manual desktop run is claimed.
