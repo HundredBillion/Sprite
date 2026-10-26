@@ -373,6 +373,7 @@ impl Workspace {
     }
 
     fn refresh_layout(&mut self, cx: &mut Context<Self>) {
+        self.prune_control_labels();
         self.refresh_titles(cx);
         let (width, height, strip) = self.cached_pane_area();
         let placements: Vec<PanePlacement> = self

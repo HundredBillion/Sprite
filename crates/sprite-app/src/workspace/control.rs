@@ -53,6 +53,10 @@ impl ControlState {
 }
 
 impl Workspace {
+    pub(super) fn prune_control_labels(&mut self) {
+        self.control.labels.retain(|pane, _| self.tabs.get(*pane).is_some());
+    }
+
     pub(super) fn expire_control(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         if self.control.pending.as_ref().is_some_and(|p| now >= p.expires) {
@@ -125,6 +129,7 @@ impl Workspace {
         let tree = self.tabs.tree(tab)?;
         let (_, rect, handle) = tree.layout().into_iter().find(|(id, _, _)| *id == pane)?;
         let (width, height, _) = self.cached_pane_area();
+        let allocated = pane_allocation(self.viewport, self.tabs.len(), rect);
         let info = match handle.view().downcast::<TerminalView>() {
             Ok(terminal) => terminal.read(cx).control_info(),
             Err(_) => json!({"kind": "hosted", "terminal_read": false, "terminal_input": false, "native_content": "unavailable"}),
@@ -134,7 +139,7 @@ impl Workspace {
             "label": self.control.labels.get(&pane), "child_title": handle.title(cx).map(|s| s.to_string()),
             "tab_name": self.tabs.name(tab), "current": tree.focus() == Some(pane),
             "visible": self.tabs.active_tab() == Some(tab),
-            "geometry": {"x": rect.x * width, "y": rect.y * height, "width": rect.width * width, "height": rect.height * height},
+            "geometry": {"x": rect.x * width, "y": rect.y * height, "width": f32::from(allocated.width), "height": f32::from(allocated.height)},
             "content": info,
             "capabilities": ["read_metadata", "rename", "move", "focus", "resize_divider", "close"]
         }))
@@ -249,7 +254,15 @@ impl Workspace {
                     self.after_close(cx);
                     Ok(json!({"pane": request.operation.pane(), "removed": true, "cleanup": "scheduled"}))
                 }
-                Operation::Input { .. } => Err("unsupported"),
+                Operation::Input { text, .. } => {
+                    let pane = pane.ok_or("denied")?;
+                    let view = self.tabs.get(pane).ok_or("gone")?.view().downcast::<TerminalView>().map_err(|_| "unsupported")?;
+                    if !confirmed && let Some(text) = text && sprite_term::unbracketed_paste_requires_confirmation(text) {
+                        return self.confirm_control(grant, request, format!("Send this text to terminal pane {}? {}", pane.0, text.escape_debug()));
+                    }
+                    view.update(cx, |view, _| view.control_input(&request.operation, confirmed))?;
+                    Ok(json!({"pane": self.pane_address(pane), "input": "admitted", "target": "terminal"}))
+                }
             }
         })();
         cx.notify();

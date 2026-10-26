@@ -66,3 +66,8 @@ pub(crate) fn new_terminal<'alloc: 'cb, 'cb>(
     terminal.set_scrollback_max_bytes(Some(scrollback_bytes))?;
     Ok(terminal)
 }
+
+/// Whether text requires confirmation without relying on a terminal's current paste mode.
+pub fn unbracketed_paste_requires_confirmation(text: &str) -> bool {
+    !libghostty_vt::paste::is_safe(text)
+}

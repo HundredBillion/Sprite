@@ -580,8 +580,8 @@ impl<T> PaneTree<T> {
             return None;
         }
         let content = content();
-        let root = self.root.take()?;
-        self.root = Some(root.split_leaf(focus, new_pane, orientation, content));
+        let side = match orientation { Orientation::Horizontal => Direction::Right, Orientation::Vertical => Direction::Down };
+        self.insert_beside(focus, new_pane, side, content);
         self.focus = Some(new_pane);
         Some(new_pane)
     }
