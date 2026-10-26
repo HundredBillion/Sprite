@@ -1,4 +1,6 @@
 use crate::{ColorDefaults, CursorDefaults, ValidTerminalSize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 /// The largest accepted raw `Input` payload. Checkpoint 2 chunks paste through
 /// this same limit rather than raising it.
 pub(crate) const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -47,6 +49,39 @@ pub struct CellPosition {
     pub row: u16,
     pub column: u16,
 }
+
+/// Cancels scroll commands already queued for one pointer drag.
+#[derive(Clone, Debug)]
+pub struct SelectionDragToken(Arc<AtomicBool>);
+
+impl SelectionDragToken {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Default for SelectionDragToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for SelectionDragToken {
+    fn eq(&self, other: &Self) -> bool {
+        // Command equality must not change when a drag is cancelled.
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for SelectionDragToken {}
 
 /// How far a selection gesture expands from where it landed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,6 +154,15 @@ pub enum TerminalCommand {
     Input(Vec<u8>),
     Resize(ValidTerminalSize),
     Scroll(Scroll),
+    /// Move the viewport and extend the active drag in one admitted command.
+    /// A release after admission must not leave newly revealed text unselected.
+    /// Cancelling the token skips a command still waiting in the worker queue.
+    ScrollAndSelect {
+        rows: i32,
+        anchor: CellPosition,
+        head: CellPosition,
+        token: SelectionDragToken,
+    },
     /// Replace the selection. Selection lives here rather than in the
     /// application because libghostty models it over the whole screen including
     /// scrollback, and because a cell is only reported as selected when the

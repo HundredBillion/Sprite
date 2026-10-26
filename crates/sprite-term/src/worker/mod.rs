@@ -22,8 +22,8 @@ use crate::pty_unix;
 use crate::pty_unix::Pump;
 use crate::snapshot::Projector;
 use crate::{
-    ChildExit, Scroll, SessionConfig, SessionError, SnapshotBundle, TerminalCommand, TerminalEvent,
-    ValidTerminalSize,
+    ChildExit, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle, TerminalCommand,
+    TerminalEvent, ValidTerminalSize,
 };
 
 pub(crate) mod closing;
@@ -586,6 +586,28 @@ impl Session {
                             libghostty_vt::terminal::ScrollViewport::Delta(rows as isize)
                         }
                     });
+                    pending.mutated();
+                }
+                TerminalCommand::ScrollAndSelect {
+                    rows,
+                    anchor,
+                    head,
+                    token,
+                } => {
+                    if token.is_cancelled() {
+                        return Continue(());
+                    }
+                    terminal.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
+                        rows as isize,
+                    ));
+                    let anchor = match selection_anchor.as_ref() {
+                        Some(tracked) => SelectionAnchor::Tracked(tracked),
+                        None => SelectionAnchor::Cell(anchor),
+                    };
+                    match apply_selection(terminal, anchor, head, SelectionMode::Character, false) {
+                        Ok(installed) => *has_selection = installed,
+                        Err(error) => emit(events, TerminalEvent::Error(error))?,
+                    }
                     pending.mutated();
                 }
                 TerminalCommand::Wheel(event) => {
