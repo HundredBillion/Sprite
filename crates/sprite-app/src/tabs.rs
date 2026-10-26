@@ -229,10 +229,15 @@ impl<T> Tabs<T> {
         self.tabs[index].1.set_divider_ratio(pane, direction, ratio)
     }
 
-    pub(crate) fn was_allocated(&self, pane: PaneId) -> bool { self.panes.was_allocated(pane) }
+    pub(crate) fn was_allocated(&self, pane: PaneId) -> bool {
+        self.panes.was_allocated(pane)
+    }
 
     pub fn tab_of(&self, pane: PaneId) -> Option<TabId> {
-        self.tabs.iter().find(|(_, tree)| tree.contains(pane)).map(|(tab, _)| *tab)
+        self.tabs
+            .iter()
+            .find(|(_, tree)| tree.contains(pane))
+            .map(|(tab, _)| *tab)
     }
 
     pub fn get(&self, pane: PaneId) -> Option<&T> {
@@ -240,11 +245,17 @@ impl<T> Tabs<T> {
     }
 
     pub fn tree(&self, tab: TabId) -> Option<&PaneTree<T>> {
-        self.tabs.iter().find(|(id, _)| *id == tab).map(|(_, tree)| tree)
+        self.tabs
+            .iter()
+            .find(|(id, _)| *id == tab)
+            .map(|(_, tree)| tree)
     }
 
     pub fn tree_mut(&mut self, tab: TabId) -> Option<&mut PaneTree<T>> {
-        self.tabs.iter_mut().find(|(id, _)| *id == tab).map(|(_, tree)| tree)
+        self.tabs
+            .iter_mut()
+            .find(|(id, _)| *id == tab)
+            .map(|(_, tree)| tree)
     }
 
     pub fn insert_beside(
@@ -256,12 +267,15 @@ impl<T> Tabs<T> {
         let tab = self.tab_of(anchor)?;
         let pane = self.panes.allocate();
         let content = content(tab, pane);
-        self.tree_mut(tab)?.insert_beside(anchor, pane, direction, content);
+        self.tree_mut(tab)?
+            .insert_beside(anchor, pane, direction, content);
         Some(pane)
     }
 
     pub fn move_pane(&mut self, pane: PaneId, destination: Option<(PaneId, Direction)>) -> bool {
-        let Some(source) = self.tab_of(pane) else { return false; };
+        let Some(source) = self.tab_of(pane) else {
+            return false;
+        };
         let target = match destination {
             Some((anchor, _)) if anchor == pane => return false,
             Some((anchor, _)) => match self.tab_of(anchor) {
@@ -270,7 +284,9 @@ impl<T> Tabs<T> {
             },
             None => None,
         };
-        let Some(content) = self.close_pane(source, pane) else { return false; };
+        let Some(content) = self.close_pane(source, pane) else {
+            return false;
+        };
         match (destination, target) {
             (Some((anchor, side)), Some(tab)) => {
                 if let Some(tree) = self.tree_mut(tab) {
@@ -281,7 +297,9 @@ impl<T> Tabs<T> {
                 let tab = TabId(self.next_tab);
                 self.next_tab += 1;
                 self.tabs.push((tab, PaneTree::new(pane, content)));
-                if self.active.is_none() { self.active = Some(tab); }
+                if self.active.is_none() {
+                    self.active = Some(tab);
+                }
             }
         }
         true

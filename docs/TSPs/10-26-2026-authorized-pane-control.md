@@ -1,6 +1,6 @@
 # Authorized Pane Control Technical Spec
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use dmi-superpowers:executing-plans to implement this TSP task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use dmi-superpowers:executing-plans to implement this TSP task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Deliver issue #106's public pane CRUD workflow with explicit, revocable owner grants.
 
@@ -45,7 +45,7 @@
 - Produces addressed `Tabs::tab_of(PaneId) -> Option<TabId>`, `Tabs::get(PaneId) -> Option<&T>`, `Tabs::insert_beside(PaneId, Direction, impl FnOnce(TabId, PaneId) -> T) -> Option<PaneId>`, `Tabs::move_pane(PaneId, Option<(PaneId, Direction)>) -> bool`.
 - Produces `Tabs::tree(TabId) -> Option<&PaneTree<T>>`, `tree_mut`, and observation membership publication `WindowPanes::set_tab(PaneId, TabId)`.
 
-- [ ] Add one failing ownership test before implementing movement:
+- [x] Add one failing ownership test before implementing movement:
 
 ```rust
 #[test]
@@ -61,10 +61,10 @@ fn moving_between_background_tabs_retains_the_payload() {
 }
 ```
 
-- [ ] Run `cargo test -p sprite-app --lib moving_between_background_tabs --locked --offline`; expect missing addressed methods before implementation, then one passing test.
-- [ ] Add leaf insertion that preserves current focus; validate both IDs before removing a move source. Insert transferred payload with the same ID; allocate a tab only for new-tab moves. Make existing split delegate to the same leaf insertion mechanism.
-- [ ] Publish current tab membership before layout, retaining command sender and capture waiters. Change `close_exited_pane` to resolve the current tab by PaneId, ignoring the original captured tab.
-- [ ] Run existing tabs/tree/observation and workspace close tests. Commit `feat: address and move panes without replacing sessions`.
+- [x] Run `cargo test -p sprite-app --lib moving_between_background_tabs --locked --offline`; expect missing addressed methods before implementation, then one passing test.
+- [x] Add leaf insertion that preserves current focus; validate both IDs before removing a move source. Insert transferred payload with the same ID; allocate a tab only for new-tab moves. Make existing split delegate to the same leaf insertion mechanism.
+- [x] Publish current tab membership before layout, retaining command sender and capture waiters. Change `close_exited_pane` to resolve the current tab by PaneId, ignoring the original captured tab.
+- [x] Run existing tabs/tree/observation and workspace close tests. Commit `feat: address and move panes without replacing sessions`.
 
 ## Task 2: Public protocol, grant endpoint and client
 
@@ -81,12 +81,12 @@ fn moving_between_background_tabs_retains_the_payload() {
 - `ControlMessage { grant: u64, request: Request, reply: Relayed<Response>, connection: Option<ReplyConnection> }`.
 - `Invocation::PaneControl(control::client::Args)`; parser and client share typed operations.
 
-- [ ] Add a public CLI test that parses `panes list --access /tmp/access.json` and rejects unknown/duplicate flags.
-- [ ] Run `cargo test -p sprite-app --lib control --locked --offline` before implementing; observe failure.
-- [ ] Implement serde-tagged operations with denied unknown fields, size/label/key checks and strict version/window validation. Render stable JSON outcomes; do not log tokens. Use `LocalSocket::open_in` with a fresh key per grant and existing transport caps/timeouts.
-- [ ] Handle `panes access request` on the authenticated observation adapter before snapshot parsing. Queue at most one pending approval; use a 60-second reply deadline. Read-only credentials can request but cannot approve.
-- [ ] Implement `--access` descriptor loading, repeated descriptors plus explicit `--window`, exclusive owner-only output file creation, bounded replies, nonzero refusal exits, and outcome-unknown transport reporting after a sent mutation.
-- [ ] Run public grammar/client tests and existing CLI tests. Commit `feat: add public pane control protocol and client`.
+- [x] Add a public CLI test that parses `panes list --access /tmp/access.json` and rejects unknown/duplicate flags.
+- [x] Run `cargo test -p sprite-app --lib control --locked --offline` before implementing; observe failure.
+- [x] Implement serde-tagged operations with denied unknown fields, size/label/key checks and strict version/window validation. Render stable JSON outcomes; do not log tokens. Use `LocalSocket::open_in` with a fresh key per grant and existing transport caps/timeouts.
+- [x] Handle `panes access request` on the authenticated observation adapter before snapshot parsing. Queue at most one pending approval; use a 60-second reply deadline. Read-only credentials can request but cannot approve.
+- [x] Implement `--access` descriptor loading, repeated descriptors plus explicit `--window`, exclusive owner-only output file creation, bounded replies, nonzero refusal exits, and outcome-unknown transport reporting after a sent mutation.
+- [x] Run public grammar/client tests and existing CLI tests. Commit `feat: add public pane control protocol and client`.
 
 ## Task 3: Owner approval and addressed CRUD
 
@@ -100,12 +100,12 @@ fn moving_between_background_tabs_retains_the_payload() {
 - `Workspace::revoke_control(u64, &mut Context<Self>)` removes endpoint and grant.
 - `Workspace::control_elements(&mut Context<Self>) -> Vec<gpui::AnyElement>` renders pending approval, grant controls and operation confirmations.
 
-- [ ] Add public request test: observation credential alone cannot label a pane; pending access leaves it unchanged; explicit owner approval permits the same operation.
-- [ ] Run control acceptance test red, then implement pending access and visible Allow/Deny actions. Keep a Pane Access button visible while grants exist, offering revoke and remove-manage/remove-input. Display claimed requester identity as unverified.
-- [ ] Drain a bounded operation lane with existing `lane_drain`. Claim each request, recheck live grant and permissions, then execute on GPUI. Use window-incarnation/pane addresses and never temporary focus switches for background mutations.
-- [ ] Implement inventory/read metadata, separate pane labels, configured-shell creation, identity-preserving move, explicit focus and persistent divider resize. Admission checks count live panes and unfinished cleanups. Return exact clamped allocations.
-- [ ] Implement target-specific busy close confirmation with explicit UI decision and expiry. A repeated request cannot confirm. Recheck target/permission at approval, then use existing shutdown and after-close behavior. Preserve final reply connection while canceling endpoints.
-- [ ] Test all-panes/fixed scopes, future panes, wrong/stale addresses, revoke-before-execute, close races and redraw persistence. Commit `feat: grant and execute authorized pane management`.
+- [x] Add public request test: observation credential alone cannot label a pane; pending access leaves it unchanged; explicit owner approval permits the same operation.
+- [x] Run control acceptance test red, then implement pending access and visible Allow/Deny actions. Keep a Pane Access button visible while grants exist, offering revoke and remove-manage/remove-input. Display claimed requester identity as unverified.
+- [x] Drain a bounded operation lane with existing `lane_drain`. Claim each request, recheck live grant and permissions, then execute on GPUI. Use window-incarnation/pane addresses and never temporary focus switches for background mutations.
+- [x] Implement inventory/read metadata, separate pane labels, configured-shell creation, identity-preserving move, explicit focus and persistent divider resize. Admission checks count live panes and unfinished cleanups. Return exact clamped allocations.
+- [x] Implement target-specific busy close confirmation with explicit UI decision and expiry. A repeated request cannot confirm. Recheck target/permission at approval, then use existing shutdown and after-close behavior. Preserve final reply connection while canceling endpoints.
+- [x] Test all-panes/fixed scopes, future panes, wrong/stale addresses, revoke-before-execute, close races and redraw persistence. Commit `feat: grant and execute authorized pane management`.
 
 ## Task 4: Supported content and distinct terminal input
 
@@ -117,10 +117,10 @@ fn moving_between_background_tabs_retains_the_payload() {
 - `TerminalView::control_input(&Operation, &mut Context<Self>) -> Result<(), &'static str>` validates terminal input and uses existing session command admission.
 - Generic panes advertise unsupported terminal read/input; TerminalView advertises terminal state plus hosted Surface presentation, without leaking editor/native documents.
 
-- [ ] Add public test: manage without input cannot type, input without manage cannot close; unsupported pane content/input returns `unsupported`.
-- [ ] Run red, then route text through `TerminalCommand::Paste`, honoring unsafe-paste confirmation; map documented keys through terminal key encoding rather than hard-coded escape guesses. Never route keys to Surface ownership/event channels.
-- [ ] Make unsafe input confirmation target/grant-specific and recheck at approval. Existing terminal pending-paste state must not let a later agent request confirm itself.
-- [ ] Verify Surface-backed panes retain CRUD and underlying terminal text while declaring native content unavailable. Commit `feat: expose separately authorized terminal input`.
+- [x] Add public test: manage without input cannot type, input without manage cannot close; unsupported pane content/input returns `unsupported`.
+- [x] Run red, then route text through `TerminalCommand::Paste`, honoring unsafe-paste confirmation; map documented keys through terminal key encoding rather than hard-coded escape guesses. Never route keys to Surface ownership/event channels.
+- [x] Make unsafe input confirmation target/grant-specific and recheck at approval. Existing terminal pending-paste state must not let a later agent request confirm itself.
+- [x] Verify Surface-backed panes retain CRUD and underlying terminal text while declaring native content unavailable. Commit `feat: expose separately authorized terminal input`.
 
 ## Task 5: Public workflow evidence, docs and branch review
 

@@ -31,24 +31,66 @@ pub struct Request {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     List,
-    Read { pane: String, #[serde(default)] lines: Option<usize> },
-    Create { #[serde(default)] beside: Option<String>, #[serde(default)] side: Option<Side> },
-    Rename { pane: String, label: Option<String> },
-    Move { pane: String, #[serde(default)] beside: Option<String>, #[serde(default)] side: Option<Side> },
-    Focus { pane: String },
-    Resize { pane: String, side: Side, pixels: u32 },
-    Close { pane: String },
-    Input { pane: String, #[serde(default)] text: Option<String>, #[serde(default)] key: Option<String> },
+    Read {
+        pane: String,
+        #[serde(default)]
+        lines: Option<usize>,
+    },
+    Create {
+        #[serde(default)]
+        beside: Option<String>,
+        #[serde(default)]
+        side: Option<Side>,
+    },
+    Rename {
+        pane: String,
+        label: Option<String>,
+    },
+    Move {
+        pane: String,
+        #[serde(default)]
+        beside: Option<String>,
+        #[serde(default)]
+        side: Option<Side>,
+    },
+    Focus {
+        pane: String,
+    },
+    Resize {
+        pane: String,
+        side: Side,
+        pixels: u32,
+    },
+    Close {
+        pane: String,
+    },
+    Input {
+        pane: String,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        key: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum Side { Left, Right, Up, Down }
+pub enum Side {
+    Left,
+    Right,
+    Up,
+    Down,
+}
 
 impl Side {
     pub(crate) fn direction(self) -> crate::pane_tree::Direction {
         use crate::pane_tree::Direction;
-        match self { Self::Left => Direction::Left, Self::Right => Direction::Right, Self::Up => Direction::Up, Self::Down => Direction::Down }
+        match self {
+            Self::Left => Direction::Left,
+            Self::Right => Direction::Right,
+            Self::Up => Direction::Up,
+            Self::Down => Direction::Down,
+        }
     }
 }
 
@@ -56,19 +98,39 @@ impl Operation {
     pub(crate) fn pane(&self) -> Option<&str> {
         match self {
             Self::List | Self::Create { .. } => None,
-            Self::Read { pane, .. } | Self::Rename { pane, .. } | Self::Move { pane, .. }
-            | Self::Focus { pane } | Self::Resize { pane, .. } | Self::Close { pane }
+            Self::Read { pane, .. }
+            | Self::Rename { pane, .. }
+            | Self::Move { pane, .. }
+            | Self::Focus { pane }
+            | Self::Resize { pane, .. }
+            | Self::Close { pane }
             | Self::Input { pane, .. } => Some(pane),
         }
     }
     pub(crate) fn valid(&self) -> bool {
         match self {
-            Self::Rename { label, .. } => label.as_ref().is_none_or(|s| s.len() <= 256 && !s.chars().any(char::is_control)),
+            Self::Rename { label, .. } => label
+                .as_ref()
+                .is_none_or(|s| s.len() <= 256 && !s.chars().any(char::is_control)),
             Self::Resize { .. } => true,
-            Self::Create { beside, side } | Self::Move { beside, side, .. } => beside.is_some() == side.is_some(),
+            Self::Create { beside, side } | Self::Move { beside, side, .. } => {
+                beside.is_some() == side.is_some()
+            }
             Self::Input { text, key, .. } => match (text, key) {
                 (Some(text), None) => !text.is_empty() && text.len() <= 4096,
-                (None, Some(key)) => matches!(key.as_str(), "enter" | "tab" | "escape" | "backspace" | "up" | "down" | "left" | "right" | "ctrl-c" | "ctrl-d"),
+                (None, Some(key)) => matches!(
+                    key.as_str(),
+                    "enter"
+                        | "tab"
+                        | "escape"
+                        | "backspace"
+                        | "up"
+                        | "down"
+                        | "left"
+                        | "right"
+                        | "ctrl-c"
+                        | "ctrl-d"
+                ),
                 _ => false,
             },
             Self::List | Self::Read { .. } | Self::Focus { .. } | Self::Close { .. } => true,
@@ -79,11 +141,16 @@ impl Operation {
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AccessRequest {
-    #[serde(default)] pub all_panes: bool,
-    #[serde(default)] pub panes: BTreeSet<u64>,
-    #[serde(default)] pub manage: bool,
-    #[serde(default)] pub input: bool,
-    #[serde(default)] pub from: Option<u64>,
+    #[serde(default)]
+    pub all_panes: bool,
+    #[serde(default)]
+    pub panes: BTreeSet<u64>,
+    #[serde(default)]
+    pub manage: bool,
+    #[serde(default)]
+    pub input: bool,
+    #[serde(default)]
+    pub from: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -96,22 +163,39 @@ pub struct Descriptor {
 }
 
 pub(crate) enum Message {
-    Access { request: AccessRequest, reply: Relayed<Value> },
-    Control { grant: u64, request: Request, reply: Relayed<Value>, connection: Option<ReplyConnection> },
+    Access {
+        request: AccessRequest,
+        reply: Relayed<Value>,
+    },
+    Control {
+        grant: u64,
+        request: Request,
+        reply: Relayed<Value>,
+        connection: Option<ReplyConnection>,
+    },
 }
 
 pub(crate) fn response(id: &str, outcome: &str, result: Value) -> Value {
     json!({"protocol": PROTOCOL, "id": id, "outcome": outcome, "result": result})
 }
 
-pub(crate) fn failure(id: &str, outcome: &str) -> Value { response(id, outcome, Value::Null) }
+pub(crate) fn failure(id: &str, outcome: &str) -> Value {
+    response(id, outcome, Value::Null)
+}
 
 pub(crate) fn ask_access(sender: &async_channel::Sender<Message>, body: &str) -> String {
     let request = serde_json::from_str::<AccessRequest>(body);
     let answer = match request {
-        Ok(request) if request.all_panes != !request.panes.is_empty() && request.panes.len() <= MAX_PANES => {
-            relay(sender, Patience::new(Duration::from_secs(ACCESS_SECONDS + 2)), |reply| Message::Access { request, reply })
-                .unwrap_or_else(|error| relay_failure("access", error))
+        Ok(request)
+            if request.all_panes != !request.panes.is_empty()
+                && request.panes.len() <= MAX_PANES =>
+        {
+            relay(
+                sender,
+                Patience::new(Duration::from_secs(ACCESS_SECONDS + 2)),
+                |reply| Message::Access { request, reply },
+            )
+            .unwrap_or_else(|error| relay_failure("access", error))
         }
         _ => failure("access", "invalid_request"),
     };
@@ -119,11 +203,14 @@ pub(crate) fn ask_access(sender: &async_channel::Sender<Message>, body: &str) ->
 }
 
 fn relay_failure(id: &str, error: RelayError) -> Value {
-    failure(id, match error {
-        RelayError::Applying => "outcome_unknown",
-        RelayError::Disconnected => "closing",
-        RelayError::Refused | RelayError::Timeout => "busy",
-    })
+    failure(
+        id,
+        match error {
+            RelayError::Applying => "outcome_unknown",
+            RelayError::Disconnected => "closing",
+            RelayError::Refused | RelayError::Timeout => "busy",
+        },
+    )
 }
 
 pub(crate) fn open_grant(
@@ -135,36 +222,70 @@ pub(crate) fn open_grant(
     let key = Arc::new(ObservationKey::generate()?);
     let key_hex = key.to_hex();
     let policy = TransportPolicy {
-        name: "sprite-control", filename_hex: 24, suffix: ".sock",
-        max_connections: 16, max_first_line: 8192,
+        name: "sprite-control",
+        filename_hex: 24,
+        suffix: ".sock",
+        max_connections: 16,
+        max_first_line: 8192,
         handshake_timeout: crate::timeouts::HANDSHAKE_TIMEOUT,
         write_timeout: crate::timeouts::WRITE_TIMEOUT,
     };
     let expected_window = window.clone();
     let socket = LocalSocket::open_in(
-        crate::local_socket::runtime_directory()?, key, policy,
-        |stream| { writeln!(stream, "{}", failure("", "denied")).ok(); },
+        crate::local_socket::runtime_directory()?,
+        key,
+        policy,
+        |stream| {
+            writeln!(stream, "{}", failure("", "denied")).ok();
+        },
         move |mut connection| {
             let answer = match serde_json::from_str::<Request>(&connection.body) {
-                Ok(request) if request.id.len() <= 64 && request.protocol == PROTOCOL && request.operation.valid() => {
+                Ok(request)
+                    if request.id.len() <= 64
+                        && request.protocol == PROTOCOL
+                        && request.operation.valid() =>
+                {
                     let id = request.id.clone();
-                    let read = match &request.operation {
-                        Operation::Read { pane, lines } => pane.rsplit_once(':').and_then(|(_, local)| local.parse::<u64>().ok()).map(|local| (local, *lines)),
-                        _ => None,
+                    let read = if let Operation::Read { pane, lines } = &request.operation {
+                        pane.rsplit_once(':')
+                            .and_then(|(_, local)| local.parse::<u64>().ok())
+                            .map(|local| (local, *lines))
+                    } else {
+                        None
                     };
                     if request.window != expected_window {
                         failure(&id, "denied")
                     } else {
-                        let mut answer = relay(&sender, Patience::new(crate::timeouts::REPLY_TIMEOUT), |reply| Message::Control {
-                            grant, request, reply, connection: Some(connection.reply_connection.clone()),
-                        }).unwrap_or_else(|error| relay_failure(&id, error));
-                        if answer["outcome"] == "ok" && let Some((local, lines)) = read {
+                        let mut answer = relay(
+                            &sender,
+                            Patience::new(crate::timeouts::REPLY_TIMEOUT),
+                            |reply| Message::Control {
+                                grant,
+                                request,
+                                reply,
+                                connection: Some(connection.reply_connection.clone()),
+                            },
+                        )
+                        .unwrap_or_else(|error| relay_failure(&id, error));
+                        if answer["outcome"] == "ok"
+                            && let Some((local, lines)) = read
+                        {
                             use crate::observation::{broker, request, schema};
-                            let query = request::Query { from: None, scope: request::Scope::Pane(crate::pane_tree::PaneId(local)), lines: sprite_term::HistoryLines::new(lines.unwrap_or(500)), pretty: false };
+                            let query = request::Query {
+                                from: None,
+                                scope: request::Scope::Pane(crate::pane_tree::PaneId(local)),
+                                lines: sprite_term::HistoryLines::new(lines.unwrap_or(500)),
+                                pretty: false,
+                            };
                             match broker::collect(&query, panes.as_ref(), broker::DEADLINE) {
                                 Ok(report) => {
-                                    let encoded = schema::render_limited(&report, false, schema::MAX_RESPONSE_BYTES - 65536);
-                                    answer["result"]["terminal"] = serde_json::from_str(&encoded).unwrap_or(Value::Null);
+                                    let encoded = schema::render_limited(
+                                        &report,
+                                        false,
+                                        schema::MAX_RESPONSE_BYTES - 65536,
+                                    );
+                                    answer["result"]["terminal"] =
+                                        serde_json::from_str(&encoded).unwrap_or(Value::Null);
                                 }
                                 Err(_) => answer = failure(&id, "gone"),
                             }
@@ -177,6 +298,92 @@ pub(crate) fn open_grant(
             writeln!(connection.stream, "{answer}").ok();
         },
     )?;
-    let descriptor = Descriptor { window, grant: grant.to_string(), socket: socket.socket_path().to_path_buf(), key: key_hex };
+    let descriptor = Descriptor {
+        window,
+        grant: grant.to_string(),
+        socket: socket.socket_path().to_path_buf(),
+        key: key_hex,
+    };
     Ok((socket, descriptor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 128, rng_seed: proptest::test_runner::RngSeed::Fixed(106), ..Default::default() })]
+        #[test]
+        fn public_request_round_trip_preserves_unicode_and_delimiters(
+            label in any::<String>(), pane in any::<u64>(),
+        ) {
+            let request = Request { protocol: PROTOCOL.into(), id: "round-trip".into(), window: "window".into(),
+                operation: Operation::Rename { pane: format!("window:{pane}"), label: Some(label) } };
+            let encoded = serde_json::to_string(&request).unwrap();
+            let decoded: Request = serde_json::from_str(&encoded).unwrap();
+            prop_assert_eq!(decoded, request);
+        }
+    }
+
+    #[test]
+    fn public_grammar_rejects_unknown_fields_and_bounds_payloads() {
+        assert!(
+            serde_json::from_value::<Operation>(
+                json!({"op": "close", "pane": "w:0", "force": true})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Operation>(
+                json!({"op": "resize", "pane": "w:0", "side": "right", "pixels": -1})
+            )
+            .is_err()
+        );
+        assert!(
+            Operation::Rename {
+                pane: "w:0".into(),
+                label: Some("é".repeat(128))
+            }
+            .valid()
+        );
+        assert!(
+            !Operation::Rename {
+                pane: "w:0".into(),
+                label: Some("é".repeat(129))
+            }
+            .valid()
+        );
+        assert!(
+            Operation::Input {
+                pane: "w:0".into(),
+                text: Some("x".repeat(4096)),
+                key: None
+            }
+            .valid()
+        );
+        assert!(
+            !Operation::Input {
+                pane: "w:0".into(),
+                text: Some("x".repeat(4097)),
+                key: None
+            }
+            .valid()
+        );
+        assert!(
+            !Operation::Input {
+                pane: "w:0".into(),
+                text: Some("x".into()),
+                key: Some("enter".into())
+            }
+            .valid()
+        );
+        assert!(
+            !Operation::Create {
+                beside: Some("w:0".into()),
+                side: None
+            }
+            .valid()
+        );
+    }
 }

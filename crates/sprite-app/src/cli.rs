@@ -191,7 +191,9 @@ where
             };
             match text(&sub).as_deref() {
                 Some("snapshot") => snapshot(arguments).map(Invocation::Snapshot),
-                Some(other) => crate::control::client::parse(other, arguments).map(Invocation::PaneControl),
+                Some(other) => {
+                    crate::control::client::parse(other, arguments).map(Invocation::PaneControl)
+                }
                 None => Err(UsageError("arguments must be valid text".to_owned())),
             }
         }

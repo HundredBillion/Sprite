@@ -19,9 +19,9 @@ use reload::*;
 mod pane_factory;
 use pane_factory::*;
 mod clock;
+mod control;
 mod lane_drain;
 mod surface_routing;
-mod control;
 use control::ControlState;
 #[cfg(test)]
 mod control_tests;
@@ -328,9 +328,12 @@ impl Workspace {
             }
         });
         let clock = Self::spawn_clock(cx);
-        let control_task = lane_drain::drain_lane(control_receiver, window, cx, Self::serve_control);
+        let control_task =
+            lane_drain::drain_lane(control_receiver, window, cx, Self::serve_control);
         let mut workspace = Self {
-            control: ControlState::new(), control_sender, _control_task: control_task,
+            control: ControlState::new(),
+            control_sender,
+            _control_task: control_task,
             tabs,
             endpoint,
             panes,

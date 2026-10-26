@@ -443,7 +443,9 @@ impl PaneIds {
         Self::default()
     }
 
-    pub(crate) fn was_allocated(&self, pane: PaneId) -> bool { pane.0 < self.next }
+    pub(crate) fn was_allocated(&self, pane: PaneId) -> bool {
+        pane.0 < self.next
+    }
 
     pub fn allocate(&mut self) -> PaneId {
         let id = PaneId(self.next);
@@ -580,7 +582,10 @@ impl<T> PaneTree<T> {
             return None;
         }
         let content = content();
-        let side = match orientation { Orientation::Horizontal => Direction::Right, Orientation::Vertical => Direction::Down };
+        let side = match orientation {
+            Orientation::Horizontal => Direction::Right,
+            Orientation::Vertical => Direction::Down,
+        };
         self.insert_beside(focus, new_pane, side, content);
         self.focus = Some(new_pane);
         Some(new_pane)

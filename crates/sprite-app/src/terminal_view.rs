@@ -947,23 +947,49 @@ impl TerminalView {
 
     /// What this pane is running, asked of the kernel rather than of the
     /// worker — see [`sprite_term::ForegroundWatch`].
-    pub(crate) fn control_input(&mut self, operation: &crate::control::Operation, confirmed: bool) -> Result<(), &'static str> {
-        if !matches!(self.session, SessionState::Running(_)) || self.admission_closed { return Err("closing"); }
-        let command = match operation {
-            crate::control::Operation::Input { text: Some(text), key: None, .. } => {
-                if sprite_term::unbracketed_paste_requires_confirmation(text) && !confirmed { return Err("confirmation_required"); }
-                if confirmed { TerminalCommand::PasteConfirmed(text.clone()) } else { TerminalCommand::Paste(text.clone()) }
+    pub(crate) fn control_input(
+        &mut self,
+        operation: &crate::control::Operation,
+        confirmed: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        if !matches!(self.session, SessionState::Running(_)) || self.admission_closed {
+            return Err("closing");
+        }
+        let crate::control::Operation::Input { text, key, .. } = operation else {
+            return Err("invalid_request");
+        };
+        let command = match (text, key) {
+            (Some(text), None) => {
+                if sprite_term::unbracketed_paste_requires_confirmation(text) && !confirmed {
+                    return Err("confirmation_required");
+                }
+                if confirmed {
+                    TerminalCommand::PasteConfirmed(text.clone())
+                } else {
+                    TerminalCommand::Paste(text.clone())
+                }
             }
-            crate::control::Operation::Input { text: None, key: Some(key), .. } => {
-                let (logical_key, control) = key.strip_prefix("ctrl-").map_or((key.as_str(), false), |key| (key, true));
+            (None, Some(key)) => {
+                let (logical_key, control) = key
+                    .strip_prefix("ctrl-")
+                    .map_or((key.as_str(), false), |key| (key, true));
                 let keystroke = gpui::Keystroke {
-                    key: logical_key.to_owned(), key_char: control.then(|| logical_key.to_owned()),
-                    modifiers: gpui::Modifiers { control, ..Default::default() },
+                    key: logical_key.to_owned(),
+                    key_char: control.then(|| logical_key.to_owned()),
+                    modifiers: gpui::Modifiers {
+                        control,
+                        ..Default::default()
+                    },
                 };
-                TerminalCommand::Key(crate::input::gpui_key_event(&keystroke, sprite_term::KeyAction::Press))
+                TerminalCommand::Key(crate::input::gpui_key_event(
+                    &keystroke,
+                    sprite_term::KeyAction::Press,
+                ))
             }
             _ => return Err("invalid_request"),
         };
+        self.drop_unsafe_paste(cx);
         match self.admit(command) {
             Ok(Admitted::Accepted) => Ok(()),
             Ok(Admitted::Saturated(_)) => Err("busy"),
@@ -974,7 +1000,7 @@ impl TerminalView {
     pub(crate) fn control_info(&self) -> serde_json::Value {
         serde_json::json!({"kind": "terminal", "terminal_read": true, "terminal_input": true,
             "lifecycle": match self.session { SessionState::Running(_) => "running", SessionState::Ended(_) => "ended", SessionState::NeverStarted => "failed" },
-            "surface_count": self.surfaces.iter().count(), "native_content": "unavailable", "input_target": "terminal"})
+            "surface_count": self.surfaces.iter().count(), "surfaces": self.surfaces.iter().map(|surface| surface.control_info()).collect::<Vec<_>>(), "native_content": "unavailable", "input_target": "terminal"})
     }
 
     pub fn foreground(&self) -> sprite_term::ForegroundState {
