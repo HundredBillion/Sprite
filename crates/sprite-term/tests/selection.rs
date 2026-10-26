@@ -11,8 +11,8 @@ mod support;
 use std::ffi::OsString;
 
 use sprite_term::{
-    CellPosition, SelectionMode, SessionConfig, SnapshotBundle, TerminalCommand, TerminalEvent,
-    TerminalSession,
+    CellPosition, SelectionDragToken, SelectionMode, SessionConfig, SnapshotBundle,
+    TerminalCommand, TerminalEvent, TerminalSession,
 };
 
 use support::{EventPump, SnapshotPump, pane_text};
@@ -91,6 +91,81 @@ fn selected_cells_are_marked_in_the_render_projection() {
             .iter()
             .all(|row| row.cells.iter().all(|cell| !cell.selected))
     );
+}
+
+#[test]
+fn scrolling_a_drag_selects_the_newly_revealed_edge_in_one_command() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("seq 1 100; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    let before = snapshots.wait_for("live output", |bundle| {
+        pane_text(bundle).contains("100") && bundle.render.viewport.offset > 0
+    });
+    let edge = at(0, 0);
+    session
+        .send(TerminalCommand::BeginSelection { anchor: edge })
+        .expect("begin drag");
+    let token = SelectionDragToken::new();
+    session
+        .send(TerminalCommand::ScrollAndSelect {
+            rows: -1,
+            anchor: edge,
+            head: edge,
+            token,
+        })
+        .expect("scroll and extend selection");
+    let after = snapshots.wait_for("scrolled selection", |bundle| {
+        bundle.render.viewport.offset < before.render.viewport.offset
+            && bundle.render.rows[0].cells.iter().any(|cell| cell.selected)
+    });
+    assert_eq!(
+        after.render.viewport.offset + 1,
+        before.render.viewport.offset
+    );
+}
+
+#[test]
+fn a_cancelled_drag_cannot_scroll_after_release() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session("seq 1 100; sleep 30");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    let before = snapshots.wait_for("live output", |bundle| {
+        pane_text(bundle).contains("100") && bundle.render.viewport.offset > 0
+    });
+    let edge = at(0, 0);
+    session
+        .send(TerminalCommand::BeginSelection { anchor: edge })
+        .expect("begin drag");
+    let pressed = snapshots.wait_for("pressed anchor", |bundle| {
+        bundle.generation > before.generation
+    });
+    let token = SelectionDragToken::new();
+    token.cancel();
+    session
+        .send(TerminalCommand::ScrollAndSelect {
+            rows: -1,
+            anchor: edge,
+            head: edge,
+            token,
+        })
+        .expect("queue cancelled drag");
+    session
+        .send(TerminalCommand::Scroll(sprite_term::Scroll::Delta(0)))
+        .expect("capture after cancelled drag");
+    let after = snapshots.wait_for("post-cancellation capture", |bundle| {
+        bundle.generation > pressed.generation
+    });
+    assert_eq!(after.render.viewport.offset, pressed.render.viewport.offset);
 }
 
 /// Word selection uses libghostty's own boundaries rather than a rule Sprite

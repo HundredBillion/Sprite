@@ -9,7 +9,9 @@ use std::ops::Range;
 use std::path::Path;
 
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, UTF16Selection, Window, point, px};
-use sprite_term::{CellPosition, MouseAction, MouseEvent, TerminalCommand};
+use sprite_term::{
+    CellPosition, MouseAction, MouseEvent, SelectionDragToken, SelectionMode, TerminalCommand,
+};
 
 use super::surfaces::Body;
 use crate::grid::cell_at;
@@ -145,6 +147,112 @@ pub(crate) struct NativeTextCommitted;
 impl gpui::EventEmitter<NativeTextCommitted> for TerminalView {}
 
 impl TerminalView {
+    pub(super) fn drag_to(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(drag), Some(cell)) = (self.drag, self.cell_under(position)) else {
+            return;
+        };
+        self.link_click.moved_to(cell);
+        if !drag.moved && cell == drag.anchor && self.edge_scroll_target_at(position).is_none() {
+            return;
+        }
+        self.drag = Some(Drag {
+            moved: true,
+            ..drag
+        });
+        self.pending_link_click = None;
+        self.send(TerminalCommand::Select {
+            anchor: drag.anchor,
+            head: cell,
+            mode: SelectionMode::Character,
+            rectangle: false,
+        });
+        self.update_edge_scroll(position, window, cx);
+    }
+
+    pub(super) fn update_edge_scroll(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.edge_scroll_target_at(position);
+        if self
+            .edge_scroll_target
+            .zip(target)
+            .is_some_and(|((previous, _), (next, _))| previous != next)
+        {
+            self.stop_edge_scroll();
+        }
+        self.edge_scroll_target = target;
+        if target.is_none() {
+            self.stop_edge_scroll();
+        } else if self.edge_scroll_task.is_none() {
+            let token = SelectionDragToken::new();
+            self.edge_scroll_token = Some(token.clone());
+            self.edge_scroll_task = Some(cx.spawn_in(window, async move |view, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(75))
+                        .await;
+                    let active = view.update_in(cx, |view, _, _| {
+                        let (rows, head) = match (view.drag, view.edge_scroll_target) {
+                            (Some(_), Some(target)) => target,
+                            _ => return false,
+                        };
+                        if view.bundle.as_ref().is_some_and(|bundle| {
+                            let viewport = bundle.render.viewport;
+                            (rows < 0 && viewport.offset == 0) || (rows > 0 && viewport.at_bottom())
+                        }) {
+                            return true;
+                        }
+                        let anchor = view.drag.unwrap().anchor;
+                        if !view.submit(TerminalCommand::ScrollAndSelect {
+                            rows,
+                            anchor,
+                            head,
+                            token: token.clone(),
+                        }) {
+                            return !view.admission_closed;
+                        }
+                        true
+                    });
+                    if !matches!(active, Ok(true)) {
+                        return;
+                    }
+                }
+            }));
+        }
+    }
+
+    fn edge_scroll_target_at(&self, position: gpui::Point<Pixels>) -> Option<(i32, CellPosition)> {
+        let origin = self.content_origin.unwrap_or(self.origin);
+        let height = f32::from(self.metrics.height());
+        self.size.and_then(|size| {
+            let y = f32::from(position.y) - f32::from(origin.y);
+            let delta = if y < 0.0 {
+                -1
+            } else if y >= height * f32::from(size.rows()) {
+                1
+            } else {
+                return None;
+            };
+            self.cell_under(position).map(|cell| (delta, cell))
+        })
+    }
+
+    pub(super) fn stop_edge_scroll(&mut self) {
+        if let Some(token) = self.edge_scroll_token.take() {
+            token.cancel();
+        }
+        self.edge_scroll_target = None;
+        self.edge_scroll_task = None;
+    }
+
     /// The cell under a window position, using the grid this view drew.
     ///
     /// Measured from the grid's corner rather than the pane's, so a click in
