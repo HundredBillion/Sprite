@@ -479,3 +479,9 @@ exists, which is what makes it testable without one.
 ## Licence
 
 MIT or Apache-2.0, at your option.
+
+## Authorized pane control
+
+See [Pane control](pane-control.md) for public CLI/protocol operations, owner
+grants, supported content, distinct input rights, revocation and bounded outcomes.
+Existing Pane Observation credentials retain their read-only pane contract.

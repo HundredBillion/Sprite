@@ -29,6 +29,7 @@ impl Workspace {
         }
         self.cancel_quit();
         self.stopping = true;
+        self.control.close(None);
         self.surfaces = None;
         if let Some(endpoint) = self.endpoint.as_mut() {
             endpoint.close();
@@ -167,7 +168,15 @@ impl Workspace {
         self.after_close(cx);
     }
     /// A shell can exit in a background tab, so close by identity rather than focus.
-    pub(super) fn close_exited_pane(&mut self, tab: TabId, pane: PaneId, cx: &mut Context<Self>) {
+    pub(super) fn close_exited_pane(
+        &mut self,
+        _original_tab: TabId,
+        pane: PaneId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.tab_of(pane) else {
+            return;
+        };
         let was_active = self.tabs.active_tab() == Some(tab);
         let Some(view) = self.tabs.close_pane(tab, pane) else {
             return;
@@ -444,7 +453,7 @@ impl Workspace {
 }
 pub(super) struct PendingCleanup {
     task: gpui::Task<()>,
-    completed: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) completed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A close waiting on a second press.

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="How Sprite routes owner-authorized agent requests between panes: local sockets, permissions, Workspace dispatch, terminal sessions and native Surfaces.">
+<title>How agents work across panes · Sprite architecture</title>
+<style>
+:root{--paper:#f5f5ef;--white:#fff;--ink:#172b32;--muted:#52676d;--line:#d7dfd9;--green:#176c55;--mint:#e6f2e9;--blue:#245dae;--ice:#edf3fc;--orange:#935519;--sand:#fbf0dc;--red:#a43739;--nav:#142e32;--mono:ui-monospace,SFMono-Regular,Consolas,monospace;--radius:15px}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:25px}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:var(--blue);text-underline-offset:3px}button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #cc8727;outline-offset:4px}button:disabled{opacity:.4;cursor:default}code,pre{font-family:var(--mono)}code{font-size:.85em;background:#edf0eb;padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}pre{overflow-x:auto;margin:0;padding:22px;background:#132e32;color:#dceee5;border-radius:12px;font-size:13px;line-height:1.8;white-space:pre}pre code{font-size:inherit;background:none;padding:0;color:inherit;overflow-wrap:normal}h1,h2,h3,p{margin-top:0}h1,h2{font-family:Georgia,"Times New Roman",serif;letter-spacing:-.04em;font-weight:normal;line-height:1.08}h1{font-size:clamp(44px,5.2vw,75px);max-width:900px;margin-bottom:25px}h2{font-size:clamp(32px,3.5vw,45px);margin-bottom:20px}h3{font-size:18px;line-height:1.4;margin-bottom:10px}p{margin-bottom:16px}small{font-size:13px;color:var(--muted)}.shell{display:grid;grid-template-columns:225px minmax(0,1fr);min-height:100vh}.sidebar{background:var(--nav);color:#dae7df;padding:38px 25px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}.brand{font-size:24px;font-weight:650;letter-spacing:-1px;margin-bottom:5px}.brand-dot{display:inline-block;width:9px;height:9px;background:#84c4a2;border-radius:50%;margin-right:9px}.sidebar .sub{color:#9eb8b2;font-size:12px;letter-spacing:.12em;text-transform:uppercase}.sidebar nav{display:grid;gap:6px;margin-top:48px}.sidebar nav a{color:#c9ddd4;text-decoration:none;padding:9px 10px;border-left:2px solid transparent;font-size:14px}.sidebar nav a:hover{background:#203e41;border-left-color:#98d0ae}.sidebar .foot{margin-top:auto;font-size:12px;color:#a9c2b8;line-height:1.8}.sidebar .foot a{color:#c9ddd4}.main{min-width:0;max-width:1370px;padding:64px clamp(24px,5vw,80px) 45px}.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin-bottom:24px}.intro{font-size:20px;line-height:1.65;max-width:760px;color:#40585e}.badge{display:inline-flex;align-items:center;gap:8px;border:1px solid #c6d9ca;border-radius:99px;padding:5px 11px;background:var(--mint);font:12px var(--mono);color:var(--green)}.badge:before{content:"";height:6px;width:6px;background:var(--green);border-radius:50%}.hero-meta{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:26px}.section{border-top:1px solid var(--line);padding-top:42px;margin-top:46px}.section-head{display:flex;align-items:baseline;gap:16px}.section-number{font:12px var(--mono);color:var(--green);flex:none}.lead{max-width:780px;color:var(--muted)}.callout{border-left:3px solid var(--green);padding:15px 20px;background:var(--mint);border-radius:0 10px 10px 0}.callout p:last-child{margin-bottom:0}.callout.warn{border-color:#bb832b;background:var(--sand)}.diagram{margin:28px 0 16px;border:1px solid var(--line);border-radius:var(--radius);background:var(--white);padding:25px}.diagram-label{font:11px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:20px}.flow{display:grid;grid-template-columns:1fr 25px 1fr 25px 1fr 25px 1fr;align-items:stretch;gap:0}.node{min-width:0;padding:18px 15px;border:1px solid var(--line);border-radius:10px;background:#fafbf8}.node strong{display:block;font-size:16px;margin:7px 0}.node .kicker{font:10px var(--mono);text-transform:uppercase;color:var(--muted);letter-spacing:.08em}.node p{font-size:13px;color:var(--muted);line-height:1.6;margin:0}.node.center{background:var(--mint);border-color:#b8d4c1}.node.blue{background:var(--ice);border-color:#c7d8ef}.arrow{display:flex;justify-content:center;align-items:center;font-size:22px;color:var(--green)}.return{margin-top:16px;padding-top:13px;border-top:1px dashed var(--line);font:12px/1.7 var(--mono);color:var(--green);text-align:center}.caption{font-size:13px;color:var(--muted);margin:12px 0 0}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:25px}.card{background:white;border:1px solid var(--line);border-radius:var(--radius);padding:23px}.card .tag{font:11px var(--mono);color:var(--green);display:block;margin-bottom:15px}.card p{font-size:14px;color:var(--muted)}.card p:last-child{margin-bottom:0}.card.blue .tag{color:var(--blue)}.card.orange .tag{color:var(--orange)}.split{display:grid;grid-template-columns:1fr 1fr;gap:25px}.label{font:11px var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:5px 0 12px}.tabbar{display:flex;gap:6px;flex-wrap:wrap;margin:23px 0 20px}.tabbar button{padding:9px 15px;border-radius:7px;border:1px solid var(--line);color:var(--muted);background:white;font-size:13px}.tabbar button[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:white}.walkthrough{border:1px solid var(--line);background:white;border-radius:var(--radius);padding:25px}.walk-top{display:flex;align-items:center;justify-content:space-between;gap:15px}.walk-top .badge{font-size:10px}.step-count{font:12px var(--mono);color:var(--muted)}.stepper{display:flex;gap:7px;margin:22px 0 26px}.stepper button{flex:1;height:8px;border:0;padding:0;border-radius:5px;background:#e0e7e1}.stepper button.done{background:#91b69e}.stepper button.current{background:var(--green)}.step-title{font-size:25px;letter-spacing:-.025em;margin-bottom:12px}.step-text{min-height:90px;max-width:800px}.thread{display:inline-block;font:11px var(--mono);color:var(--blue);background:var(--ice);padding:4px 9px;border-radius:5px;margin-bottom:15px}.source{font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:15px;overflow-wrap:anywhere}.source code{font-size:11px}.walk-bottom{display:flex;justify-content:space-between;align-items:center;margin-top:20px;gap:15px}.action{background:var(--ink);color:white;border:1px solid var(--ink);padding:8px 15px;border-radius:7px;font-size:13px}.action.secondary{background:white;color:var(--ink);border-color:var(--line)}.actions{display:flex;gap:8px}.walk-summary{font-size:13px;color:var(--muted);margin-top:18px;margin-bottom:0}.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:white}table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:14px 17px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}th{background:#edf0e9;font:11px/1.5 var(--mono);text-transform:uppercase;letter-spacing:.05em}tr:last-child td{border-bottom:0}td:first-child{font-weight:600}td p{margin-bottom:6px}.explorer{display:grid;grid-template-columns:300px minmax(0,1fr);border:1px solid var(--line);border-radius:var(--radius);background:white;overflow:hidden;margin-top:24px}.explorer-controls{background:#edf2eb;padding:25px}.explorer-results{padding:25px}.switch{display:flex;align-items:center;gap:10px;margin:16px 0;font-size:14px}.switch input{width:17px;height:17px;accent-color:var(--green);flex:none}.explorer-controls fieldset{border:0;padding:0;margin:23px 0 0}.explorer-controls legend{font-size:12px;font-weight:650}.result-row{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:12px 0;border-bottom:1px solid var(--line);font-size:14px}.result-row:last-child{border-bottom:0}.verdict{font:11px var(--mono);padding:4px 8px;border-radius:5px;background:var(--mint);color:var(--green);text-align:right;flex:none}.verdict.deny{color:var(--red);background:#faeded}.verdict.ask{color:var(--orange);background:var(--sand)}.permission-note{font-size:13px;color:var(--muted);margin:18px 0 0}.timeline{counter-reset:timeline;list-style:none;margin:0;padding:0}.timeline li{counter-increment:timeline;position:relative;padding:0 0 24px 42px;border-left:1px solid #cbd8ce;margin-left:15px}.timeline li:before{content:counter(timeline);position:absolute;left:-15px;top:0;width:29px;height:29px;display:grid;place-items:center;border-radius:50%;background:var(--mint);color:var(--green);font:12px var(--mono);border:1px solid #c2d9c9}.timeline li:last-child{border-left-color:transparent;padding-bottom:0}.timeline strong{font-size:15px}.timeline p{font-size:14px;color:var(--muted);margin-top:5px}.code-title{display:flex;justify-content:space-between;gap:10px;font:11px var(--mono);color:var(--muted);margin:0 0 10px}.limits{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:25px 0}.limit{padding:18px;background:white;border:1px solid var(--line);border-radius:10px}.limit strong{font:30px Georgia,serif;letter-spacing:-.04em;display:block}.limit span{font-size:12px;color:var(--muted)}details{border:1px solid var(--line);border-radius:10px;background:white;margin:12px 0;padding:17px 20px}summary{cursor:pointer;font-weight:600;font-size:14px}details p{color:var(--muted);font-size:14px;margin:15px 0 0}details ul{font-size:14px;color:var(--muted);padding-left:20px}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 25px}.source-entry{padding:14px 0;border-bottom:1px solid var(--line);font-size:13px}.source-entry a{display:block;font-family:var(--mono);font-size:12px;margin-bottom:5px;overflow-wrap:anywhere}.footer{margin-top:45px;padding-top:20px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}.noscript{background:var(--sand);padding:16px;border-radius:10px;margin-top:15px}
+@media(min-width:1500px){.main{padding-left:85px;padding-right:85px}}@media(max-width:1100px){.shell{grid-template-columns:185px 1fr}.sidebar{padding:30px 17px}.main{padding:45px 25px}.flow{grid-template-columns:1fr 20px 1fr 20px 1fr 20px 1fr}.node{padding:14px 10px}.node strong{font-size:14px}.node p{font-size:12px}.cards{gap:10px}.card{padding:17px}.explorer{grid-template-columns:240px 1fr}}
+@media(max-width:780px){.shell{display:block}.sidebar{height:auto;position:static;padding:20px 24px}.sidebar nav{margin-top:16px;display:flex;overflow-x:auto;gap:9px;padding-bottom:4px}.sidebar nav a{white-space:nowrap;padding:5px;font-size:12px;border:0}.sidebar .foot,.sidebar .sub{display:none}.brand{font-size:20px}.main{padding:35px 22px}.intro{font-size:18px}.flow{grid-template-columns:1fr}.arrow{height:27px;transform:rotate(90deg)}.node p{font-size:13px}.node strong{font-size:16px}.cards,.split,.source-grid{grid-template-columns:1fr}.explorer{grid-template-columns:1fr}.explorer-controls{padding:20px}.explorer-controls .switch{margin:10px 0}.limits{grid-template-columns:1fr 1fr}.walkthrough{padding:20px}.walk-bottom{align-items:flex-start;flex-direction:column}.step-text{min-height:0}.diagram{padding:20px}.section{margin-top:35px;padding-top:30px}.hero-meta{gap:8px}.return{font-size:11px}.source-entry{padding:10px 0}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}@media print{body{background:white;font-size:11pt}.shell{display:block}.sidebar,.tabbar,.walk-bottom,.stepper{display:none}.main{max-width:none;padding:0}h1{font-size:35pt}h2{font-size:25pt}.section{break-inside:avoid;margin-top:22px;padding-top:22px}.flow{grid-template-columns:1fr 20px 1fr 20px 1fr 20px 1fr}.cards{grid-template-columns:repeat(3,1fr)}.split{grid-template-columns:1fr 1fr}.card,.diagram,.walkthrough,.explorer{break-inside:avoid}.source a{color:black}pre{background:#f0f0ed;color:black;white-space:pre-wrap}.footer{margin-top:20px}}
+</style>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" aria-label="Document navigation">
+<div class="brand"><span class="brand-dot"></span>Sprite</div><div class="sub">Architecture notes / 106</div>
+<nav aria-label="Sections"><a href="#overview">01 · The big picture</a><a href="#channels">02 · Three channels</a><a href="#walkthrough">03 · Follow a request</a><a href="#permissions">04 · Permission explorer</a><a href="#workflow">05 · Agent workflow</a><a href="#safety">06 · Races &amp; lifecycle</a><a href="#sources">07 · Code map</a></nav>
+<div class="foot">Implementation snapshot<br>26 October 2026<br><a href="../pane-control.md">Public CLI &amp; protocol guide ↗</a></div>
+</aside>
+<main class="main">
+<header>
+<div class="eyebrow">Sprite Terminal · agent communication between panes</div>
+<h1>One agent.<br>Many panes.<br>Explicit permission.</h1>
+<p class="intro">An agent running in one pane can read or act on another pane by asking Sprite. Sprite authenticates the request, checks the owner's grant, and routes it to the pane or its Terminal Session.</p>
+<div class="hero-meta"><span class="badge">Implemented on the issue 106 branch</span><small>Offline, standalone architecture explainer</small></div>
+</header>
+
+<section class="section" id="overview" aria-labelledby="overview-title">
+<div class="section-head"><span class="section-number">01</span><h2 id="overview-title">Sprite is the intermediary.</h2></div>
+<p class="lead">The agent chooses what to do. Sprite supplies access to terminal context and authorized operations. The target can be an existing human pane, a new agent pane, or a pane running in a background tab.</p>
+<div class="diagram" aria-label="Agent in pane A invokes the sprite CLI, which contacts a private local socket. Sprite Workspace checks permissions and routes the operation to pane B or its Terminal Session. JSON returns to the agent.">
+<div class="diagram-label">An authorized request, from intent to effect</div>
+<div class="flow">
+<div class="node"><span class="kicker">Caller · outside Sprite's process</span><strong>Agent in Pane A</strong><p>Invokes the <code>sprite</code> CLI or speaks the public control protocol.</p></div><div class="arrow" aria-hidden="true">→</div>
+<div class="node blue"><span class="kicker">Local transport</span><strong>Private Unix socket</strong><p>A separate grant key authenticates the connection. No TCP listener.</p></div><div class="arrow" aria-hidden="true">→</div>
+<div class="node center"><span class="kicker">Sprite · UI thread</span><strong>Workspace</strong><p>Claims the request, checks current rights and scope, then dispatches by pane identity.</p></div><div class="arrow" aria-hidden="true">→</div>
+<div class="node"><span class="kicker">Sprite · addressed target</span><strong>Pane B / Session B</strong><p>Layout changes use the pane tree. Text and input use the session worker.</p></div>
+</div>
+<div class="return">← Owned JSON result, terminal text, or an explicit refusal returns to the caller.</div>
+</div>
+<p class="caption">The socket is handled on connection threads. A bounded lane crosses to the UI thread. Terminal parsing and encoding stay on the Terminal Session's worker. The CLI is a separate client process; it does not manipulate GPUI or a PTY directly.</p>
+<div class="callout" style="margin-top:22px"><p><strong>What “communication” means here:</strong> reading another pane's terminal output, managing its layout and lifecycle, or sending separately authorized terminal input. Sprite does not provide an agent chat inbox, an LLM runtime, or a durable agent-to-agent message bus. The agents supply their own coordination logic.</p></div>
+</section>
+
+<section class="section" id="channels" aria-labelledby="channels-title">
+<div class="section-head"><span class="section-number">02</span><h2 id="channels-title">Three channels, separate authority.</h2></div>
+<p class="lead">They reuse the same protected local transport implementation. Their credentials, grammars, and responsibilities remain separate.</p>
+<div class="cards">
+<article class="card"><span class="tag">OBSERVATION</span><h3>Read pane context</h3><p><code>sprite panes snapshot</code> collects owned terminal snapshots from panes in the same window. Its broker cannot express pane mutations.</p><p>The window's existing observation credential is shared with launched sessions. It can request an access prompt, but cannot approve one.</p></article>
+<article class="card blue"><span class="tag">PANE CONTROL</span><h3>Manage addressed panes</h3><p><code>sprite panes … --access FILE</code> uses a fresh owner-approved grant. Each grant has its own endpoint and key.</p><p>Read is included. Management and terminal input are separate permissions. Control reads authorize on the UI thread, then reuse the observation broker.</p></article>
+<article class="card orange"><span class="tag">SURFACE CHANNEL</span><h3>Draw native UI in a pane</h3><p><code>sprite surface open</code> opens an element, grid, or list Surface inside a pane. It supports native UI updates and events.</p><p>A Surface is hosted content, not a new pane type. Pane control does not grant synthetic Surface input or ownership of its native document.</p></article>
+</div>
+<div class="table-wrap" style="margin-top:24px"><table><thead><tr><th>Path</th><th>Credential comes from</th><th>Communication style</th></tr></thead><tbody>
+<tr><td>Observation</td><td>The containing window's session environment</td><td>Bounded snapshot request and response; no pane writes.</td></tr>
+<tr><td>Pane control</td><td>Human approval → private access descriptor</td><td>One versioned JSON request and one response per connection.</td></tr>
+<tr><td>Surface</td><td>Separate Surface session credentials</td><td>Persistent connection carrying UI descriptions, updates and events.</td></tr>
+</tbody></table></div>
+</section>
+
+<section class="section" id="walkthrough" aria-labelledby="walkthrough-title">
+<div class="section-head"><span class="section-number">03</span><h2 id="walkthrough-title">Follow a request.</h2></div>
+<p class="lead">Choose a path, then step through the code that handles it. This walkthrough illustrates the implementation; it does not contact a running Sprite window.</p>
+<div class="tabbar" role="group" aria-label="Communication path"><button type="button" data-path="read" aria-pressed="true">Read terminal text</button><button type="button" data-path="manage" aria-pressed="false">Move a pane</button><button type="button" data-path="input" aria-pressed="false">Send terminal input</button><button type="button" data-path="surface" aria-pressed="false">Open a Surface</button></div>
+<div class="walkthrough">
+<div class="walk-top"><span class="badge" id="path-badge">Pane control · read</span><span class="step-count" id="step-count">Step 1 of 6</span></div>
+<div class="stepper" id="stepper" role="group" aria-label="Select a request step"></div>
+<div aria-live="polite" aria-atomic="true"><span class="thread" id="step-thread">CLI process</span><h3 class="step-title" id="step-title">Load the grant descriptor</h3><p class="step-text" id="step-text">The CLI reads a private access file containing the window incarnation, grant ID, socket path and bearer key. The request names a pane using its window and local pane identity.</p><div class="source" id="step-source"></div></div>
+<div class="walk-bottom"><div class="actions"><button type="button" class="action secondary" id="previous" disabled>← Previous</button><button type="button" class="action" id="next">Next step →</button></div><small id="step-short">The agent holds a capability, not a live pane handle.</small></div>
+</div>
+<noscript><p class="noscript">Enable JavaScript for the stepper and permission explorer. The remaining diagrams, examples, lifecycle notes and source map work without JavaScript.</p></noscript>
+<p class="walk-summary"><strong>Legacy snapshot difference:</strong> <code>panes snapshot</code> goes from its authenticated endpoint to the observation broker, using pane membership already published by the Workspace. It does not queue a new UI-thread authorization request for each read.</p>
+</section>
+
+<section class="section" id="permissions" aria-labelledby="permissions-title">
+<div class="section-head"><span class="section-number">04</span><h2 id="permissions-title">A grant is permission to ask.</h2></div>
+<p class="lead">The owner approves all existing and future panes in one window, or a fixed set. A fixed grant also includes panes created through that grant. Permission is checked again when an operation executes.</p>
+<div class="explorer">
+<div class="explorer-controls"><h3>Explore a control grant</h3><small>Illustrative policy outcomes</small>
+<label class="switch"><input type="checkbox" id="grant-active" checked>Grant is active</label>
+<label class="switch"><input type="checkbox" id="manage-right" checked>Management permission</label>
+<label class="switch"><input type="checkbox" id="input-right">Terminal input permission</label>
+<fieldset><legend>Addressed target</legend><label class="switch"><input type="checkbox" id="target-scope" checked>Pane is in the granted window and scope</label><label class="switch"><input type="checkbox" id="busy-target" checked>Pane has a foreground-job warning</label></fieldset>
+</div>
+<div class="explorer-results" aria-live="polite"><div class="label">Expected permission decision</div>
+<div class="result-row"><span>Read terminal context</span><span class="verdict" id="result-read">allowed</span></div>
+<div class="result-row"><span>Rename, move, focus or resize</span><span class="verdict" id="result-manage">allowed</span></div>
+<div class="result-row"><span>Create a configured-shell pane</span><span class="verdict" id="result-create">allowed</span></div>
+<div class="result-row"><span>Send terminal text or a key</span><span class="verdict deny" id="result-input">denied</span></div>
+<div class="result-row"><span>Close the addressed pane</span><span class="verdict ask" id="result-close">confirmation_required</span></div>
+<p class="permission-note" id="permission-note">Input needs its own permission. Management can start a configured shell, but cannot type into it.</p>
+</div>
+</div>
+<p class="caption">This explorer isolates grant checks for an existing terminal pane, with creation beside that pane. It assumes valid requests, available capacity and no conflicting human drag. Real operations also check lifecycle, content support and resource admission.</p>
+<div class="callout warn" style="margin-top:24px"><p><strong>Revocation is a live check.</strong> An operation still waiting in the UI queue cannot use revoked rights. A human confirmation rechecks its original grant and target. Revocation cannot undo an operation that already committed. This capability model does not sandbox hostile processes running as the same OS user.</p></div>
+</section>
+
+<section class="section" id="workflow" aria-labelledby="workflow-title">
+<div class="section-head"><span class="section-number">05</span><h2 id="workflow-title">A concrete agent workflow.</h2></div>
+<div class="split">
+<div><ol class="timeline">
+<li><strong>Ask the person for access.</strong><p>The CLI uses the containing window's observation channel to request a grant. Sprite displays the requested scope and rights. Only the person's Allow action approves it.</p></li>
+<li><strong>Receive a separate capability.</strong><p>Approval creates a grant endpoint and returns a descriptor. The CLI saves it as a private file; stdout does not print the key. The credential is not automatically injected into new pane environments.</p></li>
+<li><strong>Discover and read a target.</strong><p>List reveals authorized addresses and state. Read returns metadata and bounded terminal text, with completeness information. Terminal output is untrusted data, not an instruction to the agent.</p></li>
+<li><strong>Act with the granted rights.</strong><p>Manage layout and lifecycle with <code>--manage</code>. To send text or keys, request <code>--input</code> too. Admission of input does not establish command execution or completion.</p></li>
+<li><strong>Revoke when finished.</strong><p>The person uses Pane Access to revoke a grant or remove management/input rights. Re-enabling rights needs a fresh request and approval.</p></li>
+</ol></div>
+<div><div class="code-title"><span>CLI · run inside the desired window</span><span>Example, not a live transcript</span></div>
+<pre><code># Management and input are requested separately.
+sprite panes access request \
+  --all-panes --manage --input \
+  --output /tmp/agent-access.json
+
+# After the owner chooses Allow:
+sprite panes list \
+  --access /tmp/agent-access.json
+
+# Use the full address returned by list.
+sprite panes read \
+  --access /tmp/agent-access.json \
+  --pane WINDOW:7 --lines 100
+
+sprite panes input \
+  --access /tmp/agent-access.json \
+  --pane WINDOW:7 --text 'echo hello'
+
+sprite panes input \
+  --access /tmp/agent-access.json \
+  --pane WINDOW:7 --key enter</code></pre>
+<p class="caption"><code>WINDOW:7</code> is a placeholder for a returned address. An input key is one key press. Remote key-release and hold events are unsupported.</p>
+</div>
+</div>
+<details><summary>What is on the wire?</summary><p>Connect to the grant's Unix socket. Send the bearer key, a space, and one JSON document followed by a newline. The response is JSON with the same request ID. Unknown fields are rejected.</p><pre style="margin-top:15px"><code>&lt;key&gt; {"protocol":"sprite-pane-control/1","id":"req-1",
+ "window":"WINDOW","operation":{"op":"read","pane":"WINDOW:7","lines":100}}
+
+{"protocol":"sprite-pane-control/1","id":"req-1",
+ "outcome":"ok","result":{…}}</code></pre><p>The request is shown wrapped for readability; the actual request occupies one line. IDs correlate responses, but are not durable replay or deduplication keys.</p></details>
+</section>
+
+<section class="section" id="safety" aria-labelledby="safety-title">
+<div class="section-head"><span class="section-number">06</span><h2 id="safety-title">The details that keep it predictable.</h2></div>
+<div class="limits"><div class="limit"><strong>16</strong><span>active grants per window</span></div><div class="limit"><strong>16</strong><span>connections per grant</span></div><div class="limit"><strong>16</strong><span>queued control operations per window</span></div><div class="limit"><strong>8 KiB</strong><span>authenticated request-line limit</span></div></div>
+<div class="split"><article class="card"><h3>Claim before applying</h3><p>The connection thread offers a request to a bounded lane. A full lane returns <code>busy</code>. If the caller abandons before the UI claims the request, the UI drops it without applying it.</p><p>If the UI has claimed it and the result cannot be recovered in time, the honest outcome is <code>outcome_unknown</code>. The client inspects state instead of automatically retrying a create, move, close or input operation.</p></article><article class="card"><h3>Identity survives movement</h3><p>A public pane address combines a random window incarnation and a pane ID that is never reused within that window. Moving a pane transfers its existing handle and session.</p><p>Sprite updates observation membership and resolves natural exits against the pane's current tab. Another window needs its own grant; moving sessions between windows is unsupported.</p></article></div>
+<details open><summary>Busy close and unsafe input require a person.</summary><p>A busy close returns <code>confirmation_required</code>, with a 30-second Confirm/Cancel prompt. Repeating the protocol request never confirms it. Unsafe text uses the terminal engine's conservative paste-safety classifier and also requires explicit approval. Input keys still need the separate input right.</p><p>Prompt buttons capture a unique identity, so an old button cannot approve a replacement request. Agent-driven focus and layout changes withdraw old human close confirmation. The addressed close uses the pane's foreground-job warning and normal cleanup, rather than permission to signal arbitrary host processes.</p></details>
+<details><summary>Accepted layout changes must survive redraw.</summary><p>Resize updates a persistent split ratio, with the same logical-pixel allocation and minimum-size rules as human divider movement. It does not just send a terminal resize that the next layout overwrites. A side with no divider is explicitly unsupported. Background allocations take effect when shown; later window resizes still adjust the layout normally.</p><p>Agent create, move, focus, resize and close return <code>busy</code> while a human divider drag owns the layout. A pane label, a user-assigned Tab Name, and a child-provided Pane Title remain separate fields.</p></details>
+<details><summary>Reading a pane does not expose every native UI document.</summary><p>A terminal pane can contain fill, dock and overlay Surfaces, with element, grid or list bodies. Pane control reports this presentation and can manage the containing pane. Read exposes underlying terminal text; native documents, editor buffers and raster content are explicitly unavailable through this channel.</p><p>Terminal input targets the terminal even when a Surface has keyboard focus. Native Surface updates and events remain on the independently authorized Surface Channel.</p></details>
+<details><summary>Cleanup and resource admission are bounded.</summary><p>Agent creation refuses at 128 live panes or 16 unfinished pane cleanups per window; agent close refuses at 16 unfinished cleanups. Ordinary keyboard behavior remains available, and keyboard-created resources count toward subsequent agent admission.</p><p>Input payloads are limited to 4 KiB and labels to 256 bytes. Read history retains the existing 5,000-line cap and a single 500 ms broker deadline. A successful close reports layout removal and scheduled cleanup, not process-cleanup completion. The final pane's reply is sent before endpoint teardown while Sprite still waits for owned cleanup.</p></details>
+</section>
+
+<section class="section" id="sources" aria-labelledby="sources-title">
+<div class="section-head"><span class="section-number">07</span><h2 id="sources-title">Where the architecture lives.</h2></div>
+<p class="lead">These links point to the repository files behind this explanation. Keep the HTML in <code>docs/architecture/</code> to preserve the relative links.</p>
+<div class="source-grid">
+<div class="source-entry"><a href="../../crates/sprite-app/src/control/client.rs">control/client.rs</a>CLI arguments, private descriptor files, bounded exchanges and explicit outcomes.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/control/mod.rs">control/mod.rs</a>Public request types, grant endpoints, authentication policy and post-authorization text capture.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/local_socket.rs">local_socket.rs</a>Shared protected local transport, key authentication, connection caps and cancellation.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/workspace/control.rs">workspace/control.rs</a>Owner approval, live grant checks, addressed dispatch, prompt identities and access controls.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/workspace/reload.rs">workspace/reload.rs</a>Access-request entry point and reusable <code>relay</code>/<code>Relayed</code> claim–abandon machinery.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/workspace/lane_drain.rs">workspace/lane_drain.rs</a>Fair UI-thread request draining that yields after each operation.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/observation/broker.rs">observation/broker.rs</a>Owned terminal captures under one bounded deadline.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/observation/panes.rs">observation/panes.rs</a>Pane membership and ticket-correlated capture responses.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/terminal_view.rs">terminal_view.rs</a>Terminal input admission, live encoder commands, content capabilities and session state.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/workspace/surface_routing.rs">workspace/surface_routing.rs</a>Independent routing of native Surface operations to hosted pane content.</div>
+<div class="source-entry"><a href="../../crates/sprite-app/src/tabs.rs">tabs.rs / pane_tree.rs</a>Pane identity, payload-preserving moves and persistent split layout.</div>
+<div class="source-entry"><a href="../reviews/10-26-2026-pane-control.md">Implementation &amp; verification evidence</a>Public workflow, lifecycle, authorization and race checks.</div>
+</div>
+</section>
+<footer class="footer">Based on issue 106's implementation at <code>d86e129</code> on <code>feature/issue-106-pane-control</code>. This document explains the implementation in that branch; it does not imply the branch has been merged or released. Diagrams and interactive controls are educational simulations. No external assets, libraries or network requests are required.</footer>
+</main>
+</div>
+<script>
+'use strict';
+const paths = {
+read: { badge:'Pane control · read', short:'Owned data crosses back to the caller; no PTY handle is exposed.', steps:[
+['CLI process','Load the grant descriptor','The CLI reads a private access file containing the window incarnation, grant ID, socket path and bearer key. The request names a pane using its window and local pane identity.','control/client.rs','execute'],
+['Connection thread','Authenticate and validate','The shared local transport checks the grant endpoint’s key. The control adapter validates the protocol, fields, request size and window. This is a local Unix socket exchange.','control/mod.rs','open_grant'],
+['Connection → UI thread','Offer the request to a bounded lane','relay uses nonblocking admission to the window’s 16-slot lane. The UI drain yields between requests. A full lane returns busy instead of blocking the UI.','workspace/reload.rs','relay'],
+['GPUI / Workspace','Claim, authorize and locate the pane','The Workspace claims the request, checks the live grant and target scope, resolves the addressed pane, and returns metadata. A queued request cannot rely on rights removed before execution.','workspace/control.rs','serve_control → apply_control'],
+['Connection thread → session worker','Capture bounded terminal text','After authorization, the connection handler reuses the observation broker. Capture requests carry tickets to the session worker; owned HistorySnapshot answers are matched to those tickets. Collection uses one broker deadline.','control/mod.rs','open_grant → broker::collect'],
+['Connection thread → CLI','Return metadata and terminal content','Sprite adds the terminal report to the result and writes one JSON response. The nested report retains completeness and capture-failure information. The CLI prints JSON for the agent to interpret.','control/client.rs','exchange → run']
+]},
+manage: {badge:'Pane control · manage',short:'The same pane handle and Terminal Session survive the move.',steps:[
+['CLI process','Address a move explicitly','The agent supplies the source pane address and, optionally, an authorized destination anchor and side. Without an anchor, move opens a new tab for the existing pane.','control/client.rs','parse'],
+['Connection thread','Authenticate the grant endpoint','The control adapter accepts one versioned JSON operation after key authentication. It verifies the window incarnation before offering the request to the UI lane.','control/mod.rs','open_grant'],
+['GPUI / Workspace','Claim and recheck management rights','The Workspace checks that the grant still permits management and covers both the source and any destination anchor. Another window is not a session-transfer destination.','workspace/control.rs','apply_control'],
+['GPUI / Workspace','Prepare the human interaction state','Before changing layout, Sprite refuses an active divider drag and withdraws old human close/quit/edit state. A confirmation about one pane cannot silently apply to a different current pane.','workspace/control.rs','prepare_control_layout'],
+['GPUI / pane ownership','Transfer the existing pane payload','Tabs removes the pane from its old tree and inserts the same payload and ID at the destination. It does not start a replacement terminal or share a session between panes.','tabs.rs','move_pane'],
+['GPUI → connection thread → CLI','Publish membership and return the result','Layout refresh publishes the pane’s current tab without discarding capture waiters. Later child exit is resolved against current membership. JSON describes the moved pane; request IDs do not promise replay deduplication.','workspace/control.rs','apply_control → refresh_layout']
+]},
+input: {badge:'Pane control · input',short:'Input admission is not command completion or an agent messaging protocol.',steps:[
+['CLI process','Choose text or one named key','The agent submits an Input operation with either text or a documented key. Text payloads are bounded to 4 KiB. It still needs the target window’s grant descriptor.','control/client.rs','parse'],
+['Connection thread → GPUI','Authenticate, queue and claim','The grant socket authenticates the key. A bounded relay crosses to the UI thread, where the Workspace claims the request and resolves its target.','control/mod.rs','open_grant'],
+['GPUI / Workspace','Check the independent input right','Management does not authorize typing. The current grant must include input and cover this pane. A generic hosted pane without terminal input support returns unsupported.','workspace/control.rs','apply_control'],
+['Human decision, when needed','Confirm potentially unsafe text','The terminal engine’s static paste classifier conservatively identifies unsafe text. Sprite holds the exact operation behind a prompt identity; repetition does not confirm it. Human approval rechecks the grant and target.','workspace/control.rs','confirm_control → answer_control_prompt'],
+['GPUI → session worker','Admit a terminal command','TerminalView admits paste or a normalized key event. The session worker applies live terminal modes and encoding before writing to the PTY. Previously armed human close and unsafe-paste state is withdrawn.','terminal_view.rs','control_input'],
+['Target program / CLI result','The child receives terminal input','The child in Pane B receives encoded input through its terminal. The result reports input admission. Synthetic Surface events, key-hold/release events and arbitrary host-PID signals are not exposed by this operation.','terminal_view.rs','control_input → TerminalCommand']
+]},
+surface: {badge:'Surface Channel · native UI',short:'This is an independent, persistent UI channel, not the pane-control grammar.',steps:[
+['Program / Surface client','Describe native content','A program uses its separate Surface credentials and sends a versioned description for fill, dock or overlay content in a pane. Bodies can be elements, a grid or a virtual list.','surface/channel.rs','SurfaceEndpoint'],
+['Surface connection thread','Authenticate with the Surface key','The Surface adapter reuses LocalSocket, but its key and message grammar are independent of observation and owner-granted pane control. A control grant is not a Surface ownership credential.','local_socket.rs','LocalSocket'],
+['Connection → GPUI','Cross the Surface request lanes','The existing Surface implementation has separate stream and one-shot lanes. Requests cross to GPUI without doing native rendering on socket threads.','workspace/mod.rs','Workspace::new'],
+['GPUI / Workspace','Locate the hosted pane','The Workspace claims the Surface request and routes its pane ID to the existing PaneHandle. The terminal view handles its own Surface host and content state.','workspace/surface_routing.rs','serve_surface_request'],
+['GPUI / TerminalView','Host and render the Surface','The Surface occupies a fill, dock or overlay position inside the pane. It can hold keyboard focus. Moving the pane retains the hosted Surface rather than creating another session.','terminal_view/surfaces.rs','HostedSurface'],
+['Persistent Surface connection','Exchange updates and native events','The program updates the description or grid/list body and receives Surface events over its persistent connection. Pane-control reads still expose underlying terminal text, with native content explicitly unavailable.','surface/channel.rs','SurfaceConnection']
+]}
+};
+let selectedPath='read', selectedStep=0;
+const byId=id=>document.getElementById(id);
+function renderStep(){
+ const path=paths[selectedPath], step=path.steps[selectedStep];
+ byId('path-badge').textContent=path.badge;
+ byId('step-count').textContent=`Step ${selectedStep+1} of ${path.steps.length}`;
+ byId('step-thread').textContent=step[0]; byId('step-title').textContent=step[1]; byId('step-text').textContent=step[2];
+ const source=byId('step-source'); source.replaceChildren(); source.append('Code: ');
+ const link=document.createElement('a'); link.href='../../crates/sprite-app/src/'+step[3]; link.textContent=step[3]+' · '+step[4]; source.append(link);
+ byId('step-short').textContent=path.short;
+ byId('previous').disabled=selectedStep===0; byId('next').disabled=selectedStep===path.steps.length-1;
+ const stepper=byId('stepper'); stepper.replaceChildren();
+ path.steps.forEach((entry,index)=>{const button=document.createElement('button');button.type='button';button.setAttribute('aria-label',`Step ${index+1}: ${entry[1]}`);button.setAttribute('aria-pressed',String(index===selectedStep));button.title=entry[1];button.className=index===selectedStep?'current':index<selectedStep?'done':'';button.addEventListener('click',()=>{selectedStep=index;renderStep();});stepper.append(button);});
+ document.querySelectorAll('[data-path]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.path===selectedPath)));
+}
+document.querySelectorAll('[data-path]').forEach(button=>button.addEventListener('click',()=>{selectedPath=button.dataset.path;selectedStep=0;renderStep();}));
+byId('previous').addEventListener('click',()=>{if(selectedStep>0){selectedStep--;renderStep();}});
+byId('next').addEventListener('click',()=>{if(selectedStep<paths[selectedPath].steps.length-1){selectedStep++;renderStep();}});
+function renderPermissions(){
+ const active=byId('grant-active').checked, scope=byId('target-scope').checked, manage=byId('manage-right').checked, input=byId('input-right').checked, busy=byId('busy-target').checked;
+ const permitted=active&&scope;
+ const results={read:permitted?'allowed':'denied',manage:permitted&&manage?'allowed':'denied',create:permitted&&manage?'allowed':'denied',input:permitted&&input?'allowed':'denied',close:!permitted||!manage?'denied':busy?'confirmation_required':'allowed'};
+ Object.entries(results).forEach(([name,result])=>{const element=byId('result-'+name);element.textContent=result;element.className='verdict'+(result==='denied'?' deny':result==='confirmation_required'?' ask':'');});
+ byId('permission-note').textContent=!active?'Revoked control rights cannot authorize new work. Operations that already committed remain committed. The old endpoint may be gone; this illustration shows the authorization decision.':!scope?'A grant does not authorize a pane outside its window and scope. Refusal does not reveal whether that pane exists.':!input?'Input needs its own permission. Management can start a configured shell, but cannot type into it.':!manage?'Input is granted independently: the agent may type into this terminal, but cannot manage or close its pane.':'Both rights are enabled. Unsafe text and a busy close still require human confirmation; normal resource and lifecycle checks still apply.';
+}
+['grant-active','manage-right','input-right','target-scope','busy-target'].forEach(id=>byId(id).addEventListener('change',renderPermissions));
+renderStep(); renderPermissions();
+</script>
+</body>
+</html>

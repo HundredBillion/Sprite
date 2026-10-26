@@ -252,6 +252,20 @@ enum HostedPlacement {
 }
 
 impl HostedSurface {
+    pub(super) fn control_info(&self) -> serde_json::Value {
+        let position = match self.placement {
+            HostedPlacement::Fill { .. } => "fill",
+            HostedPlacement::Dock { .. } => "dock",
+            HostedPlacement::Overlay => "overlay",
+        };
+        let kind = match self.body {
+            Body::Elements(_) => "elements",
+            Body::Grid { .. } => "grid",
+            Body::List { .. } => "list",
+        };
+        serde_json::json!({"id": self.id.0, "position": position, "kind": kind, "content": "unavailable", "input": "unsupported"})
+    }
+
     fn definition_pointer_active(&self, metrics: &crate::surface::render::GridMetrics) -> bool {
         match (&self.body, self.origin, self.definition_pointer) {
             (Body::Grid { grid, .. }, Some(origin), Some((position, true))) => {

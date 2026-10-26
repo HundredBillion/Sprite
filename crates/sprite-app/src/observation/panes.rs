@@ -110,6 +110,12 @@ impl WindowPanes {
         );
     }
 
+    pub(crate) fn set_tab(&self, pane: PaneId, tab: TabId) {
+        if let Some(entry) = crate::locked::locked(&self.entries).get_mut(&pane) {
+            entry.tab = tab;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn layout_publications(&self) -> usize {
         self.layout_publications

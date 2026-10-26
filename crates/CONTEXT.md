@@ -181,3 +181,17 @@ _Avoid_: the CLI (unqualified), sprite.nvim, the adapter
 Unmodified upstream Croft used as an optional, manually invoked check against
 its moving `main`; it is not part of Sprite Terminal or a required CI gate.
 _Avoid_: Croft dependency, Croft fork, required Croft gate
+
+**Pane Control**:
+Owner-authorized local access to manage and read addressed panes, including
+existing human panes and panes in background tabs. Terminal input is a separate
+permission. Pane Observation alone never grants Pane Control.
+
+**Pane Grant**:
+A revocable capability approved by the owner for all panes in one Sprite Window
+or an explicit set of panes, with read, manage and input permissions.
+_Avoid_: ownership (a grant does not transfer ownership of a Terminal Session)
+
+**Pane Label**:
+A name assigned to one Pane independently of its child-provided Pane Title and
+the containing tab's Tab Name.

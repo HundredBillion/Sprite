@@ -29,6 +29,7 @@ impl Workspace {
     /// Every pane in every tab, background tabs included: a tab shows its
     /// pane's title whether or not it is the tab in front.
     fn tick_panes(&mut self, cx: &mut Context<Self>) {
+        self.expire_control(cx);
         let panes: Vec<_> = self
             .tabs
             .all_panes()

@@ -26,9 +26,9 @@ interfaces around it.
 
 [kitty](https://sw.kovidgoyal.net/kitty/remote-control/) and
 [WezTerm](https://wezterm.org/cli/cli/get-text.html) can also let programs read
-pane text. Their control tools can send text to panes too. Sprite keeps reading
-separate from drawing: a program allowed to read another pane cannot type into
-it, while a program can draw an interface in its own pane.
+pane text. Their control tools can send text to panes too. Sprite keeps pane
+observation, management, terminal input and native drawing separately authorized.
+A read-only credential cannot type into a pane.
 
 [Warp](https://docs.warp.dev/agents/) includes a built-in coding agent.
 Sprite supplies no agent of its own. It gives the assistant you choose a way
@@ -42,11 +42,12 @@ shown in other panes in the same window. A program can also create, update,
 and remove a visual interface in its own pane: a file tree, an editor, or a
 small control panel. Reading a pane does not grant permission to change it.
 
-The longer-term goal is a channel through which an LLM can work across panes:
-read context from one, create a useful view in another, update it as work
-changes, and remove it when it is no longer needed. You stay in control of the
-tools. Sprite is still in development; the [technical reference](docs/technical-reference.md)
-describes what works today and its current limits.
+With an owner-approved [Pane Grant](docs/pane-control.md), an assistant can
+create, read, label, move, focus, resize and close existing or new panes,
+including panes in background tabs. Terminal input requires its own permission.
+You can revoke either right in Sprite's Pane Access controls. Sprite is still
+in development; the [technical reference](docs/technical-reference.md) describes
+what works today and its current limits.
 
 Sprite is available under either the MIT or Apache 2.0 license.
 
