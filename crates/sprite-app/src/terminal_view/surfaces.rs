@@ -1483,7 +1483,7 @@ impl TerminalView {
                     .h(metrics.cells.height())
                     .flex()
                     .items_center()
-                    .gap(px(7.0))
+                    .gap(px(5.0))
                     .pl(px(9.0))
                     .bg(rgb(crate::grid_paint::pack(background)))
                     .border_r_1()
