@@ -73,7 +73,7 @@ install the package with:
 (cd packaging && makepkg -si)
 ```
 
-The resulting x86-64 package is named `sprite-0.3.1-1-x86_64.pkg.tar.zst`.
+The resulting x86-64 package is named `sprite-0.4.0-1-x86_64.pkg.tar.zst`.
 On **macOS**, fetch the build dependencies and install the app with:
 
 ```sh
