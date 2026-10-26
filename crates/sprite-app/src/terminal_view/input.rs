@@ -200,9 +200,9 @@ impl TerminalView {
                         .timer(std::time::Duration::from_millis(75))
                         .await;
                     let active = view.update_in(cx, |view, _, _| {
-                        let (rows, head) = match (view.drag, view.edge_scroll_target) {
-                            (Some(_), Some(target)) => target,
-                            _ => return false,
+                        let (Some(drag), Some((rows, head))) = (view.drag, view.edge_scroll_target)
+                        else {
+                            return false;
                         };
                         if view.bundle.as_ref().is_some_and(|bundle| {
                             let viewport = bundle.render.viewport;
@@ -210,7 +210,7 @@ impl TerminalView {
                         }) {
                             return true;
                         }
-                        let anchor = view.drag.unwrap().anchor;
+                        let anchor = drag.anchor;
                         if !view.submit(TerminalCommand::ScrollAndSelect {
                             rows,
                             anchor,
