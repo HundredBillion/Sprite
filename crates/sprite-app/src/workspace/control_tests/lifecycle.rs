@@ -5,6 +5,9 @@ use crate::observation::broker::PaneSource;
 fn public_move_keeps_a_pending_capture_and_publishes_current_membership(
     cx: &mut gpui::TestAppContext,
 ) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         let mut settings = crate::Settings::default();
         settings.pane_observation.enabled = false;

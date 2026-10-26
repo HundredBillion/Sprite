@@ -2,6 +2,47 @@ use super::*;
 use crate::control::{self, AccessRequest, Descriptor, Message, Operation, PROTOCOL, Request};
 use serde_json::{Value, json};
 
+struct PrivateRuntime(std::path::PathBuf);
+
+impl Drop for PrivateRuntime {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn private_runtime(module: &str, cx: &gpui::TestAppContext) -> bool {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let module = module.split_once("::").unwrap().1;
+    let name = format!("{module}::{}", cx.test_function_name().unwrap());
+    if std::env::var("SPRITE_CONTROL_TEST_CHILD").ok().as_deref() == Some(name.as_str()) {
+        return true;
+    }
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let directory = PrivateRuntime(std::env::temp_dir().join(format!(
+        "sc-{:x}-{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory.0)
+        .unwrap();
+    // A subprocess owns runtime variables so parallel tests never change each other's socket environment.
+    crate::test_child::run_child_test(
+        &name,
+        &[
+            ("SPRITE_CONTROL_TEST_CHILD", name.as_ref()),
+            ("XDG_RUNTIME_DIR", directory.0.as_os_str()),
+            ("TMPDIR", directory.0.as_os_str()),
+        ],
+        "pane control with a private runtime directory",
+    );
+    false
+}
+
 fn approve(
     workspace: &gpui::Entity<Workspace>,
     cx: &mut gpui::VisualTestContext,
@@ -55,6 +96,9 @@ fn ask(descriptor: &Descriptor, operation: Operation, cx: &mut gpui::VisualTestC
 
 #[gpui::test]
 fn public_control_needs_owner_approval_and_can_be_revoked(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
     let pane = format!("{}:0", descriptor.window);
@@ -87,6 +131,9 @@ fn public_control_needs_owner_approval_and_can_be_revoked(cx: &mut gpui::TestApp
 
 #[gpui::test]
 fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
     let human = format!("{}:0", descriptor.window);
@@ -171,6 +218,9 @@ fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::T
 
 #[gpui::test]
 fn public_control_input_is_separate_and_requires_human_confirmation(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         let mut settings = crate::config::Settings::default();
         settings.pane_observation.enabled = false;
@@ -282,6 +332,9 @@ fn public_cli(
 
 #[gpui::test]
 fn public_access_request_waits_for_owner_and_cli_can_use_grant(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         Workspace::new(
             Some(vec!["/does-not-exist".into()]),
@@ -374,6 +427,9 @@ fn approve_scope(
 fn public_fixed_scope_includes_its_creations_and_denies_unrelated_future_panes(
     cx: &mut gpui::TestAppContext,
 ) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let fixed = approve_scope(&workspace, cx, &[0]);
     let all = approve(&workspace, cx, true, false);
@@ -436,6 +492,9 @@ fn public_fixed_scope_includes_its_creations_and_denies_unrelated_future_panes(
 fn public_close_requires_targeted_confirmation_and_revocation_cancels_it(
     cx: &mut gpui::TestAppContext,
 ) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     workspace.update(cx, |workspace, cx| {
         workspace.tabs.open(|_, _| {
@@ -507,6 +566,9 @@ fn public_close_requires_targeted_confirmation_and_revocation_cancels_it(
 fn public_move_resolves_natural_exit_in_current_tab_and_rejects_foreign_window(
     cx: &mut gpui::TestAppContext,
 ) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
     workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
@@ -550,6 +612,9 @@ fn public_move_resolves_natural_exit_in_current_tab_and_rejects_foreign_window(
 
 #[gpui::test]
 fn public_final_pane_close_replies_before_endpoint_teardown(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
     let pane = format!("{}:0", descriptor.window);
@@ -561,6 +626,9 @@ fn public_final_pane_close_replies_before_endpoint_teardown(cx: &mut gpui::TestA
 
 #[gpui::test]
 fn public_queued_mutation_is_denied_after_revocation(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -596,6 +664,9 @@ fn public_queued_mutation_is_denied_after_revocation(cx: &mut gpui::TestAppConte
 
 #[gpui::test]
 fn public_pane_creation_admission_is_bounded(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     workspace.update(cx, |workspace, cx| {
         for _ in 1..control::MAX_PANES {
@@ -630,6 +701,9 @@ fn public_pane_creation_admission_is_bounded(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn public_control_preserves_surfaces_when_moving_their_pane(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     use crate::surface::channel::{Open, Placement, SurfaceConnection};
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
@@ -704,6 +778,9 @@ fn public_control_preserves_surfaces_when_moving_their_pane(cx: &mut gpui::TestA
 
 #[gpui::test]
 fn public_windows_require_separate_grants_even_for_equal_local_ids(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let mut other_app = cx.new_app();
     let (first, first_cx) = test_support::test_workspace(cx);
     let (second, second_cx) = test_support::test_workspace(&mut other_app);
@@ -747,6 +824,9 @@ fn public_windows_require_separate_grants_even_for_equal_local_ids(cx: &mut gpui
 
 #[gpui::test]
 fn public_client_reports_denied_credentials_and_revoked_endpoint(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
     let bad = Descriptor {

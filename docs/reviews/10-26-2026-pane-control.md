@@ -106,3 +106,13 @@ uses the same preparation; focus/move/close/create are guarded before commit.
 Resize and label changes do not change a close target. Family prevention is the
 shared preparation seam plus public focus/move confirmation regressions.
 Scope decision needed: none. Open family members in this feature: none.
+
+## Headless CI runtime-directory correction
+
+The first PR run, [40407082998](https://github.com/HundredBillion/Sprite/actions/runs/40407082998), passed macOS but failed 19 Linux socket-backed GPUI tests. Eighteen grant approvals returned `busy`; the direct observation access-request fixture found no endpoint. The new fixtures had assumed a desktop runtime directory existed.
+
+Linux `local_socket::runtime_directory` deliberately refuses to open an endpoint when `XDG_RUNTIME_DIR` is unset. Reproducing that exact production function in the pinned amd64 Arch image failed with the missing-directory diagnostic; setting a private runtime directory made the same probe pass. This locates the failure before socket binding, rather than grant permissions, transport saturation or terminal lifecycle.
+
+The 19 fixtures now follow the existing observation reload subprocess pattern: create a unique mode-0700 directory, pass `XDG_RUNTIME_DIR` and `TMPDIR` only to the exact child test, and remove the fixture through RAII cleanup. A test-name marker prevents recursion. The shared child runner requires successful execution of one exact test, so the parent does not silently skip the assertions. Production endpoint policy and credentials are unchanged.
+
+Local verification after the correction: 22 public checks passed; 877 application unit tests passed with one ignored; pinned Clippy and formatting passed. An independent reviewer also ran the 22 public checks with eight test threads and approved the fixture isolation, test-name dispatch, cleanup and path lengths. Hosted platform results are recorded in the PR checks.

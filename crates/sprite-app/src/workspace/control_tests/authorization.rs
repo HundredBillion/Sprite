@@ -2,6 +2,9 @@ use super::*;
 
 #[gpui::test]
 fn public_focus_cannot_transfer_a_humans_close_confirmation(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     for moving in [false, true] {
         let (workspace, cx) = test_support::test_workspace(cx);
         workspace.update(cx, |workspace, cx| {
@@ -44,6 +47,9 @@ fn public_focus_cannot_transfer_a_humans_close_confirmation(cx: &mut gpui::TestA
 
 #[gpui::test]
 fn public_stale_owner_button_cannot_approve_a_replacement_request(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let (first_tx, first_rx) = std::sync::mpsc::sync_channel(1);
     let (second_tx, second_rx) = std::sync::mpsc::sync_channel(1);
@@ -91,6 +97,9 @@ fn public_stale_owner_button_cannot_approve_a_replacement_request(cx: &mut gpui:
 
 #[gpui::test]
 fn public_access_controls_remain_within_the_window_at_grant_limit(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     for _ in 0..control::MAX_GRANTS {
         approve(&workspace, cx, true, false);
@@ -129,6 +138,9 @@ fn public_access_controls_remain_within_the_window_at_grant_limit(cx: &mut gpui:
 fn public_stale_confirm_cannot_close_another_target_or_restore_removed_rights(
     cx: &mut gpui::TestAppContext,
 ) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     workspace.update(cx, |workspace, cx| {
         workspace.tabs = Tabs::new(|_, _| {
@@ -194,6 +206,9 @@ fn public_stale_confirm_cannot_close_another_target_or_restore_removed_rights(
 
 #[gpui::test]
 fn public_full_control_lane_refuses_without_late_mutation(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
     let (workspace, cx) = test_support::test_workspace(cx);
     let descriptor = approve(&workspace, cx, true, false);
     workspace.update(cx, |workspace, _| {
