@@ -1467,13 +1467,6 @@ impl TerminalView {
             let (_, background) = footer.grid.default_colors(metrics.defaults);
             let follow = footer.follow.as_ref().map(|state| {
                 let color = if state.enabled { 0x5c8fd6 } else { 0x8e939a };
-                let dot = if state.ready {
-                    0x73c991
-                } else if state.enabled {
-                    0x5c8fd6
-                } else {
-                    0x777d84
-                };
                 div()
                     .debug_selector(|| format!("grid-follow-{}", id.0))
                     .absolute()
@@ -1491,20 +1484,9 @@ impl TerminalView {
                     .font_family(".SystemUIFont")
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(if state.enabled { 0xe5e9ee } else { 0x9a9ea6 }))
+                    .text_color(rgb(if state.enabled { 0x73c991 } else { 0x9a9ea6 }))
                     .child(panther_paws(color))
                     .child("FOLLOW")
-                    .child(
-                        div()
-                            .debug_selector(|| format!("grid-follow-dot-{}", id.0))
-                            .absolute()
-                            .right(px(10.0))
-                            .top(metrics.cells.height() * 0.5 - px(2.5))
-                            .w(px(5.0))
-                            .h(px(5.0))
-                            .rounded_full()
-                            .bg(rgb(dot)),
-                    )
             });
             Some(
                 div()
@@ -4388,12 +4370,10 @@ mod tests {
         let follow = cx
             .debug_bounds("grid-follow-992")
             .expect("native Follow control is painted");
-        let dot = cx
-            .debug_bounds("grid-follow-dot-992")
-            .expect("Follow status dot is painted");
+        assert!(follow.size.width > px(0.0));
         assert!(
-            follow.right() - dot.right() >= px(9.0) && follow.right() - dot.right() <= px(11.0),
-            "Follow status dot should have a fixed 10px inset from the right divider"
+            cx.debug_bounds("grid-follow-dot-992").is_none(),
+            "Follow control has no status dot"
         );
         let position = point(footer.left() + px(17.0), footer.top() + px(3.0));
         cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
