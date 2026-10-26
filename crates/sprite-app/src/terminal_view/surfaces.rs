@@ -1494,7 +1494,17 @@ impl TerminalView {
                     .text_color(rgb(if state.enabled { 0xe5e9ee } else { 0x9a9ea6 }))
                     .child(panther_paws(color))
                     .child("FOLLOW")
-                    .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(rgb(dot)))
+                    .child(
+                        div()
+                            .debug_selector(|| format!("grid-follow-dot-{}", id.0))
+                            .absolute()
+                            .right(px(10.0))
+                            .top(metrics.cells.height() * 0.5 - px(2.5))
+                            .w(px(5.0))
+                            .h(px(5.0))
+                            .rounded_full()
+                            .bg(rgb(dot)),
+                    )
             });
             Some(
                 div()
@@ -4375,9 +4385,15 @@ mod tests {
             },
         );
         draw_test_window(cx);
+        let follow = cx
+            .debug_bounds("grid-follow-992")
+            .expect("native Follow control is painted");
+        let dot = cx
+            .debug_bounds("grid-follow-dot-992")
+            .expect("Follow status dot is painted");
         assert!(
-            cx.debug_bounds("grid-follow-992").is_some(),
-            "native Follow control is painted"
+            follow.right() - dot.right() >= px(9.0) && follow.right() - dot.right() <= px(11.0),
+            "Follow status dot should have a fixed 10px inset from the right divider"
         );
         let position = point(footer.left() + px(17.0), footer.top() + px(3.0));
         cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
