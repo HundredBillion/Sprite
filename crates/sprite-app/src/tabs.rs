@@ -229,6 +229,62 @@ impl<T> Tabs<T> {
         self.tabs[index].1.set_divider_ratio(pane, direction, ratio)
     }
 
+    pub fn tab_of(&self, pane: PaneId) -> Option<TabId> {
+        self.tabs.iter().find(|(_, tree)| tree.contains(pane)).map(|(tab, _)| *tab)
+    }
+
+    pub fn get(&self, pane: PaneId) -> Option<&T> {
+        self.tree(self.tab_of(pane)?)?.get(pane)
+    }
+
+    pub fn tree(&self, tab: TabId) -> Option<&PaneTree<T>> {
+        self.tabs.iter().find(|(id, _)| *id == tab).map(|(_, tree)| tree)
+    }
+
+    pub fn tree_mut(&mut self, tab: TabId) -> Option<&mut PaneTree<T>> {
+        self.tabs.iter_mut().find(|(id, _)| *id == tab).map(|(_, tree)| tree)
+    }
+
+    pub fn insert_beside(
+        &mut self,
+        anchor: PaneId,
+        direction: Direction,
+        content: impl FnOnce(TabId, PaneId) -> T,
+    ) -> Option<PaneId> {
+        let tab = self.tab_of(anchor)?;
+        let pane = self.panes.allocate();
+        let content = content(tab, pane);
+        self.tree_mut(tab)?.insert_beside(anchor, pane, direction, content);
+        Some(pane)
+    }
+
+    pub fn move_pane(&mut self, pane: PaneId, destination: Option<(PaneId, Direction)>) -> bool {
+        let Some(source) = self.tab_of(pane) else { return false; };
+        let target = match destination {
+            Some((anchor, _)) if anchor == pane => return false,
+            Some((anchor, _)) => match self.tab_of(anchor) {
+                Some(tab) => Some(tab),
+                None => return false,
+            },
+            None => None,
+        };
+        let Some(content) = self.close_pane(source, pane) else { return false; };
+        match (destination, target) {
+            (Some((anchor, side)), Some(tab)) => {
+                if let Some(tree) = self.tree_mut(tab) {
+                    tree.insert_beside(anchor, pane, side, content);
+                }
+            }
+            _ => {
+                let tab = TabId(self.next_tab);
+                self.next_tab += 1;
+                self.tabs.push((tab, PaneTree::new(pane, content)));
+                if self.active.is_none() { self.active = Some(tab); }
+            }
+        }
+        true
+    }
+
     /// Every pane in the window, tabs in window order.
     ///
     /// Shutdown needs this: a window closing must wait for the sessions of
@@ -677,5 +733,24 @@ mod tests {
         assert!(tabs.close_tab(TabId(999)).is_empty());
         assert_eq!(tabs.len(), 2);
         assert!(ended(&log).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn moving_between_background_tabs_retains_the_payload() {
+        let value = std::rc::Rc::new(());
+        let mut tabs = Tabs::new(|_, _| value.clone());
+        tabs.open(|_, _| std::rc::Rc::new(()));
+        let selected = tabs.active_tab();
+        assert!(tabs.move_pane(PaneId(0), Some((PaneId(1), Direction::Left))));
+        assert!(std::rc::Rc::ptr_eq(tabs.get(PaneId(0)).unwrap(), &value));
+        assert_eq!(tabs.tab_of(PaneId(0)), tabs.tab_of(PaneId(1)));
+        assert_eq!(tabs.active_tab(), selected);
+        assert!(!tabs.move_pane(PaneId(0), Some((PaneId(999), Direction::Left))));
+        assert!(std::rc::Rc::ptr_eq(tabs.get(PaneId(0)).unwrap(), &value));
     }
 }

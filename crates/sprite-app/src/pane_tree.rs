@@ -332,6 +332,20 @@ impl<T> Node<T> {
         }
     }
 
+    fn swap_pair(&mut self, anchor: PaneId, pane: PaneId) {
+        if let Self::Split { first, second, .. } = self {
+            if matches!(first.as_ref(), Self::Leaf(id, _) if *id == anchor)
+                && matches!(second.as_ref(), Self::Leaf(id, _) if *id == pane)
+            {
+                std::mem::swap(first, second);
+            } else if first.contains(anchor) {
+                first.swap_pair(anchor, pane);
+            } else {
+                second.swap_pair(anchor, pane);
+            }
+        }
+    }
+
     fn remove(self, pane: PaneId) -> (Option<Self>, Option<T>) {
         match self {
             Self::Leaf(id, content) if id == pane => (None, Some(content)),
@@ -568,6 +582,23 @@ impl<T> PaneTree<T> {
         self.root = Some(root.split_leaf(focus, new_pane, orientation, content));
         self.focus = Some(new_pane);
         Some(new_pane)
+    }
+
+    pub(crate) fn insert_beside(
+        &mut self,
+        anchor: PaneId,
+        pane: PaneId,
+        direction: Direction,
+        content: T,
+    ) {
+        let (orientation, _) = address(direction);
+        if let Some(root) = self.root.take() {
+            let mut root = root.split_leaf(anchor, pane, orientation, content);
+            if matches!(direction, Direction::Left | Direction::Up) {
+                root.swap_pair(anchor, pane);
+            }
+            self.root = Some(root);
+        }
     }
 
     /// Transfers the closed payload to its caller; the final close empties the tree.

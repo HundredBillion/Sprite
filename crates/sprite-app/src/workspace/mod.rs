@@ -406,6 +406,9 @@ impl Workspace {
             .enumerate()
             .map(|(index, placed)| (placed, display_text(format!("divider-{index}"))))
             .collect();
+        for (tab, pane, _) in self.tabs.all_panes() {
+            self.panes.set_tab(pane, tab);
+        }
         let published: Vec<_> = self
             .tabs
             .placements()
