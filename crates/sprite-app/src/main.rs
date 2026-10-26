@@ -29,6 +29,9 @@ fn main() -> ExitCode {
             let mut errors = std::io::stderr().lock();
             ExitCode::from(run_snapshot(&args, &mut out, &mut errors) as u8)
         }
+        Ok(Invocation::PaneControl(args)) => {
+            ExitCode::from(sprite_app::control::client::run(&args, &mut std::io::stdout().lock(), &mut std::io::stderr().lock()))
+        }
         Ok(Invocation::ConfigReload) => {
             let mut out = std::io::stdout().lock();
             let mut errors = std::io::stderr().lock();

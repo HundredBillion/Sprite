@@ -22,6 +22,7 @@ pub enum Invocation {
     Snapshot(SnapshotArgs),
     /// Ask the containing window to re-read its configuration file.
     ConfigReload,
+    PaneControl(crate::control::client::Args),
     /// Print the configuration that is actually in effect.
     ConfigPrint(ConfigPrintArgs),
     SurfaceOpen(SurfaceOpenArgs),
@@ -100,6 +101,8 @@ sprite — a terminal
     sprite                       open a window
     sprite -e <program> [args]   open a window running <program>
     sprite --config <path>       open a window reading settings from <path>
+    sprite panes access request  request owner-approved pane access
+    sprite panes <command>       list/read/create/rename/move/focus/resize/close/input
     sprite panes snapshot        print what other panes in this window show
     sprite config reload         re-read the configuration file in this window
     sprite config print          print the settings that are actually in effect
@@ -188,7 +191,7 @@ where
             };
             match text(&sub).as_deref() {
                 Some("snapshot") => snapshot(arguments).map(Invocation::Snapshot),
-                Some(other) => Err(UsageError(format!("unknown panes command: {other}"))),
+                Some(other) => crate::control::client::parse(other, arguments).map(Invocation::PaneControl),
                 None => Err(UsageError("arguments must be valid text".to_owned())),
             }
         }
@@ -706,5 +709,16 @@ mod tests {
         assert!(rejected(&["token", "register"]).contains("needs a name"));
         assert!(rejected(&["token", "register", "scm.added", "green"]).contains("#rrggbb"));
         assert!(rejected(&["token", "list"]).contains("unknown token command"));
+    }
+}
+
+#[cfg(test)]
+mod control_cli_tests {
+    use super::*;
+    #[test]
+    fn public_control_commands_require_explicit_access() {
+        assert!(parse_arguments(["panes", "list", "--access", "/tmp/access.json"]).is_ok());
+        assert!(parse_arguments(["panes", "list"]).is_err());
+        assert!(parse_arguments(["panes", "list", "--access", "/tmp/a", "--surprise"]).is_err());
     }
 }
