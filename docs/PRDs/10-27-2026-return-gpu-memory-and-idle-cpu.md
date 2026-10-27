@@ -64,7 +64,7 @@ A new module `crates/sprite-app/src/picture.rs` owns the lifetime of a picture
 that GPUI draws.
 
 - `Picture` wraps one `Arc<RenderImage>`. It is created only through
-  `Picture::new(frames) -> Arc<Picture>` and exposes the image to elements
+  `Picture::new(pixels: image::RgbaImage) -> Arc<Picture>` and exposes the image to elements
   through `Picture::image() -> Arc<RenderImage>`.
 - Dropping the last `Arc<Picture>` pushes its `RenderImage` onto a release
   queue. The queue is thread-local, like the ADR 0033 memory ledger, so
@@ -89,9 +89,10 @@ replaced, evicted by the 128 MB Kitty budget, cleared, its pane or Surface
 closed, or its cache dropped. A cache added later gets the same behaviour by
 using `Picture`.
 
-A picture dropped on a background thread is queued on that thread and never
-released. That is harmless, because only the UI thread paints, so such a
-picture never had a GPU copy. A picture dropped while no window renders is
+Only a thread that has drawn queues anything. A picture dropped on a
+background thread is not queued, because only the UI thread paints, so it
+never had a GPU copy, and queuing it on a thread that never empties its queue
+would hold its pixels forever. A picture dropped while no window renders is
 released at the window's next render.
 
 `RenderImage::new` is called only inside `picture.rs`. A test pins this, so a
@@ -116,9 +117,13 @@ new call site can't bypass the release.
   an appearance change, Sprite's minimap `on_next_frame`) therefore resumes
   delivery. A missed path can't freeze the window, because no path bypasses
   the invalidator.
-- On macOS the wake function restarts the display link through its own handle,
-  without locking `MacWindowState`, so calling it from inside a callback can't
-  deadlock. On other platforms it does nothing.
+- On macOS the wake function holds a weak handle to the window's state and
+  restarts the existing display link. It takes the state lock, as every
+  `PlatformWindow` method does. GPUI's macOS code releases that lock before it
+  calls into the app, so a redraw request can't deadlock on it. Display link
+  start and stop must alternate, so the window records the pause and keeps
+  them matched, including when the link is replaced or dropped. On other
+  platforms it does nothing.
 - Rejected: keeping the display link running and skipping only the hop to the
   main thread while idle. It needs no resume wiring, but the timer thread would
   still wake 60 times a second, so it can't reach the idle-CPU target.
