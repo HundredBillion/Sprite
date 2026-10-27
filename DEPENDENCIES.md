@@ -99,7 +99,7 @@ Bounded collections cap per-case work. Persisted failures run before new cases.
 
 **Supply-chain change.** Adds proptest 1.10.0, rand_xorshift 0.4.0 and unarray
 0.1.4. The remaining dependencies reuse locked versions, including rand 0.9.5.
-Its Rust 1.84 minimum is below Sprite's pinned Rust 1.97.1.
+Its Rust 1.84 minimum is below Sprite's pinned Rust 1.98.1.
 
 **License and source.** MIT OR Apache-2.0; crates.io,
 <https://docs.rs/proptest/1.10.0/proptest/test_runner/struct.Config.html>.

@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 env:
-  RUST_VERSION: "1.97.1"
+  RUST_VERSION: "1.98.1"
   # Zig comes from ziglang.org, checked against these digests, rather than
   # from a package manager: Homebrew and Arch move to a new Zig on their own
   # schedule, and Ghostty's build accepts exactly one minor version.

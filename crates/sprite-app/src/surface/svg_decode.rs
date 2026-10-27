@@ -542,7 +542,7 @@ fn rasterise(
     let height = pixmap.height();
     let mut pixels = pixmap.take();
     // tiny-skia holds premultiplied RGBA; GPUI draws straight BGRA.
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as u16;
         if alpha > 0 && alpha < 255 {
             for channel in &mut pixel[..3] {
