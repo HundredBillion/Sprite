@@ -848,3 +848,123 @@ fn public_client_reports_denied_credentials_and_revoked_endpoint(cx: &mut gpui::
 
 mod authorization;
 mod lifecycle;
+
+/// The numeric pane ID in a created pane's address (`window:id`).
+fn created_pane(response: &Value) -> u64 {
+    assert_eq!(response["outcome"], "ok", "{response}");
+    let id = response["result"]["id"].as_str().unwrap();
+    id.rsplit_once(':').unwrap().1.parse().unwrap()
+}
+
+/// Closes a pane through Pane Control, answering the owner's confirmation when
+/// the pane looks busy, and checks it is gone afterwards.
+fn close_by_control(
+    workspace: &gpui::Entity<Workspace>,
+    descriptor: &Descriptor,
+    pane: u64,
+    cx: &mut gpui::VisualTestContext,
+) {
+    let request = || Operation::Close {
+        pane: format!("{}:{pane}", descriptor.window),
+    };
+    let closed = ask(descriptor, request(), cx);
+    if closed["outcome"] == "confirmation_required" {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.answer_control(true, window, cx)
+        });
+    } else {
+        assert_eq!(closed["outcome"], "ok", "{closed}");
+    }
+    workspace.read_with(cx, |workspace, _| {
+        assert!(
+            workspace.tabs.get(PaneId(pane)).is_none(),
+            "pane {pane} closed"
+        );
+    });
+}
+
+#[gpui::test]
+fn every_way_of_closing_a_pane_takes_it_out_of_grant_scopes(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
+    let (workspace, cx) = test_support::test_workspace(cx);
+    let fixed = approve_scope(&workspace, cx, &[0]);
+    let human = format!("{}:0", fixed.window);
+    let beside = || Operation::Create {
+        beside: Some(human.clone()),
+        side: Some(crate::control::Side::Right),
+    };
+    let by_control = created_pane(&ask(&fixed, beside(), cx));
+    let exited = created_pane(&ask(&fixed, beside(), cx));
+    let focused = created_pane(&ask(&fixed, beside(), cx));
+    let own_tab = created_pane(&ask(
+        &fixed,
+        Operation::Create {
+            beside: None,
+            side: None,
+        },
+        cx,
+    ));
+    let scoped = |cx: &mut gpui::VisualTestContext| {
+        workspace.read_with(cx, |workspace, _| workspace.scoped_panes())
+    };
+    assert_eq!(
+        scoped(cx),
+        [0, by_control, exited, focused, own_tab]
+            .into_iter()
+            .collect()
+    );
+
+    close_by_control(&workspace, &fixed, by_control, cx);
+    assert!(!scoped(cx).contains(&by_control), "Pane Control close");
+
+    workspace.update(cx, |workspace, cx| {
+        let tab = workspace.tabs.tab_of(PaneId(exited)).unwrap();
+        workspace.close_exited_pane(tab, PaneId(exited), cx);
+    });
+    assert!(!scoped(cx).contains(&exited), "a pane whose program exited");
+
+    workspace.update(cx, |workspace, cx| {
+        assert!(workspace.tabs.focus_pane(PaneId(focused)));
+        workspace.close_focused_pane(false, cx);
+    });
+    assert!(!scoped(cx).contains(&focused), "the close-pane key");
+
+    workspace.update(cx, |workspace, cx| {
+        let tab = workspace.tabs.tab_of(PaneId(own_tab)).unwrap();
+        assert!(workspace.tabs.focus_tab(tab));
+        workspace.close_active_tab(false, cx);
+    });
+    assert!(!scoped(cx).contains(&own_tab), "the close-tab key");
+    assert_eq!(scoped(cx), [0].into_iter().collect());
+}
+
+#[gpui::test]
+fn a_fixed_grant_counts_only_its_open_panes_toward_the_cap(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
+    let (workspace, cx) = test_support::test_workspace(cx);
+    let fixed = approve_scope(&workspace, cx, &[0]);
+    let human = format!("{}:0", fixed.window);
+    for _ in 0..control::MAX_PANES {
+        let pane = created_pane(&ask(
+            &fixed,
+            Operation::Create {
+                beside: Some(human.clone()),
+                side: Some(crate::control::Side::Right),
+            },
+            cx,
+        ));
+        close_by_control(&workspace, &fixed, pane, cx);
+    }
+    created_pane(&ask(
+        &fixed,
+        Operation::Create {
+            beside: Some(human),
+            side: Some(crate::control::Side::Right),
+        },
+        cx,
+    ));
+}

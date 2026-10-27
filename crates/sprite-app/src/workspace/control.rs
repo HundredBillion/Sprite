@@ -78,10 +78,23 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn prune_control_labels(&mut self) {
+    /// Forgets closed panes everywhere Pane Control recorded them: their
+    /// labels and every selected-pane grant's scope. Every way of closing a
+    /// pane ends in a layout refresh, which calls this, so no close path has
+    /// to remember it. A pane's identity is never reused, so a forgotten one
+    /// can't authorize anything again, and a scope holds only open panes,
+    /// which is what its limit counts.
+    pub(super) fn prune_closed_panes(&mut self) {
+        let tabs = &self.tabs;
         self.control
             .labels
-            .retain(|pane, _| self.tabs.get(*pane).is_some());
+            .retain(|pane, _| tabs.get(*pane).is_some());
+        for grant in self.control.grants.values_mut() {
+            grant
+                .scope
+                .panes
+                .retain(|pane| tabs.get(PaneId(*pane)).is_some());
+        }
     }
 
     pub(super) fn expire_control(&mut self, cx: &mut Context<Self>) {
@@ -525,7 +538,6 @@ impl Workspace {
                 self.prepare_control_layout(cx)?;
                 let tab = self.tabs.tab_of(pane).ok_or("gone")?;
                 let handle = self.tabs.close_pane(tab, pane).ok_or("gone")?;
-                self.control.labels.remove(&pane);
                 self.shut_down(handle, cx);
                 if self.tabs.is_empty() {
                     self.control.close(connection);
@@ -731,5 +743,17 @@ impl Workspace {
             elements.push(panel.into_any_element());
         }
         elements
+    }
+}
+
+#[cfg(test)]
+impl Workspace {
+    /// Every pane any selected-pane grant's scope names.
+    pub(super) fn scoped_panes(&self) -> std::collections::BTreeSet<u64> {
+        self.control
+            .grants
+            .values()
+            .flat_map(|grant| grant.scope.panes.iter().copied())
+            .collect()
     }
 }
