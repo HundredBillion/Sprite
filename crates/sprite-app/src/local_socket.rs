@@ -209,13 +209,13 @@ impl LocalSocket {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&directory)?;
+            .create(&directory).inspect_err(|error| { tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error.kind(), "socket directory creation failed"); })?;
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         let mut name = ObservationKey::generate()?.to_hex();
         name.truncate(policy.filename_hex);
         let socket = directory.join(format!("{name}{}", policy.suffix));
         let (cancellation, cancelled) = UnixStream::pair()?;
-        let listener = bind_private(&socket)?;
+        let listener = bind_private(&socket).inspect_err(|error| { tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error.kind(), "socket bind failed"); })?;
         if let Err(error) = listener.set_nonblocking(true) {
             fs::remove_file(&socket).ok();
             return Err(error);
@@ -246,7 +246,8 @@ impl LocalSocket {
                             Err(Errno::EINTR) => continue,
                             // A failing `poll` is waited out like a failing
                             // `accept`: only closing the socket ends the loop.
-                            Err(_) => {
+                            Err(error) => {
+                                tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error, "listener poll failed");
                                 if rest(&cancelled, &running) {
                                     break;
                                 }
@@ -273,7 +274,8 @@ impl LocalSocket {
                         let stream = match listener.accept() {
                             Ok((stream, _)) => stream,
                             Err(error) if !rests_after(&error) => continue,
-                            Err(_) => {
+                            Err(error) => {
+                                tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error.kind(), "listener accept failed");
                                 if rest(&cancelled, &running) {
                                     break;
                                 }
@@ -318,19 +320,27 @@ impl LocalSocket {
                                     return;
                                 }
                                 match authenticate(&stream, &key, &running, policy, deadline) {
-                                    Ok((reader, body)) => handler(Authenticated {
-                                        stream,
-                                        reader,
-                                        body,
-                                        reply_connection: ReplyConnection {
-                                            connections: Arc::clone(&_slot.connections),
-                                            id,
-                                        },
-                                        slot: Arc::clone(&_slot),
-                                    }),
-                                    Err(_) => refused(&mut stream),
+                                    Ok((reader, body)) => {
+                                        let started = Instant::now();
+                                        handler(Authenticated {
+                                            stream,
+                                            reader,
+                                            body,
+                                            reply_connection: ReplyConnection {
+                                                connections: Arc::clone(&_slot.connections),
+                                                id,
+                                            },
+                                            slot: Arc::clone(&_slot),
+                                        });
+                                        tracing::debug!(target: "sprite_app::ipc", subsystem = policy.name, connection = id, elapsed_ms = started.elapsed().as_millis() as u64, "connection handler ended");
+                                    }
+                                    Err(_) => {
+                                        tracing::debug!(target: "sprite_app::ipc", subsystem = policy.name, connection = id, "connection refused");
+                                        refused(&mut stream);
+                                    },
                                 }
                             })
+                            .inspect_err(|error| { tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error.kind(), "connection thread failed to start"); })
                             .ok();
                     }
                 }
@@ -338,10 +348,12 @@ impl LocalSocket {
         let thread = match thread {
             Ok(thread) => thread,
             Err(error) => {
+                tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error.kind(), "listener thread failed to start");
                 fs::remove_file(&socket).ok();
                 return Err(error);
             }
         };
+        tracing::info!(target: "sprite_app::ipc", subsystem = policy.name, "listener opened");
         Ok(Self {
             socket,
             key,

@@ -436,8 +436,14 @@ impl TerminalView {
             mut events,
             mut snapshots,
         } = match TerminalSession::spawn(config) {
-            Ok(session) => session,
-            Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
+            Ok(session) => {
+                tracing::info!(target: "sprite_app::session", tab = exit.identity.0.0, pane = exit.identity.1.0, "terminal session started");
+                session
+            }
+            Err(error) => {
+                tracing::error!(target: "sprite_app::session", tab = exit.identity.0.0, pane = exit.identity.1.0, kind = ?error.kind, operation = error.operation, "terminal session failed to start");
+                return Self::failed(error.to_string(), font_family, window, cx);
+            }
         };
 
         // Registered before the event task starts, so an answer can never

@@ -85,3 +85,5 @@ packaging/macos/update.sh
 The macOS installer puts `Sprite.app` in Applications and adds the `sprite`
 command. For build details and other installation options, see the
 [packaging guide](packaging/README.md).
+
+For local debugging and performance investigation, see [application diagnostics](docs/local-logging.md).

@@ -112,6 +112,7 @@ pub(super) fn open_endpoint(
             Some(request.reply_connection),
         )
     })
+    .inspect_err(|error| { tracing::warn!(target: "sprite_app::ipc", kind = ?error.kind(), "observation endpoint failed"); })
     .ok()
 }
 

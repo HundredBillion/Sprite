@@ -549,7 +549,10 @@ impl Settings {
     fn from_read(path: &Path, read: std::io::Result<String>) -> (Self, Complaints) {
         match read {
             Ok(text) => Self::parse(&text),
-            Err(error) => (Self::default(), Complaints(vec![unreadable(path, &error)])),
+            Err(error) => {
+                tracing::warn!(target: "sprite_app::configuration", kind = ?error.kind(), "configuration file unreadable");
+                (Self::default(), Complaints(vec![unreadable(path, &error)]))
+            }
         }
     }
 
@@ -570,13 +573,21 @@ impl Settings {
     /// does not say or says wrongly.
     pub fn parse(text: &str) -> (Self, Complaints) {
         match Self::parse_candidate(text) {
-            Ok(parsed) => parsed,
-            Err(error) => (
-                Self::default(),
-                Complaints(vec![format!(
-                    "configuration is not valid TOML, so Sprite's defaults are in use: {error}"
-                )]),
-            ),
+            Ok(parsed) => {
+                if !parsed.1.0.is_empty() {
+                    tracing::warn!(target: "sprite_app::configuration", count = parsed.1.0.len(), "invalid configuration fields");
+                }
+                parsed
+            }
+            Err(error) => {
+                tracing::warn!(target: "sprite_app::configuration", "invalid configuration syntax");
+                (
+                    Self::default(),
+                    Complaints(vec![format!(
+                        "configuration is not valid TOML, so Sprite's defaults are in use: {error}"
+                    )]),
+                )
+            }
         }
     }
 

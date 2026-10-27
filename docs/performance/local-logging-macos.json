@@ -1,0 +1,110 @@
+[
+  {
+    "trial": 1,
+    "workload": "idle",
+    "mode": "default",
+    "sample": "0:00.21  85024",
+    "exited_early": null,
+    "elapsed_seconds": 4.012,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 1,
+    "workload": "idle",
+    "mode": "detailed",
+    "sample": "0:00.21  85104",
+    "exited_early": null,
+    "elapsed_seconds": 4.024,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 1,
+    "workload": "output",
+    "mode": "default",
+    "sample": "0:01.39  97120",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 1,
+    "workload": "output",
+    "mode": "detailed",
+    "sample": "0:01.39  97728",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 2,
+    "workload": "idle",
+    "mode": "default",
+    "sample": "0:00.20  84896",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 2,
+    "workload": "idle",
+    "mode": "detailed",
+    "sample": "0:00.21  84656",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 2,
+    "workload": "output",
+    "mode": "default",
+    "sample": "0:01.28  97104",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 2,
+    "workload": "output",
+    "mode": "detailed",
+    "sample": "0:01.36  97088",
+    "exited_early": null,
+    "elapsed_seconds": 4.019,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 3,
+    "workload": "idle",
+    "mode": "default",
+    "sample": "0:00.21  84992",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 3,
+    "workload": "idle",
+    "mode": "detailed",
+    "sample": "0:00.20  84864",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 3,
+    "workload": "output",
+    "mode": "default",
+    "sample": "0:01.36  96928",
+    "exited_early": null,
+    "elapsed_seconds": 4.024,
+    "stderr_tail": ""
+  },
+  {
+    "trial": 3,
+    "workload": "output",
+    "mode": "detailed",
+    "sample": "0:01.39  97024",
+    "exited_early": null,
+    "elapsed_seconds": 4.023,
+    "stderr_tail": ""
+  }
+]

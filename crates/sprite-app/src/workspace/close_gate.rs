@@ -68,6 +68,7 @@ impl Workspace {
     ) {
         self.pending_cleanups
             .retain(|cleanup| !cleanup.completed.load(std::sync::atomic::Ordering::Acquire));
+        tracing::info!(target: "sprite_app::pane", "pane cleanup starting");
         let Some(cleanup) = pane.begin_shutdown(cx) else {
             return;
         };
@@ -133,6 +134,7 @@ impl Workspace {
         if self.stopping {
             return;
         }
+        tracing::info!(target: "sprite_app::shutdown", "window cleanup starting");
         let cleanups = self.begin_shutdown(cx);
         if cleanups.is_empty() {
             let reply = self.quit_request.take();
@@ -181,6 +183,7 @@ impl Workspace {
         let Some(view) = self.tabs.close_pane(tab, pane) else {
             return;
         };
+        tracing::info!(target: "sprite_app::pane", tab = tab.0, pane = pane.0, "exited pane closing");
         self.shut_down(view, cx);
         if was_active || self.tabs.is_empty() {
             self.after_close(cx);
