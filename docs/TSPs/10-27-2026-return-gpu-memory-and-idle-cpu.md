@@ -1431,6 +1431,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Blocked by:** Tasks 1-7
 
+**Who does what:**
+- The agent runs Steps 1-4 and 6, plus the first-frame measurement in Step 5, all of which produce numbers. It drives only a `target/release/sprite` window it has verified: screen unlocked, window present and frontmost.
+- David does the visual pass in Step 5: typing, late output, resize, tab switch, display move, Cmd-H, Surface and minimap. He reports anything that doesn't appear at once.
+
 - [ ] **Step 1: Full checks with the pinned toolchain**
 
 ```bash
