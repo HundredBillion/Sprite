@@ -16,9 +16,9 @@ use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
 use gpui::{Context, RenderImage};
+use resvg::usvg;
 
 use crate::picture::Picture;
-use resvg::usvg;
 
 /// Decoded pixels one Surface cache keeps at once.
 const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;

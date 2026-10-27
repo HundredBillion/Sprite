@@ -25,8 +25,10 @@ GPUI's Metal atlas also kept a removed image's space until its whole texture
 emptied. The GPUI patch returns the tile to the texture's allocator and makes
 removal safe to repeat.
 
-Consequences: a picture's GPU copy outlives it by at most one frame of the
-window that drew it. ADRs 0022 and 0033 bound decoded pixels and excluded
+Consequences: a picture's GPU copy is released at the start of the window's
+next render. Since an idle window stops asking for frames, that render may
+come later than the next frame would have, but every way Sprite lets go of a
+picture also asks for a redraw. ADRs 0022 and 0033 bound decoded pixels and excluded
 "native texture copies". That exclusion no longer holds for retained pictures;
 it still holds for usvg parse allocations and CPU time.
 

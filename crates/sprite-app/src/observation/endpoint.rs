@@ -131,9 +131,9 @@ impl Endpoint {
 
     /// What one pane's session needs to talk to this endpoint.
     ///
-    /// A session learns the socket, the key, and **its own** identity. It is
-    /// told who it is so a request can default to the caller's own tab without
-    /// the caller having to name a pane it might not be allowed to see.
+    /// A session learns the socket, the key, and **its own** pane. It is told
+    /// which pane it is so a request can default to the tab holding that pane
+    /// without the caller having to name a pane it might not be allowed to see.
     pub fn environment(&self, pane: PaneId) -> Vec<(OsString, OsString)> {
         vec![
             (

@@ -375,10 +375,7 @@ impl Workspace {
                 {
                     return Err("busy");
                 }
-                let scope = &self.control.grants.get(&grant).ok_or("denied")?.scope;
-                if !scope.all_panes && scope.panes.len() >= control::MAX_PANES {
-                    return Err("busy");
-                }
+                self.control.grants.get(&grant).ok_or("denied")?;
                 let anchor = beside
                     .as_ref()
                     .map(|s| {

@@ -41,8 +41,8 @@ impl Deref for Picture {
 }
 
 thread_local! {
-    /// Images whose last `Picture` has gone, waiting for the window's next
-    /// frame. Thread-local, like the Surface image ledger, so parallel tests
+    /// Images whose last `Picture` has gone, waiting for the next window
+    /// render. Thread-local, like the Surface image ledger, so parallel tests
     /// never share one.
     static RELEASED: RefCell<Vec<Arc<RenderImage>>> = const { RefCell::new(Vec::new()) };
     /// Whether this thread draws windows. Only a drawing thread has GPU
@@ -66,8 +66,9 @@ impl Drop for Picture {
 }
 
 /// Drops the GPU copy of every picture let go of since the last call, from
-/// every window. Called by each window before it paints, so a copy never
-/// outlives its picture by more than a frame.
+/// every window. Called at the start of each window's render, so a copy is
+/// released when the window next renders; every way Sprite lets go of a
+/// picture also asks for a redraw.
 pub(crate) fn release_dropped(window: &mut Window, cx: &mut App) {
     DRAWS.with(|draws| draws.set(true));
     let released = RELEASED.with(|released| std::mem::take(&mut *released.borrow_mut()));
