@@ -1,0 +1,48 @@
+--- a/src/app/test_context.rs
++++ b/src/app/test_context.rs
+@@ -823,6 +823,11 @@ impl VisualTestContext {
+         self.simulate_window_scale_factor(self.window, scale_factor)
+     }
+ 
++    /// How many images the window's texture atlas holds.
++    pub fn atlas_tile_count(&self) -> usize {
++        self.test_window(self.window).atlas_tile_count()
++    }
++
+     /// debug_bounds returns the bounds of the element with the given selector.
+     pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
+         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
+--- a/src/platform/test/window.rs
++++ b/src/platform/test/window.rs
+@@ -19,7 +19,7 @@ pub(crate) struct TestWindowState {
+     pub(crate) title: Option<String>,
+     pub(crate) edited: bool,
+     platform: Weak<TestPlatform>,
+-    sprite_atlas: Arc<dyn PlatformAtlas>,
++    sprite_atlas: Arc<TestAtlas>,
+     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
+     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
+     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
+@@ -106,6 +106,11 @@ impl TestWindow {
+         self.0.lock().resize_callback = Some(callback);
+     }
+ 
++    /// How many images the window's texture atlas holds.
++    pub fn atlas_tile_count(&self) -> usize {
++        self.0.lock().sprite_atlas.tile_count()
++    }
++
+     pub(crate) fn simulate_active_status_change(&self, active: bool) {
+         let mut lock = self.0.lock();
+         let Some(mut callback) = lock.active_status_change_callback.take() else {
+@@ -327,6 +332,10 @@ impl TestAtlas {
+             tiles: HashMap::default(),
+         }))
+     }
++
++    pub(crate) fn tile_count(&self) -> usize {
++        self.0.lock().tiles.len()
++    }
+ }
+ 
+ impl PlatformAtlas for TestAtlas {

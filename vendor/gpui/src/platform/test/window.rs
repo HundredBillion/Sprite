@@ -19,7 +19,7 @@ pub(crate) struct TestWindowState {
     pub(crate) title: Option<String>,
     pub(crate) edited: bool,
     platform: Weak<TestPlatform>,
-    sprite_atlas: Arc<dyn PlatformAtlas>,
+    sprite_atlas: Arc<TestAtlas>,
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
@@ -104,6 +104,11 @@ impl TestWindow {
         drop(lock);
         callback(size, scale_factor);
         self.0.lock().resize_callback = Some(callback);
+    }
+
+    /// How many images the window's texture atlas holds.
+    pub fn atlas_tile_count(&self) -> usize {
+        self.0.lock().sprite_atlas.tile_count()
     }
 
     pub(crate) fn simulate_active_status_change(&self, active: bool) {
@@ -326,6 +331,10 @@ impl TestAtlas {
             next_id: 0,
             tiles: HashMap::default(),
         }))
+    }
+
+    pub(crate) fn tile_count(&self) -> usize {
+        self.0.lock().tiles.len()
     }
 }
 

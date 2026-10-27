@@ -625,3 +625,13 @@ fn placeholder_tiles_land_on_this_frames_cells_after_a_scale_change(cx: &mut gpu
         );
     }
 }
+
+#[gpui::test]
+fn the_window_releases_pictures_let_go_before_it_draws(cx: &mut gpui::TestAppContext) {
+    let (_workspace, cx) = test_workspace(cx);
+    draw_workspace(cx);
+    drop(crate::picture::Picture::new(image::RgbaImage::new(1, 1)));
+    assert_eq!(crate::picture::queued(), 1);
+    draw_workspace(cx);
+    assert_eq!(crate::picture::queued(), 0);
+}

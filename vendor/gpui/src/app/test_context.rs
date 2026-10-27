@@ -823,6 +823,11 @@ impl VisualTestContext {
         self.simulate_window_scale_factor(self.window, scale_factor)
     }
 
+    /// How many images the window's texture atlas holds.
+    pub fn atlas_tile_count(&self) -> usize {
+        self.test_window(self.window).atlas_tile_count()
+    }
+
     /// debug_bounds returns the bounds of the element with the given selector.
     pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())

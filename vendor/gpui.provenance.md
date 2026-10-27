@@ -137,6 +137,16 @@ other thread left alive. A one-millisecond sleep placed before the
 registration made 38 of 50 runs hang; with this patch and the same sleep, 200
 of 200 passed.
 
+## Releasing pictures and pausing idle frames
+
+`patches/gpui-0.2.2-release-and-idle.patch` applies to the tree the
+test-block-wakeup patch produces; its line numbers are that tree's.
+
+Test atlas tile count: the `test-support` `TestWindow` keeps its concrete
+`TestAtlas` and reports how many tiles it holds, through
+`VisualTestContext::atlas_tile_count`. Sprite uses it to test that a picture it
+stops using leaves the texture atlas.
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.
