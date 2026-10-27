@@ -136,16 +136,17 @@ fn widen_to_rgba(color: png::ColorType, samples: &[u8], rgba: &mut [u8]) -> bool
     if !samples.len().is_multiple_of(channels) || samples.len() / channels != rgba.len() / 4 {
         return false;
     }
-    for (pixel, out) in samples.chunks_exact(channels).zip(rgba.chunks_exact_mut(4)) {
-        let (rgb, alpha) = match *pixel {
-            [red, green, blue, alpha] => ([red, green, blue], alpha),
-            [red, green, blue] => ([red, green, blue], u8::MAX),
-            [gray, alpha] => ([gray; 3], alpha),
-            [gray] => ([gray; 3], u8::MAX),
+    for (pixel, out) in samples
+        .chunks_exact(channels)
+        .zip(rgba.as_chunks_mut::<4>().0)
+    {
+        *out = match *pixel {
+            [red, green, blue, alpha] => [red, green, blue, alpha],
+            [red, green, blue] => [red, green, blue, u8::MAX],
+            [gray, alpha] => [gray, gray, gray, alpha],
+            [gray] => [gray, gray, gray, u8::MAX],
             _ => return false,
         };
-        out[..3].copy_from_slice(&rgb);
-        out[3] = alpha;
     }
     true
 }
@@ -388,7 +389,7 @@ mod tests {
                 (width * height * 4) as usize,
                 "{color:?} at {depth:?} must be four bytes a pixel"
             );
-            for pixel in image.data.chunks_exact(4) {
+            for pixel in image.data.as_chunks::<4>().0 {
                 assert_eq!(pixel, &rgba[..], "{color:?} at {depth:?}");
             }
         }

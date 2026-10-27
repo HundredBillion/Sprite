@@ -1404,7 +1404,7 @@ mod tests {
         assert_eq!(events.len(), 513);
         assert_eq!(events[0]["type"], "opened");
         let mut senders = std::collections::HashSet::new();
-        for chunk in events[1..].chunks_exact(128) {
+        for chunk in events[1..].as_chunks::<128>().0 {
             assert!(senders.insert(chunk[0]["sender"].as_u64().unwrap()));
             assert!(
                 chunk
@@ -1444,7 +1444,7 @@ mod tests {
         assert_eq!(messages[1]["n"], 1);
         assert_eq!(messages[2]["n"], 2);
         let mut senders = std::collections::HashSet::new();
-        for chunk in messages[3..].chunks_exact(10) {
+        for chunk in messages[3..].as_chunks::<10>().0 {
             assert!(senders.insert(chunk[0]["sender"].as_u64().unwrap()));
             for (i, event) in chunk.iter().enumerate() {
                 assert_eq!(event["sender"], chunk[0]["sender"]);
