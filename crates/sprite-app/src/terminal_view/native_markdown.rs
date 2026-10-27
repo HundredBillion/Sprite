@@ -3,6 +3,7 @@ mod highlight;
 mod html;
 
 use super::TerminalView;
+use crate::picture::Picture;
 use crate::surface::{
     SurfaceId,
     markdown::{Colors, Markdown, MarkdownWindow},
@@ -33,7 +34,7 @@ struct ParseCache {
 }
 struct Prepared {
     parsed: Parsed,
-    images: HashMap<(usize, usize), Arc<RenderImage>>,
+    images: HashMap<(usize, usize), Arc<Picture>>,
 }
 #[derive(Default)]
 struct Presentation {
@@ -148,10 +149,7 @@ impl Prepared {
                 continue;
             }
             remaining -= decoded_bytes;
-            images.insert(
-                (block_index, image_index),
-                Arc::new(RenderImage::new(vec![image::Frame::new(image.to_rgba8())])),
-            );
+            images.insert((block_index, image_index), Picture::new(image.to_rgba8()));
         }
         Self { parsed, images }
     }
@@ -355,7 +353,7 @@ impl NativeMarkdown {
                 .bg(color(&state.colors.background))
                 .hover(|s| s.bg(color(&state.colors.code)))
                 .tooltip(move |_, cx| cx.new(|_| Tooltip(label)).into())
-                .children(picture.map(|picture| img(picture).size(px(18.0))))
+                .children(picture.map(|picture| img(picture.image()).size(px(18.0))))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |view, _, window, cx| {
@@ -472,7 +470,7 @@ impl NativeMarkdown {
                             Some((
                                 image.range.clone(),
                                 Some(inline_image(
-                                    picture.clone(),
+                                    picture.image(),
                                     image.link.clone(),
                                     (target.window, index, image_index),
                                     actions,
@@ -668,7 +666,7 @@ impl NativeMarkdown {
                             }),
                         );
                     if let Some(image) = prepared.images.get(&(index, 0)) {
-                        item = item.child(img(image.clone()).max_w_full().max_h(px(480.0)));
+                        item = item.child(img(image.image()).max_w_full().max_h(px(480.0)));
                     }
                     if !block.cells.is_empty() && !block.front_matter {
                         table_rows.push(item);

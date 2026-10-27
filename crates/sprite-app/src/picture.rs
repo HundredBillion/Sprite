@@ -170,4 +170,31 @@ mod tests {
         .join()
         .unwrap();
     }
+
+    #[test]
+    fn only_a_picture_makes_a_render_image() {
+        let mut offenders = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    stack.push(entry.unwrap().path());
+                }
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !path.ends_with("picture.rs")
+                && std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("RenderImage::new(")
+            {
+                offenders.push(path);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "{offenders:?} make a RenderImage whose GPU copy nothing releases; use Picture::new"
+        );
+    }
 }

@@ -17,6 +17,8 @@ use std::sync::Arc;
 use gpui::RenderImage;
 use sprite_term::ImagePixels;
 
+use crate::picture::Picture;
+
 /// How much decoded image a pane may hold on the GPU side.
 ///
 /// Independent of the terminal's own storage limit, as the PRD requires: the
@@ -27,7 +29,7 @@ pub const DEFAULT_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 struct Entry {
     generation: u64,
-    texture: Arc<RenderImage>,
+    texture: Arc<Picture>,
     bytes: usize,
     /// When this was last asked for, so the least recently *placed* image is
     /// the one evicted — not the least recently transmitted.
@@ -71,7 +73,7 @@ impl GraphicsCache {
             && entry.generation == pixels.generation
         {
             entry.last_used = now;
-            return Some(Arc::clone(&entry.texture));
+            return Some(entry.texture.image());
         }
 
         let (_, bytes) = bgra_layout(pixels)?;
@@ -83,10 +85,11 @@ impl GraphicsCache {
 
         let bgra = to_bgra(pixels)?;
         let buffer = image::RgbaImage::from_raw(pixels.width, pixels.height, bgra)?;
-        let texture = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+        let texture = Picture::new(buffer);
 
-        // Replacing an entry releases the old texture, which is what makes a
-        // generation change reclaim rather than accumulate.
+        // Replacing an entry lets go of the old picture, whose GPU copy is then
+        // released before the next frame: a generation change reclaims rather
+        // than accumulates.
         if let Some(previous) = self.entries.remove(&pixels.id) {
             self.used = self.used.saturating_sub(previous.bytes);
         }
@@ -102,7 +105,7 @@ impl GraphicsCache {
             },
         );
         self.used += bytes;
-        Some(texture)
+        Some(texture.image())
     }
 
     /// The texture already built for this image, if it is the current content.
@@ -114,7 +117,7 @@ impl GraphicsCache {
         self.entries
             .get(&id)
             .filter(|entry| entry.generation == generation)
-            .map(|entry| Arc::clone(&entry.texture))
+            .map(|entry| entry.texture.image())
     }
 
     /// Preserves current textures before admitting images into the remaining budget.
@@ -546,6 +549,44 @@ mod tests {
             assert_eq!(cache.used_bytes(), 0, "image id {id} must obey the budget");
             assert!(cache.get(id, 1).is_none());
         }
+    }
+
+    #[test]
+    fn every_way_the_cache_lets_go_of_a_texture_releases_its_gpu_copy() {
+        use crate::picture::released_by;
+        // Room for two 1×1 images.
+        let mut cache = GraphicsCache::with_budget(8);
+        cache.texture(&image(1, 1, 1, 1)).unwrap();
+        assert_eq!(
+            released_by(|| {
+                cache.texture(&image(1, 2, 1, 1)).unwrap();
+            }),
+            1,
+            "a new generation replaces the old picture"
+        );
+        cache.texture(&image(2, 1, 1, 2)).unwrap();
+        assert_eq!(
+            released_by(|| {
+                cache.texture(&image(3, 1, 1, 3)).unwrap();
+            }),
+            1,
+            "the least recently placed picture is evicted for room"
+        );
+        assert_eq!(
+            released_by(|| {
+                cache.refresh(&[Arc::new(image(3, 1, 1, 3))]);
+            }),
+            1,
+            "a picture no longer shown"
+        );
+        assert_eq!(released_by(|| cache.clear()), 1, "cleared");
+        cache.texture(&image(4, 1, 1, 4)).unwrap();
+        cache.texture(&image(4, 1, 1, 4)).unwrap();
+        assert_eq!(
+            released_by(|| drop(cache)),
+            1,
+            "dropped with its pane, once"
+        );
     }
 }
 

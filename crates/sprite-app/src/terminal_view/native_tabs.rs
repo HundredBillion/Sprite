@@ -175,7 +175,7 @@ impl NativeTabs {
                 .w(px(16.0))
                 .h(px(16.0))
                 .flex_shrink_0()
-                .children(icon.map(|picture| img(picture).size_full()));
+                .children(icon.map(|picture| img(picture.image()).size_full()));
             let close = div()
                 .id(SharedString::from(format!("close-{}", item.id)))
                 .w(px(20.0))

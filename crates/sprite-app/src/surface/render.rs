@@ -13,12 +13,13 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
-    RenderImage, SharedString, Size, StatefulInteractiveElement, Styled, div, img, px, rgb,
+    SharedString, Size, StatefulInteractiveElement, Styled, div, img, px, rgb,
 };
 use sprite_term::Rgb;
 
 use crate::config::Highlights;
 use crate::grid_paint::{GridPaint, GridPaintSpec, RowPass, ShapeCache, pack};
+use crate::picture::Picture;
 use crate::surface::SurfaceId;
 use crate::surface::channel::{SurfaceConnection, event_click};
 use crate::surface::description::{Description, Element};
@@ -59,7 +60,7 @@ pub(crate) struct ElementImageCache {
 impl ElementImageCache {
     /// The picture for the image at tree-order `index`, drawing `svg`. `None`
     /// while its decode is pending or once it was refused.
-    fn picture(&mut self, index: u64, svg: &str) -> Option<Arc<RenderImage>> {
+    fn picture(&mut self, index: u64, svg: &str) -> Option<Arc<Picture>> {
         let settled = self.decodes.settled();
         if self.placed_at != settled {
             // Only a pending decode can have changed: a ready picture or a
@@ -138,7 +139,7 @@ fn drawn_images<'a>(node: &'a Element, drawn: &mut HashSet<&'a str>) {
 
 #[cfg(test)]
 impl ElementImageCache {
-    pub(crate) fn image_for(&self, svg: &str) -> Option<Arc<RenderImage>> {
+    pub(crate) fn image_for(&self, svg: &str) -> Option<Arc<Picture>> {
         self.decodes.state(svg).and_then(|state| state.picture())
     }
 
@@ -502,7 +503,7 @@ fn element(
         Element::Image { style, svg } => {
             return match images.picture(index, svg) {
                 Some(picture) => {
-                    style::apply_all(img(picture), &style.utilities).into_any_element()
+                    style::apply_all(img(picture.image()), &style.utilities).into_any_element()
                 }
                 None => div().into_any_element(),
             };

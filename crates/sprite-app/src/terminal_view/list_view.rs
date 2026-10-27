@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Bounds, Context, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ListSizingBehavior, MouseButton, ParentElement, Render, RenderImage, SharedString,
+    ListSizingBehavior, MouseButton, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, UniformListScrollHandle, WeakEntity, Window, canvas, div,
     img, px, rgb, uniform_list,
 };
 
 use crate::grid_paint::pack;
+use crate::picture::Picture;
 use crate::surface::Refusal;
 use crate::surface::SurfaceId;
 use crate::surface::channel::{
@@ -53,7 +54,7 @@ fn dragged_scroll_offset(total: f32, viewport: f32, pointer_y: f32, grab: f32) -
 /// decode finishes and the list is told to draw again. Every outcome is kept
 /// until the raster width changes, as assets cannot be redefined.
 fn sync_image_cache(
-    cache: &mut Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
+    cache: &mut Arc<BTreeMap<String, Option<Arc<Picture>>>>,
     decodes: &SvgDecodes<String>,
     assets: &BTreeMap<String, String>,
     ids: impl IntoIterator<Item = String>,
@@ -152,7 +153,7 @@ pub(super) struct VirtualListView {
     surface: SurfaceId,
     host: WeakEntity<TerminalView>,
     pub(super) scroll: UniformListScrollHandle,
-    images: Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
+    images: Arc<BTreeMap<String, Option<Arc<Picture>>>>,
     /// The decodes behind `images`, drawn `raster_width` pixels wide.
     decodes: SvgDecodes<String>,
     raster_width: f32,
@@ -578,13 +579,15 @@ impl Render for VirtualListView {
                         if row.leading.is_some() {
                             let mut slot = div().size(px(row_config.icon_size)).flex_none();
                             if let Some(leading) = leading {
-                                slot = slot.child(img(leading).size(px(row_config.icon_size)));
+                                slot =
+                                    slot.child(img(leading.image()).size(px(row_config.icon_size)));
                             }
                             line = line.child(slot);
                         }
                         let mut icon_slot = div().size(px(row_config.icon_size)).flex_none();
                         if let Some(icon) = icon {
-                            icon_slot = icon_slot.child(img(icon).size(px(row_config.icon_size)));
+                            icon_slot =
+                                icon_slot.child(img(icon.image()).size(px(row_config.icon_size)));
                         }
                         line = line.child(icon_slot);
                         let row_host = row_host.clone();
@@ -824,9 +827,9 @@ impl Render for VirtualListView {
 }
 
 fn images_for_header(
-    images: &Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
+    images: &Arc<BTreeMap<String, Option<Arc<Picture>>>>,
     id: Option<&str>,
-) -> Option<Arc<RenderImage>> {
+) -> Option<Arc<Picture>> {
     id.and_then(|id| images.get(id)).cloned().flatten()
 }
 struct HeaderEvent {
@@ -841,7 +844,7 @@ fn header_element(
     header: &crate::surface::description::ListHeader,
     config: &ListConfig,
     foreground: gpui::Rgba,
-    icon: &Option<Arc<RenderImage>>,
+    icon: &Option<Arc<Picture>>,
     font_family: &str,
     list_width: f32,
     window: &mut Window,
@@ -865,7 +868,7 @@ fn header_element(
     let line = if header.icon.is_some() {
         let mut slot = div().size(px(config.icon_size)).flex_none();
         if let Some(icon) = icon {
-            slot = slot.child(img(icon.clone()).size(px(config.icon_size)));
+            slot = slot.child(img(icon.image()).size(px(config.icon_size)));
         }
         line.child(slot)
     } else {
@@ -942,7 +945,7 @@ mod tests {
     fn settle(
         cx: &mut gpui::TestAppContext,
         owner: &gpui::Entity<Owner>,
-        cache: &mut Arc<BTreeMap<String, Option<Arc<RenderImage>>>>,
+        cache: &mut Arc<BTreeMap<String, Option<Arc<Picture>>>>,
         decodes: &SvgDecodes<String>,
         assets: &BTreeMap<String, String>,
         ids: &[&str],

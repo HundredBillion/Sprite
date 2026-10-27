@@ -2618,7 +2618,10 @@ mod tests {
 
     /// The picture the fill Surface's cache holds for `svg`, once its decode
     /// is ready.
-    fn fill_image(view: &TerminalView, svg: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    fn fill_image(
+        view: &TerminalView,
+        svg: &str,
+    ) -> Option<std::sync::Arc<crate::picture::Picture>> {
         let Body::Elements(elements) = &view.surfaces.fill.as_ref().unwrap().body else {
             panic!("expected elements")
         };
