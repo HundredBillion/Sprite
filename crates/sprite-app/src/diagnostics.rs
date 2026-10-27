@@ -346,9 +346,130 @@ pub fn init_at(root: PathBuf, filter: &str) -> io::Result<Guard> {
     Ok(Guard { running, stopped })
 }
 
+/// What this process is holding at one moment. A field the platform would not
+/// report is `None`, never zero, so a failed reading cannot pass for an idle one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceSample {
+    pub resident_bytes: Option<u64>,
+    pub cpu_user: Option<Duration>,
+    pub cpu_system: Option<Duration>,
+    pub threads: Option<u32>,
+    pub open_files: Option<u32>,
+}
+
+impl ResourceSample {
+    pub fn read() -> Self {
+        let (cpu_user, cpu_system) = cpu_times().unzip();
+        let (resident_bytes, threads) = memory_and_threads();
+        Self {
+            resident_bytes,
+            cpu_user,
+            cpu_system,
+            threads,
+            open_files: count_entries(std::path::Path::new("/dev/fd")),
+        }
+    }
+}
+
+/// Whether performance events are being recorded, so work done only to
+/// describe them can be skipped when they are not.
+pub fn perf_enabled() -> bool {
+    tracing::enabled!(target: "sprite_app::perf", tracing::Level::DEBUG)
+}
+
+/// Records what the process holds now. A field the platform would not report
+/// is left out rather than written as zero.
+pub fn log_resources(reason: &'static str, panes: usize) {
+    let sample = ResourceSample::read();
+    tracing::debug!(
+        target: "sprite_app::perf",
+        reason,
+        panes,
+        rss_mb = sample.resident_bytes.map(|bytes| bytes / (1024 * 1024)),
+        cpu_user_ms = sample.cpu_user.map(|time| time.as_millis() as u64),
+        cpu_system_ms = sample.cpu_system.map(|time| time.as_millis() as u64),
+        threads = sample.threads,
+        open_files = sample.open_files,
+        "resource sample"
+    );
+}
+
+fn cpu_times() -> Option<(Duration, Duration)> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage fills the whole struct when it returns 0.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let time = |value: libc::timeval| {
+        Duration::from_secs(value.tv_sec as u64) + Duration::from_micros(value.tv_usec as u64)
+    };
+    Some((time(usage.ru_utime), time(usage.ru_stime)))
+}
+
+#[cfg(target_os = "macos")]
+fn memory_and_threads() -> (Option<u64>, Option<u32>) {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: the buffer is exactly one proc_taskinfo, and is read only when
+    // the call reports having written all of it.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            std::process::id() as libc::c_int,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return (None, None);
+    }
+    let info = unsafe { info.assume_init() };
+    (
+        Some(info.pti_resident_size),
+        u32::try_from(info.pti_threadnum).ok(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn memory_and_threads() -> (Option<u64>, Option<u32>) {
+    let status = std::fs::read_to_string("/proc/self/status").ok();
+    let field = |name: &str| {
+        status
+            .as_deref()?
+            .lines()
+            .find_map(|line| line.strip_prefix(name))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    };
+    (
+        field("VmRSS:").map(|kib| kib * 1024),
+        field("Threads:").and_then(|threads| u32::try_from(threads).ok()),
+    )
+}
+
+fn count_entries(directory: &std::path::Path) -> Option<u32> {
+    u32::try_from(std::fs::read_dir(directory).ok()?.count()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreadable_count_is_unknown_rather_than_zero() {
+        assert_eq!(
+            count_entries(std::path::Path::new("/nonexistent/sprite-fd")),
+            None
+        );
+        let empty = std::env::temp_dir().join(format!("sprite-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(count_entries(&empty), Some(0));
+        std::fs::remove_dir(empty).unwrap();
+    }
 
     #[test]
     fn dropped_event_count_is_written_when_the_sink_recovers() {

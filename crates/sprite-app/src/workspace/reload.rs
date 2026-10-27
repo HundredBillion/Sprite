@@ -57,6 +57,7 @@ impl Workspace {
                     (neither XDG_CONFIG_HOME nor HOME is set)"
                 .to_owned();
         };
+        let started = std::time::Instant::now();
         let candidate = match crate::config::Settings::load_candidate(&path) {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -88,6 +89,7 @@ impl Workspace {
         TerminalView::invalidate_font_catalog(cx);
         cx.set_global(crate::config::ActiveSettings(self.active_settings()));
         cx.notify();
+        tracing::debug!(target: "sprite_app::perf", elapsed_ms = started.elapsed().as_millis() as u64, "configuration reloaded");
 
         outcome.describe(&path, &complaints.0)
     }
