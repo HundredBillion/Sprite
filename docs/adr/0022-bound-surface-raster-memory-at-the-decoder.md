@@ -19,3 +19,6 @@ The cap was calibrated on a 512x512 canvas. A document at the cap on a much larg
 Parse cost is bounded by the existing Surface Channel message limit (16MiB) and list asset limit (64MiB), not by the cap. CPU time spent on content other than filters, and memory across Surfaces, remain outside this decision.
 
 Memory across Surfaces is now bounded by ADR 0033, which replaces this deferral.
+
+Amended 2026-10-27 by ADR 0035: a retained picture's native texture copy is
+now released with the picture, so that copy is no longer outside this bound.
