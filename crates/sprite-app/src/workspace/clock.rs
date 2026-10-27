@@ -10,6 +10,9 @@ use super::*;
 /// Half a blink. The rate every terminal has used since the VT100.
 pub(super) const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 
+/// How often resources are sampled while the pane count stays the same.
+const RESOURCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl Workspace {
     /// Starts the clock. It stops by itself once the window is gone.
     pub(super) fn spawn_clock(cx: &mut Context<Self>) -> gpui::Task<()> {
@@ -30,6 +33,7 @@ impl Workspace {
     /// pane's title whether or not it is the tab in front.
     fn tick_panes(&mut self, cx: &mut Context<Self>) {
         self.expire_control(cx);
+        self.sample_resources(cx);
         let panes: Vec<_> = self
             .tabs
             .all_panes()
@@ -39,6 +43,27 @@ impl Workspace {
         for pane in panes {
             pane.tick(cx);
         }
+    }
+
+    /// A sample when the pane count changes, so an opened or closed pane can
+    /// be read against memory, and otherwise once a minute.
+    fn sample_resources(&mut self, cx: &mut Context<Self>) {
+        if !crate::diagnostics::perf_enabled() {
+            return;
+        }
+        let now = cx.background_executor().now();
+        let panes = self.tabs.all_panes().len();
+        let reason = match self.resources_sampled {
+            Some((at, sampled)) if sampled == panes => {
+                if now.saturating_duration_since(at) < RESOURCE_INTERVAL {
+                    return;
+                }
+                "interval"
+            }
+            _ => "panes",
+        };
+        self.resources_sampled = Some((now, panes));
+        crate::diagnostics::log_resources(reason, panes);
     }
 }
 

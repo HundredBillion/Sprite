@@ -24,3 +24,19 @@ Levels are `error`, `warn`, `info`, `debug`, and `trace`. An invalid filter fall
 Each event is capped at 4 KiB and the queue holds at most 512 events. Producers do not wait for the writer; when the queue is full, events are dropped and a count is recorded when the writer next succeeds. The worker maintains up to four 1 MiB segments per running process (`sprite.log`, `sprite.1.log`, etc.) and retains up to ten completed runs. Active runs are protected with file locks, so total usage can grow with the number of active processes. Cleanup runs when a logger starts or exits; after an abrupt termination, the next launch can reclaim old runs. A locked, slow, full, or unwritable destination can lose logs or delay cleanup; it does not block terminal activity. Shutdown waits at most 200 ms for the writer, and abrupt termination, process aborts, or native crashes may lose buffered events. Rust panics are recorded best-effort with source location, and the previous panic hook still runs.
 
 Sprite does not deliberately log raw terminal input, terminal output, tokens, credentials, full environment values, protocol bodies, or client-provided request IDs. Treat logs as potentially sensitive nonetheless. Displaying a log inside a pane makes it readable to clients authorized for that pane; filesystem-capable agents may separately read log files. More verbose filtering can enable events from dependencies, so review logs before sharing them.
+
+## Performance events
+
+`SPRITE_LOG='sprite_app::perf=debug' sprite` records where time and resources go during ordinary use. Nothing is recorded at the default level, and the checks cost one filter test per event site when disabled.
+
+| Message | When | Fields |
+| --- | --- | --- |
+| `pane first output` | The first screen update with text after a pane's program starts | `pane`, `elapsed_ms` |
+| `pane closed` | A closed pane's cleanup (hangup, terminate, kill) has finished | `elapsed_ms` |
+| `configuration reloaded` | A reload was applied; a file that does not parse records nothing | `elapsed_ms` |
+| `resource sample` | Within one clock beat (530 ms) of the pane count changing, otherwise once a minute | `reason` (`panes` or `interval`), `panes`, `rss_mb`, `cpu_user_ms`, `cpu_system_ms`, `threads`, `open_files` |
+| `slow paint` | One terminal grid took 16 ms or longer to paint, a whole 60 Hz frame | `pass`, `rows`, `elapsed_ms` |
+
+A resource field the platform does not report is omitted rather than written as zero. `cpu_user_ms` and `cpu_system_ms` are cumulative for the process, so compare consecutive samples. `pane first output` measures the program as well as Sprite: a shell that spends two seconds in its startup files reports two seconds. To tell the two apart, time the shell outside Sprite, for example `time zsh -i -c exit`.
+
+These events show where to look, not whether a change helped. Confirm a refactor with a profiler or the existing benchmarks (`sprite-startup-bench`, `sprite-paint-bench`, `sprite-term-bench`) before and after.

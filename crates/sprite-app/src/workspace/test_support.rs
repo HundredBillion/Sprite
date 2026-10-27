@@ -129,3 +129,47 @@ pub(crate) fn terminal_view(
             .unwrap_or_else(|_| panic!("a terminal pane"))
     })
 }
+
+/// Everything `sprite_app::perf` logs at debug level while `run` runs on this
+/// thread, as the formatted lines the log file would hold.
+pub(crate) fn capture_perf<T>(run: impl FnOnce() -> T) -> (T, String) {
+    capture_logs("sprite_app::perf=debug", run)
+}
+
+/// What `filter` lets through while `run` runs on this thread.
+pub(crate) fn capture_logs<T>(filter: &str, run: impl FnOnce() -> T) -> (T, String) {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone, Default)]
+    struct Lines(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    use tracing_subscriber::prelude::*;
+    let lines = Lines::default();
+    let writer = lines.clone();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(filter))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(move || writer.clone()),
+        );
+    // With exactly one listener alive, `tracing` asks only the current thread
+    // whether a call site reached for the first time is wanted, and caches
+    // the answer for every thread. A pane test on another thread, listening to
+    // nothing, would then switch this capture's events off. A second listener
+    // that lives as long as the tests keeps that shortcut from being taken.
+    static SECOND_LISTENER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    SECOND_LISTENER
+        .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+    (result, text)
+}

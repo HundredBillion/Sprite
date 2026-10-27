@@ -5411,6 +5411,7 @@ dependencies = [
  "async-channel 2.5.0",
  "gpui",
  "image",
+ "libc",
  "nix 0.28.0",
  "proptest",
  "pulldown-cmark",

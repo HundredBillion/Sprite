@@ -124,6 +124,8 @@ pub struct Workspace {
     quit_timer: Option<gpui::Task<()>>,
     quit_key_claimed: bool,
     pending_cleanups: Vec<PendingCleanup>,
+    /// When resources were last sampled, and how many panes there were then.
+    resources_sampled: Option<(std::time::Instant, usize)>,
     stopping: bool,
     /// The platform's Quit Request this window answers when its pane cleanup
     /// finishes: a Quit from the Dock or the menu bar, or the session ending.
@@ -347,6 +349,7 @@ impl Workspace {
             quit_timer: None,
             quit_key_claimed: false,
             pending_cleanups: Vec::new(),
+            resources_sampled: None,
             stopping: false,
             quit_request: None,
             #[cfg(test)]
@@ -673,3 +676,6 @@ mod layout_tests;
 
 #[cfg(test)]
 mod startup_tests;
+
+#[cfg(test)]
+mod perf_tests;

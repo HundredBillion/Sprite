@@ -236,6 +236,29 @@ impl ShapeCache {
 /// *between* those two — Ghostty's below-text band is above the background and
 /// under the glyphs — can only be drawn if they are separate passes, so the
 /// split is made only when such an image exists.
+/// One frame at 60 Hz. A grid that takes longer to paint than this has cost
+/// the window a frame by itself.
+pub(crate) const SLOW_PAINT: std::time::Duration = std::time::Duration::from_millis(16);
+
+#[cfg(test)]
+thread_local! {
+    static SLOW_PAINT_FOR_TEST: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(SLOW_PAINT) };
+}
+
+/// Lets a test make every paint count as slow, since a real one cannot be
+/// made slow on demand.
+#[cfg(test)]
+pub(crate) fn set_slow_paint_for_test(threshold: std::time::Duration) {
+    SLOW_PAINT_FOR_TEST.with(|slow| slow.set(threshold));
+}
+
+fn slow_paint() -> std::time::Duration {
+    #[cfg(test)]
+    return SLOW_PAINT_FOR_TEST.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    SLOW_PAINT
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RowPass {
     Whole,
@@ -819,6 +842,19 @@ impl Element for GridPaint {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let started = crate::diagnostics::perf_enabled().then(std::time::Instant::now);
+        self.paint_rows(bounds, window, cx);
+        let slow = started
+            .map(|started| started.elapsed())
+            .filter(|elapsed| *elapsed >= slow_paint());
+        if let Some(elapsed) = slow {
+            tracing::debug!(target: "sprite_app::perf", pass = ?self.pass, rows = self.rows.len(), elapsed_ms = elapsed.as_millis() as u64, "slow paint");
+        }
+    }
+}
+
+impl GridPaint {
+    fn paint_rows(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let scale = window.scale_factor();
         let width = f32::from(self.cell_width);
         let height = f32::from(self.cell_height);

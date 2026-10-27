@@ -52,6 +52,22 @@ fn diagnostics_are_persisted_to_the_selected_directory() {
 }
 
 #[test]
+fn a_resource_sample_reads_this_process() {
+    let before = sprite_app::diagnostics::ResourceSample::read();
+    assert!(before.resident_bytes.is_some_and(|bytes| bytes > 0));
+    assert!(before.threads.is_some_and(|threads| threads >= 1));
+    assert!(before.cpu_user.is_some() && before.cpu_system.is_some());
+
+    // Open files are counted, not estimated: holding ten more shows ten more.
+    let held: Vec<_> = (0..10)
+        .map(|_| std::fs::File::open(env!("CARGO_MANIFEST_DIR")).unwrap())
+        .collect();
+    let after = sprite_app::diagnostics::ResourceSample::read();
+    assert!(after.open_files.unwrap() >= before.open_files.unwrap() + 10);
+    drop(held);
+}
+
+#[test]
 fn cli_stdout_is_not_contaminated_by_logging() {
     let binary = env!("CARGO_BIN_EXE_sprite");
     for arguments in [

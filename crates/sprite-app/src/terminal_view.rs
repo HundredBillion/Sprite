@@ -431,6 +431,7 @@ impl TerminalView {
         config.environment.extend(environment);
         let initial_size = config.size;
 
+        let spawned_at = std::time::Instant::now();
         let sprite_term::Spawned {
             session,
             mut events,
@@ -509,8 +510,16 @@ impl TerminalView {
             }
         });
 
+        let pane = exit.identity.1.0;
         let snapshot_task = cx.spawn(async move |view, cx| {
+            // A pane shows an empty screen before its program prints anything,
+            // so the first output is the first update with text in it.
+            let mut awaiting_output = crate::diagnostics::perf_enabled();
             while let Ok(bundle) = snapshots.next().await {
+                if awaiting_output && bundle.pane.rows.iter().any(|row| !row.text.trim().is_empty()) {
+                    awaiting_output = false;
+                    tracing::debug!(target: "sprite_app::perf", pane, elapsed_ms = spawned_at.elapsed().as_millis() as u64, "pane first output");
+                }
                 let generation = bundle.generation;
                 if view
                     .update(cx, |view, cx| {

@@ -72,6 +72,10 @@ impl Workspace {
         let Some(cleanup) = pane.begin_shutdown(cx) else {
             return;
         };
+        let started = std::time::Instant::now();
+        let closed = move || {
+            tracing::debug!(target: "sprite_app::perf", elapsed_ms = started.elapsed().as_millis() as u64, "pane closed");
+        };
         let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mark_completed = completed.clone();
         // The channel closing counts as the report too, so a cleanup that
@@ -110,6 +114,7 @@ impl Workspace {
                 drop(thread);
                 cx.background_executor().spawn(async move {
                     reported.recv().await.ok();
+                    closed();
                     mark_completed.store(true, std::sync::atomic::Ordering::Release);
                 })
             }
@@ -122,6 +127,7 @@ impl Workspace {
                     if let Some(cleanup) = cleanup {
                         cleanup();
                     }
+                    closed();
                     mark_completed.store(true, std::sync::atomic::Ordering::Release);
                 })
             }
