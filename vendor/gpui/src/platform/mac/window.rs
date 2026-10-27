@@ -392,6 +392,8 @@ struct MacWindowState {
     native_view: NonNull<Object>,
     blurred_view: Option<id>,
     display_link: Option<DisplayLink>,
+    /// The display link is stopped because the window had nothing to draw.
+    frame_delivery_paused: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> crate::DispatchEventResult>>,
@@ -495,7 +497,29 @@ impl MacWindowState {
     }
 
     fn stop_display_link(&mut self) {
-        self.display_link = None;
+        if let Some(mut display_link) = self.display_link.take()
+            && self.frame_delivery_paused
+        {
+            // Dropping stops the link again; restart it first so that stop
+            // is matched.
+            display_link.start().log_err();
+        }
+        self.frame_delivery_paused = false;
+    }
+
+    fn set_frame_delivery(&mut self, active: bool) {
+        if self.frame_delivery_paused != active {
+            return;
+        }
+        let Some(display_link) = self.display_link.as_mut() else {
+            return;
+        };
+        if active {
+            display_link.start().log_err();
+        } else {
+            display_link.stop().log_err();
+        }
+        self.frame_delivery_paused = !active;
     }
 
     fn is_maximized(&self) -> bool {
@@ -690,6 +714,7 @@ impl MacWindow {
                 native_view: NonNull::new_unchecked(native_view),
                 blurred_view: None,
                 display_link: None,
+                frame_delivery_paused: false,
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -936,7 +961,7 @@ impl Drop for MacWindow {
         let mut this = self.0.lock();
         this.renderer.destroy();
         let window = this.native_window;
-        this.display_link.take();
+        this.stop_display_link();
         unsafe {
             this.native_window.setDelegate_(nil);
         }
@@ -1474,6 +1499,21 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &crate::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
+    }
+
+    fn set_frame_delivery(&self, active: bool) {
+        self.0.lock().set_frame_delivery(active);
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        // GPUI's macOS window code releases this lock before it calls into the
+        // app, so a redraw request made from app code can take it.
+        let state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(state) = state.upgrade() {
+                state.lock().set_frame_delivery(true);
+            }
+        }))
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

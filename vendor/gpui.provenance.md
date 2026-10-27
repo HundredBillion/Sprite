@@ -161,6 +161,18 @@ measurement after this patch is recorded in the pull request.
 never released, about 30 × 32 B per session under `leaks`. They are now
 autoreleased through `ns_string`.
 
+Idle frame pause: a visible macOS window ran its `CVDisplayLink` sixty times a
+second whether or not anything changed, about 85% of an idle Sprite's 0.5% of
+one core. After a second in which a frame callback found nothing to draw,
+nothing to present and no next-frame callbacks, `Window` calls
+`PlatformWindow::set_frame_delivery(false)`, and macOS stops the existing link.
+Every redraw request already passes through `WindowInvalidator`
+(`invalidate_view`, `set_dirty`) or `on_next_frame`, so those call the
+platform's `frame_waker`, which restarts it. `DisplayLink` start and stop
+suspend and resume a dispatch source and must alternate; the window records
+the pause so each added stop is matched, including when the link is replaced
+or dropped. Other platforms keep the default hooks, which do nothing.
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.
