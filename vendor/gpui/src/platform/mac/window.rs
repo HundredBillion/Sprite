@@ -1063,7 +1063,7 @@ impl PlatformWindow for MacWindow {
             let device_description: id = msg_send![screen, deviceDescription];
             let screen_number: id = NSDictionary::valueForKey_(
                 device_description,
-                NSString::alloc(nil).init_str("NSScreenNumber"),
+                ns_string("NSScreenNumber"),
             );
 
             let screen_number: u32 = msg_send![screen_number, unsignedIntValue];
@@ -2520,7 +2520,7 @@ where
 unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
     unsafe {
         let device_description = NSScreen::deviceDescription(screen);
-        let screen_number_key: id = NSString::alloc(nil).init_str("NSScreenNumber");
+        let screen_number_key: id = ns_string("NSScreenNumber");
         let screen_number = device_description.objectForKey_(screen_number_key);
         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
         screen_number as CGDirectDisplayID

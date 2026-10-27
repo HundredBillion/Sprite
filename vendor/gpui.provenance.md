@@ -147,6 +147,20 @@ Test atlas tile count: the `test-support` `TestWindow` keeps its concrete
 `VisualTestContext::atlas_tile_count`. Sprite uses it to test that a picture it
 stops using leaves the texture atlas.
 
+Metal atlas removal: `MetalAtlas::remove` took the key out of `tiles_by_key`
+only when its whole texture emptied, and never returned the tile to the
+texture's allocator. A removed image's space was therefore reused only once
+every other image on that texture had gone, and removing the same image twice
+lowered the texture's count twice. It now always takes the key out, returns
+the tile to the `etagere` allocator, and frees the texture when it empties, as
+before. Replacing a 512×512 Kitty image 60 times took `IOAccelerator
+(graphics)` from 11.5 to 66.7 MB before Sprite released pictures; the
+measurement after this patch is recorded in the pull request.
+
+`NSScreenNumber`: both dictionary keys were `alloc`/`init` strings that were
+never released, about 30 × 32 B per session under `leaks`. They are now
+autoreleased through `ns_string`.
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.

@@ -12,6 +12,54 @@
      /// debug_bounds returns the bounds of the element with the given selector.
      pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
          self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
+--- a/src/platform/mac/metal_atlas.rs
++++ b/src/platform/mac/metal_atlas.rs
+@@ -59,9 +59,12 @@ impl PlatformAtlas for MetalAtlas {
+ 
+     fn remove(&self, key: &AtlasKey) {
+         let mut lock = self.0.lock();
+-        let Some(id) = lock.tiles_by_key.get(key).map(|v| v.texture_id) else {
++        // The key leaves first, whatever else happens, so removing an image
++        // twice cannot count it out of its texture twice.
++        let Some(tile) = lock.tiles_by_key.remove(key) else {
+             return;
+         };
++        let id = tile.texture_id;
+ 
+         let textures = match id.kind {
+             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
+@@ -81,8 +84,10 @@ impl PlatformAtlas for MetalAtlas {
+ 
+             if texture.is_unreferenced() {
+                 textures.free_list.push(id.index as usize);
+-                lock.tiles_by_key.remove(key);
+             } else {
++                // Its space goes back to the texture for the next image, rather
++                // than waiting for every other image on it to go too.
++                texture.allocator.deallocate(tile.tile_id.into());
+                 *texture_slot = Some(texture);
+             }
+         }
+--- a/src/platform/mac/window.rs
++++ b/src/platform/mac/window.rs
+@@ -1063,7 +1063,7 @@ impl PlatformWindow for MacWindow {
+             let device_description: id = msg_send![screen, deviceDescription];
+             let screen_number: id = NSDictionary::valueForKey_(
+                 device_description,
+-                NSString::alloc(nil).init_str("NSScreenNumber"),
++                ns_string("NSScreenNumber"),
+             );
+ 
+             let screen_number: u32 = msg_send![screen_number, unsignedIntValue];
+@@ -2520,7 +2520,7 @@ where
+ unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
+     unsafe {
+         let device_description = NSScreen::deviceDescription(screen);
+-        let screen_number_key: id = NSString::alloc(nil).init_str("NSScreenNumber");
++        let screen_number_key: id = ns_string("NSScreenNumber");
+         let screen_number = device_description.objectForKey_(screen_number_key);
+         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
+         screen_number as CGDirectDisplayID
 --- a/src/platform/test/window.rs
 +++ b/src/platform/test/window.rs
 @@ -19,7 +19,7 @@ pub(crate) struct TestWindowState {
