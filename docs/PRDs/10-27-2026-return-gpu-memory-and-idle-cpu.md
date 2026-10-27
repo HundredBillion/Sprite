@@ -1,6 +1,6 @@
 # Return GPU memory and idle CPU that Sprite no longer needs
 
-Status: design approved by the owner on 2026-10-27; PRD awaiting review.
+Status: approved by the owner on 2026-10-27; hardened against repository interfaces.
 
 Issue: https://github.com/HundredBillion/Sprite/issues/140
 Linux follow-up: https://github.com/HundredBillion/Sprite/issues/141
@@ -104,10 +104,24 @@ new call site can't bypass the release.
 - On macOS, the window stops the existing `CVDisplayLink` and starts it again.
   It does not recreate the link. Its occlusion handling still decides whether
   the link may run at all, so a hidden window stays paused.
-- GPUI's `Window` pauses delivery once frame callbacks have found nothing to
-  draw for about 1 s.
-- `Window` resumes delivery the moment it is invalidated: a `cx.notify`, input,
-  a resize or an appearance change.
+- GPUI's `Window` frame callback pauses delivery once it has found, for about
+  1 s, nothing to draw, nothing to present and no next-frame callbacks. The 1 s
+  also covers GPUI's existing rule of presenting for 1 s after input, which
+  keeps ProMotion displays from lowering their refresh rate.
+- Resume goes through one place, the `WindowInvalidator`. When GPUI creates a
+  window, it asks the platform for a wake function and gives it to the
+  invalidator. The invalidator calls it when the window goes from clean to
+  dirty (`invalidate_view`, `set_dirty`), and registering a next-frame callback
+  calls it too. Anything that redraws the window (`cx.notify`, input, a resize,
+  an appearance change, Sprite's minimap `on_next_frame`) therefore resumes
+  delivery. A missed path can't freeze the window, because no path bypasses
+  the invalidator.
+- On macOS the wake function restarts the display link through its own handle,
+  without locking `MacWindowState`, so calling it from inside a callback can't
+  deadlock. On other platforms it does nothing.
+- Rejected: keeping the display link running and skipping only the hop to the
+  main thread while idle. It needs no resume wiring, but the timer thread would
+  still wake 60 times a second, so it can't reach the idle-CPU target.
 
 Consequence: while the focused pane's cursor blinks, Sprite redraws every
 530 ms, so the window never stays idle for 1 s and the link keeps running as it
@@ -117,9 +131,15 @@ does today. Measurements are recorded with blinking on and off.
 
 - Both `NSScreenNumber` strings are released after use (or replaced with a
   static `NSString`).
-- `MetalAtlas::remove` deallocates the tile from the texture's `etagere`
-  allocator, so a removed image's space is reused without waiting for the whole
-  texture to empty. Emptied textures are still freed as before.
+- `MetalAtlas::remove` always takes the key out of `tiles_by_key`, deallocates
+  its tile from the texture's `etagere` allocator (`TileId` converts back to
+  `AllocId`), then lowers the texture's count and frees the texture if it is
+  empty. A removed image's space is reused without waiting for the whole
+  texture to empty.
+- Today the key is removed only when the whole texture empties, so removing
+  the same image twice lowers the count twice. That can free a texture other
+  pictures still use, and a re-added image gets a stale tile. After the patch,
+  removing an image twice is harmless.
 
 The patch goes in `patches/` and is recorded in `scripts/check_gpui_patch.py`
 (`PATCHES`) and `vendor/gpui.provenance.md`, alongside the existing four
@@ -145,8 +165,10 @@ panes.
 
 ### 5. Remove `SPRITE_TAB`
 
-Remove both exports, the two test assertions that expect it, and every mention
-in the docs. `SPRITE_PANE` is unchanged.
+Remove both exports, the two test assertions that expect it, and the
+`channel.rs` doc comment that mentions it. No user doc lists it, and
+`sprite.nvim` doesn't read it. Historical TSPs that mention it are left as
+written. `SPRITE_PANE` is unchanged.
 
 ## Decisions to record
 
@@ -154,8 +176,12 @@ in the docs. `SPRITE_PANE` is unchanged.
   the `Picture` handle, the render-time drain, and the GPUI tile patch. It
   amends ADR 0022 and ADR 0033, whose "not native texture copies" exclusion no
   longer holds for retained pictures. Both ADRs get a one-line pointer to 0035.
-- **ADR 0034 amendment.** It records that the 128-pane cap on a grant counts
-  open panes, and why the cap exists: to bound what one grant can create.
+- **ADR 0034 amendment.** The approved pane-control PRD bounded agent-created
+  resources at "128 live panes". The implementation instead kept closed panes in
+  a grant's scope, and `docs/pane-control.md` then documented a lifetime limit
+  of 128 identities per grant. Pruning restores the live-pane bound. It is safe
+  because pane IDs are never reused, so a pruned ID can't authorize anything
+  again, and the scope's memory stays bounded by open panes.
 - **Comments.** Fix the misleading comments at `terminal_view.rs:94-96` about
   when picture textures are freed.
 
@@ -164,8 +190,10 @@ in the docs. `SPRITE_PANE` is unchanged.
 - `docs/local-logging.md`: replace the `launchctl setenv SPRITE_LOG` advice
   with `open -a Sprite --env SPRITE_LOG=…`. Note that Sprite must be fully
   quit first, because `open` otherwise brings forward the running copy.
-- `docs/pane-control.md`: say that the cap counts open panes.
-- Remove `SPRITE_TAB` from every doc that lists the pane environment.
+- `docs/pane-control.md:29`: replace "retains at most 128 identities over its
+  lifetime; request a fresh grant if that limit is reached" with a statement
+  that a selected-pane grant can have at most 128 open panes in scope, and that
+  closed panes leave the scope.
 
 ## Acceptance and evidence
 
@@ -175,6 +203,10 @@ Automated tests (TDD, through public interfaces):
   closing a Surface each leave no tile for the old picture in the test atlas.
   The tests also cover a second replacement and a cleared cache refilled.
 - A picture still in use is not released.
+- Releasing the same picture twice is harmless (test atlas).
+- The Metal half of the texture-cache patch is verified by the exact-apply
+  patch check and the by-hand measurements below. Vendored GPUI is outside the
+  workspace, and no CI job runs its tests.
 - Only `picture.rs` calls `RenderImage::new` (source-scan test).
 - After 129 Pane Control creates and closes through one grant, the next create
   succeeds. Every close path prunes the grant scope.
