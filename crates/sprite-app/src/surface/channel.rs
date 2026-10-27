@@ -518,6 +518,7 @@ fn write_events(shared: &Shared) {
         let mut queue = crate::locked::locked(&shared.queue);
         queue.in_flight = 0;
         if written.is_err() {
+            tracing::warn!(target: "sprite_app::surface", "surface output failed or timed out");
             // The write timed out, the batch missed its drain deadline, or
             // the write failed: the program is not reading fast enough, or
             // is gone. Shutting the socket down ends the connection thread's

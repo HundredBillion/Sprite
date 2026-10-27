@@ -358,7 +358,7 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
         .parent()
         .unwrap()
         .to_owned();
-    let mut externs: Vec<_> = ["sprite_app", "sprite_term", "toml"]
+    let mut externs: Vec<_> = ["sprite_app", "sprite_term", "toml", "tracing"]
         .iter()
         .map(|name| {
             format!(

@@ -10,6 +10,8 @@ mod cli;
 mod config;
 mod confirmation;
 pub mod control;
+#[doc(hidden)]
+pub mod diagnostics;
 mod graphics_cache;
 mod grid;
 mod grid_paint;

@@ -99,6 +99,7 @@ pub(super) fn make_pane<'a>(
                 cx,
             )
         });
+        tracing::info!(target: "sprite_app::pane", tab = tab.0, pane = pane.0, "pane created");
         cx.subscribe(
             &view,
             |workspace, _, _: &crate::terminal_view::NativeTextCommitted, cx| {

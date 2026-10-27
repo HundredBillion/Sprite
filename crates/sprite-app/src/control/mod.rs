@@ -239,6 +239,7 @@ pub(crate) fn open_grant(
             writeln!(stream, "{}", failure("", "denied")).ok();
         },
         move |mut connection| {
+            let started = std::time::Instant::now();
             let answer = match serde_json::from_str::<Request>(&connection.body) {
                 Ok(request)
                     if request.id.len() <= 64
@@ -295,6 +296,7 @@ pub(crate) fn open_grant(
                 }
                 _ => failure("", "invalid_request"),
             };
+            tracing::debug!(target: "sprite_app::control", elapsed_ms = started.elapsed().as_millis() as u64, "control request handled");
             writeln!(connection.stream, "{answer}").ok();
         },
     )?;

@@ -37,6 +37,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 sprite-pane = { workspace = true }
 sprite-term = { workspace = true }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["fmt", "env-filter", "registry", "std"] }
 
 [dev-dependencies]
 proptest = { version = "=1.10.0", default-features = false, features = ["std"] }

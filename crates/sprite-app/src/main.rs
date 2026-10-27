@@ -21,7 +21,11 @@ use sprite_app::{
 fn main() -> ExitCode {
     match parse_arguments(std::env::args_os().skip(1)) {
         Ok(Invocation::Window(args)) => {
+            let started = std::time::Instant::now();
+            let _logging = sprite_app::diagnostics::init();
+            tracing::info!(target: "sprite_app::startup", "window starting");
             open_window(args);
+            tracing::info!(target: "sprite_app::shutdown", elapsed_ms = started.elapsed().as_millis() as u64, "application stopped");
             ExitCode::SUCCESS
         }
         Ok(Invocation::Snapshot(args)) => {
@@ -83,6 +87,7 @@ fn main() -> ExitCode {
     reason = "while the window is being opened there is nowhere else to report"
 )]
 fn open_window(args: WindowArgs) {
+    let startup = std::time::Instant::now();
     // Read before the window exists, so a session never starts under one set of
     // settings and is then told about another.
     let (settings, complaints) = match &args.config {
@@ -91,6 +96,9 @@ fn open_window(args: WindowArgs) {
         Some(path) => Settings::load_explicit(path),
         None => Settings::load(),
     };
+    if !complaints.0.is_empty() {
+        tracing::warn!(target: "sprite_app::configuration", count = complaints.0.len(), "configuration complaints");
+    }
     for complaint in complaints.0 {
         eprintln!("sprite: {complaint}");
     }
@@ -135,5 +143,6 @@ fn open_window(args: WindowArgs) {
             .expect("install the close and quit handlers");
 
         cx.activate(true);
+        tracing::debug!(target: "sprite_app::startup", elapsed_ms = startup.elapsed().as_millis() as u64, "window activated");
     });
 }

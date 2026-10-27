@@ -236,9 +236,10 @@ impl Workspace {
         // Its own key, never observation's: a program handed only the
         // observation credentials can read every pane but draw in none.
         let surface_key = crate::observation::endpoint::ObservationKey::generate()
+            .inspect_err(|error| { tracing::warn!(target: "sprite_app::surface", kind = ?error.kind(), "surface key generation failed"); })
             .ok()
             .map(Arc::new);
-        let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_lanes).ok());
+        let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_lanes).inspect_err(|error| { tracing::warn!(target: "sprite_app::surface", kind = ?error.kind(), "surface endpoint failed"); }).ok());
 
         // Published before the settings, so a pane rendering on the first
         // settings notification already finds its colours by name.
