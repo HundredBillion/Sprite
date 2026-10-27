@@ -32,7 +32,6 @@ use crate::local_socket::{
 use crate::pane_tree::PaneId;
 use crate::surface::lanes::SurfaceLanes;
 use crate::surface::{Refusal, SurfaceId};
-use crate::tabs::TabId;
 
 /// The environment a window gives each of its sessions.
 pub const SOCKET_VARIABLE: &str = "SPRITE_SURFACE_SOCKET";
@@ -765,20 +764,16 @@ impl SurfaceEndpoint {
         self.transport.key_hex()
     }
 
-    /// What one pane's session needs to open Surfaces in itself. `SPRITE_TAB`
-    /// and `SPRITE_PANE` repeat what the observation endpoint exports, with
-    /// the same values, so a session has them whether or not observation is on.
-    pub fn environment(&self, tab: TabId, pane: PaneId) -> Vec<(OsString, OsString)> {
+    /// What one pane's session needs to open Surfaces in itself. `SPRITE_PANE`
+    /// repeats what the observation endpoint exports, with the same value, so
+    /// a session has it whether or not observation is on.
+    pub fn environment(&self, pane: PaneId) -> Vec<(OsString, OsString)> {
         vec![
             (
                 OsString::from(SOCKET_VARIABLE),
                 OsString::from(self.socket_path().as_os_str()),
             ),
             (OsString::from(KEY_VARIABLE), OsString::from(self.key_hex())),
-            (
-                OsString::from("SPRITE_TAB"),
-                OsString::from(tab.0.to_string()),
-            ),
             (
                 OsString::from("SPRITE_PANE"),
                 OsString::from(pane.0.to_string()),
@@ -2387,7 +2382,7 @@ mod tests {
     fn a_session_is_told_the_surface_socket_the_shared_key_and_its_identity() {
         let scratch = Scratch::new();
         let (endpoint, _rx) = endpoint(&scratch);
-        let environment = endpoint.environment(TabId(2), PaneId(5));
+        let environment = endpoint.environment(PaneId(5));
         let get = |name: &str| {
             environment
                 .iter()
@@ -2399,7 +2394,11 @@ mod tests {
             Some(endpoint.socket_path().to_str().expect("utf-8"))
         );
         assert_eq!(get(KEY_VARIABLE), Some(endpoint.key_hex()));
-        assert_eq!(get("SPRITE_TAB").as_deref(), Some("2"));
+        assert_eq!(
+            get("SPRITE_TAB"),
+            None,
+            "a pane can move tabs; only its pane id is stable"
+        );
         assert_eq!(get("SPRITE_PANE").as_deref(), Some("5"));
     }
 

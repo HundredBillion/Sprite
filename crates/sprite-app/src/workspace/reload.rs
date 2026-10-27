@@ -405,7 +405,6 @@ mod tests {
             let environment = super::session_environment(
                 workspace.endpoint.as_ref(),
                 workspace.surfaces.as_ref(),
-                crate::tabs::TabId(0),
                 PaneId(0),
             );
             assert!(
