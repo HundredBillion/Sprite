@@ -61,8 +61,10 @@ pub use prompts::*;
 pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 
 /// How long a window may go with nothing to draw before it stops asking the
-/// platform for frames. It also covers the second of presentation after input
-/// that keeps a variable-refresh display from lowering its rate.
+/// platform for frames. The count cannot start until the second of
+/// presentation after input has passed, so that rule still holds while frames
+/// run; input that redraws nothing while already paused gets no extra
+/// presentation.
 const FRAME_IDLE_PAUSE: Duration = Duration::from_secs(1);
 
 /// Represents the two different phases when dispatching events.
@@ -1064,12 +1066,12 @@ impl Window {
             let last_input_timestamp = last_input_timestamp.clone();
             let mut idle_since: Option<Instant> = None;
             move |request_frame_options| {
-                let next_frame_callbacks = next_frame_callbacks.take();
-                let had_callbacks = !next_frame_callbacks.is_empty();
-                if !next_frame_callbacks.is_empty() {
+                let callbacks = next_frame_callbacks.take();
+                let had_callbacks = !callbacks.is_empty();
+                if had_callbacks {
                     handle
                         .update(&mut cx, |_, window, cx| {
-                            for callback in next_frame_callbacks {
+                            for callback in callbacks {
                                 callback(window, cx);
                             }
                         })
@@ -1116,6 +1118,11 @@ impl Window {
                     .get_or_insert_with(Instant::now)
                     .elapsed()
                     >= FRAME_IDLE_PAUSE
+                    // Work queued during this tick's updates woke nothing,
+                    // because frames were not yet paused. Pausing over it
+                    // would leave it waiting for some unrelated redraw.
+                    && !invalidator.is_dirty()
+                    && next_frame_callbacks.borrow().is_empty()
                 {
                     idle_since = None;
                     invalidator.pause();
