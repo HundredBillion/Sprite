@@ -563,16 +563,6 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
 
-    fn finish_cleanup(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext) {
-        let threads = workspace.update(cx, |workspace, _| {
-            std::mem::take(&mut workspace.cleanup_threads)
-        });
-        for thread in threads.into_iter().flatten() {
-            thread.join().expect("pane cleanup finished");
-        }
-        cx.run_until_parked();
-    }
-
     #[gpui::test]
     fn an_idle_window_requires_two_timely_close_requests(cx: &mut gpui::TestAppContext) {
         QUIT_REQUESTS.with(|requests| requests.set(0));
