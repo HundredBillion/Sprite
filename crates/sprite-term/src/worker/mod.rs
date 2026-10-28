@@ -303,7 +303,13 @@ pub(crate) fn run(
             return None;
         }
     };
-    foreground.attach(started.master_fd, started.process_group);
+    // `start` spawned the child on this thread, so this is the name it had
+    // before exec.
+    foreground.attach(
+        started.master_fd,
+        started.process_group,
+        pty_unix::spawner_name(),
+    );
     let mut runtime = Runtime {
         started,
         pump: None,

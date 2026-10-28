@@ -61,6 +61,8 @@ struct Attached {
     master: OwnedFd,
     /// The group the pane's initial child was put in at spawn.
     initial_group: i32,
+    /// The name the child carries until its own program replaces it.
+    spawner_name: Option<String>,
 }
 
 /// A handle on the "what is running" question for one pane.
@@ -80,7 +82,15 @@ impl ForegroundWatch {
     /// A session whose child has no process group is left unattached, and
     /// answers `Unknown` forever — which is honest: without the group there is
     /// nothing to compare against.
-    pub(crate) fn attach(&self, master_fd: RawFd, initial_group: Option<i32>) {
+    ///
+    /// `spawner_name` is the name a forked child inherits, read on the thread
+    /// that spawned it.
+    pub(crate) fn attach(
+        &self,
+        master_fd: RawFd,
+        initial_group: Option<i32>,
+        spawner_name: Option<String>,
+    ) {
         let Some(initial_group) = initial_group else {
             return;
         };
@@ -92,6 +102,7 @@ impl ForegroundWatch {
             *attached = Some(Attached {
                 master,
                 initial_group,
+                spawner_name,
             });
         }
     }
@@ -115,10 +126,11 @@ impl ForegroundWatch {
     pub fn state(&self) -> ForegroundState {
         // The master is asked under the lock, which is what keeps `detach`
         // from closing it mid-call; what follows needs only the answer.
-        let (group, initial_group) = match self.lock().as_ref() {
+        let (group, initial_group, spawner_name) = match self.lock().as_ref() {
             Some(attached) => (
                 pty_unix::foreground_group(&attached.master),
                 attached.initial_group,
+                attached.spawner_name.clone(),
             ),
             None => return ForegroundState::Unknown,
         };
@@ -133,6 +145,12 @@ impl ForegroundWatch {
         }
         let program = executable_name(group);
         if group == initial_group {
+            // Linux renames a process late in exec, after `spawn` has already
+            // returned, so a just-opened pane can still carry its starter's
+            // name. Its program has not run yet, so there is nothing to lose.
+            if program.is_some() && program == spawner_name {
+                return ForegroundState::Unknown;
+            }
             // Shell names are a prompt heuristic, not a process-identity guarantee.
             // Unrecognized shells ask before closing rather than risking unsaved work.
             return match program.as_deref() {
@@ -197,7 +215,7 @@ mod tests {
     #[test]
     fn a_shell_without_a_group_stays_unattached() {
         let watch = ForegroundWatch::default();
-        watch.attach(0, None);
+        watch.attach(0, None, None);
         assert_eq!(watch.state(), ForegroundState::Unknown);
     }
 
@@ -224,7 +242,7 @@ mod tests {
         peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .expect("read deadline");
         let watch = ForegroundWatch::default();
-        watch.attach(master.as_raw_fd(), Some(1));
+        watch.attach(master.as_raw_fd(), Some(1), None);
         // The worker's own descriptor closes first, as it does at session end.
         drop(master);
         watch.detach();
@@ -235,5 +253,38 @@ mod tests {
             .expect("the peer sees the close rather than waiting on an open duplicate");
         assert_eq!(read, 0);
         assert_eq!(watch.state(), ForegroundState::Unknown);
+    }
+
+    #[test]
+    fn a_shell_that_has_not_finished_starting_is_not_reported_as_a_program() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+        let pair = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("open a PTY");
+        let mut command = CommandBuilder::new("sleep");
+        command.arg("30");
+        let mut child = pair.slave.spawn_command(command).expect("spawn sleep");
+        let pid = child.process_id().expect("child pid");
+        let group = pty_unix::process_group_of(pid);
+        let master_fd = pair.master.as_raw_fd().expect("master fd");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while executable_name(pid as i32).as_deref() != Some("sleep") {
+            assert!(std::time::Instant::now() < deadline, "sleep never started");
+            std::thread::yield_now();
+        }
+
+        // Between fork and exec the child still carries the name of whatever
+        // started it, so a starter named "sleep" stands in for that moment.
+        let starting = ForegroundWatch::default();
+        starting.attach(master_fd, group, Some("sleep".to_owned()));
+        let started = ForegroundWatch::default();
+        started.attach(master_fd, group, Some("sprite-term-wor".to_owned()));
+        let (starting, started) = (starting.state(), started.state());
+        child.kill().expect("stop sleep");
+        child.wait().expect("reap sleep");
+
+        assert_eq!(starting, ForegroundState::Unknown);
+        assert_eq!(started, ForegroundState::Busy(Some("sleep".to_owned())));
     }
 }

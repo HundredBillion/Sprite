@@ -629,6 +629,23 @@ pub(crate) fn process_name(pid: i32) -> Option<String> {
     }
 }
 
+/// The name a child forked from the calling thread has until it execs.
+///
+/// Linux names a forked child after the thread that forked it; macOS after the
+/// process.
+pub(crate) fn spawner_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        process_name(i32::try_from(std::process::id()).ok()?)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let comm = std::fs::read_to_string("/proc/thread-self/comm").ok()?;
+        let name = comm.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+}
+
 /// A private duplicate of the PTY master.
 ///
 /// The worker's own copy is closed when the session ends, and a descriptor
