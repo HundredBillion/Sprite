@@ -101,10 +101,12 @@ jobs:
               --component clippy --component rustfmt
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # Compiled third-party crates and Ghostty's Zig packages are restored
-      # from the last master run, so a change to Sprite recompiles only Sprite
-      # and fetches no Zig package. The nightly run skips both caches to keep
-      # one clean build a day against the current runner image.
+      # Compiled third-party crates and Ghostty's Zig cache are restored from
+      # the last master run, so a change to Sprite recompiles only Sprite and
+      # fetches no Zig package. The Zig cache also holds Ghostty's compiled
+      # build script, which Zig otherwise rebuilds (about 100 s) before it can
+      # even check its packages. The nightly run skips both caches to keep one
+      # clean build a day against the current runner image.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: github.event_name != 'schedule'
         with:
@@ -114,13 +116,13 @@ jobs:
       # A separate cache because rust-cache empties every non-Cargo directory
       # under target/ before it saves. Its save runs as a post step, after the
       # explicit save below.
-      - name: Restore Ghostty's Zig packages
-        id: zig-packages
+      - name: Restore Ghostty's Zig cache
+        id: zig-cache
         if: github.event_name != 'schedule'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/zig-global-cache/p
-          key: zig-packages-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ env.GHOSTTY_COMMIT }}
+          path: target/zig-global-cache
+          key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ env.GHOSTTY_COMMIT }}
 
       - name: Fetch dependencies (the only network-enabled build stage)
         # Normally under three minutes. A stalled package host once held this
@@ -196,14 +198,14 @@ jobs:
           cargo tree --locked --offline --duplicates
           cargo tree --locked --offline --edges features
 
-      - name: Save Ghostty's Zig packages
+      - name: Save Ghostty's Zig cache
         if: >-
           (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-          && steps.zig-packages.outputs.cache-hit != 'true'
+          && steps.zig-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/zig-global-cache/p
-          key: ${{ steps.zig-packages.outputs.cache-primary-key }}
+          path: target/zig-global-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
 
       - name: Stress native Linux under CPU load
         if: ${{ !cancelled() && inputs.stress }}
@@ -279,13 +281,13 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
-      - name: Restore Ghostty's Zig packages
-        id: zig-packages
+      - name: Restore Ghostty's Zig cache
+        id: zig-cache
         if: github.event_name != 'schedule'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/zig-global-cache/p
-          key: zig-packages-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ env.GHOSTTY_COMMIT }}
+          path: target/zig-global-cache
+          key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ env.GHOSTTY_COMMIT }}
 
       - name: Fetch dependencies (the only network-enabled build stage)
         timeout-minutes: 10
@@ -327,14 +329,14 @@ jobs:
           cargo test --workspace --locked --offline --no-fail-fast
           cargo build --workspace --locked --offline
 
-      - name: Save Ghostty's Zig packages
+      - name: Save Ghostty's Zig cache
         if: >-
           (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-          && steps.zig-packages.outputs.cache-hit != 'true'
+          && steps.zig-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/zig-global-cache/p
-          key: ${{ steps.zig-packages.outputs.cache-primary-key }}
+          path: target/zig-global-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
 
       - name: Stress macOS under CPU load
         if: ${{ !cancelled() && inputs.stress }}
