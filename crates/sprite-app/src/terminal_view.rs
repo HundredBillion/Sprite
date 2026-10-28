@@ -92,9 +92,9 @@ pub struct TerminalView {
     bundle: Option<Arc<SnapshotBundle>>,
     /// Textures for the images this pane is showing.
     ///
-    /// Dropped with the view, so closing a pane releases its textures and
-    /// closing a tab releases every pane's, without a separate teardown path to
-    /// forget to call.
+    /// Dropped with the view. Each texture's GPU copy is released before the
+    /// window's next frame, so closing a pane or a tab gives back its pictures
+    /// without a separate teardown path to forget to call.
     textures: crate::graphics_cache::GraphicsCache,
     focus: FocusHandle,
     metrics: CellMetrics,

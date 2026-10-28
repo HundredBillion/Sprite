@@ -137,6 +137,42 @@ other thread left alive. A one-millisecond sleep placed before the
 registration made 38 of 50 runs hang; with this patch and the same sleep, 200
 of 200 passed.
 
+## Releasing pictures and pausing idle frames
+
+`patches/gpui-0.2.2-release-and-idle.patch` applies to the tree the
+test-block-wakeup patch produces; its line numbers are that tree's.
+
+Test atlas tile count: the `test-support` `TestWindow` keeps its concrete
+`TestAtlas` and reports how many tiles it holds, through
+`VisualTestContext::atlas_tile_count`. Sprite uses it to test that a picture it
+stops using leaves the texture atlas.
+
+Metal atlas removal: `MetalAtlas::remove` took the key out of `tiles_by_key`
+only when its whole texture emptied, and never returned the tile to the
+texture's allocator. A removed image's space was therefore reused only once
+every other image on that texture had gone, and removing the same image twice
+lowered the texture's count twice. It now always takes the key out, returns
+the tile to the `etagere` allocator, and frees the texture when it empties, as
+before. Replacing a 512×512 Kitty image 60 times took `IOAccelerator
+(graphics)` from 11.5 to 66.7 MB before Sprite released pictures; the
+measurement after this patch is recorded in the pull request.
+
+`NSScreenNumber`: both dictionary keys were `alloc`/`init` strings that were
+never released, about 30 × 32 B per session under `leaks`. They are now
+autoreleased through `ns_string`.
+
+Idle frame pause: a visible macOS window ran its `CVDisplayLink` sixty times a
+second whether or not anything changed, about 85% of an idle Sprite's 0.5% of
+one core. After a second in which a frame callback found nothing to draw,
+nothing to present and no next-frame callbacks, `Window` calls
+`PlatformWindow::set_frame_delivery(false)`, and macOS stops the existing link.
+Every redraw request already passes through `WindowInvalidator`
+(`invalidate_view`, `set_dirty`) or `on_next_frame`, so those call the
+platform's `frame_waker`, which restarts it. `DisplayLink` start and stop
+suspend and resume a dispatch source and must alternate; the window records
+the pause so each added stop is matched, including when the link is replaced
+or dropped. Other platforms keep the default hooks, which do nothing.
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.

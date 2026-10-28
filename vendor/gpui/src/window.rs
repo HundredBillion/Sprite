@@ -60,6 +60,13 @@ pub use prompts::*;
 
 pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 
+/// How long a window may go with nothing to draw before it stops asking the
+/// platform for frames. The count cannot start until the second of
+/// presentation after input has passed, so that rule still holds while frames
+/// run; input that redraws nothing while already paused gets no extra
+/// presentation.
+const FRAME_IDLE_PAUSE: Duration = Duration::from_secs(1);
+
 /// Represents the two different phases when dispatching events.
 #[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DispatchPhase {
@@ -95,6 +102,9 @@ struct WindowInvalidatorInner {
     pub dirty: bool,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
+    /// Frame callbacks are stopped because nothing needed drawing.
+    paused: bool,
+    waker: Option<Rc<dyn Fn()>>,
 }
 
 #[derive(Clone)]
@@ -109,6 +119,8 @@ impl WindowInvalidator {
                 dirty: true,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
+                paused: false,
+                waker: None,
             })),
         }
     }
@@ -119,6 +131,8 @@ impl WindowInvalidator {
         if inner.draw_phase == DrawPhase::None {
             inner.dirty = true;
             cx.push_effect(Effect::Notify { emitter: entity });
+            drop(inner);
+            self.wake();
             true
         } else {
             false
@@ -130,7 +144,34 @@ impl WindowInvalidator {
     }
 
     pub fn set_dirty(&self, dirty: bool) {
-        self.inner.borrow_mut().dirty = dirty
+        self.inner.borrow_mut().dirty = dirty;
+        if dirty {
+            self.wake();
+        }
+    }
+
+    pub fn set_waker(&self, waker: Option<Rc<dyn Fn()>>) {
+        self.inner.borrow_mut().waker = waker;
+    }
+
+    /// Records that frame callbacks are stopped.
+    pub fn pause(&self) {
+        self.inner.borrow_mut().paused = true;
+    }
+
+    /// Restarts stopped frame callbacks. Every redraw request passes through
+    /// here, so none can be lost while they are stopped.
+    pub fn wake(&self) {
+        let waker = {
+            let mut inner = self.inner.borrow_mut();
+            if !std::mem::replace(&mut inner.paused, false) {
+                return;
+            }
+            inner.waker.clone()
+        };
+        if let Some(waker) = waker {
+            waker();
+        }
     }
 
     pub fn set_phase(&self, phase: DrawPhase) {
@@ -987,6 +1028,7 @@ impl Window {
         let appearance = platform_window.appearance();
         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
         let invalidator = WindowInvalidator::new();
+        invalidator.set_waker(platform_window.frame_waker());
         let active = Rc::new(Cell::new(platform_window.is_active()));
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
         let needs_present = Rc::new(Cell::new(false));
@@ -1022,12 +1064,14 @@ impl Window {
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
             let last_input_timestamp = last_input_timestamp.clone();
+            let mut idle_since: Option<Instant> = None;
             move |request_frame_options| {
-                let next_frame_callbacks = next_frame_callbacks.take();
-                if !next_frame_callbacks.is_empty() {
+                let callbacks = next_frame_callbacks.take();
+                let had_callbacks = !callbacks.is_empty();
+                if had_callbacks {
                     handle
                         .update(&mut cx, |_, window, cx| {
-                            for callback in next_frame_callbacks {
+                            for callback in callbacks {
                                 callback(window, cx);
                             }
                         })
@@ -1041,7 +1085,8 @@ impl Window {
                     || (active.get()
                         && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
 
-                if invalidator.is_dirty() || request_frame_options.force_render {
+                let drew = invalidator.is_dirty() || request_frame_options.force_render;
+                if drew {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -1063,6 +1108,30 @@ impl Window {
                         window.complete_frame();
                     })
                     .log_err();
+
+                // After a second with nothing to draw, nothing to present and
+                // nothing waiting for a frame, stop asking for frames. Anything
+                // that redraws restarts them through the invalidator.
+                if drew || needs_present || had_callbacks {
+                    idle_since = None;
+                } else if idle_since
+                    .get_or_insert_with(Instant::now)
+                    .elapsed()
+                    >= FRAME_IDLE_PAUSE
+                    // Work queued during this tick's updates woke nothing,
+                    // because frames were not yet paused. Pausing over it
+                    // would leave it waiting for some unrelated redraw.
+                    && !invalidator.is_dirty()
+                    && next_frame_callbacks.borrow().is_empty()
+                {
+                    idle_since = None;
+                    invalidator.pause();
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            window.platform_window.set_frame_delivery(false)
+                        })
+                        .log_err();
+                }
             }
         }));
         platform_window.on_resize(Box::new({
@@ -1643,6 +1712,7 @@ impl Window {
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
+        self.invalidator.wake();
     }
 
     /// Schedule a frame to be drawn on the next animation frame.

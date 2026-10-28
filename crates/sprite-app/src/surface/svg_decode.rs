@@ -18,6 +18,8 @@ use std::sync::{Arc, LazyLock};
 use gpui::{Context, RenderImage};
 use resvg::usvg;
 
+use crate::picture::Picture;
+
 /// Decoded pixels one Surface cache keeps at once.
 const MAX_SURFACE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 /// Decoded pixels every Surface cache in the process keeps at once: four
@@ -82,13 +84,13 @@ thread_local! {
 pub(crate) enum SvgState {
     /// Waiting for, or in, its decode. Draws nothing.
     Pending,
-    Ready(Arc<RenderImage>),
+    Ready(Arc<Picture>),
     Refused(RefusalKind),
 }
 
 impl SvgState {
     /// The picture to draw, if the decode is ready.
-    pub(crate) fn picture(&self) -> Option<Arc<RenderImage>> {
+    pub(crate) fn picture(&self) -> Option<Arc<Picture>> {
         match self {
             Self::Ready(picture) => Some(Arc::clone(picture)),
             Self::Pending | Self::Refused(_) => None,
@@ -306,7 +308,7 @@ impl<K: Clone + Eq + Hash> Queue<K> {
         &mut self,
         job: Job<K>,
         given_bytes: usize,
-        outcome: Result<Arc<RenderImage>, RefusalKind>,
+        outcome: Result<Arc<Picture>, RefusalKind>,
     ) {
         self.in_flight = self.in_flight.saturating_sub(1);
         let available = self.available();
@@ -439,7 +441,7 @@ fn decode(
     svg: &str,
     target_width: Option<f32>,
     available_bytes: usize,
-) -> Result<Arc<RenderImage>, RefusalKind> {
+) -> Result<Arc<Picture>, RefusalKind> {
     let tree = parse(svg)?;
     if count_filter_primitive_uses(&tree) > MAX_FILTER_PRIMITIVE_USES {
         return Err(RefusalKind::TooComplex);
@@ -507,7 +509,7 @@ fn rasterise(
     tree: &usvg::Tree,
     target_width: Option<f32>,
     available_bytes: usize,
-) -> Result<Arc<RenderImage>, RefusalKind> {
+) -> Result<Arc<Picture>, RefusalKind> {
     let size = tree.size();
     let scale = target_width.map_or(1.0, |target| target / size.width());
     let width = (size.width() * scale).ceil();
@@ -553,7 +555,7 @@ fn rasterise(
     }
     let buffer =
         image::RgbaImage::from_raw(width, height, pixels).ok_or(RefusalKind::Unrasterisable)?;
-    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+    Ok(Picture::new(buffer))
 }
 
 /// What a decoded picture holds against the image budget.
@@ -564,7 +566,7 @@ fn raster_bytes(picture: &RenderImage) -> usize {
 /// `decode` with a whole image's budget, for tests that only care whether
 /// and how an SVG draws.
 #[cfg(test)]
-pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<RenderImage>> {
+pub(crate) fn render_svg(svg: &str, target_width: Option<f32>) -> Option<Arc<Picture>> {
     decode(svg, target_width, MAX_SVG_RASTER_BYTES).ok()
 }
 
@@ -829,6 +831,26 @@ mod tests {
         );
         retained.retain(|_| false);
         assert_eq!(process_retained_bytes(), before);
+    }
+
+    #[gpui::test]
+    fn every_way_a_cache_lets_go_of_a_picture_releases_its_gpu_copy(cx: &mut gpui::TestAppContext) {
+        use crate::picture::released_by;
+        let owner = cx.new(|_| Owner);
+        let cache = SvgDecodes::new(None);
+        let svgs = [square(4, 0), square(4, 1), square(4, 2)];
+        want_all(cx, &owner, &cache, &svgs);
+        cx.run_until_parked();
+        let kept = Arc::clone(&svgs[0]);
+        assert_eq!(
+            released_by(|| cache.retain(|svg| *svg == kept)),
+            2,
+            "retain"
+        );
+        assert_eq!(released_by(|| cache.reset(None)), 1, "reset");
+        want_all(cx, &owner, &cache, &svgs[..1]);
+        cx.run_until_parked();
+        assert_eq!(released_by(|| drop(cache)), 1, "dropped with its Surface");
     }
 
     #[gpui::test]

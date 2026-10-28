@@ -110,6 +110,14 @@ key listener already encodes or refuses that input; the explicit
 `replace_text_in_range_from_key` bridge suppresses a second delivery. Other
 GPUI clients keep ordinary replacement through default forwarding.
 
+**Picture**:
+A decoded image Sprite Terminal draws: a Kitty graphic, a Surface element
+picture or icon, a list icon, or a Markdown image. Its GPU copy lasts only as
+long as the picture: when the last holder lets go, the copy is released before
+the window's next frame.
+_Avoid_: texture (for the cache entry), image (when the GPU copy's lifetime
+matters)
+
 ## Superseded
 
 Terms retired on 2026-09-07 by `docs/PRDs/09-07-2026-native-surfaces.md`,

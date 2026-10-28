@@ -26,8 +26,8 @@ For selected existing panes, replace `--all-panes` with one or more `--pane N`
 options using the numeric IDs from `sprite panes snapshot --window`. An
 all-panes grant includes future human and agent panes. A selected-pane grant
 includes panes created with that grant, but excludes unrelated future panes.
-Its scope retains at most 128 identities over its lifetime; request a fresh
-grant if that limit is reached.
+Its scope holds at most 128 open panes. A closed pane leaves the scope, so a
+long-lived grant can keep creating and closing panes.
 
 Rights are separate:
 

@@ -1,0 +1,348 @@
+--- a/src/app/test_context.rs
++++ b/src/app/test_context.rs
+@@ -823,6 +823,11 @@ impl VisualTestContext {
+         self.simulate_window_scale_factor(self.window, scale_factor)
+     }
+ 
++    /// How many images the window's texture atlas holds.
++    pub fn atlas_tile_count(&self) -> usize {
++        self.test_window(self.window).atlas_tile_count()
++    }
++
+     /// debug_bounds returns the bounds of the element with the given selector.
+     pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
+         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -556,6 +556,15 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
+     fn draw(&self, scene: &Scene);
+     fn completed_frame(&self) {}
++    /// Stops or restarts the platform's frame callbacks. A window with
++    /// nothing to draw stops them, so an idle window costs no CPU.
++    fn set_frame_delivery(&self, _active: bool) {}
++    /// Restarts stopped frame callbacks without needing the window, for the
++    /// invalidator to call when anything asks for a redraw. `None` where they
++    /// never stop.
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        None
++    }
+     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
+ 
+     // macOS specific methods
+--- a/src/platform/mac/metal_atlas.rs
++++ b/src/platform/mac/metal_atlas.rs
+@@ -59,9 +59,12 @@ impl PlatformAtlas for MetalAtlas {
+ 
+     fn remove(&self, key: &AtlasKey) {
+         let mut lock = self.0.lock();
+-        let Some(id) = lock.tiles_by_key.get(key).map(|v| v.texture_id) else {
++        // The key leaves first, whatever else happens, so removing an image
++        // twice cannot count it out of its texture twice.
++        let Some(tile) = lock.tiles_by_key.remove(key) else {
+             return;
+         };
++        let id = tile.texture_id;
+ 
+         let textures = match id.kind {
+             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
+@@ -81,8 +84,10 @@ impl PlatformAtlas for MetalAtlas {
+ 
+             if texture.is_unreferenced() {
+                 textures.free_list.push(id.index as usize);
+-                lock.tiles_by_key.remove(key);
+             } else {
++                // Its space goes back to the texture for the next image, rather
++                // than waiting for every other image on it to go too.
++                texture.allocator.deallocate(tile.tile_id.into());
+                 *texture_slot = Some(texture);
+             }
+         }
+--- a/src/platform/mac/window.rs
++++ b/src/platform/mac/window.rs
+@@ -392,6 +392,8 @@ struct MacWindowState {
+     native_view: NonNull<Object>,
+     blurred_view: Option<id>,
+     display_link: Option<DisplayLink>,
++    /// The display link is stopped because the window had nothing to draw.
++    frame_delivery_paused: bool,
+     renderer: renderer::Renderer,
+     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
+     event_callback: Option<Box<dyn FnMut(PlatformInput) -> crate::DispatchEventResult>>,
+@@ -495,7 +497,29 @@ impl MacWindowState {
+     }
+ 
+     fn stop_display_link(&mut self) {
+-        self.display_link = None;
++        if let Some(mut display_link) = self.display_link.take()
++            && self.frame_delivery_paused
++        {
++            // Dropping stops the link again; restart it first so that stop
++            // is matched.
++            display_link.start().log_err();
++        }
++        self.frame_delivery_paused = false;
++    }
++
++    fn set_frame_delivery(&mut self, active: bool) {
++        if self.frame_delivery_paused != active {
++            return;
++        }
++        let Some(display_link) = self.display_link.as_mut() else {
++            return;
++        };
++        if active {
++            display_link.start().log_err();
++        } else {
++            display_link.stop().log_err();
++        }
++        self.frame_delivery_paused = !active;
+     }
+ 
+     fn is_maximized(&self) -> bool {
+@@ -690,6 +714,7 @@ impl MacWindow {
+                 native_view: NonNull::new_unchecked(native_view),
+                 blurred_view: None,
+                 display_link: None,
++                frame_delivery_paused: false,
+                 renderer: renderer::new_renderer(
+                     renderer_context,
+                     native_window as *mut _,
+@@ -936,7 +961,7 @@ impl Drop for MacWindow {
+         let mut this = self.0.lock();
+         this.renderer.destroy();
+         let window = this.native_window;
+-        this.display_link.take();
++        this.stop_display_link();
+         unsafe {
+             this.native_window.setDelegate_(nil);
+         }
+@@ -1063,7 +1088,7 @@ impl PlatformWindow for MacWindow {
+             let device_description: id = msg_send![screen, deviceDescription];
+             let screen_number: id = NSDictionary::valueForKey_(
+                 device_description,
+-                NSString::alloc(nil).init_str("NSScreenNumber"),
++                ns_string("NSScreenNumber"),
+             );
+ 
+             let screen_number: u32 = msg_send![screen_number, unsignedIntValue];
+@@ -1476,6 +1501,21 @@ impl PlatformWindow for MacWindow {
+         this.renderer.draw(scene);
+     }
+ 
++    fn set_frame_delivery(&self, active: bool) {
++        self.0.lock().set_frame_delivery(active);
++    }
++
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        // GPUI's macOS window code releases this lock before it calls into the
++        // app, so a redraw request made from app code can take it.
++        let state = Arc::downgrade(&self.0);
++        Some(Rc::new(move || {
++            if let Some(state) = state.upgrade() {
++                state.lock().set_frame_delivery(true);
++            }
++        }))
++    }
++
+     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+         self.0.lock().renderer.sprite_atlas().clone()
+     }
+@@ -2520,7 +2560,7 @@ where
+ unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
+     unsafe {
+         let device_description = NSScreen::deviceDescription(screen);
+-        let screen_number_key: id = NSString::alloc(nil).init_str("NSScreenNumber");
++        let screen_number_key: id = ns_string("NSScreenNumber");
+         let screen_number = device_description.objectForKey_(screen_number_key);
+         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
+         screen_number as CGDirectDisplayID
+--- a/src/platform/test/window.rs
++++ b/src/platform/test/window.rs
+@@ -19,7 +19,7 @@ pub(crate) struct TestWindowState {
+     pub(crate) title: Option<String>,
+     pub(crate) edited: bool,
+     platform: Weak<TestPlatform>,
+-    sprite_atlas: Arc<dyn PlatformAtlas>,
++    sprite_atlas: Arc<TestAtlas>,
+     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
+     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
+     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
+@@ -106,6 +106,11 @@ impl TestWindow {
+         self.0.lock().resize_callback = Some(callback);
+     }
+ 
++    /// How many images the window's texture atlas holds.
++    pub fn atlas_tile_count(&self) -> usize {
++        self.0.lock().sprite_atlas.tile_count()
++    }
++
+     pub(crate) fn simulate_active_status_change(&self, active: bool) {
+         let mut lock = self.0.lock();
+         let Some(mut callback) = lock.active_status_change_callback.take() else {
+@@ -327,6 +332,10 @@ impl TestAtlas {
+             tiles: HashMap::default(),
+         }))
+     }
++
++    pub(crate) fn tile_count(&self) -> usize {
++        self.0.lock().tiles.len()
++    }
+ }
+ 
+ impl PlatformAtlas for TestAtlas {
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -60,6 +60,13 @@ pub use prompts::*;
+ 
+ pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
+ 
++/// How long a window may go with nothing to draw before it stops asking the
++/// platform for frames. The count cannot start until the second of
++/// presentation after input has passed, so that rule still holds while frames
++/// run; input that redraws nothing while already paused gets no extra
++/// presentation.
++const FRAME_IDLE_PAUSE: Duration = Duration::from_secs(1);
++
+ /// Represents the two different phases when dispatching events.
+ #[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
+ pub enum DispatchPhase {
+@@ -95,6 +102,9 @@ struct WindowInvalidatorInner {
+     pub dirty: bool,
+     pub draw_phase: DrawPhase,
+     pub dirty_views: FxHashSet<EntityId>,
++    /// Frame callbacks are stopped because nothing needed drawing.
++    paused: bool,
++    waker: Option<Rc<dyn Fn()>>,
+ }
+ 
+ #[derive(Clone)]
+@@ -109,6 +119,8 @@ impl WindowInvalidator {
+                 dirty: true,
+                 draw_phase: DrawPhase::None,
+                 dirty_views: FxHashSet::default(),
++                paused: false,
++                waker: None,
+             })),
+         }
+     }
+@@ -119,6 +131,8 @@ impl WindowInvalidator {
+         if inner.draw_phase == DrawPhase::None {
+             inner.dirty = true;
+             cx.push_effect(Effect::Notify { emitter: entity });
++            drop(inner);
++            self.wake();
+             true
+         } else {
+             false
+@@ -130,7 +144,34 @@ impl WindowInvalidator {
+     }
+ 
+     pub fn set_dirty(&self, dirty: bool) {
+-        self.inner.borrow_mut().dirty = dirty
++        self.inner.borrow_mut().dirty = dirty;
++        if dirty {
++            self.wake();
++        }
++    }
++
++    pub fn set_waker(&self, waker: Option<Rc<dyn Fn()>>) {
++        self.inner.borrow_mut().waker = waker;
++    }
++
++    /// Records that frame callbacks are stopped.
++    pub fn pause(&self) {
++        self.inner.borrow_mut().paused = true;
++    }
++
++    /// Restarts stopped frame callbacks. Every redraw request passes through
++    /// here, so none can be lost while they are stopped.
++    pub fn wake(&self) {
++        let waker = {
++            let mut inner = self.inner.borrow_mut();
++            if !std::mem::replace(&mut inner.paused, false) {
++                return;
++            }
++            inner.waker.clone()
++        };
++        if let Some(waker) = waker {
++            waker();
++        }
+     }
+ 
+     pub fn set_phase(&self, phase: DrawPhase) {
+@@ -987,6 +1028,7 @@ impl Window {
+         let appearance = platform_window.appearance();
+         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
+         let invalidator = WindowInvalidator::new();
++        invalidator.set_waker(platform_window.frame_waker());
+         let active = Rc::new(Cell::new(platform_window.is_active()));
+         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
+         let needs_present = Rc::new(Cell::new(false));
+@@ -1022,12 +1064,14 @@ impl Window {
+             let needs_present = needs_present.clone();
+             let next_frame_callbacks = next_frame_callbacks.clone();
+             let last_input_timestamp = last_input_timestamp.clone();
++            let mut idle_since: Option<Instant> = None;
+             move |request_frame_options| {
+-                let next_frame_callbacks = next_frame_callbacks.take();
+-                if !next_frame_callbacks.is_empty() {
++                let callbacks = next_frame_callbacks.take();
++                let had_callbacks = !callbacks.is_empty();
++                if had_callbacks {
+                     handle
+                         .update(&mut cx, |_, window, cx| {
+-                            for callback in next_frame_callbacks {
++                            for callback in callbacks {
+                                 callback(window, cx);
+                             }
+                         })
+@@ -1041,7 +1085,8 @@ impl Window {
+                     || (active.get()
+                         && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
+ 
+-                if invalidator.is_dirty() || request_frame_options.force_render {
++                let drew = invalidator.is_dirty() || request_frame_options.force_render;
++                if drew {
+                     measure("frame duration", || {
+                         handle
+                             .update(&mut cx, |_, window, cx| {
+@@ -1063,6 +1108,30 @@ impl Window {
+                         window.complete_frame();
+                     })
+                     .log_err();
++
++                // After a second with nothing to draw, nothing to present and
++                // nothing waiting for a frame, stop asking for frames. Anything
++                // that redraws restarts them through the invalidator.
++                if drew || needs_present || had_callbacks {
++                    idle_since = None;
++                } else if idle_since
++                    .get_or_insert_with(Instant::now)
++                    .elapsed()
++                    >= FRAME_IDLE_PAUSE
++                    // Work queued during this tick's updates woke nothing,
++                    // because frames were not yet paused. Pausing over it
++                    // would leave it waiting for some unrelated redraw.
++                    && !invalidator.is_dirty()
++                    && next_frame_callbacks.borrow().is_empty()
++                {
++                    idle_since = None;
++                    invalidator.pause();
++                    handle
++                        .update(&mut cx, |_, window, _| {
++                            window.platform_window.set_frame_delivery(false)
++                        })
++                        .log_err();
++                }
+             }
+         }));
+         platform_window.on_resize(Box::new({
+@@ -1643,6 +1712,7 @@ impl Window {
+     /// Schedule the given closure to be run directly after the current frame is rendered.
+     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
+         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
++        self.invalidator.wake();
+     }
+ 
+     /// Schedule a frame to be drawn on the next animation frame.

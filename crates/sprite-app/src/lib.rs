@@ -22,6 +22,7 @@ mod observation;
 #[doc(hidden)]
 pub mod paint_benchmark;
 mod pane_tree;
+mod picture;
 mod surface;
 mod tabs;
 mod terminal_events;

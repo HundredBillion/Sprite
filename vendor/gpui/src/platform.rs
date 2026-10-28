@@ -556,6 +556,15 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn draw(&self, scene: &Scene);
     fn completed_frame(&self) {}
+    /// Stops or restarts the platform's frame callbacks. A window with
+    /// nothing to draw stops them, so an idle window costs no CPU.
+    fn set_frame_delivery(&self, _active: bool) {}
+    /// Restarts stopped frame callbacks without needing the window, for the
+    /// invalidator to call when anything asks for a redraw. `None` where they
+    /// never stop.
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        None
+    }
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
 
     // macOS specific methods

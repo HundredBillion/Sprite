@@ -380,7 +380,7 @@ impl Workspace {
     }
 
     fn refresh_layout(&mut self, cx: &mut Context<Self>) {
-        self.prune_control_labels();
+        self.prune_closed_panes();
         self.refresh_titles(cx);
         let (width, height, strip) = self.cached_pane_area();
         let placements: Vec<PanePlacement> = self
@@ -493,6 +493,9 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Before anything paints, so a picture let go since the last frame
+        // gives back its GPU copy now, and an empty window still releases.
+        crate::picture::release_dropped(window, cx);
         let (_, height, strip) = self.cached_pane_area();
         let Some(active) = self.tabs.active() else {
             return div().into_any_element();

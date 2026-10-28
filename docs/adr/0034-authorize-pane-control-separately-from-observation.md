@@ -27,3 +27,13 @@ forged requester identity; revocation after admission; moved pane exiting with
 its original tab ID; resize followed by redraw; final-pane response racing
 endpoint shutdown. The TSP must exercise the public operation path for these
 scenarios. None requires the canceled command/event roadmap.
+
+Amended 2026-10-27: a selected-pane grant's scope holds only open panes. The
+approved design bounded agent-created resources at 128 live panes, but the
+first implementation kept every pane a grant had ever created in its scope, so
+a long-lived grant was refused as `busy` after 128 creations even with none
+open. The workspace's layout refresh, which every way of closing a pane runs,
+now removes closed panes from every grant's scope. This can't widen a grant:
+pane identities are never reused, so a removed identity can never name a pane
+again. The 128 limit still bounds a scope's size and what one grant can hold
+open.

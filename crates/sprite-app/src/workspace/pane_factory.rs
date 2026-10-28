@@ -82,7 +82,7 @@ pub(super) fn make_pane<'a>(
     cx: &'a mut Context<Workspace>,
 ) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle<Request = SurfaceRequest>> + 'a {
     move |tab, pane| {
-        let environment = session_environment(services.endpoint, services.surfaces, tab, pane);
+        let environment = session_environment(services.endpoint, services.surfaces, pane);
         let link = pane_link(services.panes, tab, pane);
         let view = cx.new(|cx| {
             TerminalView::new_allocated(
@@ -134,16 +134,15 @@ pub(super) fn pane_link(panes: &Arc<WindowPanes>, tab: TabId, pane: PaneId) -> P
 pub(super) fn session_environment(
     endpoint: Option<&Endpoint>,
     surfaces: Option<&SurfaceEndpoint>,
-    tab: TabId,
     pane: PaneId,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     let mut environment = endpoint
-        .map(|endpoint| endpoint.environment(tab, pane))
+        .map(|endpoint| endpoint.environment(pane))
         .unwrap_or_default();
     environment.extend(
         surfaces
             .into_iter()
-            .flat_map(|surfaces| surfaces.environment(tab, pane)),
+            .flat_map(|surfaces| surfaces.environment(pane)),
     );
     environment
 }

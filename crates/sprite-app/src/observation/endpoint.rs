@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::pane_tree::PaneId;
-use crate::tabs::TabId;
 use crate::timeouts::SILENT_CLIENT_TIMEOUT;
 
 /// The one answer to every request that is not allowed to proceed.
@@ -132,10 +131,10 @@ impl Endpoint {
 
     /// What one pane's session needs to talk to this endpoint.
     ///
-    /// A session learns the socket, the key, and **its own** identity. It is
-    /// told who it is so a request can default to the caller's own tab without
-    /// the caller having to name a pane it might not be allowed to see.
-    pub fn environment(&self, tab: TabId, pane: PaneId) -> Vec<(OsString, OsString)> {
+    /// A session learns the socket, the key, and **its own** pane. It is told
+    /// which pane it is so a request can default to the tab holding that pane
+    /// without the caller having to name a pane it might not be allowed to see.
+    pub fn environment(&self, pane: PaneId) -> Vec<(OsString, OsString)> {
         vec![
             (
                 OsString::from("SPRITE_OBSERVATION_SOCKET"),
@@ -144,10 +143,6 @@ impl Endpoint {
             (
                 OsString::from("SPRITE_OBSERVATION_KEY"),
                 OsString::from(self.key_hex()),
-            ),
-            (
-                OsString::from("SPRITE_TAB"),
-                OsString::from(tab.0.to_string()),
             ),
             (
                 OsString::from("SPRITE_PANE"),
@@ -575,7 +570,7 @@ mod tests {
     fn a_session_is_told_the_socket_the_key_and_its_own_identity() {
         let (_scratch, endpoint, _) = endpoint_with_spy();
 
-        let environment = endpoint.environment(TabId(3), PaneId(7));
+        let environment = endpoint.environment(PaneId(7));
         let lookup = |name: &str| {
             environment
                 .iter()
@@ -589,7 +584,10 @@ mod tests {
             endpoint.socket_path().to_string_lossy()
         );
         assert_eq!(lookup("SPRITE_OBSERVATION_KEY"), endpoint.key_hex());
-        assert_eq!(lookup("SPRITE_TAB"), "3");
+        assert!(
+            !environment.iter().any(|(key, _)| key == "SPRITE_TAB"),
+            "a pane can move tabs; only its pane id is stable"
+        );
         assert_eq!(lookup("SPRITE_PANE"), "7");
     }
 
