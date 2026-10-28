@@ -250,6 +250,10 @@ jobs:
     runs-on: macos-latest
     # About twice the longest recent successful run (17.8 min).
     timeout-minutes: ${{ inputs.stress && 360 || 40 }}
+    env:
+      # A starved hosted runner can leave a worker silent for longer than the
+      # five-second default without anything being stuck.
+      SPRITE_TEST_WATCHDOG_SECS: "20"
     steps:
       - name: Record the runner image
         run: |
@@ -348,8 +352,6 @@ jobs:
 
       - name: Stress macOS under CPU load
         if: ${{ !cancelled() && inputs.stress }}
-        env:
-          SPRITE_TEST_WATCHDOG_SECS: "20"
         run: |
           set -uo pipefail
           command -v tmux >/dev/null || brew install tmux

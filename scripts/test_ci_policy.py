@@ -66,6 +66,17 @@ class CiPolicyTests(unittest.TestCase):
             with self.subTest(job=header.group(1)):
                 self.assertRegex(jobs[header.end():end], r"(?m)^    timeout-minutes: (?:[1-9][0-9]*|\$\{\{ inputs\.stress && 360 \|\| [1-9][0-9]* \}\})$")
 
+    def test_every_native_test_job_raises_the_test_watchdog(self):
+        # Hosted runners can starve a busy test past the five-second default
+        # without anything being stuck; macOS ran without this and flaked.
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        jobs = workflow.split("\njobs:\n", 1)[1]
+        for job in ["arch", "macos"]:
+            with self.subTest(job=job):
+                body = re.split(r"(?m)^  [a-z][a-z0-9-]*:$", jobs.split(f"\n  {job}:\n", 1)[1], 1)[0]
+                header = body.split("\n    steps:\n", 1)[0]
+                self.assertRegex(header, r'(?m)^      SPRITE_TEST_WATCHDOG_SECS: "20"$')
+
 
 if __name__ == "__main__":
     unittest.main()

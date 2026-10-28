@@ -958,6 +958,10 @@ fn a_fixed_grant_counts_only_its_open_panes_toward_the_cap(cx: &mut gpui::TestAp
             cx,
         ));
         close_by_control(&workspace, &fixed, pane, cx);
+        // Closed panes stop counting at once, but their cleanups have a cap
+        // of their own; on a loaded machine they would pile up and refuse
+        // the next create as busy.
+        test_support::finish_cleanup(&workspace, cx);
     }
     created_pane(&ask(
         &fixed,

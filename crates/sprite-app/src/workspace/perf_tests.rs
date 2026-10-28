@@ -189,11 +189,16 @@ fn only_a_paint_over_the_threshold_is_logged(cx: &mut gpui::TestAppContext) {
             && line.contains("elapsed_ms=")),
         "{log}"
     );
+    // A threshold no paint reaches, for every paint the window makes: the
+    // real one is a wall-clock 16 ms, which a debug build on a loaded machine
+    // can exceed.
+    crate::grid_paint::set_slow_paint_for_test(std::time::Duration::MAX);
     let ((), quiet) = capture_perf(|| {
         let (workspace, cx) = workspace_running("echo ready; read release", cx);
         cx.run_until_parked();
         super::test_support::draw_workspace(cx);
         workspace.update(cx, |workspace, cx| workspace.close_window(cx));
     });
+    crate::grid_paint::set_slow_paint_for_test(crate::grid_paint::SLOW_PAINT);
     assert!(!quiet.contains("slow paint"), "{quiet}");
 }

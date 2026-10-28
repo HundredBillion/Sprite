@@ -22,6 +22,20 @@ pub(crate) fn draw_workspace(cx: &mut gpui::VisualTestContext) {
     });
 }
 
+/// Waits for every closed pane's cleanup to finish and be counted as done.
+pub(super) fn finish_cleanup(
+    workspace: &gpui::Entity<super::Workspace>,
+    cx: &mut gpui::VisualTestContext,
+) {
+    let threads = workspace.update(cx, |workspace, _| {
+        std::mem::take(&mut workspace.cleanup_threads)
+    });
+    for thread in threads.into_iter().flatten() {
+        thread.join().expect("pane cleanup finished");
+    }
+    cx.run_until_parked();
+}
+
 pub(super) fn focused_handle(
     workspace: &gpui::Entity<super::Workspace>,
     cx: &mut gpui::VisualTestContext,
