@@ -30,6 +30,10 @@ env:
   ZIG_SHA256_X86_64_LINUX: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
   ZIG_SHA256_AARCH64_MACOS: "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a"
   GHOSTTY_COMMIT: "5064b3265e500d55f5f44ff48ca59b8685543bb8"
+  # File and line numbers only, which is all a CI panic backtrace uses. Full
+  # debug info makes every compile and link slower for a debugger nobody runs
+  # on a hosted runner. Local builds are unaffected: they don't set this.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   release-automation:
@@ -97,7 +101,39 @@ jobs:
               --component clippy --component rustfmt
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # Compiled third-party crates and Ghostty's Zig cache are restored from
+      # the last master run, so a change to Sprite recompiles only Sprite and
+      # fetches no Zig package. The Zig cache also holds Ghostty's compiled
+      # build script, which Zig otherwise rebuilds (about 100 s) before it can
+      # even check its packages. The nightly run skips both caches to keep one
+      # clean build a day against the current runner image.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.event_name != 'schedule'
+        with:
+          # Key on the pinned toolchain only. The default also hashes every
+          # toolchain on the runner, including the stable Rust GitHub
+          # preinstalls on macOS, which differs between the image versions
+          # GitHub runs side by side, so the cache was missed at random.
+          add-rust-environment-hash-key: "false"
+          key: rust-${{ env.RUST_VERSION }}
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+
+      # A separate cache because rust-cache empties every non-Cargo directory
+      # under target/ before it saves. Its save runs as a post step, after the
+      # explicit save below.
+      - name: Restore Ghostty's Zig cache
+        id: zig-cache
+        if: github.event_name != 'schedule'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/zig-global-cache
+          key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ env.GHOSTTY_COMMIT }}
+
       - name: Fetch dependencies (the only network-enabled build stage)
+        # Normally under three minutes. A stalled package host once held this
+        # step for 23 minutes before failing.
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           python3 scripts/check_gpui_patch.py --fetch
@@ -168,6 +204,15 @@ jobs:
           cargo tree --locked --offline --duplicates
           cargo tree --locked --offline --edges features
 
+      - name: Save Ghostty's Zig cache
+        if: >-
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && steps.zig-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/zig-global-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
+
       - name: Stress native Linux under CPU load
         if: ${{ !cancelled() && inputs.stress }}
         run: |
@@ -235,7 +280,25 @@ jobs:
           echo "$HOME/zig" >> "$GITHUB_PATH"
           "$HOME/zig/zig" version | grep -qx "${ZIG_VERSION}"
 
+      # The same two caches as the Arch job, for the same reasons.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.event_name != 'schedule'
+        with:
+          add-rust-environment-hash-key: "false"
+          key: rust-${{ env.RUST_VERSION }}
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+
+      - name: Restore Ghostty's Zig cache
+        id: zig-cache
+        if: github.event_name != 'schedule'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/zig-global-cache
+          key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ env.GHOSTTY_COMMIT }}
+
       - name: Fetch dependencies (the only network-enabled build stage)
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           python3 scripts/check_gpui_patch.py --fetch
@@ -273,6 +336,15 @@ jobs:
           # the next latent failure instead of the whole set at once.
           cargo test --workspace --locked --offline --no-fail-fast
           cargo build --workspace --locked --offline
+
+      - name: Save Ghostty's Zig cache
+        if: >-
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && steps.zig-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/zig-global-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
 
       - name: Stress macOS under CPU load
         if: ${{ !cancelled() && inputs.stress }}
