@@ -110,6 +110,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: github.event_name != 'schedule'
         with:
+          # Key on the pinned toolchain only. The default also hashes every
+          # toolchain on the runner, including the stable Rust GitHub
+          # preinstalls on macOS, which differs between the image versions
+          # GitHub runs side by side, so the cache was missed at random.
+          add-rust-environment-hash-key: "false"
+          key: rust-${{ env.RUST_VERSION }}
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
@@ -278,6 +284,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: github.event_name != 'schedule'
         with:
+          add-rust-environment-hash-key: "false"
+          key: rust-${{ env.RUST_VERSION }}
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
