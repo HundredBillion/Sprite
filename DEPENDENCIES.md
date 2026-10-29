@@ -121,9 +121,12 @@ the type must be the identical version or it is a different type.
 GPUI, and there is exactly one version of it there; declaring it directly
 changed the lock by one line.
 
-**Features.** Defaults off — **no codecs**. Sprite decodes PNG itself through
-`png` and accepts no other image format, so none of this crate's decoders are
-compiled in and none of them ever sees a byte a child printed.
+**Features.** Defaults off; `gif`, `jpeg`, `png` and `webp` only, for the
+Markdown preview's local images. GPUI's own dependency on this crate is
+patched to the same four, because Cargo unifies features and GPUI's defaults
+otherwise compiled in every other decoder (EXR, TIFF, BMP and more) and an AV1
+encoder. Kitty images a child prints are decoded through `png`, not here.
+`native_markdown`'s format test fails if a TIFF or BMP file is decoded again.
 
 **License and source.** MIT OR Apache-2.0, crates.io.
 

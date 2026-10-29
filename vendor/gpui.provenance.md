@@ -196,6 +196,24 @@ are unchanged; they run once per family GPUI loads, not per listing.
 GPUI application 30 times and fails if the process grows by 8 MiB; before
 this patch it grew by about 74 MB.
 
+## Image formats
+
+`patches/gpui-0.2.2-image-formats.patch` applies to the tree the
+font-family-names patch produces; its line numbers are that tree's.
+
+GPUI took `image` with default features, and Cargo unifies features across
+the build, so Sprite's own `default-features = false` list was overridden:
+every decoder (AVIF, BMP, DDS, EXR, Farbfeld, HDR, ICO, PNM, QOI, TGA, TIFF),
+an AV1 encoder and rayon were compiled in, and the Markdown preview, which
+detects a file's format from its contents, would decode any of them. GPUI's
+dependency now has defaults off and the four formats Sprite enables: GIF,
+JPEG, PNG and WebP. GPUI's code still names `ImageFormat::Bmp` and
+`ImageFormat::Tiff`; those variants exist without their features, and
+decoding them returns an unsupported-format error. Cargo.lock loses 38
+packages. `native_markdown`'s
+`markdown_shows_only_the_image_formats_sprite_decodes` fails if a TIFF or BMP
+image is decoded again.
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.
