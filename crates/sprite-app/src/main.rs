@@ -22,10 +22,9 @@ fn main() -> ExitCode {
     match parse_arguments(std::env::args_os().skip(1)) {
         Ok(Invocation::Window(args)) => {
             let started = std::time::Instant::now();
-            let _logging = sprite_app::diagnostics::init();
+            let logging = sprite_app::diagnostics::init();
             tracing::info!(target: "sprite_app::startup", "window starting");
-            open_window(args);
-            tracing::info!(target: "sprite_app::shutdown", elapsed_ms = started.elapsed().as_millis() as u64, "application stopped");
+            open_window(args, started, logging);
             ExitCode::SUCCESS
         }
         Ok(Invocation::Snapshot(args)) => {
@@ -86,7 +85,11 @@ fn main() -> ExitCode {
     clippy::expect_used,
     reason = "while the window is being opened there is nowhere else to report"
 )]
-fn open_window(args: WindowArgs) {
+fn open_window(
+    args: WindowArgs,
+    started: std::time::Instant,
+    mut logging: Option<sprite_app::diagnostics::Guard>,
+) {
     let startup = std::time::Instant::now();
     // Read before the window exists, so a session never starts under one set of
     // settings and is then told about another.
@@ -102,8 +105,18 @@ fn open_window(args: WindowArgs) {
     for complaint in complaints.0 {
         eprintln!("sprite: {complaint}");
     }
+    tracing::debug!(target: "sprite_app::startup", elapsed_ms = startup.elapsed().as_millis() as u64, "configuration read");
 
     Application::new().run(move |cx: &mut App| {
+        tracing::debug!(target: "sprite_app::startup", elapsed_ms = startup.elapsed().as_millis() as u64, "platform ready");
+        // On macOS the process ends inside the quit, so `run` never returns:
+        // this is the last moment to say so and to write what is queued.
+        cx.on_app_quit(move |_| {
+            tracing::info!(target: "sprite_app::shutdown", elapsed_ms = started.elapsed().as_millis() as u64, "application stopped");
+            drop(logging.take());
+            async {}
+        })
+        .detach();
         #[cfg(target_os = "linux")]
         reference_fonts::install(cx);
         let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
@@ -124,6 +137,7 @@ fn open_window(args: WindowArgs) {
                     ..Default::default()
                 },
                 |window, cx| {
+                    tracing::debug!(target: "sprite_app::startup", elapsed_ms = startup.elapsed().as_millis() as u64, "window created");
                     let view =
                         cx.new(|cx| Workspace::new(command, settings, config_path, window, cx));
                     window.focus(&view.focus_handle(cx));
@@ -131,6 +145,7 @@ fn open_window(args: WindowArgs) {
                 },
             )
             .expect("open the Sprite window");
+        tracing::debug!(target: "sprite_app::startup", elapsed_ms = startup.elapsed().as_millis() as u64, "window opened");
 
         window
             .update(cx, |_view, window, cx| {

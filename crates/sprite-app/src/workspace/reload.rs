@@ -65,6 +65,13 @@ impl Workspace {
         };
         let (settings, complaints) = candidate;
 
+        // A file that says what the window already uses has nothing to tell
+        // the panes. Republishing it would still have every pane re-read the
+        // system's font list, which is most of what a reload costs.
+        if settings == self.settings && TerminalView::font_catalog_has(&settings, cx) {
+            return crate::config::SettingsDiff::default().describe(&path, &complaints.0);
+        }
+
         // File against file: the zoom lives beside `self.settings`, so a
         // zoomed window is not mistaken for a font change and the zoom
         // outlasts the reload.
@@ -1090,10 +1097,75 @@ mod font_reload_tests {
         cx.update(|_, cx| {
             assert_eq!(
                 TerminalView::font_discovery_probe(cx).enumerations,
-                3,
-                "one refresh shared by all subscribed panes even when the catalog is unchanged"
+                2,
+                "an unchanged reload whose family is already found does not read the list again"
             )
         });
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn unchanged_reload_without_a_family_still_finds_a_newly_installed_fallback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            TerminalView::font_discovery_probe(cx).available = Some(vec!["Hack".into()])
+        });
+        let (workspace, cx) = super::super::test_support::test_workspace(cx);
+        let path =
+            std::env::temp_dir().join(format!("sprite-font-fallback-{}.toml", std::process::id()));
+        std::fs::write(&path, "[pane_observation]\nenabled = false\n").unwrap();
+        let mut settings = crate::config::Settings::default();
+        settings.pane_observation.enabled = false;
+        workspace.update(cx, |workspace, cx| {
+            workspace.config_path = Some(path.clone());
+            workspace.settings = settings.clone();
+            cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        });
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let (sender, _receiver) = async_channel::unbounded();
+                let mut view = TerminalView::new(
+                    Some(vec!["/sprite-font-test-missing-executable".into()]),
+                    settings.clone(),
+                    Vec::new(),
+                    None,
+                    crate::terminal_view::PaneExit {
+                        sender,
+                        identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                    },
+                    window,
+                    cx,
+                );
+                view.apply_settings(&settings, window, cx);
+                view
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.font_test_metrics())
+                .0
+                .family()
+                .as_ref(),
+            "Hack"
+        );
+        cx.update(|_, cx| {
+            TerminalView::font_discovery_probe(cx).available =
+                Some(vec!["Hack".into(), "JetBrains Mono".into()])
+        });
+
+        let report = workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        assert!(report.starts_with("reloaded "), "{report}");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.font_test_metrics())
+                .0
+                .family()
+                .as_ref(),
+            "JetBrains Mono",
+            "an unchanged reload with no family must still pick up a better fallback"
+        );
+        cx.update(|_, cx| assert_eq!(TerminalView::font_discovery_probe(cx).enumerations, 2));
         std::fs::remove_file(path).unwrap();
     }
 }
