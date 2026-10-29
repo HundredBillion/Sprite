@@ -14,9 +14,11 @@ fn main() {
 
     gpui::Application::headless().run(|cx| {
         let resident = || {
-            sprite_app::diagnostics::ResourceSample::read()
-                .resident_bytes
-                .expect("macOS reports resident memory")
+            let Some(bytes) = sprite_app::diagnostics::ResourceSample::read().resident_bytes else {
+                eprintln!("font listing: macOS did not report resident memory");
+                std::process::exit(1);
+            };
+            bytes
         };
         // The first listing warms caches that are meant to stay.
         let names = cx.text_system().all_font_names();
