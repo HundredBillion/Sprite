@@ -130,10 +130,7 @@ pub fn run_config_reload(out: &mut dyn Write, errors: &mut dyn Write) -> Exit {
                 .ok();
                 return Exit::Refused;
             }
-            // A refusal is prose too, so it is told apart by what it says
-            // rather than by its shape: only a reload that happened begins by
-            // saying so.
-            if !trimmed.starts_with("reloaded ") {
+            if !crate::config::reload_was_applied(trimmed) {
                 writeln!(errors, "sprite: {trimmed}").ok();
                 return Exit::Refused;
             }

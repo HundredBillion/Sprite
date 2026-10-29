@@ -288,6 +288,10 @@ impl Workspace {
                 if !request.reply.claim() {
                     continue;
                 }
+                // Timed around the whole update: the panes follow a reload
+                // only as the update ends, when each re-measures its font, and
+                // that is most of what a reload costs.
+                let started = std::time::Instant::now();
                 let answer = workspace
                     .update(cx, |workspace, cx| match request.what {
                         ConfigVerb::Reload => {
@@ -299,6 +303,11 @@ impl Workspace {
                         ConfigVerb::Print => workspace.active_settings().to_toml(),
                     })
                     .unwrap_or_else(|_| "this window is closing".to_owned());
+                if matches!(request.what, ConfigVerb::Reload)
+                    && crate::config::reload_was_applied(&answer)
+                {
+                    tracing::debug!(target: "sprite_app::perf", elapsed_ms = started.elapsed().as_millis() as u64, "configuration reloaded");
+                }
                 // The endpoint thread is waiting on this with a timeout of its
                 // own, so a failure here costs it a wait rather than a thread.
                 request.reply.send(answer).ok();

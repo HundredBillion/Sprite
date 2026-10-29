@@ -113,6 +113,8 @@ impl gpui::Global for FontCatalog {}
 pub(crate) struct FontDiscoveryProbe {
     pub(crate) enumerations: usize,
     pub(crate) available: Option<Vec<String>>,
+    /// How long each listing takes, standing in for a machine with many fonts.
+    pub(crate) delay: std::time::Duration,
 }
 
 #[cfg(test)]
@@ -124,6 +126,7 @@ fn enumerate_fonts(window: &Window, _cx: &mut gpui::App) -> Vec<String> {
     {
         let probe = _cx.default_global::<FontDiscoveryProbe>();
         probe.enumerations += 1;
+        crate::test_blocking_wait::pause(probe.delay);
         if let Some(available) = &probe.available {
             return available.clone();
         }

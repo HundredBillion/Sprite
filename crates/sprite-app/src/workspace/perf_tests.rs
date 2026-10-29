@@ -98,14 +98,72 @@ fn only_an_applied_reload_logs_its_duration(cx: &mut gpui::TestAppContext) {
             workspace.config_path = Some(path.clone())
         });
         std::fs::write(&path, "[font]\nsize = 14\n").unwrap();
-        workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        assert!(ask_to_reload(&workspace, cx).starts_with("reloaded "));
         // A file that does not parse leaves the running configuration alone.
         std::fs::write(&path, "[font\n").unwrap();
-        workspace.update(cx, |workspace, cx| workspace.reload(None, cx));
+        assert!(ask_to_reload(&workspace, cx).starts_with("not reloaded"));
+        workspace.update(cx, |workspace, cx| workspace.close_window(cx));
     });
     std::fs::remove_file(&path).unwrap();
     assert_eq!(log.matches("configuration reloaded").count(), 1, "{log}");
     assert!(log.contains("configuration reloaded elapsed_ms="), "{log}");
+}
+
+#[gpui::test]
+fn a_reload_logs_the_time_its_panes_take_to_follow_it(cx: &mut gpui::TestAppContext) {
+    let path = std::env::temp_dir().join(format!(
+        "sprite-perf-reload-panes-{}.toml",
+        std::process::id()
+    ));
+    let delay = std::time::Duration::from_millis(200);
+    let ((), log) = capture_perf(|| {
+        let (workspace, cx) = workspace_running("read release", cx);
+        workspace.update(cx, |workspace, _| {
+            workspace.config_path = Some(path.clone())
+        });
+        std::fs::write(&path, "[font]\nsize = 14\n").unwrap();
+        // Each pane lists the installed fonts again once a reload is applied,
+        // and on a machine with many fonts that is most of what a reload costs.
+        cx.update(|_, cx| TerminalView::font_discovery_probe(cx).delay = delay);
+        assert!(ask_to_reload(&workspace, cx).starts_with("reloaded "));
+        cx.update(|_, cx| TerminalView::font_discovery_probe(cx).delay = std::time::Duration::ZERO);
+        workspace.update(cx, |workspace, cx| workspace.close_window(cx));
+    });
+    std::fs::remove_file(&path).unwrap();
+    let elapsed: u64 = log
+        .lines()
+        .find(|line| line.contains("configuration reloaded"))
+        .and_then(|line| line.split("elapsed_ms=").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("no elapsed_ms: {log}"));
+    assert!(elapsed >= delay.as_millis() as u64, "{log}");
+}
+
+/// Asks the window to reload the way `sprite config reload` does, through
+/// its reload channel, and returns the answer.
+fn ask_to_reload(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> String {
+    let sender = workspace.read_with(cx, |workspace, _| workspace.reload_sender.clone());
+    let (answer, receive) = async_channel::bounded(1);
+    let asker = std::thread::spawn(move || {
+        let reply = relay(
+            &sender,
+            Patience::new(crate::test_blocking_wait::watchdog()),
+            |reply| ReloadRequest {
+                what: crate::observation::request::ConfigVerb::Reload,
+                reply,
+                reply_connection: None,
+            },
+        );
+        answer.send_blocking(reply).unwrap();
+    });
+    let executor = cx.executor();
+    executor.allow_parking();
+    let report = executor
+        .block_test(async { receive.recv().await.unwrap() })
+        .unwrap_or_else(|error| panic!("the window did not answer: {error:?}"));
+    asker.join().unwrap();
+    report
 }
 
 fn beat(cx: &mut gpui::VisualTestContext, duration: std::time::Duration) {

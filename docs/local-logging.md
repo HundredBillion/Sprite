@@ -33,7 +33,7 @@ Sprite does not deliberately log raw terminal input, terminal output, tokens, cr
 | --- | --- | --- |
 | `pane first output` | The first screen update with text after a pane's program starts | `pane`, `elapsed_ms` |
 | `pane closed` | A closed pane's cleanup (hangup, terminate, kill) has finished | `elapsed_ms` |
-| `configuration reloaded` | A reload was applied; a file that does not parse records nothing | `elapsed_ms` |
+| `configuration reloaded` | A reload was applied, timed until every pane has followed it, font listing included; a file that does not parse records nothing | `elapsed_ms` |
 | `resource sample` | Within one clock beat (530 ms) of the pane count changing, otherwise once a minute | `reason` (`panes` or `interval`), `panes`, `rss_mb`, `cpu_user_ms`, `cpu_system_ms`, `threads`, `open_files` |
 | `slow paint` | One terminal grid took 16 ms or longer to paint, a whole 60 Hz frame | `pass`, `rows`, `elapsed_ms` |
 

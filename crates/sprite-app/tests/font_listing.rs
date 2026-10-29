@@ -38,7 +38,10 @@ fn main() {
             ));
         }
         if failures.is_empty() {
-            println!("font listing: {LISTINGS} listings grew the process by {} KiB", grew / 1024);
+            println!(
+                "font listing: {LISTINGS} listings grew the process by {} KiB",
+                grew / 1024
+            );
             std::process::exit(0);
         }
         for failure in failures {
