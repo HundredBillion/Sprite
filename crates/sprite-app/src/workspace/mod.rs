@@ -307,6 +307,14 @@ impl Workspace {
                     && crate::config::reload_was_applied(&answer)
                 {
                     tracing::debug!(target: "sprite_app::perf", elapsed_ms = started.elapsed().as_millis() as u64, "configuration reloaded");
+                    // Read beside the reload, so memory a reload keeps shows
+                    // up in the log without waiting out the minute's sample.
+                    if crate::diagnostics::perf_enabled()
+                        && let Ok(panes) = workspace
+                            .read_with(cx, |workspace, _| workspace.tabs.all_panes().len())
+                    {
+                        crate::diagnostics::log_resources("reload", panes);
+                    }
                 }
                 // The endpoint thread is waiting on this with a timeout of its
                 // own, so a failure here costs it a wait rather than a thread.

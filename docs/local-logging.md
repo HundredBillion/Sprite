@@ -34,7 +34,7 @@ Sprite does not deliberately log raw terminal input, terminal output, tokens, cr
 | `pane first output` | The first screen update with text after a pane's program starts | `pane`, `elapsed_ms` |
 | `pane closed` | A closed pane's cleanup (hangup, terminate, kill) has finished | `elapsed_ms` |
 | `configuration reloaded` | A reload was applied, timed until every pane has followed it, font listing included; a file that does not parse records nothing | `elapsed_ms` |
-| `resource sample` | Within one clock beat (530 ms) of the pane count changing, otherwise once a minute | `reason` (`panes` or `interval`), `panes`, `rss_mb`, `cpu_user_ms`, `cpu_system_ms`, `threads`, `open_files` |
+| `resource sample` | Within one clock beat (530 ms) of the pane count changing, right after each applied reload, otherwise once a minute | `reason` (`panes`, `reload` or `interval`), `panes`, `rss_mb`, `cpu_user_ms`, `cpu_system_ms`, `threads`, `open_files` |
 | `slow paint` | One terminal grid took 16 ms or longer to paint, a whole 60 Hz frame | `pass`, `rows`, `elapsed_ms` |
 
 A reload whose file matches the running configuration, and whose configured font families are all installed, is answered without reading the system's font list again, so it records a near-zero `elapsed_ms`. A font with no `family` still reads the list on every reload, because its fallback can change when a font is installed.
