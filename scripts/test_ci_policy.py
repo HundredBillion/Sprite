@@ -78,5 +78,18 @@ class CiPolicyTests(unittest.TestCase):
                 self.assertRegex(header, r'(?m)^      SPRITE_TEST_WATCHDOG_SECS: "20"$')
 
 
+    def test_release_builds_are_optimized_across_crates_and_stripped(self):
+        # Link-time optimization and symbol stripping took the macOS binary
+        # from 20.8 MB to 14.0 MB. Panic logs keep their file and line either
+        # way; only backtraces lose function names.
+        manifest = (ROOT / "Cargo.toml").read_text()
+        match = re.search(r"(?ms)^\[profile\.release\]\n(.*?)(?=^\[|\Z)", manifest)
+        self.assertIsNotNone(match, "Cargo.toml has no [profile.release]")
+        release = match.group(1)
+        self.assertRegex(release, r'(?m)^lto = "fat"$')
+        self.assertRegex(release, r"(?m)^codegen-units = 1$")
+        self.assertRegex(release, r'(?m)^strip = "symbols"$')
+
+
 if __name__ == "__main__":
     unittest.main()
