@@ -10,11 +10,15 @@ const QUEUE_LIMIT: usize = 512;
 pub struct Guard {
     running: Arc<AtomicBool>,
     stopped: mpsc::Receiver<()>,
+    /// Wakes the writer, which otherwise sleeps until there is an event.
+    wake: mpsc::SyncSender<Vec<u8>>,
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
+        // An empty event is never written; it only ends the writer's wait.
+        self.wake.try_send(Vec::new()).ok();
         self.stopped.recv_timeout(Duration::from_millis(200)).ok();
     }
 }
@@ -299,6 +303,7 @@ pub fn init_at(root: PathBuf, filter: &str) -> io::Result<Guard> {
     let filter = tracing_subscriber::EnvFilter::try_new(filter)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(QUEUE_LIMIT);
+    let wake = sender.clone();
     let (stopped_sender, stopped) = mpsc::sync_channel(1);
     let running = Arc::new(AtomicBool::new(true));
     let worker_running = Arc::clone(&running);
@@ -312,7 +317,8 @@ pub fn init_at(root: PathBuf, filter: &str) -> io::Result<Guard> {
             };
             let mut healthy = true;
             while worker_running.load(Ordering::Acquire) {
-                match receiver.recv_timeout(Duration::from_millis(100)) {
+                match receiver.recv() {
+                    Ok(event) if event.is_empty() => {}
                     Ok(event) => {
                         if report_dropped(&mut disk, &worker_dropped).is_err() {
                             healthy = false;
@@ -323,8 +329,7 @@ pub fn init_at(root: PathBuf, filter: &str) -> io::Result<Guard> {
                             break;
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvError) => break,
                 }
             }
             let healthy = drain_pending(&receiver, healthy, |event| disk.write_event(event));
@@ -343,7 +348,11 @@ pub fn init_at(root: PathBuf, filter: &str) -> io::Result<Guard> {
             running.store(false, Ordering::Release);
             io::Error::other(error.to_string())
         })?;
-    Ok(Guard { running, stopped })
+    Ok(Guard {
+        running,
+        stopped,
+        wake,
+    })
 }
 
 /// What this process is holding at one moment. A field the platform would not
