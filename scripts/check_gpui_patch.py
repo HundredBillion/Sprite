@@ -17,6 +17,7 @@ PATCHES = (
     "gpui-0.2.2-test-scale-factor.patch",
     "gpui-0.2.2-test-block-wakeup.patch",
     "gpui-0.2.2-release-and-idle.patch",
+    "gpui-0.2.2-font-family-names.patch",
 )
 
 

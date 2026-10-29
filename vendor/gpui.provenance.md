@@ -12,8 +12,9 @@ metadata, are preserved. Exact `=0.2.2` and existing features remain unchanged.
 patch. `patches/gpui-0.2.2-should-terminate.patch` follows it (see "Should-terminate
 hook" below), `patches/gpui-0.2.2-test-scale-factor.patch` follows that (see
 "Test window scale factor" below), and `patches/gpui-0.2.2-test-block-wakeup.patch`
-follows that (see "Test executor wake-up" below); `PATCHES` in the checker lists
-all four in application order.
+follows that (see "Test executor wake-up" below), and the later sections
+describe the patches after it; `PATCHES` in the checker lists them all in
+application order.
 `python3 scripts/check_gpui_patch.py` verifies every byte of the local
 tree against the checksum-verified archive after replaying each unified hunk at its exact lines and context, without
 offset/fuzz, including additions and unexpected files. The checker uses Python 3.9+
@@ -172,6 +173,28 @@ platform's `frame_waker`, which restarts it. `DisplayLink` start and stop
 suspend and resume a dispatch source and must alternate; the window records
 the pause so each added stop is matched, including when the link is replaced
 or dropped. Other platforms keep the default hooks, which do nothing.
+
+## Listing font families
+
+`patches/gpui-0.2.2-font-family-names.patch` applies to the tree the
+release-and-idle patch produces; its line numbers are that tree's.
+
+macOS `all_font_names` listed every installed face through
+`core_text::font_collection::create_for_all_families().get_descriptors()`.
+core-text 21.0.0 wraps the array `CTFontCollectionCreateMatchingFontDescriptors`
+returns under the get rule, but CoreText's header declares that function under
+`CF_IMPLICIT_BRIDGING_ENABLED` with a *Create* name, so the array is already
+owned. The extra retain kept the array and every descriptor and `TBaseFont`
+in it alive: about 0.7 MB per listing, and Sprite lists the fonts again on
+every configuration reload. It now asks
+`core_text::font_manager::copy_available_font_family_names()`, which core-text
+wraps under the create rule and which returns the same family names without
+building a descriptor per face. The `lenient_font_attributes` module served
+only the old listing and is removed. font-kit's own `get_descriptors` calls
+are unchanged; they run once per family GPUI loads, not per listing.
+`crates/sprite-app/tests/font_listing.rs` lists the fonts through a headless
+GPUI application 30 times and fails if the process grows by 8 MiB; before
+this patch it grew by about 74 MB.
 
 ## Execution limits
 
