@@ -98,14 +98,14 @@ impl PlatformTextSystem for MacTextSystem {
     }
 
     fn all_font_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        let collection = core_text::font_collection::create_for_all_families();
-        let Some(descriptors) = collection.get_descriptors() else {
-            return names;
-        };
-        for descriptor in descriptors.into_iter() {
-            names.extend(lenient_font_attributes::family_name(&descriptor));
-        }
+        // Family names only. `CTFontCollection::get_descriptors` takes an extra
+        // reference to an array CoreText already handed over, so listing
+        // through font descriptors kept every installed font alive, about
+        // 0.7 MB per listing.
+        let mut names: Vec<String> = core_text::font_manager::copy_available_font_family_names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
         if let Ok(fonts_in_memory) = self.0.read().memory_source.all_families() {
             names.extend(fonts_in_memory);
         }
@@ -662,47 +662,6 @@ impl From<FontStyle> for FontkitStyle {
             FontStyle::Normal => FontkitStyle::Normal,
             FontStyle::Italic => FontkitStyle::Italic,
             FontStyle::Oblique => FontkitStyle::Oblique,
-        }
-    }
-}
-
-// Some fonts may have no attributes despite `core_text` requiring them (and panicking).
-// This is the same version as `core_text` has without `expect` calls.
-mod lenient_font_attributes {
-    use core_foundation::{
-        base::{CFRetain, CFType, TCFType},
-        string::{CFString, CFStringRef},
-    };
-    use core_text::font_descriptor::{
-        CTFontDescriptor, CTFontDescriptorCopyAttribute, kCTFontFamilyNameAttribute,
-    };
-
-    pub fn family_name(descriptor: &CTFontDescriptor) -> Option<String> {
-        unsafe { get_string_attribute(descriptor, kCTFontFamilyNameAttribute) }
-    }
-
-    fn get_string_attribute(
-        descriptor: &CTFontDescriptor,
-        attribute: CFStringRef,
-    ) -> Option<String> {
-        unsafe {
-            let value = CTFontDescriptorCopyAttribute(descriptor.as_concrete_TypeRef(), attribute);
-            if value.is_null() {
-                return None;
-            }
-
-            let value = CFType::wrap_under_create_rule(value);
-            assert!(value.instance_of::<CFString>());
-            let s = wrap_under_get_rule(value.as_CFTypeRef() as CFStringRef);
-            Some(s.to_string())
-        }
-    }
-
-    unsafe fn wrap_under_get_rule(reference: CFStringRef) -> CFString {
-        unsafe {
-            assert!(!reference.is_null(), "Attempted to create a NULL object.");
-            let reference = CFRetain(reference as *const ::std::os::raw::c_void) as CFStringRef;
-            TCFType::wrap_under_create_rule(reference)
         }
     }
 }

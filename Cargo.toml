@@ -46,5 +46,15 @@ portable-pty = { version = "=0.9.0", default-features = false }
 sprite-pane = { path = "crates/sprite-pane" }
 sprite-term = { path = "crates/sprite-term" }
 
+# Link-time optimization across every crate and one codegen unit let the
+# compiler drop and inline across crate boundaries; stripping removes the
+# symbol table. Together they took the macOS binary from 20.8 MB to 14.0 MB,
+# for about 45 s more per release build. Panic logs keep their file and line;
+# only backtraces lose function names.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }

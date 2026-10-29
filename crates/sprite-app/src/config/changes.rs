@@ -40,6 +40,16 @@ impl NextSessionChange {
         }
     }
 }
+/// How every report of an applied reload begins. A refusal is prose too, so
+/// whether a reload happened is told by what the answer says rather than by
+/// its shape.
+const APPLIED_PREFIX: &str = "reloaded ";
+
+/// Whether a reload's answer reports a configuration that was applied.
+pub fn reload_was_applied(answer: &str) -> bool {
+    answer.starts_with(APPLIED_PREFIX)
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SettingsDiff {
     pub live: Vec<LiveChange>,
@@ -50,7 +60,7 @@ impl SettingsDiff {
         self.live.contains(&change)
     }
     pub fn describe(&self, path: &std::path::Path, ignored: &[String]) -> String {
-        let mut lines = vec![format!("reloaded {}", path.display())];
+        let mut lines = vec![format!("{APPLIED_PREFIX}{}", path.display())];
         if self.live.is_empty() && self.next_session.is_empty() {
             lines.push("nothing changed".to_owned());
         }

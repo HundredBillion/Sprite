@@ -66,3 +66,8 @@ minimap-benchmark = []
 name = "sprite-startup-bench"
 path = "src/bin/sprite-startup-bench.rs"
 required-features = ["startup-benchmark"]
+
+# AppKit runs only on the main thread, which libtest keeps for itself.
+[[test]]
+name = "font_listing"
+harness = false
