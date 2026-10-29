@@ -41,4 +41,18 @@ A reload whose file matches the running configuration, and whose configured font
 
 A resource field the platform does not report is omitted rather than written as zero. `cpu_user_ms` and `cpu_system_ms` are cumulative for the process, so compare consecutive samples. `pane first output` measures the program as well as Sprite: a shell that spends two seconds in its startup files reports two seconds. To tell the two apart, time the shell outside Sprite, for example `time zsh -i -c exit`.
 
+## Startup events
+
+`SPRITE_LOG='sprite_app::startup=debug' sprite` records how far a window got and when. Every `elapsed_ms` is measured from the same moment, just before the configuration file is read, so consecutive events subtract to give each phase.
+
+| Message | When |
+| --- | --- |
+| `configuration read` | The configuration file has been read and checked |
+| `platform ready` | The windowing platform has started and handed over control |
+| `window created` | The native window and its renderer exist; the workspace has not been built |
+| `window opened` | The workspace, its first pane and its listeners exist |
+| `window activated` | The window has been brought to the front |
+
+The window process also records `application stopped` (`sprite_app::shutdown`, with `elapsed_ms` since launch) as it quits, and writes any queued events before the process ends.
+
 These events show where to look, not whether a change helped. Confirm a refactor with a profiler or the existing benchmarks (`sprite-startup-bench`, `sprite-paint-bench`, `sprite-term-bench`) before and after.
