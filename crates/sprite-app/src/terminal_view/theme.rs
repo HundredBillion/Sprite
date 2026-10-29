@@ -243,6 +243,24 @@ impl TerminalView {
         cx.default_global::<FontCatalog>().0 = None;
     }
 
+    /// Whether the system's font list has already been read and holds every
+    /// family the settings name, so reading it again could not change what a
+    /// pane renders with. A family that was missing could have been installed
+    /// since, and a font with no family follows the best monospace installed,
+    /// so either one sends the panes back to the list.
+    pub(crate) fn font_catalog_has(settings: &crate::config::Settings, cx: &gpui::App) -> bool {
+        let Some(Some(available)) = cx.try_global::<FontCatalog>().map(|catalog| &catalog.0) else {
+            return false;
+        };
+        [&settings.font, settings.effective_surface_font()]
+            .into_iter()
+            .all(|font| {
+                font.family
+                    .as_deref()
+                    .is_some_and(|wanted| available.names.iter().any(|name| name == wanted))
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn font_discovery_probe(cx: &mut gpui::App) -> &mut FontDiscoveryProbe {
         cx.default_global::<FontDiscoveryProbe>()

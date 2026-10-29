@@ -37,6 +37,8 @@ Sprite does not deliberately log raw terminal input, terminal output, tokens, cr
 | `resource sample` | Within one clock beat (530 ms) of the pane count changing, otherwise once a minute | `reason` (`panes` or `interval`), `panes`, `rss_mb`, `cpu_user_ms`, `cpu_system_ms`, `threads`, `open_files` |
 | `slow paint` | One terminal grid took 16 ms or longer to paint, a whole 60 Hz frame | `pass`, `rows`, `elapsed_ms` |
 
+A reload whose file matches the running configuration, and whose configured font families are all installed, is answered without reading the system's font list again, so it records a near-zero `elapsed_ms`. A font with no `family` still reads the list on every reload, because its fallback can change when a font is installed.
+
 A resource field the platform does not report is omitted rather than written as zero. `cpu_user_ms` and `cpu_system_ms` are cumulative for the process, so compare consecutive samples. `pane first output` measures the program as well as Sprite: a shell that spends two seconds in its startup files reports two seconds. To tell the two apart, time the shell outside Sprite, for example `time zsh -i -c exit`.
 
 These events show where to look, not whether a change helped. Confirm a refactor with a profiler or the existing benchmarks (`sprite-startup-bench`, `sprite-paint-bench`, `sprite-term-bench`) before and after.
