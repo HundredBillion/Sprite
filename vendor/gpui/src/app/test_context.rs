@@ -833,6 +833,12 @@ impl VisualTestContext {
         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
     }
 
+    /// Every primitive of the last drawn frame, in the order the renderer
+    /// draws them.
+    pub fn drawn_primitives(&mut self) -> Vec<crate::DrawnPrimitive> {
+        self.update(|window, _| window.rendered_frame.scene.drawn_primitives())
+    }
+
     /// Draw an element to the window. Useful for simulating events or actions
     pub fn draw<E>(
         &mut self,

@@ -1,0 +1,135 @@
+--- a/src/app/test_context.rs
++++ b/src/app/test_context.rs
+@@ -833,6 +833,12 @@ impl VisualTestContext {
+         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
+     }
+ 
++    /// Every primitive of the last drawn frame, in the order the renderer
++    /// draws them.
++    pub fn drawn_primitives(&mut self) -> Vec<crate::DrawnPrimitive> {
++        self.update(|window, _| window.rendered_frame.scene.drawn_primitives())
++    }
++
+     /// Draw an element to the window. Useful for simulating events or actions
+     pub fn draw<E>(
+         &mut self,
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -659,6 +659,20 @@ pub(crate) trait PlatformTextSystem: Send + Sync {
+ 
+ pub(crate) struct NoopTextSystem;
+ 
++#[cfg(any(test, feature = "test-support"))]
++thread_local! {
++    static INK_TEST_GLYPHS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++}
++
++/// Makes the no-op text system that tests use give every glyph painted on
++/// this thread an em-sized box, so the glyph reaches the frame and a test can
++/// see where it lies and what is drawn over it. Off by default, because a
++/// glyph that reaches the frame also takes a tile in the window's atlas.
++#[cfg(any(test, feature = "test-support"))]
++pub fn ink_test_glyphs(enabled: bool) {
++    INK_TEST_GLYPHS.with(|ink| ink.set(enabled));
++}
++
+ impl NoopTextSystem {
+     #[allow(dead_code)]
+     pub fn new() -> Self {
+@@ -718,6 +732,16 @@ impl PlatformTextSystem for NoopTextSystem {
+     }
+ 
+     fn glyph_raster_bounds(&self, _params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
++        #[cfg(any(test, feature = "test-support"))]
++        if INK_TEST_GLYPHS.with(|ink| ink.get()) {
++            // One em wide, from one em above the baseline to half an em
++            // below it, so it covers its cell from edge to edge.
++            let em = (_params.font_size.0 * _params.scale_factor).round() as i32;
++            return Ok(Bounds {
++                origin: point(DevicePixels(0), DevicePixels(-em)),
++                size: size(DevicePixels(em), DevicePixels(em + em / 2)),
++            });
++        }
+         Ok(Default::default())
+     }
+ 
+--- a/src/scene.rs
++++ b/src/scene.rs
+@@ -424,6 +424,77 @@ impl<'a> Iterator for BatchIterator<'a> {
+     }
+ }
+ 
++/// What kind of primitive a [`DrawnPrimitive`] is.
++#[cfg(any(test, feature = "test-support"))]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum DrawnKind {
++    /// A shadow.
++    Shadow,
++    /// A filled or bordered quad.
++    Quad,
++    /// A path.
++    Path,
++    /// An underline or strikethrough.
++    Underline,
++    /// A monochrome sprite, such as a glyph.
++    MonochromeSprite,
++    /// A polychrome sprite, such as an emoji or an image.
++    PolychromeSprite,
++    /// A platform surface.
++    Surface,
++}
++
++/// One primitive of a drawn frame, as a test sees it.
++#[cfg(any(test, feature = "test-support"))]
++#[derive(Clone, Debug, PartialEq)]
++pub struct DrawnPrimitive {
++    /// What kind of primitive it is.
++    pub kind: DrawnKind,
++    /// Where it is drawn, in device pixels.
++    pub bounds: Bounds<ScaledPixels>,
++}
++
++#[cfg(any(test, feature = "test-support"))]
++impl Scene {
++    /// Every primitive in the order the renderer draws it, so a primitive is
++    /// drawn over any earlier one it overlaps.
++    pub(crate) fn drawn_primitives(&self) -> Vec<DrawnPrimitive> {
++        let mut drawn = Vec::new();
++        let mut push = |kind, bounds: &Bounds<ScaledPixels>| {
++            drawn.push(DrawnPrimitive {
++                kind,
++                bounds: *bounds,
++            })
++        };
++        for batch in self.batches() {
++            match batch {
++                PrimitiveBatch::Shadows(shadows) => {
++                    shadows.iter().for_each(|p| push(DrawnKind::Shadow, &p.bounds))
++                }
++                PrimitiveBatch::Quads(quads) => {
++                    quads.iter().for_each(|p| push(DrawnKind::Quad, &p.bounds))
++                }
++                PrimitiveBatch::Paths(paths) => {
++                    paths.iter().for_each(|p| push(DrawnKind::Path, &p.bounds))
++                }
++                PrimitiveBatch::Underlines(underlines) => underlines
++                    .iter()
++                    .for_each(|p| push(DrawnKind::Underline, &p.bounds)),
++                PrimitiveBatch::MonochromeSprites { sprites, .. } => sprites
++                    .iter()
++                    .for_each(|p| push(DrawnKind::MonochromeSprite, &p.bounds)),
++                PrimitiveBatch::PolychromeSprites { sprites, .. } => sprites
++                    .iter()
++                    .for_each(|p| push(DrawnKind::PolychromeSprite, &p.bounds)),
++                PrimitiveBatch::Surfaces(surfaces) => {
++                    surfaces.iter().for_each(|p| push(DrawnKind::Surface, &p.bounds))
++                }
++            }
++        }
++        drawn
++    }
++}
++
+ #[derive(Debug)]
+ #[cfg_attr(
+     all(

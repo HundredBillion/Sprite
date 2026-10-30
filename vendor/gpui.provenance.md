@@ -214,6 +214,32 @@ packages. `native_markdown`'s
 `markdown_shows_only_the_image_formats_sprite_decodes` fails if a TIFF or BMP
 image is decoded again.
 
+## Drawn primitives in tests
+
+`patches/gpui-0.2.2-test-drawn-primitives.patch` applies to the tree the
+image-formats patch produces; its line numbers are that tree's. Everything it
+adds is compiled only with `test` or `test-support`, so no shipped code path
+changes.
+
+- `scene.rs`: `DrawnPrimitive` and `DrawnKind`, and `Scene::drawn_primitives`,
+  which lists every primitive in the order `Scene::batches` hands them to the
+  renderer. That is the order the renderer draws in, so a primitive is drawn
+  over any earlier one it overlaps. Reading the batches rather than each
+  primitive's `order` keeps the test from re-deriving how GPUI breaks ties
+  between kinds.
+- `test_context.rs`: `VisualTestContext::drawn_primitives`, the last rendered
+  frame's primitives, beside `debug_bounds`.
+- `platform.rs`: `ink_test_glyphs`, a thread-local switch that makes the no-op
+  text system tests use give each glyph an em-sized box. Its glyphs have none,
+  and `Window::paint_glyph` skips a glyph whose box is empty, so without it no
+  test frame holds a glyph at all. It is off unless a test turns it on, and
+  thread-local because each GPUI test runs on its own thread, so tests that
+  count atlas tiles see no glyph tiles.
+
+Sprite uses it to test that a bar, underline or outline cursor is drawn after
+the glyph it marks
+(`grid_paint::tests::a_cursor_drawn_as_a_shape_is_drawn_over_the_glyph_it_marks`).
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.

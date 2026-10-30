@@ -659,6 +659,20 @@ pub(crate) trait PlatformTextSystem: Send + Sync {
 
 pub(crate) struct NoopTextSystem;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static INK_TEST_GLYPHS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the no-op text system that tests use give every glyph painted on
+/// this thread an em-sized box, so the glyph reaches the frame and a test can
+/// see where it lies and what is drawn over it. Off by default, because a
+/// glyph that reaches the frame also takes a tile in the window's atlas.
+#[cfg(any(test, feature = "test-support"))]
+pub fn ink_test_glyphs(enabled: bool) {
+    INK_TEST_GLYPHS.with(|ink| ink.set(enabled));
+}
+
 impl NoopTextSystem {
     #[allow(dead_code)]
     pub fn new() -> Self {
@@ -718,6 +732,16 @@ impl PlatformTextSystem for NoopTextSystem {
     }
 
     fn glyph_raster_bounds(&self, _params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if INK_TEST_GLYPHS.with(|ink| ink.get()) {
+            // One em wide, from one em above the baseline to half an em
+            // below it, so it covers its cell from edge to edge.
+            let em = (_params.font_size.0 * _params.scale_factor).round() as i32;
+            return Ok(Bounds {
+                origin: point(DevicePixels(0), DevicePixels(-em)),
+                size: size(DevicePixels(em), DevicePixels(em + em / 2)),
+            });
+        }
         Ok(Default::default())
     }
 
