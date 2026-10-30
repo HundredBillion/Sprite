@@ -2571,7 +2571,7 @@ mod tests {
         let answer = receiver.try_recv().unwrap();
         if answer.is_ok() {
             let opened = crate::surface::channel::event_opened(id);
-            assert!(connection.establish(&opened));
+            assert!(connection.establish(id));
             draw_test_window(cx);
             let initial = events(&mut peer);
             assert_eq!(

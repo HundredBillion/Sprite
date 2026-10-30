@@ -56,3 +56,17 @@ A resource field the platform does not report is omitted rather than written as 
 The window process also records `application stopped` (`sprite_app::shutdown`, with `elapsed_ms` since launch) as it quits, and writes any queued events before the process ends.
 
 These events show where to look, not whether a change helped. Confirm a refactor with a profiler or the existing benchmarks (`sprite-startup-bench`, `sprite-paint-bench`, `sprite-term-bench`) before and after.
+
+## Surface events
+
+`SPRITE_LOG='sprite_app::surface=debug' sprite` records each Surface connection's life. At the default level only the two warnings below appear, and each says which Surface it was.
+
+| Message | Level | When | Fields |
+| --- | --- | --- | --- |
+| `surface opened` | debug | The window accepted a Surface and its `opened` event is queued | `surface` |
+| `surface closed` | debug | The connection's writer has stopped, for any reason | `surface` |
+| `surface closed by program` | debug | A write failed because the program had already closed its end, which is how a Surface normally ends | `surface`, `bytes` |
+| `surface output failed or timed out` | warn | The program stayed connected but did not read a batch within its drain deadline: 2 s plus the batch's size at 64 KiB/s | `surface`, `bytes`, `waited_ms`, `deadline_ms`, `kind` |
+| `surface output overflowed its queue` | warn | Events waiting for the program reached the 4 MiB bound | `surface`, `bytes`, `limit` |
+
+Either warning closes that Surface's connection. `kind` is the I/O error kind; `TimedOut` or `WouldBlock` mean the program fell behind.

@@ -727,9 +727,7 @@ mod tests {
         let second = terminal_view(&workspace, PaneId(1), cx);
         let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
-        connection.establish(&crate::surface::channel::event_opened(
-            crate::surface::SurfaceId(998),
-        ));
+        connection.establish(crate::surface::SurfaceId(998));
         second.update_in(cx, |view, window, cx| {
             view.open_surface(crate::surface::SurfaceId(998), Open {
                 placement: Placement::Fill { owner_pid: None }, focus: false,

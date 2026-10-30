@@ -213,6 +213,9 @@ struct Queue {
     /// `opened` is at the front of `queued`, so the writer may start. Lines
     /// queued before then wait behind it.
     ready: bool,
+    /// The Surface this connection serves, once it is open, so what the
+    /// writer logs says which one it was.
+    surface: Option<SurfaceId>,
     /// The client is gone — refused, overflowed, timed out, or a write
     /// failed. Nothing more is queued or written.
     dead: bool,
@@ -263,6 +266,13 @@ impl Shared {
     /// open leaves it open: the connection thread writes the refusal next.
     /// A write still in progress no longer counts as pending: it can only
     /// fail now, so a dead connection holds nothing.
+    /// Kills a connection whose program has fallen so far behind that the
+    /// pending bound is reached, and says so: unlike a hang-up, it is a fault.
+    fn overflow(&self, queue: MutexGuard<'_, Queue>) {
+        tracing::warn!(target: "sprite_app::surface", surface = queue.surface.map(|id| id.0), bytes = queue.queued.len() + queue.in_flight, limit = MAX_PENDING_BYTES, "surface output overflowed its queue");
+        self.kill(queue, true);
+    }
+
     fn kill(&self, mut queue: MutexGuard<'_, Queue>, shut_down: bool) {
         queue.dead = true;
         queue.queued = Vec::new();
@@ -348,13 +358,16 @@ impl SurfaceConnection {
         // are bounded in time as well as in bytes. It holds one of the
         // endpoint's slots and no more, so the cap on connections still caps
         // writer threads, and only a program running as the same user can
-        // connect at all.
+        // connect at all. It reports to whatever was listening when the
+        // connection was made, which in the app is the one log every thread
+        // shares.
+        let listener = tracing::dispatcher::get_default(Clone::clone);
         drop(
             std::thread::Builder::new()
                 .name("sprite-surface-writer".to_owned())
                 .spawn(move || {
                     let _slot = slot;
-                    write_events(&writer);
+                    tracing::dispatcher::with_default(&listener, || write_events(&writer));
                 })?,
         );
         Ok(Self {
@@ -381,7 +394,7 @@ impl SurfaceConnection {
         }
         for line in lines {
             if queue.queued.len() + queue.in_flight >= MAX_PENDING_BYTES {
-                shared.kill(queue, true);
+                shared.overflow(queue);
                 return false;
             }
             queue.queued.extend_from_slice(line.as_bytes());
@@ -392,19 +405,20 @@ impl SurfaceConnection {
         true
     }
 
-    /// Puts the connection's first line ahead of every line a program queued
+    /// Puts the Surface's `opened` event ahead of every line a program queued
     /// before it, and lets the writer start. Called once, by the connection
     /// thread that decided to accept the Surface — never by the program.
     /// `false` means the connection was already dead, or what a program
     /// queued before it had already reached the pending bound.
-    pub(crate) fn establish(&self, line: &str) -> bool {
+    pub(crate) fn establish(&self, id: SurfaceId) -> bool {
+        let line = event_opened(id);
         let shared = &self.handle.shared;
         let mut queue = crate::locked::locked(&shared.queue);
         if queue.dead {
             return false;
         }
         if queue.queued.len() >= MAX_PENDING_BYTES {
-            shared.kill(queue, true);
+            shared.overflow(queue);
             return false;
         }
         let mut first = Vec::with_capacity(line.len() + 1 + queue.queued.len());
@@ -413,7 +427,9 @@ impl SurfaceConnection {
         first.extend_from_slice(&queue.queued);
         queue.queued = first;
         queue.ready = true;
+        queue.surface = Some(id);
         drop(queue);
+        tracing::debug!(target: "sprite_app::surface", surface = id.0, "surface opened");
         shared.changed.notify_all();
         true
     }
@@ -494,6 +510,9 @@ fn write_events(shared: &Shared) {
             if !queue.dead && queue.ready {
                 shared.stream.shutdown(Shutdown::Write).ok();
             }
+            if let Some(id) = queue.surface {
+                tracing::debug!(target: "sprite_app::surface", surface = id.0, "surface closed");
+            }
             queue.finish();
             drop(queue);
             shared.changed.notify_all();
@@ -509,19 +528,29 @@ fn write_events(shared: &Shared) {
         {
             crate::minimap_benchmark::record(serde_json::json!({"event":"socket_write"}));
         }
-        let written = write_within(&shared.stream, &outgoing, drain_deadline(outgoing.len()));
+        let (bytes, started) = (outgoing.len(), Instant::now());
+        let deadline = drain_deadline(bytes);
+        let written = write_within(&shared.stream, &outgoing, deadline);
         outgoing.clear();
         if outgoing.capacity() > KEPT_WRITE_BUFFER_BYTES {
             outgoing = Vec::new();
         }
         let mut queue = crate::locked::locked(&shared.queue);
         queue.in_flight = 0;
-        if written.is_err() {
-            tracing::warn!(target: "sprite_app::surface", "surface output failed or timed out");
-            // The write timed out, the batch missed its drain deadline, or
-            // the write failed: the program is not reading fast enough, or
-            // is gone. Shutting the socket down ends the connection thread's
-            // read, and the window hears the Surface closed.
+        if let Err(error) = written {
+            let surface = queue.surface.map(|id| id.0);
+            // Already dead means the queue overflowed and the write failed
+            // on the socket Sprite shut down, which was reported then.
+            if !queue.dead {
+                if hung_up(&error) {
+                    tracing::debug!(target: "sprite_app::surface", surface, bytes, "surface closed by program");
+                } else {
+                    tracing::warn!(target: "sprite_app::surface", surface, bytes, waited_ms = started.elapsed().as_millis() as u64, deadline_ms = deadline.as_millis() as u64, kind = ?error.kind(), "surface output failed or timed out");
+                }
+            }
+            // The program is gone, or not reading fast enough. Shutting the
+            // socket down ends the connection thread's read, and the window
+            // hears the Surface closed.
             shared.stream.shutdown(Shutdown::Both).ok();
             queue.finish();
             shared.kill(queue, false);
@@ -530,6 +559,19 @@ fn write_events(shared: &Shared) {
         drop(queue);
         shared.changed.notify_all();
     }
+}
+
+/// Whether a failed write means the program closed its end, which is how a
+/// Surface normally ends, rather than that it stopped keeping up.
+fn hung_up(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+    )
 }
 
 /// Writes `bytes` within `budget`, one chunk at a time. Before each chunk
@@ -553,7 +595,19 @@ fn write_within(mut stream: &UnixStream, bytes: &[u8], budget: Duration) -> std:
                 "the reader fell below the drain floor",
             ));
         }
-        stream.set_write_timeout(Some(left.min(WRITE_TIMEOUT)))?;
+        // macOS refuses to set a timeout on a socket whose program has
+        // closed its end, with EINVAL rather than the broken pipe a write
+        // would report. The timeout here is never zero and never more than
+        // `WRITE_TIMEOUT`, so that refusal can only mean the program is gone.
+        stream
+            .set_write_timeout(Some(left.min(WRITE_TIMEOUT)))
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidInput {
+                    std::io::Error::new(std::io::ErrorKind::NotConnected, error)
+                } else {
+                    error
+                }
+            })?;
         let (chunk, _) = rest.split_at(rest.len().min(WRITE_CHUNK_BYTES));
         match stream.write(chunk) {
             Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
@@ -877,7 +931,7 @@ fn serve_surface(
         }
     }) {
         Ok(Ok(())) => {
-            let _ = handle.establish(&event_opened(id));
+            let _ = handle.establish(id);
         }
         Ok(Err(refusal)) => {
             handle.abandon();
@@ -1134,7 +1188,7 @@ mod tests {
     fn a_huge_batch_stops_consuming_when_the_peer_stops_reading() {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         let line = "x".repeat(1023);
         let consumed = std::cell::Cell::new(0usize);
         let lines = std::iter::repeat_n(line.as_str(), 1_000_000_000).inspect(|_| {
@@ -1157,12 +1211,117 @@ mod tests {
         );
     }
 
+    /// A program that closes its end while events are still queued has
+    /// simply gone: that is how a Surface ends, not a fault, so it is noted
+    /// at debug level and never raised as a warning.
+    #[test]
+    fn a_program_that_hangs_up_is_logged_as_closed_not_as_a_failure() {
+        let ((), log) =
+            crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
+                let (stream, peer) = UnixStream::pair().unwrap();
+                let connection = SurfaceConnection::new(&stream).unwrap();
+                let writer = connection.writer();
+                assert!(connection.establish(SurfaceId(1)));
+                drop(peer);
+                let _ = connection.send("{}");
+                assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+            });
+        assert!(!log.contains("WARN"), "{log}");
+        assert!(log.contains("surface closed by program"), "{log}");
+    }
+
+    /// A program that stays connected but stops reading is a fault, and its
+    /// warning says which Surface it was, how much was waiting, how long the
+    /// writer waited against what deadline, and why it gave up.
+    #[test]
+    fn a_program_that_stops_reading_is_warned_about_with_what_was_waiting() {
+        let ((), log) =
+            crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
+                let (stream, _peer) = UnixStream::pair().unwrap();
+                let connection = SurfaceConnection::new(&stream).unwrap();
+                let writer = connection.writer();
+                assert!(connection.establish(SurfaceId(7)));
+                let line = "x".repeat(1023);
+                assert!(connection.send_batch(std::iter::repeat_n(line.as_str(), 256)));
+                assert!(writer.finished_within(WRITE_TIMEOUT * 20));
+            });
+        let warning = log
+            .lines()
+            .find(|line| line.contains("WARN"))
+            .unwrap_or_else(|| panic!("a stalled reader is warned about: {log}"));
+        let field = |name: &str| -> u64 {
+            warning
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix(&format!("{name}=")))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| panic!("{name} in {warning}"))
+        };
+        assert_eq!(field("surface"), 7, "{warning}");
+        assert!(field("bytes") >= 256 * 1024, "the stalled batch: {warning}");
+        assert!(field("waited_ms") <= field("deadline_ms") + 50, "{warning}");
+        assert!(warning.contains("kind="), "{warning}");
+    }
+
+    /// Each Surface's log has a start and an end with its id on both, so a
+    /// later warning, or its absence, can be matched to the Surface it was.
+    #[test]
+    fn each_surface_is_logged_opening_and_closing_with_its_own_id() {
+        let ((), log) =
+            crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
+                let mut writers = Vec::new();
+                for id in [3, 4] {
+                    let (stream, peer) = UnixStream::pair().unwrap();
+                    let connection = SurfaceConnection::new(&stream).unwrap();
+                    writers.push((connection.writer(), peer));
+                    assert!(connection.establish(SurfaceId(id)));
+                }
+                for (writer, _peer) in writers {
+                    assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+                }
+            });
+        for id in [3, 4] {
+            for event in ["surface opened", "surface closed"] {
+                assert!(
+                    log.lines().any(|line| line.contains(event) && line.contains(&format!("surface={id}"))),
+                    "{event} for {id}: {log}"
+                );
+            }
+        }
+        assert!(!log.contains("WARN"), "{log}");
+    }
+
+    /// A program so far behind that its queue overflows is a fault too, and
+    /// is never passed off as the program hanging up, although the write
+    /// the writer had in flight then fails on the socket Sprite shut down.
+    #[test]
+    fn a_program_whose_queue_overflows_is_warned_about_not_logged_as_closed() {
+        let ((), log) =
+            crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
+                let (stream, _peer) = UnixStream::pair().unwrap();
+                let connection = SurfaceConnection::new(&stream).unwrap();
+                let writer = connection.writer();
+                assert!(connection.establish(SurfaceId(5)));
+                let line = "x".repeat(64 * 1024);
+                assert!(
+                    (0..1024).any(|_| !connection.send(&line)),
+                    "the queue overflows"
+                );
+                assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+            });
+        assert!(!log.contains("closed by program"), "{log}");
+        let warning = log
+            .lines()
+            .find(|line| line.contains("WARN"))
+            .unwrap_or_else(|| panic!("an overflow is warned about: {log}"));
+        assert!(warning.contains("surface=5"), "{warning}");
+    }
+
     #[test]
     fn a_failed_write_leaves_later_batches_unconsumed() {
         let (stream, peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let writer = connection.writer();
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         drop(peer);
         // Whether the writer meets the closed peer on `opened` or on this
         // line, its write fails and the connection dies.
@@ -1192,7 +1351,7 @@ mod tests {
         assert_eq!(connection.pending_bytes(), MAX_PENDING_BYTES);
         assert!(!connection.send("overflow"));
         assert_eq!(connection.pending_bytes(), 0);
-        assert!(!connection.establish(&event_opened(SurfaceId(1))));
+        assert!(!connection.establish(SurfaceId(1)));
         assert!(connection.is_dead());
         let mut received = Vec::new();
         peer.read_to_end(&mut received).unwrap();
@@ -1372,7 +1531,7 @@ mod tests {
     fn concurrent_batches_each_reach_the_wire_in_one_piece() {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         let reader = std::thread::spawn(move || {
             let wire = String::from_utf8(read_to_eof(&mut peer)).unwrap();
             wire.lines()
@@ -1416,7 +1575,7 @@ mod tests {
         assert!(
             connection.send_batch([r#"{"type":"queued","n":1}"#, r#"{"type":"queued","n":2}"#])
         );
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         std::thread::scope(|scope| {
             for sender in 0..4 {
                 let connection = connection.clone();
@@ -1453,7 +1612,7 @@ mod tests {
         let (stream, peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let writer = connection.writer();
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         assert!(connection.send_batch(["one", "two"]));
         drop(peer);
         let _ = connection.send_batch(["gone"]);
@@ -1467,7 +1626,7 @@ mod tests {
         let (stream, mut peer) = UnixStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let opened = event_opened(SurfaceId(1));
-        assert!(connection.establish(&opened));
+        assert!(connection.establish(SurfaceId(1)));
         let line = json!({"payload":"x".repeat(2*1024*1024)}).to_string();
         let expected = format!("{opened}\n{line}\n{line}\n");
         let reader = std::thread::spawn(move || read_to_eof(&mut peer));
@@ -1483,7 +1642,7 @@ mod tests {
         let connection = SurfaceConnection::new(&stream).unwrap();
         let writer = connection.writer();
         let opened = event_opened(SurfaceId(1));
-        assert!(connection.establish(&opened));
+        assert!(connection.establish(SurfaceId(1)));
         let line = "x".repeat(2 * 1024 * 1024);
         let expected = format!("{opened}\n{line}\n");
         // The line fits the pending bound, so it is queued; the writer meets
@@ -1915,7 +2074,7 @@ mod tests {
     fn overflowing_the_queue_marks_the_connection_dead_and_later_sends_return_at_once() {
         let (here, there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         // `there` is kept open and never read, so once the socket buffer is
         // full the sends pile up in the pending queue until one finds the
         // bound reached; none of them blocks.
@@ -1951,7 +2110,7 @@ mod tests {
         use std::io::Read;
         let (here, mut there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         // 200 × 64 KiB is 12.5 MiB: several socket buffers, and three times
         // the pending bound.
         let line = "x".repeat(64 * 1024);
@@ -1987,7 +2146,7 @@ mod tests {
         let (here, mut there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let opened = event_opened(SurfaceId(1));
-        assert!(connection.establish(&opened));
+        assert!(connection.establish(SurfaceId(1)));
         let lines: Vec<String> = (0..100)
             .map(|i| json!({"type":"focus","i":i}).to_string())
             .collect();
@@ -2013,7 +2172,7 @@ mod tests {
         let (here, _there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let writer = connection.writer();
-        assert!(connection.establish(&event_opened(SurfaceId(1))));
+        assert!(connection.establish(SurfaceId(1)));
         // Far more than a socket buffer holds, so the writer blocks in its
         // write until the timeout.
         assert!(connection.send(&"x".repeat(2 * 1024 * 1024)));
@@ -2037,7 +2196,7 @@ mod tests {
         let (here, mut there) = UnixStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let opened = event_opened(SurfaceId(1));
-        assert!(connection.establish(&opened));
+        assert!(connection.establish(SurfaceId(1)));
         let reader = std::thread::spawn(move || read_to_eof(&mut there));
         let paste = event_paste(&"x".repeat(MAX_PENDING_BYTES + 1024 * 1024));
         // Only `opened` can be pending, far under the bound, so the line is
@@ -2161,10 +2320,7 @@ mod tests {
             assert!(connection.send(&event_focus()));
         }
         drop(there);
-        assert!(
-            connection.establish(&event_opened(SurfaceId(1))),
-            "establish only queues"
-        );
+        assert!(connection.establish(SurfaceId(1)), "establish only queues");
         assert!(writer.finished_within(WRITE_TIMEOUT * 10));
         assert!(connection.is_dead());
         assert!(!connection.send(&event_focus()));
