@@ -1059,3 +1059,203 @@ fn a_selected_hidden_cell_shows_the_selection_and_still_hides_its_glyph() {
         "the text pass hides it against the same ground"
     );
 }
+
+/// Paints one cell holding `text`, optionally in its own style and with a
+/// cursor on it.
+struct OverlayProbe {
+    text: &'static str,
+    style: Option<CellStyle>,
+    cursor: Option<CursorStyle>,
+}
+
+impl OverlayProbe {
+    fn new(text: &'static str) -> Self {
+        Self {
+            text,
+            style: None,
+            cursor: None,
+        }
+    }
+}
+
+impl gpui::Render for OverlayProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::{ParentElement, Styled};
+        let (text, style) = (self.text, self.style);
+        let paint = GridPaint::new(GridPaintSpec {
+            rows: Arc::from([one_cell_row(|cell| {
+                cell.text = text.into();
+                if let Some(style) = style {
+                    cell.style = style;
+                }
+            })]),
+            pass: RowPass::Whole,
+            cursor: self.cursor.map(|style| CursorSnapshot {
+                row: 0,
+                column: 0,
+                visible: true,
+                blinking: false,
+                style,
+            }),
+            cursor_color: None,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x112233),
+            palette: None,
+            cell_width: px(8.4),
+            cell_height: px(18.0),
+            font_family: "monospace".into(),
+            font_size: px(14.0),
+            shapes: Default::default(),
+            focused: true,
+        });
+        gpui::div().size_full().child(paint)
+    }
+}
+
+/// A bar, an underline or an outline is the one shape a terminal draws over
+/// the character it marks, so it must reach the screen after that
+/// character's glyph wherever the two overlap; drawn first, the glyph's ink
+/// would cover it. The order is read from the frame the renderer is given,
+/// not from the order `paint` was called in, because GPUI decides the final
+/// order.
+#[gpui::test]
+fn a_cursor_drawn_as_a_shape_is_drawn_over_the_glyph_it_marks(cx: &mut gpui::TestAppContext) {
+    use gpui::{DrawnKind, DrawnPrimitive};
+    // Test text has no ink unless asked for, and a glyph without ink is
+    // never drawn, which would leave nothing for the cursor to cover.
+    gpui::ink_test_glyphs(true);
+    let mut covered = Vec::new();
+    for (style, text) in [
+        (CursorStyle::Bar, "W"),
+        (CursorStyle::Underline, "g"),
+        (CursorStyle::BlockHollow, "W"),
+    ] {
+        let (probe, cx) = cx.add_window_view(|_, _| OverlayProbe::new(text));
+        let mut frame = |cursor: Option<CursorStyle>| -> Vec<DrawnPrimitive> {
+            probe.update(cx, |probe, _| probe.cursor = cursor);
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            cx.drawn_primitives()
+        };
+        let without = frame(None);
+        let with = frame(Some(style));
+
+        let glyph = with
+            .iter()
+            .position(|drawn| drawn.kind == DrawnKind::MonochromeSprite)
+            .unwrap_or_else(|| panic!("{style:?}: {text:?} is drawn as a glyph: {with:?}"));
+        // The cursor is the one quad the second frame adds. Removing it must
+        // give back the first frame; the last position where that holds is
+        // the latest the cursor could be drawn.
+        let cursor = (0..with.len())
+            .rev()
+            .find(|&index| {
+                with[index].kind == DrawnKind::Quad && {
+                    let mut rest = with.clone();
+                    rest.remove(index);
+                    rest == without
+                }
+            })
+            .unwrap_or_else(|| panic!("{style:?}: the cursor adds one quad: {with:?}"));
+        assert!(
+            with[cursor].bounds.intersects(&with[glyph].bounds),
+            "{style:?}: the cursor overlaps the glyph, so the order is visible: {with:?}"
+        );
+        if cursor < glyph {
+            covered.push(format!("{style:?} under {text:?}: {with:?}"));
+        }
+    }
+    assert!(
+        covered.is_empty(),
+        "each cursor is drawn after the glyph it marks; drawn first:\n{}",
+        covered.join("\n")
+    );
+}
+
+/// An underline or a strikethrough is drawn over its glyph, as the cursor is.
+/// One in a colour of its own (SGR 58) would otherwise disappear under a
+/// descender's ink, and a strikethrough under the very letters it strikes.
+#[gpui::test]
+fn decorations_are_drawn_over_the_glyph_they_decorate(cx: &mut gpui::TestAppContext) {
+    use gpui::{DrawnKind, DrawnPrimitive};
+    gpui::ink_test_glyphs(true);
+    let (probe, cx) = cx.add_window_view(|_, _| OverlayProbe::new("g"));
+    let mut frame = |style: Option<CellStyle>| -> Vec<DrawnPrimitive> {
+        probe.update(cx, |probe, _| probe.style = style);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.drawn_primitives()
+    };
+    let plain = frame(None);
+    let mut style = decorated(UnderlineStyle::Single, true);
+    style.underline_color = SnapshotColor::Rgb(unpack(0xff0000));
+    let with = frame(Some(style));
+
+    let glyph = with
+        .iter()
+        .position(|drawn| drawn.kind == DrawnKind::MonochromeSprite)
+        .unwrap_or_else(|| panic!("\"g\" is drawn as a glyph: {with:?}"));
+    let lines: Vec<usize> = (0..with.len())
+        .filter(|&index| with[index].kind == DrawnKind::Underline)
+        .collect();
+    assert_eq!(lines.len(), 2, "an underline and a strikethrough: {with:?}");
+    assert_eq!(
+        plain
+            .iter()
+            .filter(|drawn| drawn.kind == DrawnKind::Underline)
+            .count(),
+        0,
+        "the plain cell draws no lines: {plain:?}"
+    );
+    for line in lines {
+        assert!(
+            with[line].bounds.intersects(&with[glyph].bounds),
+            "the line crosses the glyph, so the order is visible: {with:?}"
+        );
+        assert!(
+            line > glyph,
+            "each line is drawn after the glyph it decorates: {with:?}"
+        );
+    }
+}
+
+/// A cursor on a decorated cell is drawn too, and over the decorations as
+/// well as the glyph: it marks the cell, whatever the cell holds.
+#[gpui::test]
+fn a_cursor_on_a_decorated_cell_is_drawn_over_its_decorations(cx: &mut gpui::TestAppContext) {
+    use gpui::{DrawnKind, DrawnPrimitive};
+    gpui::ink_test_glyphs(true);
+    let (probe, cx) = cx.add_window_view(|_, _| OverlayProbe {
+        style: Some(decorated(UnderlineStyle::Single, true)),
+        ..OverlayProbe::new("W")
+    });
+    let mut frame = |cursor: Option<CursorStyle>| -> Vec<DrawnPrimitive> {
+        probe.update(cx, |probe, _| probe.cursor = cursor);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.drawn_primitives()
+    };
+    let without = frame(None);
+    let with = frame(Some(CursorStyle::Bar));
+    assert_eq!(
+        with.len(),
+        without.len() + 1,
+        "the cursor adds one quad to the decorated cell: {with:?}"
+    );
+    let last_line = with
+        .iter()
+        .rposition(|drawn| drawn.kind == DrawnKind::Underline)
+        .unwrap_or_else(|| panic!("the cell is decorated: {with:?}"));
+    let cursor = with.len() - 1;
+    assert_eq!(with[cursor].kind, DrawnKind::Quad, "{with:?}");
+    assert!(
+        cursor > last_line,
+        "the cursor is drawn after the cell's decorations: {with:?}"
+    );
+}
