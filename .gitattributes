@@ -5,3 +5,4 @@ patches/gpui-0.2.2-should-terminate.patch -whitespace
 patches/gpui-0.2.2-test-scale-factor.patch -whitespace
 patches/gpui-0.2.2-test-block-wakeup.patch -whitespace
 patches/gpui-0.2.2-release-and-idle.patch -whitespace
+patches/gpui-0.2.2-test-drawn-primitives.patch -whitespace

@@ -60,6 +60,52 @@ fn review_direct_program_requires_close_confirmation(cx: &mut gpui::TestAppConte
     });
 }
 
+/// An image placed below the text (a negative z-index) is drawn between the
+/// cells' grounds and their glyphs, so text printed over it stays readable.
+/// The grid's two passes are each one layer, and this is the order those two
+/// layers and the image between them reach the renderer in.
+#[gpui::test]
+fn an_image_below_the_text_is_drawn_under_the_glyphs_over_it(cx: &mut gpui::TestAppContext) {
+    use gpui::DrawnKind;
+    gpui::ink_test_glyphs(true);
+    with_view(
+        cx,
+        shell(
+            r"printf '\033_Ga=T,f=32,s=1,v=1,i=1,c=4,r=1,z=-1,C=1,q=2;/////w==\033\\WWWW'; exec sleep 30",
+        ),
+        |view, cx| {
+            wait_for_bundle(view, cx, |bundle| {
+                bundle
+                    .graphics
+                    .as_ref()
+                    .is_some_and(|frame| !frame.placements.is_empty())
+                    && bundle
+                        .render
+                        .rows
+                        .iter()
+                        .any(|row| row.cells.iter().any(|cell| cell.text == "W"))
+            });
+            focus_and_draw(view, cx);
+            let drawn = cx.drawn_primitives();
+            let image = drawn
+                .iter()
+                .position(|primitive| primitive.kind == DrawnKind::PolychromeSprite)
+                .unwrap_or_else(|| panic!("the image is drawn: {drawn:?}"));
+            let over: Vec<usize> = (0..drawn.len())
+                .filter(|&index| {
+                    drawn[index].kind == DrawnKind::MonochromeSprite
+                        && drawn[index].bounds.intersects(&drawn[image].bounds)
+                })
+                .collect();
+            assert!(!over.is_empty(), "letters lie over the image: {drawn:?}");
+            assert!(
+                over.iter().all(|&glyph| glyph > image),
+                "every letter over the image is drawn after it: {drawn:?}"
+            );
+        },
+    );
+}
+
 #[gpui::test]
 fn review_fixed_image_matches_requested_columns_at_two_x(cx: &mut gpui::TestAppContext) {
     with_view(

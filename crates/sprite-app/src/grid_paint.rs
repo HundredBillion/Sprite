@@ -584,8 +584,17 @@ fn decoration_slot(bold: bool, italic: bool, enlarged: bool) -> usize {
     usize::from(bold) | usize::from(italic) << 1 | usize::from(enlarged) << 2
 }
 
+/// What a pass draws over its grounds and glyphs: the shapes that must sit on
+/// top of a glyph, which a layer would put beneath it.
+#[derive(Default)]
+struct Overlay {
+    decorations: Vec<(PositionedCell, Drawn, CellBounds)>,
+    cursor: Option<(Drawn, CellBounds)>,
+}
+
 /// What one cell contributes to the frame, resolved once and used by both
 /// halves of the paint.
+#[derive(Clone)]
 struct Drawn {
     /// The colour to fill the cell with, or `None` if this pass leaves it bare.
     background: Option<Rgba>,
@@ -843,7 +852,20 @@ impl Element for GridPaint {
         cx: &mut App,
     ) {
         let started = crate::diagnostics::perf_enabled().then(std::time::Instant::now);
-        self.paint_rows(bounds, window, cx);
+        // Every cell's ground and glyph go in one layer, which gives them one
+        // draw order. Outside a layer GPUI orders each primitive by searching
+        // for every earlier one it overlaps, and every glyph overlaps the
+        // ground beneath it, so a full grid cost a search per glyph through
+        // most of the frame. Inside, it draws quads before glyphs, so a shape
+        // that belongs on top of a glyph is painted after the layer instead.
+        let overlay = window.paint_layer(bounds, |window| self.paint_rows(bounds, window, cx));
+        let mut decoration_metrics: DecorationMetricsCache = [None; 8];
+        for (cell, drawn, bounds) in &overlay.decorations {
+            self.paint_decorations(cell, drawn, *bounds, &mut decoration_metrics, window);
+        }
+        if let Some((drawn, cell)) = overlay.cursor {
+            self.paint_cursor(&drawn, cell, window.scale_factor(), window);
+        }
         let slow = started
             .map(|started| started.elapsed())
             .filter(|elapsed| *elapsed >= slow_paint());
@@ -854,12 +876,14 @@ impl Element for GridPaint {
 }
 
 impl GridPaint {
-    fn paint_rows(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    /// Paints the pass's grounds and glyphs, and returns what is drawn over
+    /// them for the caller to paint once they are done.
+    fn paint_rows(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> Overlay {
         let scale = window.scale_factor();
         let width = f32::from(self.cell_width);
         let height = f32::from(self.cell_height);
         if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-            return;
+            return Overlay::default();
         }
 
         let edge = |column: Col| column_edge(bounds.origin.x, self.cell_width, column, scale);
@@ -871,8 +895,7 @@ impl GridPaint {
         if self.pass != RowPass::Background {
             shapes.begin_frame(self.shape_context(scale), rows.len());
         }
-        // Per pass, not per element: the font and size, not the cell, decide it.
-        let mut decoration_metrics: DecorationMetricsCache = [None; 8];
+        let mut overlay = Overlay::default();
         // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
             let top = row_edge(Row(index));
@@ -940,10 +963,17 @@ impl GridPaint {
                     shapes: &mut shapes,
                 };
                 self.paint_glyph(target, &drawn, bounds, scale, window, cx);
-                self.paint_decorations(cell, &drawn, bounds, &mut decoration_metrics, window);
-                self.paint_cursor(&drawn, bounds, scale, window);
+                if drawn.underline.is_some() || drawn.strikethrough.is_some() {
+                    overlay
+                        .decorations
+                        .push((cell.clone(), drawn.clone(), bounds));
+                }
+                if drawn.cursor.is_some() {
+                    overlay.cursor = Some((drawn, bounds));
+                }
             }
         }
+        overlay
     }
 }
 
