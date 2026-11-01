@@ -61,24 +61,6 @@ fn clock_beat(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContex
     cx.run_until_parked();
 }
 
-/// Delivers the worker's refusal of a multi-line paste exactly as the event
-/// task delivers it.
-fn hold_unsafe_paste(
-    view: &gpui::Entity<TerminalView>,
-    cx: &mut gpui::VisualTestContext,
-    text: &str,
-) {
-    view.update(cx, |view, cx| {
-        let decision = crate::terminal_events::decide(Ok(sprite_term::TerminalEvent::UnsafePaste(
-            text.to_owned(),
-        )));
-        for effect in decision.effects {
-            view.apply(effect, cx);
-        }
-        cx.notify();
-    });
-}
-
 #[gpui::test]
 fn idle_view_accepts_colour_and_cursor_reloads(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();

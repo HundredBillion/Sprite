@@ -189,7 +189,6 @@ fn a_bell_is_reported_as_an_event() {
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
             | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }
             | TerminalEvent::HistoryFailed { .. }

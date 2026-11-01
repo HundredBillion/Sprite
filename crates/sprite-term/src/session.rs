@@ -271,9 +271,7 @@ impl ShutdownHandle {
 fn validate(command: &TerminalCommand) -> Result<(), SessionError> {
     let (bytes, limit) = match command {
         TerminalCommand::Input(bytes) => (bytes.len(), MAX_INPUT_BYTES),
-        TerminalCommand::Paste(text) | TerminalCommand::PasteConfirmed(text) => {
-            (text.len(), crate::max_clipboard_bytes())
-        }
+        TerminalCommand::Paste(text) => (text.len(), crate::max_clipboard_bytes()),
         TerminalCommand::CommitText(text) => (text.len(), MAX_INPUT_BYTES),
         TerminalCommand::Key(key) => (
             key.logical_key

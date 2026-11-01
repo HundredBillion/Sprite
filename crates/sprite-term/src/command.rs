@@ -200,14 +200,9 @@ pub enum TerminalCommand {
     /// Paste text as data.
     ///
     /// When the child has bracketed paste on, the text is wrapped and cannot be
-    /// read as typing. When it does not, a payload containing a newline *would*
-    /// execute on arrival — the line discipline turns Sprite's carriage return
-    /// back into a newline — so such a paste is withheld and reported as
-    /// `UnsafePaste` instead of being performed.
+    /// read as typing. When it does not, the text arrives as if typed, and a
+    /// newline in it runs the line: Sprite does not second-guess a paste.
     Paste(String),
-    /// Perform a paste the person has explicitly confirmed, skipping the safety
-    /// check. Their decision, made with the content in front of them.
-    PasteConfirmed(String),
     /// Text committed by an input method.
     ///
     /// This is typing, not pasting: it returns the viewport to live output and

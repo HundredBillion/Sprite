@@ -217,7 +217,7 @@ fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::T
 }
 
 #[gpui::test]
-fn public_control_input_is_separate_and_requires_human_confirmation(cx: &mut gpui::TestAppContext) {
+fn public_control_input_is_separate_and_sent_unchecked(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
@@ -254,36 +254,37 @@ fn public_control_input_is_separate_and_requires_human_confirmation(cx: &mut gpu
         )["outcome"],
         "ok"
     );
-    let unsafe_input = Operation::Input {
-        pane: pane.clone(),
-        text: Some("needs-owner\n".into()),
-        key: None,
-    };
     assert_eq!(
-        ask(&descriptor, unsafe_input.clone(), cx)["outcome"],
-        "confirmation_required"
+        ask(
+            &descriptor,
+            Operation::Input {
+                pane: pane.clone(),
+                text: Some("multi-line\ninput\n".into()),
+                key: None,
+            },
+            cx
+        )["outcome"],
+        "ok",
+        "multi-line input is sent as typed, with no confirmation"
     );
-    assert_eq!(
-        ask(&descriptor, unsafe_input, cx)["outcome"],
-        "confirmation_required"
-    );
-    workspace.update(cx, |workspace, cx| {
-        workspace.revoke_control(descriptor.grant.parse().unwrap(), cx)
-    });
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.answer_control(true, window, cx)
-    });
     let read_only = approve(&workspace, cx, false, false);
-    let content = ask(
-        &read_only,
-        Operation::Read {
-            pane,
-            lines: Some(0),
-        },
-        cx,
-    );
+    let mut content = Value::Null;
+    for _ in 0..200 {
+        content = ask(
+            &read_only,
+            Operation::Read {
+                pane: pane.clone(),
+                lines: Some(0),
+            },
+            cx,
+        );
+        if content.to_string().contains("multi-line") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(content["outcome"], "ok");
-    assert!(!content.to_string().contains("needs-owner"));
+    assert!(content.to_string().contains("multi-line"), "{content}");
 }
 
 fn public_cli(

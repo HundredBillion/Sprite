@@ -219,7 +219,6 @@ fn sample(mode: Consumer, cols: u16, rows: u16, payload_bytes: usize, ordinal: u
                 TerminalEvent::Exited(_) => exited = true,
                 TerminalEvent::Error(error) => panic!("session error: {error}"),
                 TerminalEvent::SelectionCopied(_)
-                | TerminalEvent::UnsafePaste(_)
                 | TerminalEvent::Bell
                 | TerminalEvent::TitleChanged(_)
                 | TerminalEvent::History { .. }

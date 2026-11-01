@@ -544,7 +544,7 @@ impl Workspace {
                     json!({"pane": request.operation.pane(), "removed": true, "cleanup": "scheduled"}),
                 )
             }
-            Operation::Input { text, .. } => {
+            Operation::Input { .. } => {
                 let pane = pane.ok_or("denied")?;
                 let view = self
                     .tabs
@@ -553,23 +553,7 @@ impl Workspace {
                     .view()
                     .downcast::<TerminalView>()
                     .map_err(|_| "unsupported")?;
-                if !confirmed
-                    && let Some(text) = text
-                    && sprite_term::unbracketed_paste_requires_confirmation(text)
-                {
-                    return self.confirm_control(
-                        grant,
-                        request,
-                        format!(
-                            "Send this text to terminal pane {}? {}",
-                            pane.0,
-                            text.escape_debug()
-                        ),
-                    );
-                }
-                view.update(cx, |view, cx| {
-                    view.control_input(&request.operation, confirmed, cx)
-                })?;
+                view.update(cx, |view, _| view.control_input(&request.operation))?;
                 self.dismiss_pending_close(cx);
                 Ok(
                     json!({"pane": self.pane_address(pane), "input": "admitted", "target": "terminal"}),

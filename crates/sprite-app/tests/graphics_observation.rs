@@ -118,7 +118,6 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
                 TerminalEvent::Ready
                 | TerminalEvent::Exited(_)
                 | TerminalEvent::SelectionCopied(_)
-                | TerminalEvent::UnsafePaste(_)
                 | TerminalEvent::Bell
                 | TerminalEvent::TitleChanged(_)
                 | TerminalEvent::HistoryFailed { .. }

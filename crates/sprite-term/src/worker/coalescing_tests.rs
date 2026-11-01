@@ -269,7 +269,6 @@ fn a_queued_command_is_applied_before_output_that_arrived_first() {
                 other @ (TerminalEvent::Ready
                 | TerminalEvent::Exited(_)
                 | TerminalEvent::SelectionCopied(_)
-                | TerminalEvent::UnsafePaste(_)
                 | TerminalEvent::Bell
                 | TerminalEvent::TitleChanged(_)
                 | TerminalEvent::History { .. }

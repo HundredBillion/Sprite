@@ -171,9 +171,6 @@ pub struct TerminalView {
     /// it against the cells.
     #[cfg(test)]
     painted_tiles: TileLog,
-    /// A paste withheld as unsafe, awaiting a second explicit request for the
-    /// same text.
-    unsafe_paste: crate::confirmation::Confirmation<String>,
     /// Whether the cursor is in the visible half of its blink.
     ///
     /// Always true for a cursor that does not blink, so the phase costs a
@@ -604,7 +601,6 @@ impl TerminalView {
             content_origin: None,
             #[cfg(test)]
             painted_tiles: Default::default(),
-            unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
             pane_focus: pane_focus::PaneFocus::default(),
@@ -702,7 +698,6 @@ impl TerminalView {
             content_origin: None,
             #[cfg(test)]
             painted_tiles: Default::default(),
-            unsafe_paste: Default::default(),
             preedit: None,
             blink_on: true,
             pane_focus: pane_focus::PaneFocus::default(),
@@ -729,10 +724,6 @@ impl TerminalView {
             Effect::Title(title) => {
                 self.title = title.map(SharedString::from);
                 self.refresh_display_title(cx);
-                true
-            }
-            Effect::HoldPaste(text) => {
-                self.unsafe_paste.arm(text);
                 true
             }
             Effect::HyperlinkResolved {
@@ -828,18 +819,13 @@ impl TerminalView {
     /// Recomputes Pane Focus from the window, and reports a change.
     fn refresh_pane_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let held = pane_focus::PaneFocus::compute(window, &self.focus, cx);
-        let Some(focused) = self.pane_focus.update(held) else {
+        if self.pane_focus.update(held).is_none() {
             return;
-        };
+        }
         self.admit_focus();
         // A pane gaining focus starts its blink from visible, and one losing
         // it shows a steady cursor from the next frame on.
         self.blink_on = true;
-        if !focused {
-            // Leaving the pane is a decision too: a paste held here is not
-            // answered by a paste made after coming back.
-            self.drop_unsafe_paste(cx);
-        }
         cx.notify();
     }
 
@@ -975,8 +961,6 @@ impl TerminalView {
     pub(crate) fn control_input(
         &mut self,
         operation: &crate::control::Operation,
-        confirmed: bool,
-        cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
         if !matches!(self.session, SessionState::Running(_)) || self.admission_closed {
             return Err("closing");
@@ -985,16 +969,7 @@ impl TerminalView {
             return Err("invalid_request");
         };
         let command = match (text, key) {
-            (Some(text), None) => {
-                if sprite_term::unbracketed_paste_requires_confirmation(text) && !confirmed {
-                    return Err("confirmation_required");
-                }
-                if confirmed {
-                    TerminalCommand::PasteConfirmed(text.clone())
-                } else {
-                    TerminalCommand::Paste(text.clone())
-                }
-            }
+            (Some(text), None) => TerminalCommand::Paste(text.clone()),
             (None, Some(key)) => {
                 let (logical_key, control) = key
                     .strip_prefix("ctrl-")
@@ -1014,7 +989,6 @@ impl TerminalView {
             }
             _ => return Err("invalid_request"),
         };
-        self.drop_unsafe_paste(cx);
         match self.admit(command) {
             Ok(Admitted::Accepted) => Ok(()),
             Ok(Admitted::Saturated(_)) => Err("busy"),
@@ -1189,10 +1163,6 @@ impl sprite_pane::Pane for TerminalView {
 
     fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle_focus(window, cx);
-    }
-
-    fn cancel_pending_input(&mut self, cx: &mut Context<Self>) {
-        self.drop_unsafe_paste(cx);
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {

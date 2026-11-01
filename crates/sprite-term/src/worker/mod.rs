@@ -35,7 +35,7 @@ use crate::input::mouse::{
     PinnedAnchor, SelectionAnchor, WheelDestination, apply_selection, encode_mouse, encode_wheel,
     selection_text, track_selection_anchor, wheel_destination,
 };
-use crate::input::paste::{encode_paste, paste_is_safe_to_perform};
+use crate::input::paste::encode_paste;
 use start::{apply_color_defaults, apply_cursor_defaults};
 use std::ops::ControlFlow::{self, Break as Stop, Continue};
 type Flow = ControlFlow<()>;
@@ -734,13 +734,6 @@ impl Session {
                     }
                 }
                 TerminalCommand::Paste(text) => {
-                    // Bracketing is what makes a paste safe; without it a
-                    // newline is indistinguishable from pressing Enter, so the
-                    // person is asked before anything is written.
-                    if !paste_is_safe_to_perform(terminal, &text) {
-                        emit(events, TerminalEvent::UnsafePaste(text))?;
-                        return Continue(());
-                    }
                     match encode_paste(terminal, &text) {
                         // Queued whole; the pump feeds it to the PTY as the
                         // PTY has room, so its size costs the pane nothing.
@@ -757,19 +750,6 @@ impl Session {
                         }
                     }
                 }
-                TerminalCommand::PasteConfirmed(text) => match encode_paste(terminal, &text) {
-                    Ok(bytes) => {
-                        if return_to_bottom(terminal) {
-                            pending.mutated();
-                        }
-                        if let Err(error) = input.write(bytes) {
-                            emit(events, TerminalEvent::Error(error))?;
-                        }
-                    }
-                    Err(error) => {
-                        emit(events, TerminalEvent::Error(error))?;
-                    }
-                },
                 TerminalCommand::CommitText(text) => {
                     // Typing, so it returns the reader to where the result will
                     // appear, exactly as a keystroke does.

@@ -211,11 +211,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let action = workspace_action(&event.keystroke);
-        if action.is_some()
-            && let Some(pane) = self.tabs.active().and_then(|tab| tab.focused())
-        {
-            pane.cancel_pending_input(cx);
-        }
         if !event.is_held && Self::is_quit_key(&event.keystroke.key) {
             self.quit_key_claimed = action == Some(WorkspaceAction::Quit);
         }

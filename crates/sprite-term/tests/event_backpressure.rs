@@ -95,7 +95,6 @@ fn shutdown_retains_accepted_clipboard_writes_without_consumer_progress() {
             TerminalEvent::Exited(_) => exited = true,
             TerminalEvent::Ready
             | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }
@@ -137,7 +136,6 @@ fn every_submission_method_bounds_variable_sized_input() {
     let oversized = vec![
         TerminalCommand::Input(vec![b'x'; 16 * 1024 + 1]),
         TerminalCommand::Paste("x".repeat(1024 * 1024 + 1)),
-        TerminalCommand::PasteConfirmed("x".repeat(1024 * 1024 + 1)),
         TerminalCommand::CommitText("x".repeat(16 * 1024 + 1)),
         TerminalCommand::Key(KeyEvent {
             logical_key: "x".into(),
@@ -252,7 +250,6 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
             TerminalEvent::Exited(exit) => outcome = Some(exit),
             TerminalEvent::Ready
             | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }
