@@ -39,9 +39,8 @@ use sprite_pane::PaneHandle;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::observation::endpoint::Endpoint;
+use crate::control::ConfigVerb;
 use crate::observation::panes::{PaneLink, Placement, WindowPanes};
-use crate::observation::request::ConfigVerb;
 use crate::pane_tree::{Direction, Orientation, PaneId};
 use crate::surface::Refusal;
 use crate::surface::channel::{SurfaceEndpoint, SurfaceRequest};
@@ -87,15 +86,8 @@ const TAB_ACTIVE_FG: u32 = 0xe6e6ef;
 
 pub struct Workspace {
     tabs: Tabs<Rc<dyn PaneHandle<Request = SurfaceRequest>>>,
-    /// This window's observation socket and key.
-    ///
-    /// `None` when the endpoint could not be opened — there is no private
-    /// runtime directory to put it in, for instance. Observation is then simply
-    /// unavailable: panes still run, and no session is told a key, which is
-    /// better than putting the socket somewhere another user could reach.
-    endpoint: Option<Endpoint>,
-    /// The panes this window's endpoint may reach. Shared with the endpoint's
-    /// serving threads, and the only route from a request to a pane.
+    /// The panes Pane Control reads. Shared with the socket's serving
+    /// threads, and the only route from a read to a pane.
     panes: Arc<WindowPanes>,
     focus: FocusHandle,
     /// What the configuration file says, and nothing else.
@@ -141,7 +133,7 @@ pub struct Workspace {
     config_path: Option<std::path::PathBuf>,
     /// Keeps the reload listener alive for as long as the window is.
     _reload: gpui::Task<()>,
-    /// Handed to an endpoint opened later, when observation is turned back on.
+    #[cfg(test)]
     reload_sender: async_channel::Sender<ReloadRequest>,
     /// The Surface Channel, if the window could open one.
     surfaces: Option<SurfaceEndpoint>,
@@ -166,6 +158,7 @@ pub struct Workspace {
     /// The window's one clock: blink phase and title discovery for every pane.
     _clock: gpui::Task<()>,
     control: ControlState,
+    #[cfg(test)]
     control_sender: async_channel::Sender<crate::control::Message>,
     _control_task: gpui::Task<()>,
 }
@@ -210,22 +203,23 @@ impl Workspace {
         // Opened before the first session, so every session this window
         // launches — including the first — is told the key and its own pane.
         let panes = WindowPanes::new();
-        let (control_sender, control_receiver) = async_channel::bounded(16);
-        // The endpoint's threads are not the GPUI thread, and a reload has to
+        let (control_sender, control_receiver) =
+            async_channel::bounded(crate::control::MAX_CONNECTIONS);
+        // The socket's threads are not the GPUI thread, and a reload has to
         // touch views. So a request crosses back on a channel and is answered
-        // from here, with the endpoint thread waiting on a reply of its own.
+        // from here, with the socket thread waiting on a reply of its own.
         let (reload_tx, reload_rx) = reload_channel();
-        let endpoint = settings
-            .pane_observation
-            .enabled
-            .then(|| open_endpoint(&panes, &reload_tx, &control_sender))
-            .flatten();
-        let reload_sender = reload_tx.clone();
+        // Opened before the first session, so every session this window
+        // launches — including the first — can be reached.
+        let mut control = ControlState::new();
+        control.open(crate::control::Lanes {
+            control: control_sender.clone(),
+            reload: reload_tx.clone(),
+            panes: Arc::clone(&panes),
+        });
 
         let (surface_lanes, surface_receivers) = crate::surface::lanes::surface_lanes();
-        // Its own key, never observation's: a program handed only the
-        // observation credentials can read every pane but draw in none.
-        let surface_key = crate::observation::endpoint::ObservationKey::generate()
+        let surface_key = crate::local_socket::SocketKey::generate()
             .inspect_err(|error| { tracing::warn!(target: "sprite_app::surface", kind = ?error.kind(), "surface key generation failed"); })
             .ok()
             .map(Arc::new);
@@ -249,7 +243,7 @@ impl Workspace {
             )),
             PaneServices {
                 panes: &panes,
-                endpoint: endpoint.as_ref(),
+                window: control.window(),
                 surfaces: surfaces.as_ref(),
                 exit: exit_sender.clone(),
             },
@@ -282,9 +276,7 @@ impl Workspace {
                 let started = std::time::Instant::now();
                 let answer = workspace
                     .update(cx, |workspace, cx| match request.what {
-                        ConfigVerb::Reload => {
-                            workspace.reload(request.reply_connection.as_ref(), cx)
-                        }
+                        ConfigVerb::Reload => workspace.reload(cx),
                         // Printed from what the window is *using*, which after
                         // a reload is not necessarily what the file says, and
                         // which includes the window's font zoom.
@@ -339,11 +331,11 @@ impl Workspace {
         let control_task =
             lane_drain::drain_lane(control_receiver, window, cx, Self::serve_control);
         let mut workspace = Self {
-            control: ControlState::new(),
+            control,
+            #[cfg(test)]
             control_sender,
             _control_task: control_task,
             tabs,
-            endpoint,
             panes,
             command,
             font_zoom: None,
@@ -374,7 +366,8 @@ impl Workspace {
             _clock: clock,
             config_path,
             _reload: reload_task,
-            reload_sender,
+            #[cfg(test)]
+            reload_sender: reload_tx,
             surfaces,
             _surface_requests: surface_tasks,
             exit_sender,
@@ -447,7 +440,7 @@ impl Workspace {
                 )
             })
             .collect();
-        // Observation reports normalized geometry and each tab's own focus, independent of viewport size.
+        // Pane reads report normalized geometry and each tab's own focus, independent of viewport size.
         if published != self.published {
             self.panes.set_layout(&published);
             self.published = published;
@@ -551,7 +544,6 @@ impl Render for Workspace {
         let divider_children = self.divider_elements(strip, cx);
 
         let tab_children = self.tab_elements(cx);
-        let control_elements = self.control_elements(cx);
         let quit_scroll = cx.listener(|workspace, _: &gpui::ScrollWheelEvent, _window, cx| {
             if workspace.quit_gesture.visible() {
                 workspace.dismiss_pending_close(cx);
@@ -622,7 +614,6 @@ impl Render for Workspace {
                 )
             })
             .child(panes)
-            .children(control_elements)
             .when_some(self.mode.divider_drag(), |element, drag| {
                 element.child(Self::divider_overlay(drag, cx))
             })

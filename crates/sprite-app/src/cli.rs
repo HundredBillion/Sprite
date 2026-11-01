@@ -8,8 +8,6 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use crate::observation::request::Scope;
-use crate::pane_tree::PaneId;
 use crate::surface::DockSize;
 use crate::surface::channel::{Position as SurfacePosition, Side as SurfaceSide};
 
@@ -18,10 +16,9 @@ use crate::surface::channel::{Position as SurfacePosition, Side as SurfaceSide};
 pub enum Invocation {
     /// Open a window. What Sprite does with no arguments at all.
     Window(WindowArgs),
-    /// Ask the containing window about its panes and print the answer.
-    Snapshot(SnapshotArgs),
-    /// Ask the containing window to re-read its configuration file.
-    ConfigReload,
+    /// Ask a window to re-read its configuration file, naming the window
+    /// when the command can't tell which.
+    ConfigReload(Option<String>),
     PaneControl(crate::control::client::Args),
     /// Print the configuration that is actually in effect.
     ConfigPrint(ConfigPrintArgs),
@@ -38,6 +35,8 @@ pub enum Invocation {
 pub struct ConfigPrintArgs {
     /// Read this file instead of asking the window, or of discovery.
     pub path: Option<PathBuf>,
+    /// The window to ask, when the command can't tell which.
+    pub window: Option<String>,
 }
 
 /// Where to open a Surface, and whether it takes the keyboard.
@@ -73,18 +72,6 @@ pub struct WindowArgs {
     pub config: Option<PathBuf>,
 }
 
-/// Which panes to ask about, and how to print them.
-///
-/// The scope is the same type the wire parser produces, so the command line and
-/// the window cannot disagree about what a scope is or which combinations of
-/// flags exist.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SnapshotArgs {
-    pub scope: Scope,
-    pub lines: Option<usize>,
-    pub pretty: bool,
-}
-
 /// Why a command line could not be acted on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageError(pub String);
@@ -101,25 +88,21 @@ sprite — a terminal
     sprite                       open a window
     sprite -e <program> [args]   open a window running <program>
     sprite --config <path>       open a window reading settings from <path>
-    sprite panes access request  request owner-approved pane access
     sprite panes <command>       list/read/create/rename/move/focus/resize/close/input
-    sprite panes snapshot        print what other panes in this window show
-    sprite config reload         re-read the configuration file in this window
+    sprite config reload         re-read the configuration file in a window
     sprite config print          print the settings that are actually in effect
     sprite surface open …        draw native UI in this pane from a description on stdin
     sprite surface focus [ID]    hand the keyboard to this pane's terminal, or to Surface ID
     sprite token register <name> <#rrggbb> [description]
                                  add a colour token the theme can override
 
-Options for `config print`:
-    --config <path>              describe this file instead of asking the window
+Options for `config reload` and `config print`:
+    --window <id>                the window to ask, when several are running
+    --config <path>              (print only) describe this file instead
 
-Options for `panes snapshot`:
-    --include-self               include the pane making the request
-    --pane <id>                  one pane, named by the id the schema reports
-    --window                     every pane in this window
-    --lines <n>                  history lines per pane (0-5000, default 500)
-    --pretty                     lay the JSON out for a human
+Pane commands name panes by address, <window>:<pane>, as `panes list` prints
+them. `panes list` covers every running window. `panes create` and the config
+commands ask the window they run in, or the only one running, or --window.
 
 Options for `surface open` (one position is required):
     --fill                       in place of the grid
@@ -134,9 +117,9 @@ number of further JSON documents: a description replaces the Surface;
 does closing standard input. Events arrive on standard output, one JSON line
 each.
 
-The JSON goes to standard output and diagnostics to standard error. A response
-that parses exits zero even when `complete` is false, because the panes that did
-answer are still usable.";
+The JSON goes to standard output and diagnostics to standard error. Exit status:
+0 ok, 2 bad arguments, 4 no window could be reached, 5 the window refused or the
+outcome is unknown.";
 
 /// Reads a command line, without acting on any of it.
 pub fn parse_arguments<I, S>(arguments: I) -> Result<Invocation, UsageError>
@@ -170,13 +153,7 @@ where
             };
             match text(&sub).as_deref() {
                 Some("print") => config_print(arguments).map(Invocation::ConfigPrint),
-                Some("reload") => match arguments.next() {
-                    None => Ok(Invocation::ConfigReload),
-                    Some(extra) => Err(UsageError(format!(
-                        "config reload takes no arguments, but was given {}",
-                        extra.to_string_lossy()
-                    ))),
-                },
+                Some("reload") => config_reload(arguments).map(Invocation::ConfigReload),
                 Some(other) => Err(UsageError(format!("unknown config command: {other}"))),
                 None => Err(UsageError("arguments must be valid text".to_owned())),
             }
@@ -186,11 +163,10 @@ where
             // empty one and report it as unknown, which tells a person nothing.
             let Some(sub) = arguments.next() else {
                 return Err(UsageError(
-                    "panes needs a command, such as: snapshot".to_owned(),
+                    "panes needs a command, such as: list".to_owned(),
                 ));
             };
             match text(&sub).as_deref() {
-                Some("snapshot") => snapshot(arguments).map(Invocation::Snapshot),
                 Some(other) => {
                     crate::control::client::parse(other, arguments).map(Invocation::PaneControl)
                 }
@@ -277,6 +253,7 @@ fn config_print(arguments: impl Iterator<Item = OsString>) -> Result<ConfigPrint
                 }
                 parsed.path = Some(PathBuf::from(path));
             }
+            Some("--window") => parsed.window = Some(window_id(&mut arguments)?),
             Some(other) => return Err(UsageError(format!("unknown option: {other}"))),
             None => return Err(UsageError("arguments must be valid text".to_owned())),
         }
@@ -284,52 +261,30 @@ fn config_print(arguments: impl Iterator<Item = OsString>) -> Result<ConfigPrint
     Ok(parsed)
 }
 
-fn snapshot(arguments: impl Iterator<Item = OsString>) -> Result<SnapshotArgs, UsageError> {
-    let mut arguments = arguments.peekable();
-    let mut parsed = SnapshotArgs::default();
-    let mut scope_given = false;
-
+fn config_reload(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Option<String>, UsageError> {
+    let mut window = None;
     while let Some(argument) = arguments.next() {
-        let Some(word) = text(&argument) else {
-            return Err(UsageError("arguments must be valid text".to_owned()));
-        };
-        match word.as_str() {
-            "--pretty" => parsed.pretty = true,
-            "--include-self" => {
-                // Refused rather than ignored where it would mean nothing: with
-                // `--window` or `--pane` the request already covers this pane,
-                // and silently accepting a flag that changes nothing teaches a
-                // caller that it did something.
-                if scope_given {
-                    return Err(UsageError(
-                        "--include-self applies to the default tab scope, not --window or --pane"
-                            .to_owned(),
-                    ));
-                }
-                parsed.scope = Scope::Tab { include_self: true };
+        match text(&argument).as_deref() {
+            Some("--window") => window = Some(window_id(&mut arguments)?),
+            _ => {
+                return Err(UsageError(format!(
+                    "config reload takes only --window, but was given {}",
+                    argument.to_string_lossy()
+                )));
             }
-            "--window" => {
-                if scope_given || matches!(parsed.scope, Scope::Tab { include_self: true }) {
-                    return Err(UsageError("choose one of --window or --pane".to_owned()));
-                }
-                scope_given = true;
-                parsed.scope = Scope::Window;
-            }
-            "--pane" => {
-                if scope_given || matches!(parsed.scope, Scope::Tab { include_self: true }) {
-                    return Err(UsageError("choose one of --window or --pane".to_owned()));
-                }
-                scope_given = true;
-                parsed.scope = Scope::Pane(PaneId(number(&mut arguments, "--pane")?));
-            }
-            "--lines" => {
-                let lines = number(&mut arguments, "--lines")?;
-                parsed.lines = Some(usize::try_from(lines).unwrap_or(usize::MAX));
-            }
-            other => return Err(UsageError(format!("unknown option: {other}"))),
         }
     }
-    Ok(parsed)
+    Ok(window)
+}
+
+fn window_id(arguments: &mut impl Iterator<Item = OsString>) -> Result<String, UsageError> {
+    arguments
+        .next()
+        .and_then(|value| text(&value))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| UsageError("--window needs a window id".to_owned()))
 }
 
 fn surface_open(
@@ -460,12 +415,20 @@ mod tests {
     fn config_print_can_be_pointed_at_a_file() {
         assert_eq!(
             parsed(&["config", "print"]),
-            Invocation::ConfigPrint(ConfigPrintArgs { path: None })
+            Invocation::ConfigPrint(ConfigPrintArgs::default())
         );
         assert_eq!(
             parsed(&["config", "print", "--config", "/tmp/other.toml"]),
             Invocation::ConfigPrint(ConfigPrintArgs {
                 path: Some(PathBuf::from("/tmp/other.toml")),
+                window: None,
+            })
+        );
+        assert_eq!(
+            parsed(&["config", "print", "--window", "abc"]),
+            Invocation::ConfigPrint(ConfigPrintArgs {
+                path: None,
+                window: Some("abc".to_owned()),
             })
         );
         assert_eq!(
@@ -478,7 +441,11 @@ mod tests {
     fn config_reload_is_its_own_invocation() {
         assert_eq!(
             parse_arguments(["config", "reload"]).expect("parse"),
-            Invocation::ConfigReload
+            Invocation::ConfigReload(None)
+        );
+        assert_eq!(
+            parse_arguments(["config", "reload", "--window", "abc"]).expect("parse"),
+            Invocation::ConfigReload(Some("abc".to_owned()))
         );
     }
 
@@ -540,91 +507,22 @@ mod tests {
     }
 
     #[test]
-    fn the_default_snapshot_scope_is_the_tab_without_this_pane() {
-        assert_eq!(
-            parsed(&["panes", "snapshot"]),
-            Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Tab {
-                    include_self: false,
-                },
-                lines: None,
-                pretty: false,
-            })
-        );
-    }
-
-    #[test]
-    fn scope_options_are_read() {
-        assert_eq!(
-            parsed(&["panes", "snapshot", "--window"]),
-            Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Window,
-                ..SnapshotArgs::default()
-            })
-        );
-        assert_eq!(
-            parsed(&["panes", "snapshot", "--pane", "7"]),
-            Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Pane(PaneId(7)),
-                ..SnapshotArgs::default()
-            })
-        );
-        assert_eq!(
-            parsed(&["panes", "snapshot", "--include-self"]),
-            Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Tab { include_self: true },
-                ..SnapshotArgs::default()
-            })
-        );
-        assert_eq!(
-            parsed(&["panes", "snapshot", "--lines", "12", "--pretty"]),
-            Invocation::Snapshot(SnapshotArgs {
-                scope: Scope::Tab {
-                    include_self: false,
-                },
-                lines: Some(12),
-                pretty: true,
-            })
-        );
-    }
-
-    /// The window refuses `--include-self` alongside a wider scope, so the
-    /// client must not offer the combination and then report the window's
-    /// refusal as though the request had been reasonable.
-    #[test]
-    fn contradictory_scopes_are_refused_here_rather_than_by_the_window() {
-        assert!(
-            rejected(&["panes", "snapshot", "--window", "--include-self"])
-                .contains("--include-self")
-        );
-        assert!(rejected(&["panes", "snapshot", "--include-self", "--window"]).contains("one of"));
-        assert!(rejected(&["panes", "snapshot", "--window", "--pane", "1"]).contains("one of"));
-        assert!(rejected(&["panes", "snapshot", "--pane", "1", "--window"]).contains("one of"));
-    }
-
-    #[test]
     fn nonsense_is_refused_with_something_a_person_can_act_on() {
         assert_eq!(rejected(&["--nonsense"]), "unknown argument: --nonsense");
-        assert_eq!(
-            rejected(&["panes"]),
-            "panes needs a command, such as: snapshot"
-        );
+        assert_eq!(rejected(&["panes"]), "panes needs a command, such as: list");
         assert_eq!(
             rejected(&["panes", "write"]),
             "unknown panes command: write"
         );
         assert_eq!(
-            rejected(&["panes", "snapshot", "--exec", "ls"]),
+            rejected(&["panes", "read", "--pane", "w:0", "--exec", "ls"]),
             "unknown option: --exec"
         );
         assert_eq!(
-            rejected(&["panes", "snapshot", "--lines"]),
-            "--lines needs a number"
+            rejected(&["panes", "read", "--pane", "w:0", "--lines"]),
+            "--lines needs a value"
         );
-        assert_eq!(
-            rejected(&["panes", "snapshot", "--pane", "everything"]),
-            "--pane needs a number"
-        );
+        assert!(rejected(&["panes", "read", "--pane", "7"]).contains("<window>:<pane>"));
     }
 
     #[test]
@@ -718,9 +616,12 @@ mod tests {
 mod control_cli_tests {
     use super::*;
     #[test]
-    fn public_control_commands_require_explicit_access() {
-        assert!(parse_arguments(["panes", "list", "--access", "/tmp/access.json"]).is_ok());
-        assert!(parse_arguments(["panes", "list"]).is_err());
-        assert!(parse_arguments(["panes", "list", "--access", "/tmp/a", "--surprise"]).is_err());
+    fn pane_commands_need_no_access_file() {
+        assert!(parse_arguments(["panes", "list"]).is_ok());
+        assert!(parse_arguments(["panes", "list", "--access", "/tmp/access.json"]).is_err());
+        assert!(parse_arguments(["panes", "access", "request"]).is_err());
+        assert!(parse_arguments(["panes", "snapshot"]).is_err());
+        assert!(parse_arguments(["panes", "create", "--window", "abc"]).is_ok());
+        assert!(parse_arguments(["panes", "read", "--window", "abc", "--pane", "abc:0"]).is_err());
     }
 }

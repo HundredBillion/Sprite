@@ -1,9 +1,9 @@
 //! The Surface Channel: the window's second endpoint, over which a program
 //! opens and drives Surfaces in its own pane.
 //!
-//! It shares the observation endpoint's key type, directory, and authentication
-//! but not its grammar. Pane queries are read-only; observation also carries
-//! configuration print/reload. Only this adapter opens Surfaces or changes focus.
+//! It shares the window socket's directory and transport, and adds a key that
+//! only the window's own sessions are given. Pane Control never opens
+//! Surfaces; only this adapter does.
 //!
 //! One connection per Surface, alive for the Surface's life: the program
 //! streams updates down it and receives input and events up it, as
@@ -27,7 +27,7 @@ use sprite_term::Rgb;
 pub use super::wire::*;
 use super::wire::{FirstRequest, Message, first_line, stream_line};
 use crate::local_socket::{
-    Authenticated, ConnectionSlot, LocalSocket, ObservationKey, TransportPolicy, runtime_directory,
+    Authenticated, ConnectionSlot, LocalSocket, SocketKey, TransportPolicy, runtime_directory,
 };
 use crate::pane_tree::PaneId;
 use crate::surface::lanes::SurfaceLanes;
@@ -48,8 +48,8 @@ const NO_ANSWER: &str = "this window did not answer in time";
 const BUSY: &str = "this window is busy; nothing was changed";
 
 /// Hex digits in a socket file name. With the `.surface.sock` suffix this is
-/// as wide as the observation socket's name, which is measured against a
-/// macOS `$TMPDIR` in the tests below; a longer name would not fit there.
+/// measured against a macOS `$TMPDIR` in the tests below; a longer name would
+/// not fit there.
 const SOCKET_HEX: usize = 16;
 /// The width of `<SOCKET_HEX hex>.surface.sock`.
 #[cfg(test)] // Measured only by the macOS path-length test below.
@@ -782,13 +782,13 @@ pub struct SurfaceEndpoint {
 }
 
 impl SurfaceEndpoint {
-    pub fn open(key: Arc<ObservationKey>, lanes: SurfaceLanes) -> std::io::Result<Self> {
+    pub fn open(key: Arc<SocketKey>, lanes: SurfaceLanes) -> std::io::Result<Self> {
         Self::open_in(runtime_directory()?, key, lanes)
     }
 
     pub fn open_in(
         directory: PathBuf,
-        key: Arc<ObservationKey>,
+        key: Arc<SocketKey>,
         lanes: SurfaceLanes,
     ) -> std::io::Result<Self> {
         let policy = TransportPolicy {
@@ -818,20 +818,15 @@ impl SurfaceEndpoint {
         self.transport.key_hex()
     }
 
-    /// What one pane's session needs to open Surfaces in itself. `SPRITE_PANE`
-    /// repeats what the observation endpoint exports, with the same value, so
-    /// a session has it whether or not observation is on.
-    pub fn environment(&self, pane: PaneId) -> Vec<(OsString, OsString)> {
+    /// What one pane's session needs to open Surfaces in itself. The pane it
+    /// draws in comes from `SPRITE_PANE`, which every session is given.
+    pub fn environment(&self) -> Vec<(OsString, OsString)> {
         vec![
             (
                 OsString::from(SOCKET_VARIABLE),
                 OsString::from(self.socket_path().as_os_str()),
             ),
             (OsString::from(KEY_VARIABLE), OsString::from(self.key_hex())),
-            (
-                OsString::from("SPRITE_PANE"),
-                OsString::from(pane.0.to_string()),
-            ),
         ]
     }
 
@@ -1061,7 +1056,7 @@ mod tests {
     use serde_json::{Value, json};
 
     /// A private directory of this test's own, removed when it is dropped.
-    /// Named as short as the observation tests name theirs, because it sits
+    /// Named short, because it sits
     /// inside `$TMPDIR`, which on macOS is already ~48 bytes, and what is left
     /// has to hold a socket name.
     struct Scratch(PathBuf);
@@ -1117,7 +1112,7 @@ mod tests {
 
     fn endpoint(scratch: &Scratch) -> (SurfaceEndpoint, SurfaceReceivers) {
         let (lanes, receivers) = surface_lanes_with(8, 8);
-        let key = Arc::new(ObservationKey::generate().expect("key"));
+        let key = Arc::new(SocketKey::generate().expect("key"));
         let endpoint = SurfaceEndpoint::open_in(scratch.0.clone(), key, lanes).expect("open");
         (endpoint, receivers)
     }
@@ -1659,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_socket_permissions_and_platform_path_limit_match_observation() {
+    fn surface_socket_permissions_and_platform_path_limit_match_the_window_socket() {
         use crate::local_socket::MAX_SOCKET_PATH;
         use std::os::unix::fs::PermissionsExt;
         let scratch = Scratch::new();
@@ -1669,7 +1664,7 @@ mod tests {
             let (lanes, _receivers) = surface_lanes_with(1, 1);
             let endpoint = SurfaceEndpoint::open_in(
                 directory.clone(),
-                Arc::new(ObservationKey::generate().unwrap()),
+                Arc::new(SocketKey::generate().unwrap()),
                 lanes,
             );
             if length > MAX_SOCKET_PATH {
@@ -2535,10 +2530,10 @@ mod tests {
     }
 
     #[test]
-    fn a_session_is_told_the_surface_socket_the_shared_key_and_its_identity() {
+    fn a_session_is_told_the_surface_socket_and_its_key() {
         let scratch = Scratch::new();
         let (endpoint, _rx) = endpoint(&scratch);
-        let environment = endpoint.environment(PaneId(5));
+        let environment = endpoint.environment();
         let get = |name: &str| {
             environment
                 .iter()
@@ -2551,26 +2546,34 @@ mod tests {
         );
         assert_eq!(get(KEY_VARIABLE), Some(endpoint.key_hex()));
         assert_eq!(
-            get("SPRITE_TAB"),
-            None,
-            "a pane can move tabs; only its pane id is stable"
+            environment.len(),
+            2,
+            "the pane's address is set by its window"
         );
-        assert_eq!(get("SPRITE_PANE").as_deref(), Some("5"));
     }
 
     #[test]
-    fn the_surface_socket_lives_beside_the_observation_socket_and_neither_sweeps_the_other() {
+    fn the_surface_socket_lives_beside_the_window_socket_and_neither_sweeps_the_other() {
         let scratch = Scratch::new();
-        let observation =
-            crate::observation::endpoint::Endpoint::open_in(scratch.0.clone(), |_| String::new())
-                .expect("observation endpoint");
+        let (control, _control) = async_channel::bounded(1);
+        let (reload, _reload) = async_channel::bounded(1);
+        let window = crate::control::open_window_socket(
+            &scratch.0,
+            "window".into(),
+            crate::control::Lanes {
+                control,
+                reload,
+                panes: crate::observation::panes::WindowPanes::new(),
+            },
+        )
+        .expect("window socket");
         let (surfaces, _rx) = endpoint(&scratch);
         // A third endpoint opening sweeps dead sockets; the two live ones stay.
         let (later, _rx2) = endpoint(&scratch);
-        assert!(UnixStream::connect(observation.socket_path()).is_ok());
+        assert!(UnixStream::connect(window.socket_path()).is_ok());
         assert!(UnixStream::connect(surfaces.socket_path()).is_ok());
         assert!(UnixStream::connect(later.socket_path()).is_ok());
-        assert_ne!(observation.socket_path(), surfaces.socket_path());
+        assert_ne!(window.socket_path(), surfaces.socket_path());
     }
 
     #[test]

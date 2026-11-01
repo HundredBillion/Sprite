@@ -443,10 +443,6 @@ impl PaneIds {
         Self::default()
     }
 
-    pub(crate) fn was_allocated(&self, pane: PaneId) -> bool {
-        pane.0 < self.next
-    }
-
     pub fn allocate(&mut self) -> PaneId {
         let id = PaneId(self.next);
         self.next += 1;

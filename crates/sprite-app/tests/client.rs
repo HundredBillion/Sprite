@@ -1,4 +1,5 @@
-//! `sprite panes snapshot`, exercised as a real process.
+//! `sprite panes`, `sprite config` and `sprite surface`, exercised as a real
+//! process.
 //!
 //! These run the built binary rather than calling into the library, because the
 //! promises being checked are about a command: what reaches standard output,
@@ -19,8 +20,6 @@ mod test_child;
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-use sprite_app::Endpoint;
 
 /// The binary under test, built by cargo for this run.
 const SPRITE: &str = env!("CARGO_BIN_EXE_sprite");
@@ -110,7 +109,7 @@ fn surface_window(
     script: impl FnMut(sprite_app::SurfaceRequest) -> bool + Send + 'static,
 ) -> (sprite_app::SurfaceEndpoint, std::thread::JoinHandle<()>) {
     let (lanes, receivers) = sprite_app::surface_lanes();
-    let key = std::sync::Arc::new(sprite_app::ObservationKey::generate().expect("key"));
+    let key = std::sync::Arc::new(sprite_app::SocketKey::generate().expect("key"));
     let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), key, lanes).expect("endpoint");
     // Both lanes feed the one script, whichever lane a request came by.
     let (merged, requests) = std::sync::mpsc::channel();
@@ -187,7 +186,7 @@ fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
         | sprite_app::SurfaceRequest::List { .. }
         | sprite_app::SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
     });
-    let credentials = surface_credentials(&endpoint, "4");
+    let credentials = surface_credentials(&endpoint, "f00d:4");
     let input = format!(
         "{DESCRIPTION}\n{{ \"version\": 1, \"root\": {{ \"kind\": \"text\", \"text\": \"again\" }} }}\n{{\"type\":\"focus\",\"target\":\"terminal\"}}\n"
     );
@@ -343,20 +342,105 @@ fn scratch() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("sprite-client-{}-{ordinal}", std::process::id()))
 }
 
-/// A window that answers with whatever `answer` produces.
-fn window(answer: impl Fn() -> String + Send + Sync + 'static) -> Endpoint {
-    Endpoint::open_in(scratch(), move |_request| answer()).expect("open an endpoint")
+/// A runtime directory of the test's own, named the way both platforms name
+/// it, so the command finds window sockets here and nowhere else.
+struct Runtime {
+    root: std::path::PathBuf,
 }
 
-fn credentials(endpoint: &Endpoint, pane: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            "SPRITE_OBSERVATION_SOCKET".to_owned(),
-            endpoint.socket_path().to_string_lossy().into_owned(),
-        ),
-        ("SPRITE_OBSERVATION_KEY".to_owned(), endpoint.key_hex()),
-        ("SPRITE_PANE".to_owned(), pane.to_owned()),
-    ]
+impl Runtime {
+    fn new() -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = scratch();
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(root.join("sprite"))
+            .expect("runtime directory");
+        Self { root }
+    }
+
+    fn environment(&self) -> Vec<(String, String)> {
+        let root = self.root.to_string_lossy().into_owned();
+        vec![
+            ("TMPDIR".to_owned(), root.clone()),
+            ("XDG_RUNTIME_DIR".to_owned(), root),
+        ]
+    }
+
+    fn socket(&self, window: &str) -> std::path::PathBuf {
+        self.root
+            .join("sprite")
+            .join(format!("window-{window}.sock"))
+    }
+
+    /// A window that answers every request with `answer(request)`, and
+    /// records what it was sent.
+    fn window(
+        &self,
+        id: &str,
+        answer: impl Fn(&serde_json::Value) -> serde_json::Value + Send + 'static,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        use std::io::{BufRead, BufReader, Write};
+        let listener =
+            std::os::unix::net::UnixListener::bind(self.socket(id)).expect("bind a window");
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let recorder = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut line = String::new();
+                // A connection that sends nothing is the command checking
+                // the window is alive.
+                if BufReader::new(&stream).read_line(&mut line).is_err() || line.is_empty() {
+                    continue;
+                }
+                recorder.lock().expect("lock").push(line.clone());
+                let request: serde_json::Value =
+                    serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
+                writeln!(stream, "{}", answer(&request)).ok();
+            }
+        });
+        seen
+    }
+
+    /// What a window killed rather than closed leaves: a socket file with
+    /// nothing listening on it.
+    fn dead_window(&self, id: &str) {
+        drop(std::os::unix::net::UnixListener::bind(self.socket(id)).expect("bind"));
+    }
+}
+
+/// A window's answer to `request`.
+fn reply(
+    request: &serde_json::Value,
+    outcome: &str,
+    result: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "sprite-pane-control/2",
+        "id": request["id"],
+        "outcome": outcome,
+        "result": result,
+    })
+}
+
+/// A window with one pane, `<id>:0`, that lists it and accepts everything else.
+fn one_pane_window(
+    runtime: &Runtime,
+    id: &'static str,
+) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+    runtime.window(id, move |request| {
+        match request["operation"]["op"].as_str() {
+            Some("list") => reply(
+                request,
+                "ok",
+                serde_json::json!({"window": id, "panes": [{"id": format!("{id}:0")}]}),
+            ),
+            Some("create") => reply(request, "ok", serde_json::json!({"id": format!("{id}:1")})),
+            _ => reply(request, "ok", serde_json::Value::Null),
+        }
+    })
 }
 
 fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -366,182 +450,142 @@ fn borrowed(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// The case a person hits first: running the command in an ordinary terminal.
-/// It must say something useful, fail, and return — never wait for a socket
-/// that does not exist.
 #[test]
-fn outside_a_sprite_window_it_fails_clearly_and_promptly() {
-    let outcome = run(&["panes", "snapshot"], &[]);
-
-    assert_ne!(outcome.status, 0, "a failure is reported as one");
-    assert!(outcome.out.is_empty(), "nothing is written to stdout");
-    assert!(
-        outcome
-            .errors
-            .contains("not running inside a Sprite window"),
-        "the diagnostic says what is wrong: {:?}",
-        outcome.errors
-    );
-    assert!(
-        outcome.took < watchdog(),
-        "it returned rather than hanging: {:?}",
-        outcome.took
-    );
-}
-
-/// Credentials that point at nothing must fail rather than block.
-#[test]
-fn a_socket_that_is_not_there_fails_rather_than_hanging() {
-    let outcome = run(
-        &["panes", "snapshot", "--window"],
-        &[
-            ("SPRITE_OBSERVATION_SOCKET", "/nonexistent/sprite.sock"),
-            ("SPRITE_OBSERVATION_KEY", &"a".repeat(64)),
-            ("SPRITE_PANE", "0"),
-        ],
-    );
-
-    assert_ne!(outcome.status, 0);
-    assert!(outcome.out.is_empty());
-    assert!(outcome.errors.contains("could not ask this window"));
+fn listing_with_no_window_running_is_an_empty_answer() {
+    let runtime = Runtime::new();
+    let outcome = run(&["panes", "list"], &borrowed(&runtime.environment()));
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    let parsed: serde_json::Value = serde_json::from_str(&outcome.out).expect("JSON");
+    assert_eq!(parsed["result"]["panes"], serde_json::json!([]));
     assert!(outcome.took < watchdog());
 }
 
+/// `panes list` asks every running window and merges what they say. A socket
+/// left by a killed window is skipped, not reported.
 #[test]
-fn a_valid_answer_reaches_stdout_and_exits_zero() {
-    let endpoint = window(|| {
-        r#"{"schema_version":1,"complete":true,"panes":[{"pane":1}],"errors":[]}"#.to_owned()
-    });
-    let environment = credentials(&endpoint, "0");
-    let outcome = run(&["panes", "snapshot"], &borrowed(&environment));
-
-    assert_eq!(outcome.status, 0);
-    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&outcome.out).expect("stdout is the JSON answer");
-    assert_eq!(parsed["schema_version"], 1);
-}
-
-/// The rule this task states outright: a partial answer is still an answer.
-#[test]
-fn an_incomplete_answer_still_exits_zero() {
-    let endpoint = window(|| {
-        r#"{"schema_version":1,"complete":false,"panes":[{"pane":1}],
-            "errors":[{"pane":2,"error":"pane_timeout"}]}"#
-            .to_owned()
-    });
-    let environment = credentials(&endpoint, "0");
-    let outcome = run(&["panes", "snapshot"], &borrowed(&environment));
-
-    assert_eq!(
-        outcome.status, 0,
-        "healthy snapshots remain usable, so this is a success"
-    );
+fn listing_merges_every_running_window_and_skips_dead_sockets() {
+    let runtime = Runtime::new();
+    one_pane_window(&runtime, "aaaa");
+    one_pane_window(&runtime, "bbbb");
+    runtime.dead_window("cccc");
+    let outcome = run(&["panes", "list"], &borrowed(&runtime.environment()));
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
     let parsed: serde_json::Value = serde_json::from_str(&outcome.out).expect("JSON");
-    assert_eq!(parsed["complete"], false);
-}
-
-/// A refusal is a diagnostic, not data. It must never reach standard output,
-/// where a caller parsing the command's output would treat it as an answer.
-#[test]
-fn a_refusal_goes_to_stderr_and_never_to_stdout() {
-    let endpoint = window(|| "denied".to_owned());
-    let environment = credentials(&endpoint, "0");
-    let outcome = run(&["panes", "snapshot"], &borrowed(&environment));
-
-    assert_ne!(outcome.status, 0);
-    assert!(
-        outcome.out.is_empty(),
-        "stdout carries answers only: {:?}",
-        outcome.out
+    assert_eq!(
+        parsed["result"]["windows"],
+        serde_json::json!(["aaaa", "bbbb"])
     );
-    assert!(outcome.errors.contains("denied"));
+    assert_eq!(
+        parsed["result"]["panes"],
+        serde_json::json!([{"id": "aaaa:0"}, {"id": "bbbb:0"}])
+    );
 }
 
+/// A request is one JSON line with no key, sent to the window its pane
+/// address names.
 #[test]
-fn the_request_carries_the_options_the_command_was_given() {
-    use std::sync::{Arc, Mutex};
-
-    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-    let recorder = Arc::clone(&seen);
-    let endpoint = Endpoint::open_in(scratch(), move |request| {
-        recorder.lock().expect("lock").push(request.body.clone());
-        r#"{"schema_version":1,"complete":true,"panes":[],"errors":[]}"#.to_owned()
-    })
-    .expect("open an endpoint");
-
-    let environment = credentials(&endpoint, "3");
+fn a_request_carries_no_key_and_goes_to_the_window_it_names() {
+    let runtime = Runtime::new();
+    let first = one_pane_window(&runtime, "aaaa");
+    let second = one_pane_window(&runtime, "bbbb");
     let outcome = run(
-        &["panes", "snapshot", "--window", "--lines", "42", "--pretty"],
+        &["panes", "read", "--pane", "bbbb:0", "--lines", "42"],
+        &borrowed(&runtime.environment()),
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert!(first.lock().expect("lock").is_empty());
+    let sent = second.lock().expect("lock").clone();
+    let request: serde_json::Value = serde_json::from_str(&sent[0]).expect("one JSON line");
+    assert_eq!(request["protocol"], "sprite-pane-control/2");
+    assert_eq!(request["window"], "bbbb");
+    assert_eq!(
+        request["operation"],
+        serde_json::json!({"op": "read", "pane": "bbbb:0", "lines": 42})
+    );
+}
+
+/// An address whose window isn't running fails at once, saying so, with
+/// nothing on standard output.
+#[test]
+fn an_address_for_a_window_that_is_not_running_fails_clearly() {
+    let runtime = Runtime::new();
+    runtime.dead_window("dddd");
+    for pane in ["dddd:0", "eeee:0"] {
+        let outcome = run(
+            &["panes", "focus", "--pane", pane],
+            &borrowed(&runtime.environment()),
+        );
+        assert_eq!(outcome.status, 4, "{pane}");
+        assert!(outcome.out.is_empty(), "{}", outcome.out);
+        assert!(
+            outcome.errors.contains("is not running"),
+            "{}",
+            outcome.errors
+        );
+        assert!(outcome.took < watchdog());
+    }
+}
+
+/// A window that answers but does not do it exits 5, with its answer on
+/// standard output for a caller to read.
+#[test]
+fn a_window_that_refuses_exits_five_with_its_answer() {
+    let runtime = Runtime::new();
+    runtime.window("aaaa", |request| {
+        reply(request, "gone", serde_json::Value::Null)
+    });
+    let outcome = run(
+        &["panes", "close", "--pane", "aaaa:3"],
+        &borrowed(&runtime.environment()),
+    );
+    assert_eq!(outcome.status, 5);
+    let parsed: serde_json::Value = serde_json::from_str(&outcome.out).expect("JSON");
+    assert_eq!(parsed["outcome"], "gone");
+}
+
+/// `create` with no anchor asks the window it runs in, else the only window
+/// running, else asks the caller to choose.
+#[test]
+fn create_without_an_anchor_finds_its_window() {
+    let runtime = Runtime::new();
+    let first = one_pane_window(&runtime, "aaaa");
+    let mut environment = runtime.environment();
+
+    let outcome = run(&["panes", "create"], &borrowed(&environment));
+    assert_eq!(outcome.status, 0, "the only window: {}", outcome.errors);
+    assert_eq!(first.lock().expect("lock").len(), 1);
+
+    let second = one_pane_window(&runtime, "bbbb");
+    let outcome = run(&["panes", "create"], &borrowed(&environment));
+    assert_eq!(outcome.status, 4);
+    assert!(outcome.errors.contains("--window"), "{}", outcome.errors);
+
+    let outcome = run(
+        &["panes", "create", "--window", "bbbb"],
         &borrowed(&environment),
     );
-    assert_eq!(outcome.status, 0);
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert_eq!(second.lock().expect("lock").len(), 1);
 
-    let request = seen
-        .lock()
-        .expect("lock")
-        .first()
-        .expect("the window was asked")
-        .clone();
-    assert!(request.contains("sprite-observation/1"), "{request}");
-    assert!(request.contains("--from 3"), "its own pane: {request}");
-    assert!(request.contains("--window"));
-    assert!(request.contains("--lines 42"));
-    assert!(request.contains("--pretty"));
-}
-
-/// A wrong key must be refused by the window, not merely by politeness on the
-/// client's side.
-#[test]
-fn a_client_holding_the_wrong_key_is_refused_by_the_window() {
-    let endpoint = window(|| r#"{"schema_version":1}"#.to_owned());
-    let outcome = run(
-        &["panes", "snapshot", "--window"],
-        &[
-            (
-                "SPRITE_OBSERVATION_SOCKET",
-                &endpoint.socket_path().to_string_lossy(),
-            ),
-            ("SPRITE_OBSERVATION_KEY", &"b".repeat(64)),
-            ("SPRITE_PANE", "0"),
-        ],
-    );
-
-    assert_ne!(outcome.status, 0);
-    assert!(outcome.out.is_empty());
-    assert!(outcome.errors.contains("denied"), "{:?}", outcome.errors);
-}
-
-/// The window is what sets `SPRITE_PANE`, so a value that is not a pane id
-/// means something outside Sprite replaced it. The command says so and stops.
-///
-/// `--window` is the scope that makes this worth a test: it needs no pane
-/// identity, so treating the bad value as simply absent would let the request
-/// through and report success on a tampered environment.
-#[test]
-fn a_pane_identity_that_is_not_a_pane_id_is_refused_before_the_window_is_asked() {
-    let endpoint = window(|| r#"{"schema_version":1}"#.to_owned());
-    let environment = credentials(&endpoint, "not-a-pane");
-    let outcome = run(&["panes", "snapshot", "--window"], &borrowed(&environment));
-
-    assert_eq!(outcome.status, 2, "a usage error is its own status");
-    assert!(outcome.out.is_empty(), "{:?}", outcome.out);
-    assert!(
-        outcome.errors.contains("SPRITE_PANE"),
-        "the diagnostic names the variable a person has to fix: {:?}",
-        outcome.errors
+    environment.push(("SPRITE_PANE".to_owned(), "aaaa:0".to_owned()));
+    let outcome = run(&["panes", "create"], &borrowed(&environment));
+    assert_eq!(outcome.status, 0, "{}", outcome.errors);
+    assert_eq!(
+        first.lock().expect("lock").len(),
+        2,
+        "the window it runs in"
     );
 }
 
 #[test]
 fn a_misspelled_option_fails_before_anything_is_asked() {
-    let outcome = run(&["panes", "snapshot", "--windwo"], &[]);
+    let outcome = run(&["panes", "read", "--pane", "aaaa:0", "--windwo", "x"], &[]);
 
     assert_eq!(outcome.status, 2, "a usage error is its own status");
     assert!(outcome.out.is_empty());
     assert!(outcome.errors.contains("unknown option: --windwo"));
     assert!(
-        outcome.errors.contains("sprite panes snapshot"),
+        outcome.errors.contains("sprite panes <command>"),
         "usage follows"
     );
 }
@@ -550,7 +594,7 @@ fn a_misspelled_option_fails_before_anything_is_asked() {
 fn help_and_version_are_answers_rather_than_errors() {
     let help = run(&["--help"], &[]);
     assert_eq!(help.status, 0);
-    assert!(help.out.contains("sprite panes snapshot"));
+    assert!(help.out.contains("sprite panes <command>"));
 
     let version = run(&["--version"], &[]);
     assert_eq!(version.status, 0);
@@ -558,37 +602,56 @@ fn help_and_version_are_answers_rather_than_errors() {
 }
 
 #[test]
-fn config_print_refuses_wrong_credentials_without_stdout() {
-    let endpoint = window(|| "unused".to_owned());
-    let mut environment = credentials(&endpoint, "0");
-    environment
-        .iter_mut()
-        .find(|(name, _)| name == "SPRITE_OBSERVATION_KEY")
-        .unwrap()
-        .1 = "b".repeat(64);
-    let outcome = run(&["config", "print"], &borrowed(&environment));
-    assert_eq!(outcome.status, 5);
-    assert!(outcome.out.is_empty(), "{}", outcome.out);
-    assert!(outcome.errors.contains("denied"), "{}", outcome.errors);
-}
-
-#[test]
 fn config_print_validates_the_window_answer_before_printing() {
     for answer in ["not TOML", "font = [", "font = 42"] {
-        let endpoint = window(move || answer.to_owned());
-        let environment = credentials(&endpoint, "0");
-        let outcome = run(&["config", "print"], &borrowed(&environment));
+        let runtime = Runtime::new();
+        runtime.window("aaaa", move |request| {
+            reply(request, "ok", serde_json::json!({"settings": answer}))
+        });
+        let outcome = run(&["config", "print"], &borrowed(&runtime.environment()));
         assert_eq!(outcome.status, 5, "{answer}");
         assert!(outcome.out.is_empty(), "{}", outcome.out);
         assert!(!outcome.errors.is_empty());
     }
     let settings = sprite_app::Settings::default().to_toml();
     let response = settings.clone();
-    let endpoint = window(move || response.clone());
-    let environment = credentials(&endpoint, "0");
-    let outcome = run(&["config", "print"], &borrowed(&environment));
+    let runtime = Runtime::new();
+    let seen = runtime.window("aaaa", move |request| {
+        reply(request, "ok", serde_json::json!({"settings": response}))
+    });
+    let outcome = run(&["config", "print"], &borrowed(&runtime.environment()));
     assert_eq!(outcome.status, 0, "{}", outcome.errors);
     assert!(outcome.out.contains(settings.trim_end()));
+    let request: serde_json::Value =
+        serde_json::from_str(&seen.lock().expect("lock")[0]).expect("JSON");
+    assert_eq!(
+        request["operation"],
+        serde_json::json!({"op": "config_print"})
+    );
+}
+
+/// A reload the window could not apply is reported on standard error and
+/// exits 5; one it applied prints the window's report and exits 0.
+#[test]
+fn config_reload_reports_whether_the_window_applied_it() {
+    for (applied, status) in [(true, 0), (false, 5)] {
+        let runtime = Runtime::new();
+        runtime.window("aaaa", move |request| {
+            reply(
+                request,
+                "ok",
+                serde_json::json!({"applied": applied, "message": "the report"}),
+            )
+        });
+        let outcome = run(&["config", "reload"], &borrowed(&runtime.environment()));
+        assert_eq!(outcome.status, status, "{}", outcome.errors);
+        let printed = if applied {
+            &outcome.out
+        } else {
+            &outcome.errors
+        };
+        assert!(printed.contains("the report"), "{printed}");
+    }
 }
 
 /// A file named outright that cannot be read is said to be unreadable, in the

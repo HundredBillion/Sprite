@@ -9,8 +9,7 @@ fn public_move_keeps_a_pending_capture_and_publishes_current_membership(
         return;
     }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
-        let mut settings = crate::Settings::default();
-        settings.pane_observation.enabled = false;
+        let settings = crate::Settings::default();
         Workspace::new(
             Some(vec![
                 "/bin/sh".into(),
@@ -23,7 +22,7 @@ fn public_move_keeps_a_pending_capture_and_publishes_current_membership(
             cx,
         )
     });
-    let descriptor = approve(&workspace, cx, true, false);
+    let descriptor = target(&workspace, cx);
     let (pending, reply) = workspace.update_in(cx, |workspace, window, cx| {
         let pending = workspace
             .panes
@@ -31,8 +30,7 @@ fn public_move_keeps_a_pending_capture_and_publishes_current_membership(
             .unwrap();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         workspace.serve_control(
-            Message::Control {
-                grant: descriptor.grant.parse().unwrap(),
+            Message {
                 request: Request {
                     protocol: PROTOCOL.into(),
                     id: "move-capture".into(),

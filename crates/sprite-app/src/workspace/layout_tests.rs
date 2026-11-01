@@ -138,15 +138,7 @@ fn layout_mutations_publish_only_changed_observation_geometry(cx: &mut gpui::Tes
         assert_eq!(workspace.placements[0].4, 699.0);
         assert_eq!(workspace.pane_titles.len(), 1);
     });
-    workspace.update(cx, |workspace, cx| {
-        workspace.set_observation_enabled(true, cx);
-        workspace.set_observation_enabled(false, cx);
-    });
-    assert_eq!(
-        publications(&workspace, cx),
-        9,
-        "reenabling retains the current registry layout"
-    );
+    assert_eq!(publications(&workspace, cx), 9);
     workspace.update(cx, |workspace, cx| workspace.close_focused_pane(false, cx));
     assert_eq!(publications(&workspace, cx), 10);
     workspace.read_with(cx, |workspace, _| {
@@ -437,8 +429,7 @@ fn image_workspace(
     // image 1.
     let script = r"printf '\033_Ga=T,U=1,f=32,s=1,v=1,i=1,c=2,r=1,q=2;/////w==\033\\\033[38;2;0;0;1m\364\216\273\256\314\205\314\205\364\216\273\256\314\205\314\215\033[39m'; exec sleep 30";
     cx.add_window_view(|window, cx| {
-        let mut settings = crate::config::Settings::default();
-        settings.pane_observation.enabled = false;
+        let settings = crate::config::Settings::default();
         super::Workspace::new(
             Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
             settings,

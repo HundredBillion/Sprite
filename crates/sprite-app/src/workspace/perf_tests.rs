@@ -7,8 +7,7 @@ fn workspace_running<'a>(
 ) -> (gpui::Entity<Workspace>, &'a mut gpui::VisualTestContext) {
     let script = script.to_owned();
     cx.add_window_view(move |window, cx| {
-        let mut settings = crate::config::Settings::default();
-        settings.pane_observation.enabled = false;
+        let settings = crate::config::Settings::default();
         Workspace::new(
             Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
             settings,
@@ -150,9 +149,8 @@ fn ask_to_reload(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestC
             &sender,
             Patience::new(crate::test_blocking_wait::watchdog()),
             |reply| ReloadRequest {
-                what: crate::observation::request::ConfigVerb::Reload,
+                what: crate::control::ConfigVerb::Reload,
                 reply,
-                reply_connection: None,
             },
         );
         answer.send_blocking(reply).unwrap();

@@ -1,22 +1,32 @@
-use std::collections::BTreeSet;
+//! Pane Control: the window's local socket, which any process of the same
+//! user may use to list, read and drive the window's panes.
+//!
+//! The socket sits in a directory only its owner may enter and is itself
+//! readable and writable only by its owner. Those permissions are the whole
+//! check: there is no key and no prompt.
+
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::local_socket::{LocalSocket, ObservationKey, ReplyConnection, TransportPolicy};
-use crate::workspace::{Patience, RelayError, Relayed, relay};
+use crate::local_socket::{LocalSocket, ReplyConnection, TransportPolicy};
+use crate::workspace::{Patience, RelayError, Relayed, ReloadRequest, relay};
 
 pub mod client;
 
-pub const PROTOCOL: &str = "sprite-pane-control/1";
-pub(crate) const MAX_GRANTS: usize = 16;
+pub const PROTOCOL: &str = "sprite-pane-control/2";
 pub(crate) const MAX_PANES: usize = 128;
 pub(crate) const MAX_CLEANUPS: usize = 16;
-pub(crate) const ACCESS_SECONDS: u64 = 60;
+/// How many connections a window serves at once, and how many requests may
+/// wait for it.
+pub(crate) const MAX_CONNECTIONS: usize = 16;
+const MAX_REQUEST_BYTES: usize = 8192;
+/// How long a socket thread waits for the window to answer a configuration
+/// request.
+const CONFIG_PATIENCE: Patience = Patience::new(std::time::Duration::from_secs(2));
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +81,8 @@ pub enum Operation {
         #[serde(default)]
         key: Option<String>,
     },
+    ConfigReload,
+    ConfigPrint,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -97,7 +109,7 @@ impl Side {
 impl Operation {
     pub(crate) fn pane(&self) -> Option<&str> {
         match self {
-            Self::List | Self::Create { .. } => None,
+            Self::List | Self::Create { .. } | Self::ConfigReload | Self::ConfigPrint => None,
             Self::Read { pane, .. }
             | Self::Rename { pane, .. }
             | Self::Move { pane, .. }
@@ -133,46 +145,28 @@ impl Operation {
                 ),
                 _ => false,
             },
-            Self::List | Self::Read { .. } | Self::Focus { .. } | Self::Close { .. } => true,
+            Self::List
+            | Self::Read { .. }
+            | Self::Focus { .. }
+            | Self::Close { .. }
+            | Self::ConfigReload
+            | Self::ConfigPrint => true,
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AccessRequest {
-    #[serde(default)]
-    pub all_panes: bool,
-    #[serde(default)]
-    pub panes: BTreeSet<u64>,
-    #[serde(default)]
-    pub manage: bool,
-    #[serde(default)]
-    pub input: bool,
-    #[serde(default)]
-    pub from: Option<u64>,
+/// The two things a caller can ask about a window's configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConfigVerb {
+    Reload,
+    Print,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Descriptor {
-    pub window: String,
-    pub grant: String,
-    pub socket: PathBuf,
-    pub key: String,
-}
-
-pub(crate) enum Message {
-    Access {
-        request: AccessRequest,
-        reply: Relayed<Value>,
-    },
-    Control {
-        grant: u64,
-        request: Request,
-        reply: Relayed<Value>,
-        connection: Option<ReplyConnection>,
-    },
+/// A pane request on its way from a socket thread to the window.
+pub(crate) struct Message {
+    pub(crate) request: Request,
+    pub(crate) reply: Relayed<Value>,
+    pub(crate) connection: Option<ReplyConnection>,
 }
 
 pub(crate) fn response(id: &str, outcome: &str, result: Value) -> Value {
@@ -181,25 +175,6 @@ pub(crate) fn response(id: &str, outcome: &str, result: Value) -> Value {
 
 pub(crate) fn failure(id: &str, outcome: &str) -> Value {
     response(id, outcome, Value::Null)
-}
-
-pub(crate) fn ask_access(sender: &async_channel::Sender<Message>, body: &str) -> String {
-    let request = serde_json::from_str::<AccessRequest>(body);
-    let answer = match request {
-        Ok(request)
-            if request.all_panes != !request.panes.is_empty()
-                && request.panes.len() <= MAX_PANES =>
-        {
-            relay(
-                sender,
-                Patience::new(Duration::from_secs(ACCESS_SECONDS + 2)),
-                |reply| Message::Access { request, reply },
-            )
-            .unwrap_or_else(|error| relay_failure("access", error))
-        }
-        _ => failure("access", "invalid_request"),
-    };
-    answer.to_string()
 }
 
 fn relay_failure(id: &str, error: RelayError) -> Value {
@@ -213,100 +188,150 @@ fn relay_failure(id: &str, error: RelayError) -> Value {
     )
 }
 
-pub(crate) fn open_grant(
+/// Where the window called `window` listens, inside `directory`.
+pub(crate) fn socket_path(directory: &Path, window: &str) -> PathBuf {
+    directory.join(format!("window-{window}.sock"))
+}
+
+/// The window id in a socket file name, when the name is a window socket's.
+pub(crate) fn window_of(file_name: &str) -> Option<&str> {
+    file_name
+        .strip_prefix("window-")?
+        .strip_suffix(".sock")
+        .filter(|id| !id.is_empty())
+}
+
+/// Everything a window socket's threads need from their window.
+pub(crate) struct Lanes {
+    pub(crate) control: async_channel::Sender<Message>,
+    pub(crate) reload: async_channel::Sender<ReloadRequest>,
+    pub(crate) panes: Arc<crate::observation::panes::WindowPanes>,
+}
+
+/// Opens the window's socket in `directory` and starts serving it.
+pub(crate) fn open_window_socket(
+    directory: &Path,
     window: String,
-    grant: u64,
-    sender: async_channel::Sender<Message>,
-    panes: Arc<crate::observation::panes::WindowPanes>,
-) -> std::io::Result<(LocalSocket, Descriptor)> {
-    let key = Arc::new(ObservationKey::generate()?);
-    let key_hex = key.to_hex();
+    lanes: Lanes,
+) -> std::io::Result<LocalSocket> {
     let policy = TransportPolicy {
         name: "sprite-control",
-        filename_hex: 24,
-        suffix: ".sock",
-        max_connections: 16,
-        max_first_line: 8192,
+        filename_hex: 0,
+        suffix: "",
+        max_connections: MAX_CONNECTIONS,
+        max_first_line: MAX_REQUEST_BYTES,
         handshake_timeout: crate::timeouts::HANDSHAKE_TIMEOUT,
         write_timeout: crate::timeouts::WRITE_TIMEOUT,
     };
-    let expected_window = window.clone();
-    let socket = LocalSocket::open_in(
-        crate::local_socket::runtime_directory()?,
-        key,
+    let socket = socket_path(directory, &window);
+    LocalSocket::open_at(
+        socket,
+        None,
         policy,
         |stream| {
-            writeln!(stream, "{}", failure("", "denied")).ok();
+            writeln!(stream, "{}", failure("", "invalid_request")).ok();
         },
         move |mut connection| {
             let started = std::time::Instant::now();
-            let answer = match serde_json::from_str::<Request>(&connection.body) {
-                Ok(request)
-                    if request.id.len() <= 64
-                        && request.protocol == PROTOCOL
-                        && request.operation.valid() =>
-                {
-                    let id = request.id.clone();
-                    let read = if let Operation::Read { pane, lines } = &request.operation {
-                        pane.rsplit_once(':')
-                            .and_then(|(_, local)| local.parse::<u64>().ok())
-                            .map(|local| (local, *lines))
-                    } else {
-                        None
-                    };
-                    if request.window != expected_window {
-                        failure(&id, "denied")
-                    } else {
-                        let mut answer = relay(
-                            &sender,
-                            Patience::new(crate::timeouts::REPLY_TIMEOUT),
-                            |reply| Message::Control {
-                                grant,
-                                request,
-                                reply,
-                                connection: Some(connection.reply_connection.clone()),
-                            },
-                        )
-                        .unwrap_or_else(|error| relay_failure(&id, error));
-                        if answer["outcome"] == "ok"
-                            && let Some((local, lines)) = read
-                        {
-                            use crate::observation::{broker, request, schema};
-                            let query = request::Query {
-                                from: None,
-                                scope: request::Scope::Pane(crate::pane_tree::PaneId(local)),
-                                lines: sprite_term::HistoryLines::new(lines.unwrap_or(500)),
-                                pretty: false,
-                            };
-                            match broker::collect(&query, panes.as_ref(), broker::DEADLINE) {
-                                Ok(report) => {
-                                    let encoded = schema::render_limited(
-                                        &report,
-                                        false,
-                                        schema::MAX_RESPONSE_BYTES - 65536,
-                                    );
-                                    answer["result"]["terminal"] =
-                                        serde_json::from_str(&encoded).unwrap_or(Value::Null);
-                                }
-                                Err(_) => answer = failure(&id, "gone"),
-                            }
-                        }
-                        answer
-                    }
-                }
-                _ => failure("", "invalid_request"),
-            };
+            let answer = answer(
+                &window,
+                &lanes,
+                &connection.body,
+                &connection.reply_connection,
+            );
             tracing::debug!(target: "sprite_app::control", elapsed_ms = started.elapsed().as_millis() as u64, "control request handled");
             writeln!(connection.stream, "{answer}").ok();
         },
-    )?;
-    let descriptor = Descriptor {
-        window,
-        grant: grant.to_string(),
-        socket: socket.socket_path().to_path_buf(),
-        key: key_hex,
+    )
+}
+
+/// Answers one request line.
+fn answer(window: &str, lanes: &Lanes, body: &str, connection: &ReplyConnection) -> Value {
+    let request = match serde_json::from_str::<Request>(body) {
+        Ok(request) => request,
+        Err(_) => {
+            // A caller speaking another version is told which one this is.
+            let spoken = serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|value| value["protocol"].as_str().map(str::to_owned));
+            return match spoken {
+                Some(spoken) if spoken != PROTOCOL => {
+                    response("", "invalid_request", json!({"supported": PROTOCOL}))
+                }
+                _ => failure("", "invalid_request"),
+            };
+        }
     };
-    Ok((socket, descriptor))
+    let id = request.id.clone();
+    if request.protocol != PROTOCOL {
+        return response(&id, "invalid_request", json!({"supported": PROTOCOL}));
+    }
+    if id.len() > 64 || !request.operation.valid() || request.window != window {
+        return failure(&id, "invalid_request");
+    }
+    if request.operation == Operation::ConfigReload {
+        return configure(lanes, &id, ConfigVerb::Reload);
+    }
+    if request.operation == Operation::ConfigPrint {
+        return configure(lanes, &id, ConfigVerb::Print);
+    }
+    let read = if let Operation::Read { pane, lines } = &request.operation {
+        pane.rsplit_once(':')
+            .and_then(|(_, local)| local.parse::<u64>().ok())
+            .map(|local| (local, *lines))
+    } else {
+        None
+    };
+    let mut answer = relay(
+        &lanes.control,
+        Patience::new(crate::timeouts::REPLY_TIMEOUT),
+        |reply| Message {
+            request,
+            reply,
+            connection: Some(connection.clone()),
+        },
+    )
+    .unwrap_or_else(|error| relay_failure(&id, error));
+    if answer["outcome"] == "ok"
+        && let Some((local, lines)) = read
+    {
+        use crate::observation::{broker, request, schema};
+        let query = request::Query {
+            from: None,
+            scope: request::Scope::Pane(crate::pane_tree::PaneId(local)),
+            lines: sprite_term::HistoryLines::new(lines.unwrap_or(500)),
+            pretty: false,
+        };
+        match broker::collect(&query, lanes.panes.as_ref(), broker::DEADLINE) {
+            Ok(report) => {
+                let encoded =
+                    schema::render_limited(&report, false, schema::MAX_RESPONSE_BYTES - 65536);
+                answer["result"]["terminal"] =
+                    serde_json::from_str(&encoded).unwrap_or(Value::Null);
+            }
+            Err(_) => answer = failure(&id, "gone"),
+        }
+    }
+    answer
+}
+
+/// Hands a configuration request to the window and waits, within
+/// [`CONFIG_PATIENCE`], for its answer.
+fn configure(lanes: &Lanes, id: &str, what: ConfigVerb) -> Value {
+    match relay(&lanes.reload, CONFIG_PATIENCE, |reply| ReloadRequest {
+        what,
+        reply,
+    }) {
+        Ok(text) => match what {
+            ConfigVerb::Reload => response(
+                id,
+                "ok",
+                json!({"applied": crate::config::reload_was_applied(&text), "message": text}),
+            ),
+            ConfigVerb::Print => response(id, "ok", json!({"settings": text})),
+        },
+        Err(error) => relay_failure(id, error),
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +350,22 @@ mod tests {
             let encoded = serde_json::to_string(&request).unwrap();
             let decoded: Request = serde_json::from_str(&encoded).unwrap();
             prop_assert_eq!(decoded, request);
+        }
+    }
+
+    #[test]
+    fn a_window_socket_is_named_for_its_window_and_only_those_names_are_windows() {
+        let path = socket_path(std::path::Path::new("/run/sprite"), "abc123");
+        assert_eq!(path, std::path::Path::new("/run/sprite/window-abc123.sock"));
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(window_of(name), Some("abc123"));
+        for other in [
+            "window-.sock",
+            "abc.surface.sock",
+            "window-abc.socket",
+            "abc.sock",
+        ] {
+            assert_eq!(window_of(other), None, "{other}");
         }
     }
 

@@ -85,8 +85,6 @@ fn cli_stdout_is_not_contaminated_by_logging() {
             std::process::Command::new(binary)
                 .args(&arguments)
                 .env("SPRITE_LOG", level)
-                .env_remove("SPRITE_OBSERVATION_SOCKET")
-                .env_remove("SPRITE_OBSERVATION_KEY")
                 .env_remove("SPRITE_SURFACE_SOCKET")
                 .env_remove("SPRITE_SURFACE_KEY")
                 .stdin(std::process::Stdio::null())
@@ -102,14 +100,14 @@ fn cli_stdout_is_not_contaminated_by_logging() {
 }
 
 #[test]
-fn authenticated_snapshot_reply_is_not_mixed_with_diagnostics() {
+fn a_pane_control_reply_is_not_mixed_with_diagnostics() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
 
     let root = std::env::temp_dir().join(format!("sprite-log-protocol-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::remove_file(root.join("test.sock")).ok();
-    let socket = root.join("test.sock");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(root.join("sprite")).unwrap();
+    let socket = root.join("sprite").join("window-test.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let peer = std::thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
@@ -132,20 +130,31 @@ fn authenticated_snapshot_reply_is_not_mixed_with_diagnostics() {
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)
             .unwrap();
-        assert!(line.starts_with("test-private-key "));
-        stream.write_all(b"{\"protocol_marker\":true}\n").unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let answer = serde_json::json!({
+            "protocol": "sprite-pane-control/2",
+            "id": request["id"],
+            "outcome": "ok",
+            "result": {"panes": [{"id": "test:0"}]},
+        });
+        writeln!(stream, "{answer}").unwrap();
     });
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_sprite"))
-        .args(["panes", "snapshot", "--window"])
-        .env("SPRITE_OBSERVATION_SOCKET", &socket)
-        .env("SPRITE_OBSERVATION_KEY", "test-private-key")
+        .args(["panes", "focus", "--pane", "test:0"])
+        .env("TMPDIR", &root)
+        .env("XDG_RUNTIME_DIR", &root)
         .env_remove("SPRITE_PANE")
         .env("SPRITE_LOG", "trace")
         .output()
         .unwrap();
     peer.join().unwrap();
-    assert!(output.status.success());
-    assert_eq!(output.stdout, b"{\"protocol_marker\":true}\n");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(printed["result"]["panes"][0]["id"], "test:0");
     assert!(output.stderr.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }

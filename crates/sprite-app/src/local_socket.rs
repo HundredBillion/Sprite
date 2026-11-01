@@ -47,11 +47,11 @@ pub(crate) const MAX_SOCKET_PATH: usize = 103;
 pub(crate) const MAX_SOCKET_PATH: usize = 107;
 
 /// A per-window secret, compared in constant time and wiped when dropped.
-pub struct ObservationKey {
+pub struct SocketKey {
     bytes: [u8; KEY_BYTES],
 }
 
-impl ObservationKey {
+impl SocketKey {
     /// Generates a key from the operating system's cryptographic source.
     ///
     /// Read straight from `/dev/urandom` rather than through a random-number
@@ -98,7 +98,7 @@ impl ObservationKey {
     }
 }
 
-impl Drop for ObservationKey {
+impl Drop for SocketKey {
     fn drop(&mut self) {
         // Closing the window destroys the key. Overwriting it means a later
         // read of freed memory finds zeroes rather than a working secret.
@@ -188,7 +188,8 @@ impl Drop for ConnectionSlot {
 
 pub(crate) struct LocalSocket {
     socket: PathBuf,
-    key: Arc<ObservationKey>,
+    /// `None` for a socket whose file permissions are its only check.
+    key: Option<Arc<SocketKey>>,
     running: Arc<AtomicBool>,
     connections: Connections,
     listener: Option<JoinHandle<()>>,
@@ -198,7 +199,7 @@ pub(crate) struct LocalSocket {
 impl LocalSocket {
     pub fn open_in<H>(
         directory: PathBuf,
-        key: Arc<ObservationKey>,
+        key: Arc<SocketKey>,
         policy: TransportPolicy,
         refused: fn(&mut UnixStream),
         handler: H,
@@ -206,14 +207,34 @@ impl LocalSocket {
     where
         H: Fn(Authenticated) + Send + Sync + 'static,
     {
+        let mut name = SocketKey::generate()?.to_hex();
+        name.truncate(policy.filename_hex);
+        let socket = directory.join(format!("{name}{}", policy.suffix));
+        Self::open_at(socket, Some(key), policy, refused, handler)
+    }
+
+    /// Opens a socket at a path the caller chose, in a directory only its
+    /// owner may enter. With no key, every connection the file permissions let
+    /// through is served, and its whole first line is the body.
+    pub fn open_at<H>(
+        socket: PathBuf,
+        key: Option<Arc<SocketKey>>,
+        policy: TransportPolicy,
+        refused: fn(&mut UnixStream),
+        handler: H,
+    ) -> io::Result<Self>
+    where
+        H: Fn(Authenticated) + Send + Sync + 'static,
+    {
+        let directory = socket
+            .parent()
+            .ok_or_else(|| io::Error::other("a local socket needs a directory"))?
+            .to_path_buf();
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&directory).inspect_err(|error| { tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error.kind(), "socket directory creation failed"); })?;
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-        let mut name = ObservationKey::generate()?.to_hex();
-        name.truncate(policy.filename_hex);
-        let socket = directory.join(format!("{name}{}", policy.suffix));
         let (cancellation, cancelled) = UnixStream::pair()?;
         let listener = bind_private(&socket).inspect_err(|error| { tracing::warn!(target: "sprite_app::ipc", subsystem = policy.name, kind = ?error.kind(), "socket bind failed"); })?;
         if let Err(error) = listener.set_nonblocking(true) {
@@ -226,7 +247,7 @@ impl LocalSocket {
             .name(policy.name.to_owned())
             .spawn({
                 let running = Arc::clone(&running);
-                let key = Arc::clone(&key);
+                let key = key.clone();
                 let connections = Arc::clone(&connections);
                 let handler = Arc::new(handler);
                 move || {
@@ -305,7 +326,7 @@ impl LocalSocket {
                             id,
                         });
                         let running = Arc::clone(&running);
-                        let key = Arc::clone(&key);
+                        let key = key.clone();
                         let handler = Arc::clone(&handler);
                         // The slot also drops if spawning fails or an adapter panics.
                         std::thread::Builder::new()
@@ -319,7 +340,7 @@ impl LocalSocket {
                                 {
                                     return;
                                 }
-                                match authenticate(&stream, &key, &running, policy, deadline) {
+                                match authenticate(&stream, key.as_deref(), &running, policy, deadline) {
                                     Ok((reader, body)) => {
                                         let started = Instant::now();
                                         handler(Authenticated {
@@ -367,8 +388,11 @@ impl LocalSocket {
     pub fn socket_path(&self) -> &Path {
         &self.socket
     }
+    /// The key, or an empty string for a socket that has none.
     pub fn key_hex(&self) -> String {
-        self.key.to_hex()
+        self.key
+            .as_ref()
+            .map_or_else(String::new, |key| key.to_hex())
     }
 
     /// How many connections hold a slot against the cap right now.
@@ -470,7 +494,7 @@ pub(crate) fn bind_private(socket: &Path) -> io::Result<UnixListener> {
 
 fn authenticate(
     stream: &UnixStream,
-    key: &ObservationKey,
+    key: Option<&SocketKey>,
     running: &AtomicBool,
     policy: TransportPolicy,
     deadline: Instant,
@@ -507,8 +531,17 @@ fn authenticate(
     }
     let line = std::str::from_utf8(&line).map_err(|_| io::ErrorKind::InvalidData)?;
     let line = line.trim_end_matches(['\r', '\n']);
-    let (presented, body) = line.split_once(' ').unwrap_or((line, ""));
-    if Instant::now() >= deadline || !running.load(Ordering::SeqCst) || !key.matches(presented) {
+    let body = match key {
+        Some(key) => {
+            let (presented, body) = line.split_once(' ').unwrap_or((line, ""));
+            if !key.matches(presented) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            body
+        }
+        None => line,
+    };
+    if Instant::now() >= deadline || !running.load(Ordering::SeqCst) {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     stream.set_read_timeout(None)?;
@@ -812,7 +845,7 @@ mod tests {
                 let (sent, received) = mpsc::channel();
                 let mut socket = LocalSocket::open_in(
                     directory.to_owned(),
-                    Arc::new(ObservationKey::generate().unwrap()),
+                    Arc::new(SocketKey::generate().unwrap()),
                     POLICY,
                     rejected,
                     move |connection| {
@@ -847,7 +880,7 @@ mod tests {
 
     #[test]
     fn authentication_requires_a_complete_bounded_utf8_line_and_the_exact_key() {
-        let key = ObservationKey::generate().unwrap();
+        let key = SocketKey::generate().unwrap();
         let running = AtomicBool::new(true);
         for line in [
             "\n".to_owned(),
@@ -862,7 +895,7 @@ mod tests {
             assert!(
                 authenticate(
                     &server,
-                    &key,
+                    Some(&key),
                     &running,
                     POLICY,
                     Instant::now() + POLICY.handshake_timeout
@@ -875,7 +908,7 @@ mod tests {
         assert!(
             authenticate(
                 &server,
-                &key,
+                Some(&key),
                 &running,
                 POLICY,
                 Instant::now() + POLICY.handshake_timeout
@@ -886,13 +919,13 @@ mod tests {
 
     #[test]
     fn the_exact_line_limit_is_accepted_and_buffered_followup_bytes_survive() {
-        let key = ObservationKey::generate().unwrap();
+        let key = SocketKey::generate().unwrap();
         let (mut client, server) = UnixStream::pair().unwrap();
         let body = "x".repeat(POLICY.max_first_line - 66);
         write!(client, "{} {body}\nnext\n", key.to_hex()).unwrap();
         let (mut reader, parsed) = authenticate(
             &server,
-            &key,
+            Some(&key),
             &AtomicBool::new(true),
             POLICY,
             Instant::now() + POLICY.handshake_timeout,
@@ -907,7 +940,7 @@ mod tests {
 
     #[test]
     fn a_trickling_client_cannot_restart_the_handshake_deadline() {
-        let key = ObservationKey::generate().unwrap();
+        let key = SocketKey::generate().unwrap();
         let (mut client, server) = UnixStream::pair().unwrap();
         let (stop, stopped) = mpsc::channel();
         let writer = std::thread::spawn(move || {
@@ -920,7 +953,7 @@ mod tests {
         let start = Instant::now();
         let result = authenticate(
             &server,
-            &key,
+            Some(&key),
             &AtomicBool::new(true),
             POLICY,
             start + POLICY.handshake_timeout,
@@ -938,12 +971,12 @@ mod tests {
 
     #[test]
     fn a_silent_client_and_a_cancelled_key_never_authenticate() {
-        let key = ObservationKey::generate().unwrap();
+        let key = SocketKey::generate().unwrap();
         let (_client, server) = UnixStream::pair().unwrap();
         assert!(
             authenticate(
                 &server,
-                &key,
+                Some(&key),
                 &AtomicBool::new(true),
                 POLICY,
                 Instant::now() + POLICY.handshake_timeout
@@ -955,7 +988,7 @@ mod tests {
         assert!(
             authenticate(
                 &server,
-                &key,
+                Some(&key),
                 &AtomicBool::new(false),
                 POLICY,
                 Instant::now() + POLICY.handshake_timeout
@@ -970,7 +1003,7 @@ mod tests {
         let (entered, entry) = mpsc::channel();
         let mut socket = LocalSocket::open_in(
             scratch.0.clone(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             POLICY,
             rejected,
             move |mut connection| {
@@ -1007,7 +1040,7 @@ mod tests {
         };
         let mut socket = LocalSocket::open_in(
             scratch.0.clone(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             policy,
             rejected,
             |_| panic!("unauthenticated"),
@@ -1032,7 +1065,7 @@ mod tests {
         };
         let mut socket = LocalSocket::open_in(
             scratch.0.clone(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             policy,
             rejected,
             |_| panic!("unauthenticated"),
@@ -1053,6 +1086,35 @@ mod tests {
         assert!(scratch.0.exists());
     }
 
+    /// A socket with no key serves the whole first line, at the path it was
+    /// given, in a private directory.
+    #[test]
+    fn a_keyless_socket_serves_the_whole_line_at_its_own_path() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("window-test.sock");
+        let (seen, bodies) = mpsc::channel();
+        let socket =
+            LocalSocket::open_at(path.clone(), None, POLICY, rejected, move |connection| {
+                seen.send(connection.body).unwrap();
+            })
+            .unwrap();
+        assert_eq!(socket.socket_path(), path);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&scratch.0).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let mut client = UnixStream::connect(&path).unwrap();
+        writeln!(client, "{{\"a\": 1}} with spaces").unwrap();
+        assert_eq!(
+            bodies.recv_timeout(watchdog()).unwrap(),
+            "{\"a\": 1} with spaces"
+        );
+    }
+
     fn gated_reply_socket(
         directory: &Path,
     ) -> (
@@ -1065,7 +1127,7 @@ mod tests {
         let finished = Mutex::new(finished);
         let socket = LocalSocket::open_in(
             directory.to_owned(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             POLICY,
             rejected,
             move |mut connection| {
@@ -1102,7 +1164,7 @@ mod tests {
         };
         let mut socket = LocalSocket::open_in(
             scratch.0.clone(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             policy,
             rejected,
             move |mut connection| {
@@ -1209,7 +1271,7 @@ mod tests {
         let (entered, entry) = mpsc::channel();
         let socket = LocalSocket::open_in(
             scratch.0.clone(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             POLICY,
             rejected,
             move |_| {
@@ -1229,7 +1291,7 @@ mod tests {
         let (entered, entry) = mpsc::channel();
         let mut socket = LocalSocket::open_in(
             scratch.0.clone(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             POLICY,
             rejected,
             move |mut connection| {
@@ -1353,7 +1415,7 @@ mod tests {
         let (bodies, received) = mpsc::channel();
         let mut socket = LocalSocket::open_in(
             scratch.0.clone(),
-            Arc::new(ObservationKey::generate().unwrap()),
+            Arc::new(SocketKey::generate().unwrap()),
             POLICY,
             rejected,
             move |connection| {

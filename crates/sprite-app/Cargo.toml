@@ -16,10 +16,6 @@ name = "sprite"
 path = "src/main.rs"
 
 [[bin]]
-name = "sprite-observation-bench"
-path = "src/bin/sprite-observation-bench.rs"
-
-[[bin]]
 name = "sprite-paint-bench"
 path = "src/bin/sprite-paint-bench.rs"
 

@@ -30,9 +30,6 @@ impl Workspace {
         self.stopping = true;
         self.control.close(None);
         self.surfaces = None;
-        if let Some(endpoint) = self.endpoint.as_mut() {
-            endpoint.close();
-        }
         let mut panes = self.tabs.all_panes();
         panes.sort_unstable_by_key(|(_, pane, _)| *pane);
         let panes: Vec<_> = panes
@@ -993,12 +990,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn queued_reload_cannot_reenable_observation_during_shutdown(cx: &mut gpui::TestAppContext) {
+    fn a_queued_reload_is_not_applied_during_shutdown(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         let (_completed, gates) = gated_panes(&workspace, cx);
         let path =
             std::env::temp_dir().join(format!("sprite-stop-reload-{}.toml", std::process::id()));
-        std::fs::write(&path, "[pane_observation]\nenabled = true\n").unwrap();
+        std::fs::write(&path, "[font]\nsize = 31.0\n").unwrap();
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         workspace.update(cx, |workspace, cx| {
             workspace.config_path = Some(path.clone());
@@ -1009,7 +1006,6 @@ mod tests {
                 .try_send(ReloadRequest {
                     what: ConfigVerb::Reload,
                     reply: reply.into(),
-                    reply_connection: None,
                 })
                 .unwrap();
         });
@@ -1018,8 +1014,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(answer, "this window is closing");
         workspace.read_with(cx, |workspace, _| {
-            assert!(!workspace.settings.pane_observation.enabled);
-            assert!(workspace.endpoint.is_none());
+            assert_ne!(workspace.settings.font.size.get(), 31.0);
         });
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
         for index in 0..gates.len() {
