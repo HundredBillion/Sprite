@@ -7,13 +7,15 @@ use super::*;
 use crate::control::{self, AccessRequest, Message, Operation, Request, failure, response};
 use crate::local_socket::{LocalSocket, ObservationKey, ReplyConnection};
 
+const CONFIRM_BG: u32 = 0x5a3030;
+const CONFIRM_FG: u32 = 0xffe0e0;
+
 pub(super) struct ControlState {
     window: String,
     next_grant: u64,
     next_prompt: u64,
     grants: BTreeMap<u64, Grant>,
     pending: Option<PendingAccess>,
-    confirmation: Option<PendingOperation>,
     labels: HashMap<PaneId, String>,
     show_access: bool,
 }
@@ -28,14 +30,6 @@ struct PendingAccess {
     reply: Relayed<Value>,
     expires: Instant,
 }
-struct PendingOperation {
-    prompt: u64,
-    grant: u64,
-    request: Request,
-    expires: Instant,
-    label: String,
-}
-
 impl ControlState {
     pub(super) fn new() -> Self {
         Self {
@@ -46,7 +40,6 @@ impl ControlState {
             next_prompt: 0,
             grants: BTreeMap::new(),
             pending: None,
-            confirmation: None,
             labels: HashMap::new(),
             show_access: false,
         }
@@ -59,7 +52,6 @@ impl ControlState {
         if let Some(pending) = self.pending.take() {
             pending.reply.send(failure("access", "closing")).ok();
         }
-        self.confirmation = None;
     }
     fn permits(&self, grant: u64, pane: PaneId) -> bool {
         self.grants
@@ -108,15 +100,6 @@ impl Workspace {
             if let Some(pending) = self.control.pending.take() {
                 pending.reply.send(failure("access", "denied")).ok();
             }
-            cx.notify();
-        }
-        if self
-            .control
-            .confirmation
-            .as_ref()
-            .is_some_and(|p| now >= p.expires)
-        {
-            self.control.confirmation = None;
             cx.notify();
         }
     }
@@ -171,8 +154,7 @@ impl Workspace {
                 if !reply.claim() {
                     return;
                 }
-                let answer =
-                    self.apply_control(grant, &request, false, connection.as_ref(), window, cx);
+                let answer = self.apply_control(grant, &request, connection.as_ref(), window, cx);
                 reply.send(answer).ok();
             }
         }
@@ -247,14 +229,6 @@ impl Workspace {
         if self.control.grants.is_empty() {
             self.control.show_access = false;
         }
-        if self
-            .control
-            .confirmation
-            .as_ref()
-            .is_some_and(|p| p.grant == grant)
-        {
-            self.control.confirmation = None;
-        }
         cx.notify();
     }
 
@@ -295,7 +269,6 @@ impl Workspace {
         &mut self,
         grant: u64,
         request: &Request,
-        confirmed: bool,
         connection: Option<&ReplyConnection>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -515,18 +488,6 @@ impl Workspace {
             }
             Operation::Close { .. } => {
                 let pane = pane.ok_or("denied")?;
-                let handle = Rc::clone(self.tabs.get(pane).ok_or("gone")?);
-                if !confirmed && let Some(warning) = handle.close_warning(cx) {
-                    let program = warning
-                        .program
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "a running program".into());
-                    return self.confirm_control(
-                        grant,
-                        request,
-                        format!("Close pane {} and stop {program}?", pane.0),
-                    );
-                }
                 self.pending_cleanups
                     .retain(|c| !c.completed.load(std::sync::atomic::Ordering::Acquire));
                 if self.pending_cleanups.len() >= control::MAX_CLEANUPS {
@@ -564,58 +525,6 @@ impl Workspace {
         match result {
             Ok(value) => response(id, "ok", value),
             Err(outcome) => failure(id, outcome),
-        }
-    }
-
-    fn confirm_control(
-        &mut self,
-        grant: u64,
-        request: &Request,
-        label: String,
-    ) -> Result<Value, &'static str> {
-        if self.control.confirmation.is_some() {
-            return Err("confirmation_required");
-        }
-        let prompt = self.control.next_prompt;
-        self.control.next_prompt += 1;
-        self.control.confirmation = Some(PendingOperation {
-            prompt,
-            grant,
-            request: request.clone(),
-            expires: Instant::now() + Duration::from_secs(30),
-            label,
-        });
-        Err("confirmation_required")
-    }
-
-    pub(super) fn answer_control_prompt(
-        &mut self,
-        prompt: u64,
-        allow: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .control
-            .confirmation
-            .as_ref()
-            .is_some_and(|pending| pending.prompt == prompt)
-        {
-            self.answer_control(allow, window, cx);
-        }
-    }
-
-    pub(super) fn answer_control(
-        &mut self,
-        allow: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pending) = self.control.confirmation.take() {
-            if allow && Instant::now() < pending.expires {
-                self.apply_control(pending.grant, &pending.request, true, None, window, cx);
-            }
-            cx.notify();
         }
     }
 
@@ -668,24 +577,6 @@ impl Workspace {
                 if pending.request.all_panes { "all existing and future panes".to_owned() } else { format!("panes {:?}", pending.request.panes) }, pending.request.manage, pending.request.input))
                 .child(div().child("Allow").on_mouse_down(gpui::MouseButton::Left, cx.listener(move |workspace, _, _, cx| workspace.answer_access_prompt(prompt, true, cx))))
                 .child(div().child("Deny").on_mouse_down(gpui::MouseButton::Left, cx.listener(move |workspace, _, _, cx| workspace.answer_access_prompt(prompt, false, cx))));
-        }
-        if let Some(pending) = &self.control.confirmation {
-            let prompt = pending.prompt;
-            visible = true;
-            panel = panel
-                .child(pending.label.clone())
-                .child(div().child("Confirm").on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |workspace, _, window, cx| {
-                        workspace.answer_control_prompt(prompt, true, window, cx)
-                    }),
-                ))
-                .child(div().child("Cancel").on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |workspace, _, window, cx| {
-                        workspace.answer_control_prompt(prompt, false, window, cx)
-                    }),
-                ));
         }
         if self.control.show_access {
             visible = true;

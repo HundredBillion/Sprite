@@ -38,15 +38,6 @@ pub enum ForegroundState {
 }
 
 impl ForegroundState {
-    /// Whether closing this pane should ask first.
-    ///
-    /// `Unknown` does not: a terminal that could never answer would otherwise
-    /// prompt on every close, and a prompt nobody can ever dismiss by fixing
-    /// the situation is a prompt people learn to dismiss without reading.
-    pub fn should_confirm(&self) -> bool {
-        matches!(self, Self::Busy(_))
-    }
-
     /// The program's name, when one is known.
     pub fn program(&self) -> Option<&str> {
         match self {
@@ -200,10 +191,6 @@ mod tests {
     fn an_unattached_watch_knows_that_it_does_not_know() {
         let watch = ForegroundWatch::default();
         assert_eq!(watch.state(), ForegroundState::Unknown);
-        assert!(
-            !watch.state().should_confirm(),
-            "not knowing must not mean prompting forever"
-        );
     }
 
     #[test]
@@ -220,11 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_running_program_asks_for_confirmation() {
-        assert!(ForegroundState::Busy(Some("vim".to_owned())).should_confirm());
-        assert!(ForegroundState::Busy(None).should_confirm());
-        assert!(!ForegroundState::Idle.should_confirm());
-        assert!(!ForegroundState::Unknown.should_confirm());
+    fn only_a_running_program_has_a_name() {
         assert_eq!(
             ForegroundState::Busy(Some("vim".to_owned())).program(),
             Some("vim")

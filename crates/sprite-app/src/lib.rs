@@ -8,7 +8,6 @@ mod block_elements;
 mod box_drawing;
 mod cli;
 mod config;
-mod confirmation;
 pub mod control;
 #[doc(hidden)]
 pub mod diagnostics;

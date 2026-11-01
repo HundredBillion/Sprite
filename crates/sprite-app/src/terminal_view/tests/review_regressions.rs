@@ -39,27 +39,6 @@ fn shell(script: &str) -> Vec<std::ffi::OsString> {
     vec!["/bin/sh".into(), "-c".into(), script.into()]
 }
 
-#[gpui::test]
-fn review_direct_program_requires_close_confirmation(cx: &mut gpui::TestAppContext) {
-    with_view(cx, vec!["/bin/cat".into()], |view, cx| {
-        view.update(cx, |view, _| {
-            view.send(TerminalCommand::Input(b"READY\n".to_vec()))
-        });
-        wait_for_bundle(view, cx, |bundle| {
-            bundle
-                .pane
-                .rows
-                .iter()
-                .any(|row| row.text.contains("READY"))
-        });
-        assert!(
-            view.read_with(cx, |view, _| sprite_pane::Pane::close_warning(view)
-                .is_some()),
-            "a directly launched foreground program must require close confirmation"
-        );
-    });
-}
-
 /// An image placed below the text (a negative z-index) is drawn between the
 /// cells' grounds and their glyphs, so text printed over it stays readable.
 /// The grid's two passes are each one layer, and this is the order those two

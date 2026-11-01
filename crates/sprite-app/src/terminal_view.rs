@@ -1185,15 +1185,6 @@ impl sprite_pane::Pane for TerminalView {
             handle.wait().ok();
         }))
     }
-
-    fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
-        let state = self.foreground();
-        state.should_confirm().then(|| sprite_pane::CloseWarning {
-            program: state
-                .program()
-                .map(|program| SharedString::from(program.to_owned())),
-        })
-    }
 }
 
 #[cfg(test)]

@@ -198,9 +198,7 @@ fn resized_workspace_allocates_each_retained_terminal_its_placement(cx: &mut gpu
 }
 
 #[gpui::test]
-fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
-    cx: &mut gpui::TestAppContext,
-) {
+fn drawn_panes_and_dividers_stay_in_window_coordinates(cx: &mut gpui::TestAppContext) {
     for tabs in [1, 2] {
         for orientation in [Orientation::Horizontal, Orientation::Vertical] {
             let (workspace, cx) = test_workspace(cx);
@@ -212,22 +210,7 @@ fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
             });
             cx.simulate_resize(gpui::size(px(1000.0), px(700.0)));
             draw_workspace(cx);
-            let before = cx.debug_bounds("workspace-panes").unwrap();
             let published = publications(&workspace, cx);
-            workspace.update(cx, |workspace, cx| {
-                workspace.mode = Mode::ConfirmingClose(PendingClose::new(
-                    CloseScope::Window,
-                    "busy — click close again to close this window, Esc to keep it".into(),
-                ));
-                cx.notify();
-            });
-            draw_workspace(cx);
-            assert_eq!(
-                cx.debug_bounds("workspace-panes").unwrap(),
-                before,
-                "confirmation must not move or shrink drawn panes"
-            );
-            assert_eq!(publications(&workspace, cx), published);
             for size in [
                 gpui::size(px(1000.0), px(700.0)),
                 gpui::size(px(840.0), px(560.0)),
@@ -307,60 +290,6 @@ fn confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates(
                 assert!(matches!(workspace.mode, Mode::Idle));
             });
             assert_eq!(publications(&workspace, cx), published + 1);
-            let dismissed = cx.debug_bounds("workspace-panes").unwrap();
-            workspace.update(cx, |workspace, cx| {
-                workspace.mode = Mode::ConfirmingClose(PendingClose::new(
-                    CloseScope::Window,
-                    "busy ".repeat(100).into(),
-                ));
-                cx.notify();
-            });
-            draw_workspace(cx);
-            assert_eq!(cx.debug_bounds("workspace-panes").unwrap(), dismissed);
-            let confirmation = cx.debug_bounds("workspace-confirmation").unwrap();
-            assert_eq!(confirmation.origin, gpui::point(px(0.0), px(0.0)));
-            assert!(confirmation.bottom() <= px(560.0));
-            let focused = workspace.read_with(cx, |workspace, _| {
-                (
-                    workspace.tabs.active_tab(),
-                    workspace.tabs.active().unwrap().focus(),
-                )
-            });
-            for x in [10.0, 600.0] {
-                for button in [
-                    gpui::MouseButton::Left,
-                    gpui::MouseButton::Middle,
-                    gpui::MouseButton::Right,
-                ] {
-                    cx.simulate_mouse_down(
-                        gpui::point(px(x), px(10.0)),
-                        button,
-                        gpui::Modifiers::default(),
-                    );
-                    cx.simulate_mouse_up(
-                        gpui::point(px(x), px(10.0)),
-                        button,
-                        gpui::Modifiers::default(),
-                    );
-                    workspace.read_with(cx, |workspace, _| {
-                        assert_eq!(
-                            (
-                                workspace.tabs.active_tab(),
-                                workspace.tabs.active().unwrap().focus()
-                            ),
-                            focused
-                        );
-                        assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
-                    });
-                }
-            }
-            workspace.update(cx, |workspace, cx| {
-                workspace.mode = Mode::Idle;
-                cx.notify();
-            });
-            draw_workspace(cx);
-            assert_eq!(cx.debug_bounds("workspace-panes").unwrap(), dismissed);
-            assert_eq!(publications(&workspace, cx), published + 1);
         }
     }
 }
@@ -389,9 +318,6 @@ impl sprite_pane::Pane for CountedPane {
         self.allocations.push(size);
     }
     fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
-        None
-    }
-    fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
         None
     }
 }

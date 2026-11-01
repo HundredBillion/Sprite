@@ -84,9 +84,6 @@ const TAB_ACTIVE_BG: u32 = 0x1d1d24;
 const TAB_EDIT_BG: u32 = 0x2a2a3a;
 const TAB_INACTIVE_FG: u32 = 0x8a8a99;
 const TAB_ACTIVE_FG: u32 = 0xe6e6ef;
-/// The close question, in the one colour nothing else in the window uses.
-const CONFIRM_BG: u32 = 0x5a3030;
-const CONFIRM_FG: u32 = 0xffe0e0;
 
 pub struct Workspace {
     tabs: Tabs<Rc<dyn PaneHandle<Request = SurfaceRequest>>>,
@@ -181,7 +178,6 @@ struct PaneTitle {
 enum Mode {
     Idle,
     Renaming(TabRename),
-    ConfirmingClose(PendingClose),
     DraggingDivider(DividerDrag),
 }
 
@@ -189,14 +185,6 @@ impl Mode {
     fn renaming(&self) -> Option<&TabRename> {
         if let Self::Renaming(rename) = self {
             Some(rename)
-        } else {
-            None
-        }
-    }
-
-    fn pending_close(&self) -> Option<&PendingClose> {
-        if let Self::ConfirmingClose(close) = self {
-            Some(close)
         } else {
             None
         }
@@ -638,25 +626,6 @@ impl Render for Workspace {
             .when_some(self.mode.divider_drag(), |element, drag| {
                 element.child(Self::divider_overlay(drag, cx))
             })
-            .children(self.mode.pending_close().map(|pending| {
-                div()
-                    .debug_selector(|| "workspace-confirmation".into())
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(0.0))
-                    .occlude()
-                    .max_h_full()
-                    .overflow_hidden()
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                    .w_full()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .bg(rgb(CONFIRM_BG))
-                    .text_color(rgb(CONFIRM_FG))
-                    .child(pending.label.clone())
-            }))
             .when(self.quit_gesture.visible(), |element| {
                 element.child(
                     div()

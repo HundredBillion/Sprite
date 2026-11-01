@@ -80,11 +80,6 @@ impl sprite_pane::Pane for BusyPane {
     fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
         None
     }
-    fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
-        Some(sprite_pane::CloseWarning {
-            program: Some("busy".into()),
-        })
-    }
 }
 
 pub(super) fn press(key: &str, modifiers: Modifiers) -> Keystroke {

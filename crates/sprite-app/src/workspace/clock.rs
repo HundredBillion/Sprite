@@ -100,9 +100,6 @@ mod tests {
         fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
             None
         }
-        fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
-            None
-        }
         fn tick(&mut self, _: &mut Context<Self>) {
             self.ticks.set(self.ticks.get() + 1);
         }

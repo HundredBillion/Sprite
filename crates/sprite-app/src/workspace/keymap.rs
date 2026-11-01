@@ -235,23 +235,6 @@ impl Workspace {
                 cx.stop_propagation();
                 return;
             }
-            Mode::ConfirmingClose(_) => {
-                if event.keystroke.key == "escape" {
-                    self.dismiss_pending_close(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if !matches!(
-                    action,
-                    Some(
-                        WorkspaceAction::ClosePane
-                            | WorkspaceAction::CloseTab
-                            | WorkspaceAction::Quit
-                    )
-                ) {
-                    self.dismiss_pending_close(cx);
-                }
-            }
             Mode::DraggingDivider(_) => {
                 if action.is_some() {
                     self.end_divider_drag(cx);
@@ -330,11 +313,6 @@ mod tests {
         fn title(&self) -> Option<SharedString> {
             None
         }
-        fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
-            Some(sprite_pane::CloseWarning {
-                program: Some("editor".into()),
-            })
-        }
         fn set_allocated(&mut self, _: Size<Pixels>) {}
         fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
             None
@@ -376,34 +354,33 @@ mod tests {
         });
     }
 
-    /// A held repeat that reaches a close never answers its question,
-    /// whatever route it arrives by: the auto-repeat is the first press
-    /// still going, not a second decision.
+    /// Closing a pane or a tab whose program is still running closes it at
+    /// once. Sprite asks nothing first; the program is ended by the usual
+    /// bounded cleanup.
     #[gpui::test]
-    fn a_held_repeat_reaching_a_close_does_not_confirm_it(cx: &mut gpui::TestAppContext) {
+    fn closing_a_busy_pane_or_tab_closes_it_at_once(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         busy_panes(&workspace, cx);
+        cx.simulate_keystrokes("ctrl-shift-w");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.tabs.active().unwrap().len(), 1, "the pane closed");
+        });
         workspace.update(cx, |workspace, cx| {
-            assert!(
-                !workspace.may_close(CloseScope::Pane, false, cx),
-                "a busy pane asks first"
-            );
-            assert!(
-                !workspace.may_close(CloseScope::Pane, true, cx),
-                "a held repeat does not answer"
-            );
-            assert!(
-                matches!(workspace.mode, Mode::ConfirmingClose(_)),
-                "the question is still asked"
-            );
-            assert!(
-                workspace.may_close(CloseScope::Pane, false, cx),
-                "a fresh press answers it"
-            );
+            workspace.tabs.open(&mut |_, _| {
+                Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            });
+            workspace.refresh_layout(cx);
+        });
+        draw_workspace(cx);
+        cx.simulate_keystrokes("ctrl-shift-q");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.tabs.len(), 1, "the tab closed");
         });
     }
 
-    /// Two panes that both report a running program, so every close asks.
+    /// Two panes, the first focused.
     fn busy_panes(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext) {
         workspace.update(cx, |workspace, cx| {
             let mut make = |_, _| {
@@ -419,23 +396,23 @@ mod tests {
         draw_workspace(cx);
     }
 
-    fn asking(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> bool {
-        workspace.read_with(cx, |workspace, _| {
-            matches!(workspace.mode, Mode::ConfirmingClose(_))
-        })
-    }
-
-    /// Holding a close key auto-repeats it. The first press asks; the repeats
-    /// that follow while the key is still down are that same press, so they
-    /// neither answer the question nor dismiss it. Letting go and pressing
-    /// again is what closes.
+    /// Holding a close key auto-repeats it, and the repeats are the same press:
+    /// one pane or one tab closes, however long the key is held.
     #[gpui::test]
-    fn a_held_close_key_cannot_answer_its_own_question(cx: &mut gpui::TestAppContext) {
+    fn holding_a_close_key_closes_once(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         busy_panes(&workspace, cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs.split(Orientation::Horizontal, |_, _| {
+                Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            });
+            workspace.refresh_layout(cx);
+        });
+        draw_workspace(cx);
 
         cx.simulate_keystrokes("ctrl-shift-w");
-        assert!(asking(&workspace, cx));
         for _ in 0..3 {
             hold(cx, press("w", ctrl_shift()));
         }
@@ -443,21 +420,8 @@ mod tests {
             assert_eq!(
                 workspace.tabs.active().unwrap().len(),
                 2,
-                "a held repeat closed the pane"
+                "a held repeat closed another pane"
             );
-        });
-        assert!(
-            asking(&workspace, cx),
-            "a held repeat dismissed the question"
-        );
-        cx.simulate_keystrokes("ctrl-shift-w");
-        workspace.read_with(cx, |workspace, _| {
-            assert_eq!(
-                workspace.tabs.active().unwrap().len(),
-                1,
-                "a fresh second press still confirms"
-            );
-            assert!(matches!(workspace.mode, Mode::Idle));
         });
 
         // The same for a tab. A second tab keeps the window open when one closes.
@@ -467,20 +431,21 @@ mod tests {
                     focus: cx.focus_handle(),
                 })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
             });
+            workspace.tabs.open(|_, _| {
+                Rc::new(cx.new(|cx| BusyPane {
+                    focus: cx.focus_handle(),
+                })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+            });
             workspace.refresh_layout(cx);
         });
         draw_workspace(cx);
         cx.simulate_keystrokes("ctrl-shift-q");
-        assert!(asking(&workspace, cx));
         for _ in 0..3 {
             hold(cx, press("q", ctrl_shift()));
         }
         workspace.read_with(cx, |workspace, _| {
-            assert_eq!(workspace.tabs.len(), 2, "a held repeat closed the tab");
+            assert_eq!(workspace.tabs.len(), 2, "a held repeat closed another tab");
         });
-        assert!(asking(&workspace, cx));
-        cx.simulate_keystrokes("ctrl-shift-q");
-        workspace.read_with(cx, |workspace, _| assert_eq!(workspace.tabs.len(), 1));
     }
 
     /// Holding the split key makes one split and holding the new-tab key one
@@ -525,56 +490,6 @@ mod tests {
         );
     }
 
-    /// A deliberate act withdraws a close question: a button press anywhere,
-    /// or the window going to the background. Pointer motion, a wheel turn, a
-    /// modifier on its own and a resize are not decisions and leave it standing.
-    #[gpui::test]
-    fn a_close_question_is_withdrawn_by_deliberate_input_only(cx: &mut gpui::TestAppContext) {
-        use gpui::{MouseButton, ScrollDelta, ScrollWheelEvent};
-        let (workspace, cx) = test_workspace(cx);
-        busy_panes(&workspace, cx);
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-
-        cx.simulate_keystrokes("ctrl-shift-w");
-        assert!(asking(&workspace, cx));
-        cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
-        draw_workspace(cx);
-        let pane = cx.debug_bounds("workspace-pane-0").unwrap().center();
-        cx.simulate_mouse_move(pane, None, Modifiers::default());
-        cx.simulate_event(ScrollWheelEvent {
-            position: pane,
-            delta: ScrollDelta::Lines(gpui::point(0.0, 3.0)),
-            ..Default::default()
-        });
-        cx.simulate_modifiers_change(ctrl());
-        assert!(
-            asking(&workspace, cx),
-            "a resize, motion, a wheel turn or a modifier withdrew the question"
-        );
-
-        cx.simulate_mouse_down(pane, MouseButton::Right, Modifiers::default());
-        cx.simulate_mouse_up(pane, MouseButton::Right, Modifiers::default());
-        assert!(
-            !asking(&workspace, cx),
-            "a button press withdraws the question"
-        );
-        cx.simulate_keystrokes("ctrl-shift-w");
-        assert!(
-            asking(&workspace, cx),
-            "so the next close asks again rather than closing"
-        );
-
-        cx.deactivate_window();
-        assert!(
-            !asking(&workspace, cx),
-            "switching away from the window withdraws the question"
-        );
-        workspace.read_with(cx, |workspace, _| {
-            assert_eq!(workspace.tabs.active().unwrap().len(), 2)
-        });
-    }
-
     #[gpui::test]
     fn modal_keys_reach_only_the_intended_consumer(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
@@ -612,13 +527,6 @@ mod tests {
                 Some("c")
             )
         });
-        cx.simulate_keystrokes("ctrl-shift-w escape");
-        assert_eq!(&*keys.borrow(), &["a"]);
-        cx.simulate_keystrokes("ctrl-shift-w z");
-        workspace.read_with(cx, |workspace, _| {
-            assert!(matches!(workspace.mode, Mode::Idle))
-        });
-        assert_eq!(&*keys.borrow(), &["a", "z"]);
         workspace.update(cx, |workspace, cx| {
             let placed = workspace.dividers[0].0;
             workspace.begin_divider_drag(placed, placed.boundary, cx);
@@ -628,7 +536,7 @@ mod tests {
         workspace.read_with(cx, |workspace, _| {
             assert!(matches!(workspace.mode, Mode::DraggingDivider(_)))
         });
-        assert_eq!(&*keys.borrow(), &["a", "z", "y"]);
+        assert_eq!(&*keys.borrow(), &["a", "y"]);
         cx.simulate_keystrokes("ctrl-shift-right");
         draw_workspace(cx);
         workspace.read_with(cx, |workspace, _| {
@@ -637,7 +545,7 @@ mod tests {
         let second_focus = focused_handle(&workspace, cx);
         assert_ne!(first_focus, second_focus);
         cx.update(|window, _| assert!(second_focus.is_focused(window)));
-        assert_eq!(&*keys.borrow(), &["a", "z", "y"]);
+        assert_eq!(&*keys.borrow(), &["a", "y"]);
     }
 
     #[gpui::test]
@@ -796,7 +704,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn modes_cancel_and_close_confirmation_remains_scope_specific(cx: &mut gpui::TestAppContext) {
+    fn a_close_ends_rename_and_divider_drag(cx: &mut gpui::TestAppContext) {
         use super::Mode;
         use gpui::AppContext;
         let (workspace, cx) = test_workspace(cx);
@@ -828,36 +736,12 @@ mod tests {
             workspace.begin_divider_drag(placed, 400.0, cx);
             assert!(matches!(workspace.mode, Mode::DraggingDivider(_)));
             assert!(workspace.mode.renaming().is_none());
-            assert!(!workspace.may_close(CloseScope::Pane, false, cx));
-            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)));
-            assert!(workspace.mode.divider_drag().is_none());
-            assert!(!workspace.may_close(CloseScope::Tab, false, cx));
-            assert!(workspace.may_close(CloseScope::Tab, false, cx));
+            assert!(workspace.may_close(CloseScope::Pane, false, cx));
             assert!(matches!(workspace.mode, Mode::Idle));
-            assert!(!workspace.may_close(CloseScope::Pane, false, cx));
+            assert!(workspace.mode.divider_drag().is_none());
         });
         draw_workspace(cx);
-        cx.simulate_keystrokes("escape");
-        workspace.read_with(cx, |workspace, _| {
-            assert!(matches!(workspace.mode, Mode::Idle));
-            assert_eq!(workspace.tabs.active().unwrap().len(), 2);
-        });
         cx.simulate_keystrokes("ctrl-shift-w");
-        workspace.read_with(cx, |workspace, _| {
-            assert!(matches!(workspace.mode, Mode::ConfirmingClose(_)))
-        });
-        cx.simulate_keystrokes("a");
-        workspace.read_with(cx, |workspace, _| {
-            assert!(matches!(workspace.mode, Mode::Idle))
-        });
-        cx.simulate_keystrokes("ctrl-shift-w");
-        workspace.update(cx, |workspace, cx| {
-            workspace.focus_pane(PaneId(0), cx);
-            assert!(matches!(workspace.mode, Mode::Idle));
-            assert!(!workspace.may_close(CloseScope::Pane, false, cx));
-            workspace.dismiss_pending_close(cx);
-        });
-        cx.simulate_keystrokes("ctrl-shift-w ctrl-shift-w");
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.tabs.active().unwrap().len(), 1)
         });

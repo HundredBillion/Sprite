@@ -65,10 +65,6 @@ pub trait Pane: Render + Focusable + gpui::EventEmitter<TitleChanged> + 'static 
     /// closure rather than a named handle type, so that "a pane is a thing
     /// with a child process" never becomes part of the contract.
     fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>>;
-
-    /// What closing this pane would interrupt, or `None` if closing is
-    /// uneventful.
-    fn close_warning(&self) -> Option<CloseWarning>;
 }
 
 /// A pane emits its new display title when that title changes, including resets to unknown.
@@ -82,16 +78,6 @@ pub type TitleListener = Box<dyn FnMut(&TitleChanged, &mut App)>;
 pub trait PaneRequest {
     /// Answers unsupported requests instead of leaving the caller waiting.
     fn refuse(self);
-}
-
-/// What a person is told before a pane that is busy is closed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloseWarning {
-    /// The program that would be interrupted, when it can be named.
-    ///
-    /// `None` still warns: "something is running" is the part that matters,
-    /// and inventing a name would be worse than admitting to none.
-    pub program: Option<SharedString>,
 }
 
 /// The object-safe view of a pane. Implemented on the handle, never written by
@@ -121,8 +107,6 @@ pub trait PaneHandle {
     fn set_allocated(&self, size: Size<Pixels>, cx: &mut App);
     /// See [`Pane::begin_shutdown`].
     fn begin_shutdown(&self, cx: &mut App) -> Option<Box<dyn FnOnce() + Send>>;
-    /// See [`Pane::close_warning`].
-    fn close_warning(&self, cx: &App) -> Option<CloseWarning>;
 }
 
 impl<V: Pane> PaneHandle for gpui::Entity<V> {
@@ -162,10 +146,6 @@ impl<V: Pane> PaneHandle for gpui::Entity<V> {
 
     fn begin_shutdown(&self, cx: &mut App) -> Option<Box<dyn FnOnce() + Send>> {
         self.update(cx, |pane, _cx| pane.begin_shutdown())
-    }
-
-    fn close_warning(&self, cx: &App) -> Option<CloseWarning> {
-        self.read(cx).close_warning()
     }
 }
 
@@ -214,10 +194,6 @@ mod tests {
         fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
             None
         }
-
-        fn close_warning(&self) -> Option<CloseWarning> {
-            None
-        }
     }
 
     /// Compiles only if the blanket implementation reaches a second type. The
@@ -254,18 +230,5 @@ mod tests {
             ["gpui"],
             "sprite-pane depends on gpui and nothing else"
         );
-    }
-
-    #[test]
-    fn a_close_warning_names_the_program_when_it_can() {
-        let named = CloseWarning {
-            program: Some("vim".into()),
-        };
-        let unnamed = CloseWarning { program: None };
-        assert_eq!(
-            named.program.as_ref().map(|p| -> &str { p.as_ref() }),
-            Some("vim")
-        );
-        assert!(unnamed.program.is_none());
     }
 }

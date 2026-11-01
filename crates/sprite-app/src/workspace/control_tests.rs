@@ -192,13 +192,10 @@ fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::T
         ask(&descriptor, Operation::Focus { pane: pane.clone() }, cx)["outcome"],
         "ok"
     );
-    let closed = ask(&descriptor, Operation::Close { pane: pane.clone() }, cx);
-    assert!(closed["outcome"] == "ok" || closed["outcome"] == "confirmation_required");
-    if closed["outcome"] == "confirmation_required" {
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.answer_control(true, window, cx)
-        });
-    }
+    assert_eq!(
+        ask(&descriptor, Operation::Close { pane: pane.clone() }, cx)["outcome"],
+        "ok"
+    );
     assert_eq!(
         ask(&descriptor, Operation::Close { pane }, cx)["outcome"],
         "gone"
@@ -490,9 +487,7 @@ fn public_fixed_scope_includes_its_creations_and_denies_unrelated_future_panes(
 }
 
 #[gpui::test]
-fn public_close_requires_targeted_confirmation_and_revocation_cancels_it(
-    cx: &mut gpui::TestAppContext,
-) {
+fn public_close_of_a_busy_pane_removes_it_at_once(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
@@ -520,46 +515,15 @@ fn public_close_requires_targeted_confirmation_and_revocation_cancels_it(
         "unsupported"
     );
     assert_eq!(
-        ask(&descriptor, Operation::Close { pane: busy.clone() }, cx)["outcome"],
-        "confirmation_required"
+        ask(&descriptor, Operation::Close { pane: busy }, cx)["outcome"],
+        "ok",
+        "a busy pane closes at once"
     );
-    assert_eq!(
-        ask(&descriptor, Operation::Close { pane: busy.clone() }, cx)["outcome"],
-        "confirmation_required"
-    );
-    assert_eq!(
-        ask(&descriptor, Operation::List, cx)["result"]["panes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    workspace.update(cx, |workspace, cx| {
-        workspace.revoke_control(descriptor.grant.parse().unwrap(), cx)
-    });
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.answer_control(true, window, cx)
-    });
-    let other = approve(&workspace, cx, true, false);
-    assert_eq!(
-        ask(&other, Operation::List, cx)["result"]["panes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        ask(&other, Operation::Close { pane: busy }, cx)["outcome"],
-        "confirmation_required"
-    );
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.answer_control(true, window, cx)
-    });
-    let listing = ask(&other, Operation::List, cx);
+    let listing = ask(&descriptor, Operation::List, cx);
     assert_eq!(listing["result"]["panes"].as_array().unwrap().len(), 1);
     assert_eq!(
         listing["result"]["panes"][0]["id"],
-        format!("{}:0", other.window)
+        format!("{}:0", descriptor.window)
     );
 }
 
@@ -857,8 +821,7 @@ fn created_pane(response: &Value) -> u64 {
     id.rsplit_once(':').unwrap().1.parse().unwrap()
 }
 
-/// Closes a pane through Pane Control, answering the owner's confirmation when
-/// the pane looks busy, and checks it is gone afterwards.
+/// Closes a pane through Pane Control and checks it is gone afterwards.
 fn close_by_control(
     workspace: &gpui::Entity<Workspace>,
     descriptor: &Descriptor,
@@ -869,13 +832,7 @@ fn close_by_control(
         pane: format!("{}:{pane}", descriptor.window),
     };
     let closed = ask(descriptor, request(), cx);
-    if closed["outcome"] == "confirmation_required" {
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.answer_control(true, window, cx)
-        });
-    } else {
-        assert_eq!(closed["outcome"], "ok", "{closed}");
-    }
+    assert_eq!(closed["outcome"], "ok", "{closed}");
     workspace.read_with(cx, |workspace, _| {
         assert!(
             workspace.tabs.get(PaneId(pane)).is_none(),

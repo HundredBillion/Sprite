@@ -268,7 +268,6 @@ fn startup_and_reload_apply_identical_session_defaults(cx: &mut gpui::TestAppCon
 fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     cx: &mut gpui::TestAppContext,
 ) {
-    use sprite_pane::Pane;
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
@@ -331,12 +330,11 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     );
     view.update(cx, |view, cx| {
         let queries = FOREGROUND_QUERIES.with(|count| count.get());
-        let warning = view.close_warning().unwrap();
-        assert_eq!(warning.program.unwrap().as_ref(), "cat");
+        assert_eq!(view.foreground().program(), Some("cat"));
         assert_eq!(
             FOREGROUND_QUERIES.with(|count| count.get()),
             queries + 1,
-            "close consent must query live state, not the explicit display title"
+            "the foreground is asked of live state, not the explicit display title"
         );
         assert!(view.foreground_owner_group(std::process::id()).is_none());
         view.apply(crate::terminal_events::Effect::Title(None), cx);
@@ -375,7 +373,6 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     clock_beat(&view, cx);
     view.read_with(cx, |view, _| {
         assert!(view.title().is_none());
-        assert!(view.close_warning().is_none());
     });
     // Isolate blink activity from shell output snapshots that may still be queued.
     view.update(cx, |view, _| view._snapshots = Task::ready(()));
