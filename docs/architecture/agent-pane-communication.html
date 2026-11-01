@@ -25,6 +25,7 @@
 <div class="eyebrow">Sprite Terminal · agent communication between panes</div>
 <h1>One agent.<br>Many panes.<br>Explicit permission.</h1>
 <p class="intro">An agent running in one pane can read or act on another pane by asking Sprite. Sprite authenticates the request, checks the owner's grant, and routes it to the pane or its Terminal Session.</p>
+<p class="intro"><strong>Superseded on 2026-11-01 (ADR 0036).</strong> Grants, access requests, observation keys and Allow prompts were removed. Any process running as the owner now drives every pane through each window's socket; see <a href="../pane-control.md">Pane control</a>. This page describes the earlier design.</p>
 <div class="hero-meta"><span class="badge">Implemented on the issue 106 branch</span><small>Offline, standalone architecture explainer</small></div>
 </header>
 

@@ -50,38 +50,32 @@ IDE-shaped plan behind it.
 
 **kitty** can already do this, through the same channel it uses to drive the
 terminal: `kitty @ get-text` reads a window and `kitty @ send-text` types into
-one. What keeps those apart is configured rather than structural — passwords
-scoped to named commands, or a Python hook that vets each one — so a read-only
-kitty is something you assemble correctly and then keep that way. Sprite's is
-read-only because the grammar has no write in it to switch off.
+one. Sprite offers the same pair through `sprite panes read` and `sprite panes
+input`, with nothing to configure first: any program running as you can use
+them.
 
 **WezTerm** is the closest prior art and deserves the credit: `wezterm cli
 get-text` genuinely hands a program the contents of a pane. The difference is
-shape rather than existence. That arrives as text, from a CLI that can equally
-spawn, kill and write to panes. Sprite's arrives as versioned JSON, from a
-grammar with no write in it, over a socket keyed per window, with the content
-declared untrusted in the payload.
+shape rather than existence. That arrives as text. Sprite's arrives as
+versioned JSON over a private per-window socket, with the content declared
+untrusted in the payload.
 
-The trust boundary is the pane's process tree. Anything you run in a pane
-inherits that pane's keys from its environment, so it can read what the
-window shows and draw into any pane of that window; nothing outside the
-window's process trees holds a key, and the keys are never written anywhere a
-later process could find them.
+The trust boundary is your user account. Each window's socket sits in a
+directory only you can enter, so any program running as you can read, create,
+close and type into every pane, and nothing running as anyone else can reach
+them. Drawing a Surface is narrower: it needs a key that only a pane's own
+sessions are given.
 
 **Warp** shares the premise and is more open than it is usually given credit
 for: the client is on GitHub under AGPL v3, and the account is optional. The
 difference is what the product is. Warp is an agentic development environment —
 it supplies the intelligence, rebuilds the shell interaction model around it,
 and reaches its own servers for the parts that matter. Sprite supplies none of
-that and changes nothing about how your shell works. It exposes a surface, keys
-it per window, and lets whichever agent you already run be the one that reads.
+that and changes nothing about how your shell works. It exposes a socket per
+window and lets whichever agent you already run be the one that reads.
 
-What holds that together is that the read surface is read-only by construction
-rather than by policy. The request grammar has no variant that means write, so a
-mutating request cannot be built, let alone refused; scope resolves against the
-issuing window, so a pane in another window is not addressable rather than
-forbidden; no TCP socket is ever opened, and a test asserts the process holds
-none. The reply is serialised field by field in hand-written code, so adding a
+A pane address names its window, and a window answers only for its own panes;
+no TCP socket is ever opened, and a test asserts the process holds none. The reply is serialised field by field in hand-written code, so adding a
 field to an internal snapshot for the renderer's benefit cannot put it on the
 wire — colours, fonts, image bytes, control sequences, environment values and
 filenames are absent because no line of the serialiser writes them. And every
@@ -90,7 +84,7 @@ feeding this to a language model is feeding it text an arbitrary program chose.
 
 Agents living in the terminal are what make that worth having now. The usual
 options are to scrape the screen or to paste it. Sprite offers a third: ask,
-over a local socket, with a key, and get back something with a schema.
+over a local socket, and get back something with a schema.
 
 ## Install
 
@@ -211,9 +205,7 @@ applications. Without it, two quick window-close requests still confirm quit,
 but holding Super+W cannot be detected. See the
 [configuration notes](../extras/hyprland/README.md) for verification and rollback.
 
-Closing a pane or tab that is running a program asks first: the banner
-names what would be interrupted, and repeating the same gesture confirms.
-Escape keeps it.
+Closing a pane or tab closes it at once, ending whatever is running in it.
 
 A tab shows the name you gave it, else what its focused pane is running — the
 title the program set, or the program's name — else its number. The window
@@ -268,17 +260,17 @@ sentence of this file calls Sprite an ordinary terminal emulator. It is one in
 most respects. These are the respects in which it is not, and they are the two
 you would meet on the first day.
 
-## Reading a pane from a program
+## Reading and driving panes from a program
 
 ```sh
-sprite panes snapshot            # the rest of this tab
-sprite panes snapshot --window   # every pane in this window
+sprite panes list                        # every pane in every window
+sprite panes read --pane "$pane"         # one pane's text and history
+sprite panes input --pane "$pane" --text 'make test'
 ```
 
-Read-only, authenticated by a per-window key, and scoped to the window that
-issued it — a pane in another window is not merely refused, it is not
-addressable. Responses declare their content untrusted, because terminal
-output is whatever a program chose to print.
+Each pane's session is told its own address in `SPRITE_PANE`. Responses declare
+their content untrusted, because terminal output is whatever a program chose to
+print. [Pane control](pane-control.md) has every command.
 
 ## Drawing in a pane from a program
 
@@ -296,9 +288,8 @@ holds the Surface open, prints each click, keystroke, resize, and focus
 change as one JSON line, sends each further document on standard input as a
 replacement, and closes the Surface when standard input closes. A Surface
 takes the keyboard when it opens; the program hands it back with
-`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Reading and drawing travel
-on separate sockets with separate keys: nothing that holds only the
-observation credentials can draw.
+`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Drawing uses the Surface
+socket and a key that only the pane's own sessions are given.
 
 What a Surface hears is what a terminal program hears. A key press arrives with
 the text it typed (`{"type":"input","key":"shift-1","text":"!"}`), so a program
@@ -441,7 +432,7 @@ pane's font and cell size, and the theme styles it by highlight-group name:
 
 Linux is the supported platform and the one this is tested on.
 
-macOS builds. Its observation tests used to fail there, and the cause was
+macOS builds. Its socket tests used to fail there, and the cause was
 Sprite's own: a socket-path guard set at a flat 100 bytes, stricter than either
 platform requires — `sun_path` holds 104 on macOS and 108 on Linux. What
 exceeded it was the *test* harness, which nests a scratch directory inside
@@ -451,8 +442,8 @@ test pins that budget so it cannot drift back.
 
 That is now measured, not inferred. The whole workspace — format, lints, every
 test, the build — was run on real hardware on 2026-09-07: an Apple-silicon Mac
-on macOS 26 with Xcode installed for the Metal shaders. The observation tests
-pass there. The same run found two dozen engine-test failures that Linux had
+on macOS 26 with Xcode installed for the Metal shaders. The socket tests pass
+there. The same run found two dozen engine-test failures that Linux had
 hidden. Most were the harness assuming GNU `od` spacing, `/proc`, or a bash
 newer than the 3.2 Apple ships. One was Sprite's: the worker wrote PTY input
 inline with a blocking call, and macOS's 1 KiB PTY input queue turned a large
@@ -468,7 +459,7 @@ with `packaging/macos/update.sh`.
 | | |
 |---|---|
 | `crates/sprite-term` | The terminal engine — PTY, child lifecycle, libghostty, projections. Imports no GPUI. |
-| `crates/sprite-app` | The application shell — window, panes, tabs, the observation endpoint. |
+| `crates/sprite-app` | The application shell — window, panes, tabs, the pane control socket. |
 | `docs/adr` | Decisions, with the reasoning that produced them. |
 | `docs/PRD`, `docs/TSP` | What was built and how it was planned. |
 | `packaging` | Everything needed to install it. |
@@ -480,8 +471,7 @@ exists, which is what makes it testable without one.
 
 MIT or Apache-2.0, at your option.
 
-## Authorized pane control
+## Pane control
 
-See [Pane control](pane-control.md) for public CLI/protocol operations, owner
-grants, supported content, distinct input rights, revocation and bounded outcomes.
-Existing Pane Observation credentials retain their read-only pane contract.
+See [Pane control](pane-control.md) for the CLI and protocol, supported content,
+outcomes and limits.
