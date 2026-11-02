@@ -782,12 +782,15 @@ pub struct SurfaceEndpoint {
 }
 
 impl SurfaceEndpoint {
-    pub fn open(key: Arc<SocketKey>, lanes: SurfaceLanes) -> std::io::Result<Self> {
-        Self::open_in(runtime_directory()?, key, lanes)
+    /// `window` is the id in this window's Pane Addresses; a Surface names its
+    /// pane by one of them.
+    pub fn open(window: String, key: Arc<SocketKey>, lanes: SurfaceLanes) -> std::io::Result<Self> {
+        Self::open_in(runtime_directory()?, window, key, lanes)
     }
 
     pub fn open_in(
         directory: PathBuf,
+        window: String,
         key: Arc<SocketKey>,
         lanes: SurfaceLanes,
     ) -> std::io::Result<Self> {
@@ -805,7 +808,7 @@ impl SurfaceEndpoint {
             key,
             policy,
             |stream| refuse(stream, &Refusal::Denied.reason()),
-            move |connection| converse(connection, &lanes),
+            move |connection| converse(connection, &window, &lanes),
         )?;
         Ok(Self { transport })
     }
@@ -837,7 +840,7 @@ impl SurfaceEndpoint {
 
 static NEXT_SURFACE: AtomicU64 = AtomicU64::new(1);
 
-fn converse(connection: Authenticated, lanes: &SurfaceLanes) {
+fn converse(connection: Authenticated, window: &str, lanes: &SurfaceLanes) {
     let Authenticated {
         mut stream,
         reader,
@@ -845,7 +848,7 @@ fn converse(connection: Authenticated, lanes: &SurfaceLanes) {
         slot,
         ..
     } = connection;
-    match first_line(&body) {
+    match first_line(&body, window) {
         Ok(FirstRequest::Open { pane, open }) => {
             let connection = SurfaceConnection::holding(&stream, Some(slot));
             serve_surface(stream, reader, connection, pane, open, lanes)
@@ -1113,7 +1116,8 @@ mod tests {
     fn endpoint(scratch: &Scratch) -> (SurfaceEndpoint, SurfaceReceivers) {
         let (lanes, receivers) = surface_lanes_with(8, 8);
         let key = Arc::new(SocketKey::generate().expect("key"));
-        let endpoint = SurfaceEndpoint::open_in(scratch.0.clone(), key, lanes).expect("open");
+        let endpoint = SurfaceEndpoint::open_in(scratch.0.clone(), WINDOW.to_owned(), key, lanes)
+            .expect("open");
         (endpoint, receivers)
     }
 
@@ -1164,9 +1168,11 @@ mod tests {
         }
     }
 
+    const WINDOW: &str = "f00d";
+
     fn open_message(pane: u64) -> Value {
         json!({
-            "type": "open", "version": VERSION, "pane": pane, "position": "dock",
+            "type": "open", "version": VERSION, "pane": format!("{WINDOW}:{pane}"), "position": "dock",
             "side": "left", "size": 200, "focus": false,
             "description": { "version": 1, "root": { "kind": "box" } }
         })
@@ -1174,7 +1180,7 @@ mod tests {
 
     fn capabilities_message(pane: u64, owner_pid: u64, return_target: Value) -> Value {
         json!({
-            "type": "capabilities", "version": VERSION, "pane": pane,
+            "type": "capabilities", "version": VERSION, "pane": format!("{WINDOW}:{pane}"),
             "owner_pid": owner_pid, "return_target": return_target
         })
     }
@@ -1664,6 +1670,7 @@ mod tests {
             let (lanes, _receivers) = surface_lanes_with(1, 1);
             let endpoint = SurfaceEndpoint::open_in(
                 directory.clone(),
+                WINDOW.to_owned(),
                 Arc::new(SocketKey::generate().unwrap()),
                 lanes,
             );
@@ -1823,6 +1830,9 @@ mod tests {
         let (endpoint, rx) = endpoint(&scratch);
         let mut missing_pane = capabilities_message(1, 41, json!("terminal"));
         missing_pane.as_object_mut().expect("object").remove("pane");
+        let mut other_window = capabilities_message(1, 41, json!("terminal"));
+        other_window["pane"] = json!("beef:1");
+        let pane_needed = "malformed: pane is this pane's address, from SPRITE_PANE";
         for (message, reason) in [
             (
                 capabilities_message(1, 41, json!("terminal")),
@@ -1836,7 +1846,8 @@ mod tests {
                 capabilities_message(1, u64::from(u32::MAX) + 1, json!("terminal")),
                 "malformed: owner_pid is a positive process id",
             ),
-            (missing_pane, "malformed: a pane id is needed"),
+            (missing_pane, pane_needed),
+            (other_window, pane_needed),
             (
                 capabilities_message(1, 41, json!(9_007_199_254_740_992_u64)),
                 "malformed: return_target is \"terminal\" or a Surface id",
@@ -2504,7 +2515,7 @@ mod tests {
             stream,
             "{} {}",
             endpoint.key_hex(),
-            json!({ "type": "focus", "pane": 9, "target": "terminal" })
+            json!({ "type": "focus", "pane": "f00d:9", "target": "terminal" })
         )
         .expect("write");
         assert_eq!(
@@ -2731,7 +2742,7 @@ mod tests {
             stream,
             "{} {}",
             endpoint.key_hex(),
-            json!({ "type": "focus", "pane": 9, "target": 7 })
+            json!({ "type": "focus", "pane": "f00d:9", "target": 7 })
         )
         .expect("write");
         assert_eq!(
@@ -2744,7 +2755,7 @@ mod tests {
             stream,
             "{} {}",
             endpoint.key_hex(),
-            json!({ "type": "focus", "pane": 9, "target": 8 })
+            json!({ "type": "focus", "pane": "f00d:9", "target": 8 })
         )
         .expect("write");
         assert_eq!(
@@ -2760,7 +2771,7 @@ mod tests {
             stream,
             "{} {}",
             endpoint.key_hex(),
-            json!({ "type": "focus", "pane": 9, "target": "blob" })
+            json!({ "type": "focus", "pane": "f00d:9", "target": "blob" })
         )
         .expect("write");
         assert_eq!(

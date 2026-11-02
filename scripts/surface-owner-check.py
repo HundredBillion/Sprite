@@ -20,7 +20,7 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description='Check owned Surface lifecycle from a foreground Sprite pane.')
 parser.add_argument('--output', type=Path, required=True)
 log = parser.parse_args().output
-pane = int(os.environ['SPRITE_PANE'])
+pane = os.environ['SPRITE_PANE']
 checks = []
 
 
@@ -110,7 +110,7 @@ try:
     caps['return_target'] = did
     check(query(caps)['type'] == 'refused', 'dock cannot be an editor return target')
     caps['return_target'] = fid
-    check(query(dict(type='focus', pane=pane + 1000, target=did))['type'] == 'refused', 'unknown-pane focus refused')
+    check(query(dict(type='focus', pane=f"{pane.split(':')[0]}:{int(pane.split(':')[1]) + 1000}", target=did))['type'] == 'refused', 'unknown-pane focus refused')
     send(fd, {'type': 'close'})
     expect(fd, 'closed')
     expect(ff, 'focus')

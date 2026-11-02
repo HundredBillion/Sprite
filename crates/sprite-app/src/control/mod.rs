@@ -353,6 +353,33 @@ mod tests {
         }
     }
 
+    /// A config request the window's full queue turns away is reported as
+    /// busy at once, not after waiting out the window's answer.
+    #[test]
+    fn a_config_request_refused_at_admission_is_busy_at_once() {
+        let (reload, _window) = async_channel::bounded(1);
+        reload
+            .try_send(ReloadRequest {
+                what: ConfigVerb::Print,
+                reply: Relayed::waiting(std::sync::mpsc::sync_channel(1).0).0,
+            })
+            .expect("fill the lane");
+        let lanes = Lanes {
+            control: async_channel::bounded(1).0,
+            reload,
+            panes: crate::observation::panes::WindowPanes::new(),
+        };
+        for verb in [ConfigVerb::Reload, ConfigVerb::Print] {
+            let started = std::time::Instant::now();
+            let answer = configure(&lanes, "full", verb);
+            assert_eq!(answer, failure("full", "busy"));
+            assert!(
+                started.elapsed() < CONFIG_PATIENCE.answer / 2,
+                "waited it out"
+            );
+        }
+    }
+
     #[test]
     fn a_window_socket_is_named_for_its_window_and_only_those_names_are_windows() {
         let path = socket_path(std::path::Path::new("/run/sprite"), "abc123");

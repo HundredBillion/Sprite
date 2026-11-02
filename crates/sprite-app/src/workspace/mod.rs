@@ -223,7 +223,7 @@ impl Workspace {
             .inspect_err(|error| { tracing::warn!(target: "sprite_app::surface", kind = ?error.kind(), "surface key generation failed"); })
             .ok()
             .map(Arc::new);
-        let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(key, surface_lanes).inspect_err(|error| { tracing::warn!(target: "sprite_app::surface", kind = ?error.kind(), "surface endpoint failed"); }).ok());
+        let surfaces = surface_key.and_then(|key| SurfaceEndpoint::open(control.window().to_owned(), key, surface_lanes).inspect_err(|error| { tracing::warn!(target: "sprite_app::surface", kind = ?error.kind(), "surface endpoint failed"); }).ok());
 
         // Published before the settings, so a pane rendering on the first
         // settings notification already finds its colours by name.
