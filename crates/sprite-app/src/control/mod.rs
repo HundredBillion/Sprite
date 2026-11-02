@@ -373,7 +373,10 @@ mod tests {
             let started = std::time::Instant::now();
             let answer = configure(&lanes, "full", verb);
             assert_eq!(answer, failure("full", "busy"));
-            assert!(started.elapsed() < CONFIG_PATIENCE.answer / 2, "waited it out");
+            assert!(
+                started.elapsed() < CONFIG_PATIENCE.answer / 2,
+                "waited it out"
+            );
         }
     }
 
