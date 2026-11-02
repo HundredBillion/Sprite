@@ -107,16 +107,10 @@ fn pane_focus_follows_the_keyboard_and_the_window_and_reaches_the_child(
         assert_eq!(focused(cx), (true, false));
         redraw(cx);
 
-        // Moving the keyboard moves Pane Focus, and the pane left behind drops
-        // the paste it was holding.
-        hold_unsafe_paste(&left, cx, "a\nb");
+        // Moving the keyboard moves Pane Focus.
         right.update_in(cx, |view, window, _| window.focus(&view.focus));
         redraw(cx);
         assert_eq!(focused(cx), (false, true));
-        assert!(
-            !left.read_with(cx, |view, _| view.unsafe_paste.is_armed()),
-            "leaving the pane drops its held paste"
-        );
 
         // Frames with nothing changed report nothing.
         redraw(cx);

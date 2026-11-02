@@ -1,5 +1,7 @@
 # Scope pane observation to the window, not the pane
 
+Amended 2026-11-01 by ADR 0036: the boundary is now the user account, not the window. Any process of the owner can reach every window.
+
 Any pane in a Sprite window may read any other pane in that window. The
 observation key is a boundary between windows and everything else; it is
 deliberately **not** a boundary between the panes inside one window.

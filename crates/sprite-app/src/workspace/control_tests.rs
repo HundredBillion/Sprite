@@ -1,5 +1,5 @@
 use super::*;
-use crate::control::{self, AccessRequest, Descriptor, Message, Operation, PROTOCOL, Request};
+use crate::control::{self, Message, Operation, PROTOCOL, Request};
 use serde_json::{Value, json};
 
 struct PrivateRuntime(std::path::PathBuf);
@@ -43,45 +43,27 @@ fn private_runtime(module: &str, cx: &gpui::TestAppContext) -> bool {
     false
 }
 
-fn approve(
-    workspace: &gpui::Entity<Workspace>,
-    cx: &mut gpui::VisualTestContext,
-    manage: bool,
-    input: bool,
-) -> Descriptor {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.serve_control(
-            Message::Access {
-                request: AccessRequest {
-                    all_panes: true,
-                    panes: Default::default(),
-                    manage,
-                    input,
-                    from: Some(0),
-                },
-                reply: tx.into(),
-            },
-            window,
-            cx,
-        );
-        assert!(rx.try_recv().is_err(), "requesting never approves itself");
-        workspace.answer_access(true, cx);
-    });
-    let response = rx.recv().unwrap();
-    assert_eq!(response["outcome"], "ok");
-    serde_json::from_value(response["result"].clone()).unwrap()
+/// Where a window listens, and the window id its pane addresses carry.
+#[derive(Clone, Debug)]
+struct Target {
+    window: String,
+    socket: std::path::PathBuf,
 }
 
-fn ask(descriptor: &Descriptor, operation: Operation, cx: &mut gpui::VisualTestContext) -> Value {
-    let request = Request {
-        protocol: PROTOCOL.into(),
-        id: "test".into(),
-        window: descriptor.window.clone(),
-        operation,
-    };
-    let socket = descriptor.socket.clone();
-    let line = format!("{} {}", descriptor.key, json!(request));
+fn target(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext) -> Target {
+    workspace.read_with(cx, |workspace, _| Target {
+        window: workspace.control.window().to_owned(),
+        socket: workspace
+            .control
+            .socket_path()
+            .expect("the window socket is open")
+            .to_path_buf(),
+    })
+}
+
+/// Sends one raw line to a window socket, running the window until it answers.
+fn send(socket: &std::path::Path, line: String, cx: &mut gpui::VisualTestContext) -> Value {
+    let socket = socket.to_path_buf();
     let thread = std::thread::spawn(move || {
         control::client::exchange(&socket, &line, std::time::Duration::from_secs(3))
     });
@@ -94,39 +76,71 @@ fn ask(descriptor: &Descriptor, operation: Operation, cx: &mut gpui::VisualTestC
     thread.join().unwrap().unwrap()
 }
 
+fn ask(target: &Target, operation: Operation, cx: &mut gpui::VisualTestContext) -> Value {
+    let request = Request {
+        protocol: PROTOCOL.into(),
+        id: "test".into(),
+        window: target.window.clone(),
+        operation,
+    };
+    send(&target.socket, json!(request).to_string(), cx)
+}
+
+/// Any process of the window's user can drive it: the socket is the window's
+/// own file in a private directory, and a request carries no key.
 #[gpui::test]
-fn public_control_needs_owner_approval_and_can_be_revoked(cx: &mut gpui::TestAppContext) {
+fn any_process_of_the_user_can_drive_a_window_without_a_key(cx: &mut gpui::TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
     if !private_runtime(module_path!(), cx) {
         return;
     }
     let (workspace, cx) = test_support::test_workspace(cx);
-    let descriptor = approve(&workspace, cx, true, false);
-    let pane = format!("{}:0", descriptor.window);
+    let target = target(&workspace, cx);
+    assert_eq!(
+        target.socket,
+        crate::local_socket::runtime_directory()
+            .unwrap()
+            .join(format!("window-{}.sock", target.window))
+    );
+    assert_eq!(target.window.len(), 24);
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&target.socket), 0o600);
+    assert_eq!(mode(target.socket.parent().unwrap()), 0o700);
+
+    let pane = format!("{}:0", target.window);
     let answer = ask(
-        &descriptor,
+        &target,
         Operation::Rename {
-            pane: pane.clone(),
+            pane,
             label: Some("human pane".into()),
         },
         cx,
     );
     assert_eq!(answer["outcome"], "ok");
-    let list = ask(&descriptor, Operation::List, cx);
+    let list = ask(&target, Operation::List, cx);
     assert_eq!(list["result"]["panes"][0]["label"], "human pane");
-    let input = ask(
-        &descriptor,
-        Operation::Input {
-            pane,
-            text: Some("x".into()),
-            key: None,
-        },
+
+    let request = json!(Request {
+        protocol: PROTOCOL.into(),
+        id: "keyed".into(),
+        window: target.window.clone(),
+        operation: Operation::List,
+    });
+    let keyed = send(&target.socket, format!("{} {request}", "ab".repeat(32)), cx);
+    assert_eq!(keyed["outcome"], "invalid_request", "{keyed}");
+    let older = send(
+        &target.socket,
+        json!({"protocol": "sprite-pane-control/1", "id": "old", "window": target.window, "operation": {"op": "list"}}).to_string(),
         cx,
     );
-    assert_eq!(input["outcome"], "denied");
+    assert_eq!(older["outcome"], "invalid_request");
+    assert_eq!(older["result"]["supported"], PROTOCOL);
+
     workspace.update(cx, |workspace, cx| {
-        workspace.revoke_control(descriptor.grant.parse().unwrap(), cx)
+        workspace.begin_shutdown(cx);
     });
-    assert!(!descriptor.socket.exists());
+    assert!(!target.socket.exists(), "a closed window leaves no socket");
 }
 
 #[gpui::test]
@@ -135,7 +149,7 @@ fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::T
         return;
     }
     let (workspace, cx) = test_support::test_workspace(cx);
-    let descriptor = approve(&workspace, cx, true, false);
+    let descriptor = target(&workspace, cx);
     let human = format!("{}:0", descriptor.window);
     let created = ask(
         &descriptor,
@@ -192,13 +206,10 @@ fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::T
         ask(&descriptor, Operation::Focus { pane: pane.clone() }, cx)["outcome"],
         "ok"
     );
-    let closed = ask(&descriptor, Operation::Close { pane: pane.clone() }, cx);
-    assert!(closed["outcome"] == "ok" || closed["outcome"] == "confirmation_required");
-    if closed["outcome"] == "confirmation_required" {
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.answer_control(true, window, cx)
-        });
-    }
+    assert_eq!(
+        ask(&descriptor, Operation::Close { pane: pane.clone() }, cx)["outcome"],
+        "ok"
+    );
     assert_eq!(
         ask(&descriptor, Operation::Close { pane }, cx)["outcome"],
         "gone"
@@ -217,13 +228,12 @@ fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::T
 }
 
 #[gpui::test]
-fn public_control_input_is_separate_and_requires_human_confirmation(cx: &mut gpui::TestAppContext) {
+fn public_control_input_is_sent_unchecked(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
-        let mut settings = crate::config::Settings::default();
-        settings.pane_observation.enabled = false;
+        let settings = crate::config::Settings::default();
         Workspace::new(
             Some(vec![
                 "/bin/sh".into(),
@@ -236,12 +246,8 @@ fn public_control_input_is_separate_and_requires_human_confirmation(cx: &mut gpu
             cx,
         )
     });
-    let descriptor = approve(&workspace, cx, false, true);
+    let descriptor = target(&workspace, cx);
     let pane = format!("{}:0", descriptor.window);
-    assert_eq!(
-        ask(&descriptor, Operation::Close { pane: pane.clone() }, cx)["outcome"],
-        "denied"
-    );
     assert_eq!(
         ask(
             &descriptor,
@@ -254,61 +260,43 @@ fn public_control_input_is_separate_and_requires_human_confirmation(cx: &mut gpu
         )["outcome"],
         "ok"
     );
-    let unsafe_input = Operation::Input {
-        pane: pane.clone(),
-        text: Some("needs-owner\n".into()),
-        key: None,
-    };
     assert_eq!(
-        ask(&descriptor, unsafe_input.clone(), cx)["outcome"],
-        "confirmation_required"
+        ask(
+            &descriptor,
+            Operation::Input {
+                pane: pane.clone(),
+                text: Some("multi-line\ninput\n".into()),
+                key: None,
+            },
+            cx
+        )["outcome"],
+        "ok",
+        "multi-line input is sent as typed, with no confirmation"
     );
-    assert_eq!(
-        ask(&descriptor, unsafe_input, cx)["outcome"],
-        "confirmation_required"
-    );
-    workspace.update(cx, |workspace, cx| {
-        workspace.revoke_control(descriptor.grant.parse().unwrap(), cx)
-    });
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.answer_control(true, window, cx)
-    });
-    let read_only = approve(&workspace, cx, false, false);
-    let content = ask(
-        &read_only,
-        Operation::Read {
-            pane,
-            lines: Some(0),
-        },
-        cx,
-    );
+    let read_only = descriptor.clone();
+    let mut content = Value::Null;
+    for _ in 0..200 {
+        content = ask(
+            &read_only,
+            Operation::Read {
+                pane: pane.clone(),
+                lines: Some(0),
+            },
+            cx,
+        );
+        if content.to_string().contains("multi-line") {
+            break;
+        }
+        crate::test_blocking_wait::pause(std::time::Duration::from_millis(10));
+    }
     assert_eq!(content["outcome"], "ok");
-    assert!(!content.to_string().contains("needs-owner"));
+    assert!(content.to_string().contains("multi-line"), "{content}");
 }
 
-fn public_cli(
-    descriptor: &Descriptor,
-    arguments: &[&str],
-    cx: &mut gpui::VisualTestContext,
-) -> (u8, Value) {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let path = std::env::temp_dir().join(format!(
-        "sprite-control-{}-{}.json",
-        std::process::id(),
-        descriptor.window
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .unwrap();
-    file.write_all(&serde_json::to_vec(descriptor).unwrap())
-        .unwrap();
-    drop(file);
-    let mut arguments: Vec<String> = arguments.iter().map(|s| (*s).to_owned()).collect();
-    arguments.extend(["--access".into(), path.to_str().unwrap().into()]);
+/// Runs a `sprite panes` command line in this process, running the window
+/// until it returns.
+fn public_cli(arguments: &[&str], cx: &mut gpui::VisualTestContext) -> (u8, Value, String) {
+    let arguments: Vec<String> = arguments.iter().map(|s| (*s).to_owned()).collect();
     let thread = std::thread::spawn(move || {
         let crate::Invocation::PaneControl(args) = crate::parse_arguments(arguments).unwrap()
         else {
@@ -317,8 +305,11 @@ fn public_cli(
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = control::client::run(&args, &mut stdout, &mut stderr);
-        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
-        (code, serde_json::from_slice(&stdout).unwrap())
+        (
+            code,
+            serde_json::from_slice(&stdout).unwrap_or(Value::Null),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        )
     });
     let started = std::time::Instant::now();
     while !thread.is_finished() {
@@ -326,59 +317,40 @@ fn public_cli(
         assert!(started.elapsed() < crate::test_blocking_wait::watchdog());
         crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
     }
-    std::fs::remove_file(path).unwrap();
     thread.join().unwrap()
 }
 
+/// The command line finds the window from the pane address alone: no access
+/// file, no prompt.
 #[gpui::test]
-fn public_access_request_waits_for_owner_and_cli_can_use_grant(cx: &mut gpui::TestAppContext) {
+fn the_cli_lists_renames_and_types_with_no_access_file(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         Workspace::new(
-            Some(vec!["/does-not-exist".into()]),
+            Some(vec!["/bin/cat".into()]),
             crate::Settings::default(),
             None,
             window,
             cx,
         )
     });
-    let (socket, key) = workspace.read_with(cx, |workspace, _| {
-        let endpoint = workspace.endpoint.as_ref().unwrap();
-        (endpoint.socket_path().to_path_buf(), endpoint.key_hex())
-    });
-    let thread = std::thread::spawn(move || {
-        control::client::exchange(
-            &socket,
-            &format!(
-                "{key} panes access {}",
-                json!({"all_panes": true, "manage": true, "from": 99999})
-            ),
-            std::time::Duration::from_secs(3),
-        )
-    });
-    let started = std::time::Instant::now();
-    while !thread.is_finished() {
-        cx.run_until_parked();
-        workspace.update(cx, |workspace, cx| workspace.answer_access(true, cx));
-        assert!(started.elapsed() < crate::test_blocking_wait::watchdog());
-        crate::test_blocking_wait::pause(std::time::Duration::from_millis(1));
-    }
-    let answer = thread.join().unwrap().unwrap();
-    assert_eq!(answer["outcome"], "ok");
-    let descriptor: Descriptor = serde_json::from_value(answer["result"].clone()).unwrap();
-    let (code, list) = public_cli(&descriptor, &["panes", "list"], cx);
+    let target = target(&workspace, cx);
+    let (code, list, _) = public_cli(&["panes", "list"], cx);
     assert_eq!(code, 0);
+    assert_eq!(list["result"]["windows"], json!([target.window]));
     assert_eq!(list["result"]["panes"].as_array().unwrap().len(), 1);
-    let pane = list["result"]["panes"][0]["id"].as_str().unwrap();
-    let (code, renamed) = public_cli(
-        &descriptor,
+    let pane = list["result"]["panes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (code, renamed, _) = public_cli(
         &[
             "panes",
             "rename",
             "--pane",
-            pane,
+            &pane,
             "--label",
             "pre-existing human",
         ],
@@ -386,112 +358,30 @@ fn public_access_request_waits_for_owner_and_cli_can_use_grant(cx: &mut gpui::Te
     );
     assert_eq!(code, 0);
     assert_eq!(renamed["result"]["label"], "pre-existing human");
-    let (code, denied) = public_cli(
-        &descriptor,
-        &["panes", "input", "--pane", pane, "--text", "x"],
-        cx,
-    );
-    assert_eq!(code, 5);
-    assert_eq!(denied["outcome"], "denied");
-}
+    let (code, typed, _) = public_cli(&["panes", "input", "--pane", &pane, "--text", "x"], cx);
+    assert_eq!(code, 0, "{typed}");
 
-fn approve_scope(
-    workspace: &gpui::Entity<Workspace>,
-    cx: &mut gpui::VisualTestContext,
-    panes: &[u64],
-) -> Descriptor {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.serve_control(
-            Message::Access {
-                request: AccessRequest {
-                    all_panes: false,
-                    panes: panes.iter().copied().collect(),
-                    manage: true,
-                    input: false,
-                    from: None,
-                },
-                reply: tx.into(),
-            },
-            window,
-            cx,
-        );
-        workspace.answer_access(true, cx);
-    });
-    let answer = rx.recv().unwrap();
-    assert_eq!(answer["outcome"], "ok");
-    serde_json::from_value(answer["result"].clone()).unwrap()
-}
+    // `create` with no anchor picks the only window running.
+    let (code, created, _) = public_cli(&["panes", "create"], cx);
+    assert_eq!(code, 0, "{created}");
+    assert!(
+        created["result"]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{}:", target.window))
+    );
 
-#[gpui::test]
-fn public_fixed_scope_includes_its_creations_and_denies_unrelated_future_panes(
-    cx: &mut gpui::TestAppContext,
-) {
-    if !private_runtime(module_path!(), cx) {
-        return;
-    }
-    let (workspace, cx) = test_support::test_workspace(cx);
-    let fixed = approve_scope(&workspace, cx, &[0]);
-    let all = approve(&workspace, cx, true, false);
-    workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
-    let listing = ask(&fixed, Operation::List, cx);
-    assert_eq!(listing["result"]["panes"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        ask(&all, Operation::List, cx)["result"]["panes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    let human = format!("{}:0", fixed.window);
-    let forbidden = format!("{}:1", fixed.window);
-    assert_eq!(
-        ask(
-            &fixed,
-            Operation::Rename {
-                pane: forbidden.clone(),
-                label: Some("no".into())
-            },
-            cx
-        )["outcome"],
-        "denied"
-    );
-    assert_eq!(
-        ask(
-            &fixed,
-            Operation::Move {
-                pane: human.clone(),
-                beside: Some(forbidden),
-                side: Some(crate::control::Side::Left)
-            },
-            cx
-        )["outcome"],
-        "denied"
-    );
-    assert_eq!(
-        ask(
-            &fixed,
-            Operation::Create {
-                beside: Some(human),
-                side: Some(crate::control::Side::Right)
-            },
-            cx
-        )["outcome"],
-        "ok"
-    );
-    assert_eq!(
-        ask(&fixed, Operation::List, cx)["result"]["panes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+    // An address for a window that isn't running reaches nothing.
+    let (code, _, errors) = public_cli(&["panes", "read", "--pane", "0123abcd:0"], cx);
+    assert_eq!(code, 4);
+    assert!(
+        errors.contains("window 0123abcd is not running"),
+        "{errors}"
     );
 }
 
 #[gpui::test]
-fn public_close_requires_targeted_confirmation_and_revocation_cancels_it(
-    cx: &mut gpui::TestAppContext,
-) {
+fn public_close_of_a_busy_pane_removes_it_at_once(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
@@ -505,7 +395,7 @@ fn public_close_requires_targeted_confirmation_and_revocation_cancels_it(
         workspace.tabs.focus_tab(TabId(0));
         workspace.refresh_layout(cx);
     });
-    let descriptor = approve(&workspace, cx, true, false);
+    let descriptor = target(&workspace, cx);
     let busy = format!("{}:1", descriptor.window);
     assert_eq!(
         ask(
@@ -519,46 +409,15 @@ fn public_close_requires_targeted_confirmation_and_revocation_cancels_it(
         "unsupported"
     );
     assert_eq!(
-        ask(&descriptor, Operation::Close { pane: busy.clone() }, cx)["outcome"],
-        "confirmation_required"
+        ask(&descriptor, Operation::Close { pane: busy }, cx)["outcome"],
+        "ok",
+        "a busy pane closes at once"
     );
-    assert_eq!(
-        ask(&descriptor, Operation::Close { pane: busy.clone() }, cx)["outcome"],
-        "confirmation_required"
-    );
-    assert_eq!(
-        ask(&descriptor, Operation::List, cx)["result"]["panes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    workspace.update(cx, |workspace, cx| {
-        workspace.revoke_control(descriptor.grant.parse().unwrap(), cx)
-    });
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.answer_control(true, window, cx)
-    });
-    let other = approve(&workspace, cx, true, false);
-    assert_eq!(
-        ask(&other, Operation::List, cx)["result"]["panes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        ask(&other, Operation::Close { pane: busy }, cx)["outcome"],
-        "confirmation_required"
-    );
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.answer_control(true, window, cx)
-    });
-    let listing = ask(&other, Operation::List, cx);
+    let listing = ask(&descriptor, Operation::List, cx);
     assert_eq!(listing["result"]["panes"].as_array().unwrap().len(), 1);
     assert_eq!(
         listing["result"]["panes"][0]["id"],
-        format!("{}:0", other.window)
+        format!("{}:0", descriptor.window)
     );
 }
 
@@ -570,7 +429,7 @@ fn public_move_resolves_natural_exit_in_current_tab_and_rejects_foreign_window(
         return;
     }
     let (workspace, cx) = test_support::test_workspace(cx);
-    let descriptor = approve(&workspace, cx, true, false);
+    let descriptor = target(&workspace, cx);
     workspace.update_in(cx, |workspace, window, cx| workspace.open_tab(window, cx));
     let pane = format!("{}:0", descriptor.window);
     assert_eq!(
@@ -616,50 +475,12 @@ fn public_final_pane_close_replies_before_endpoint_teardown(cx: &mut gpui::TestA
         return;
     }
     let (workspace, cx) = test_support::test_workspace(cx);
-    let descriptor = approve(&workspace, cx, true, false);
+    let descriptor = target(&workspace, cx);
     let pane = format!("{}:0", descriptor.window);
     let reply = ask(&descriptor, Operation::Close { pane }, cx);
     assert_eq!(reply["outcome"], "ok");
     assert_eq!(reply["result"]["removed"], true);
     assert!(!descriptor.socket.exists());
-}
-
-#[gpui::test]
-fn public_queued_mutation_is_denied_after_revocation(cx: &mut gpui::TestAppContext) {
-    if !private_runtime(module_path!(), cx) {
-        return;
-    }
-    let (workspace, cx) = test_support::test_workspace(cx);
-    let descriptor = approve(&workspace, cx, true, false);
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    workspace.update(cx, |workspace, cx| {
-        let grant = descriptor.grant.parse().unwrap();
-        workspace
-            .control_sender
-            .try_send(Message::Control {
-                grant,
-                request: Request {
-                    protocol: PROTOCOL.into(),
-                    window: descriptor.window.clone(),
-                    id: "queued".into(),
-                    operation: Operation::Rename {
-                        pane: format!("{}:0", descriptor.window),
-                        label: Some("must not apply".into()),
-                    },
-                },
-                reply: tx.into(),
-                connection: None,
-            })
-            .unwrap_or_else(|_| panic!("admission"));
-        workspace.revoke_control(grant, cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(rx.try_recv().unwrap()["outcome"], "denied");
-    let read = approve(&workspace, cx, false, false);
-    assert_eq!(
-        ask(&read, Operation::List, cx)["result"]["panes"][0]["label"],
-        Value::Null
-    );
 }
 
 #[gpui::test]
@@ -678,7 +499,7 @@ fn public_pane_creation_admission_is_bounded(cx: &mut gpui::TestAppContext) {
         }
         workspace.refresh_layout(cx);
     });
-    let descriptor = approve(&workspace, cx, true, false);
+    let descriptor = target(&workspace, cx);
     assert_eq!(
         ask(
             &descriptor,
@@ -706,7 +527,7 @@ fn public_control_preserves_surfaces_when_moving_their_pane(cx: &mut gpui::TestA
     }
     use crate::surface::channel::{Open, Placement, SurfaceConnection};
     let (workspace, cx) = test_support::test_workspace(cx);
-    let descriptor = approve(&workspace, cx, true, false);
+    let descriptor = target(&workspace, cx);
     let mut peers = Vec::new();
     for (index, placement) in [
         Placement::Fill { owner_pid: None },
@@ -776,33 +597,36 @@ fn public_control_preserves_surfaces_when_moving_their_pane(cx: &mut gpui::TestA
     drop(peers);
 }
 
+/// Two windows have their own sockets and their own pane addresses, so an
+/// address only ever reaches the window it names.
 #[gpui::test]
-fn public_windows_require_separate_grants_even_for_equal_local_ids(cx: &mut gpui::TestAppContext) {
+fn each_window_answers_only_for_its_own_panes(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
     let mut other_app = cx.new_app();
     let (first, first_cx) = test_support::test_workspace(cx);
     let (second, second_cx) = test_support::test_workspace(&mut other_app);
-    let first_access = approve(&first, first_cx, true, false);
-    let second_access = approve(&second, second_cx, true, false);
-    assert_ne!(first_access.window, second_access.window);
+    let first = target(&first, first_cx);
+    let second = target(&second, second_cx);
+    assert_ne!(first.window, second.window);
+    assert_ne!(first.socket, second.socket);
     assert_eq!(
         ask(
-            &first_access,
+            &first,
             Operation::Rename {
-                pane: format!("{}:0", second_access.window),
+                pane: format!("{}:0", second.window),
                 label: Some("wrong window".into())
             },
             first_cx
         )["outcome"],
-        "denied"
+        "invalid_request"
     );
     assert_eq!(
         ask(
-            &first_access,
+            &first,
             Operation::Rename {
-                pane: format!("{}:0", first_access.window),
+                pane: format!("{}:0", first.window),
                 label: Some("first only".into())
             },
             first_cx
@@ -810,43 +634,19 @@ fn public_windows_require_separate_grants_even_for_equal_local_ids(cx: &mut gpui
         "ok"
     );
     assert_eq!(
-        ask(&second_access, Operation::List, second_cx)["result"]["panes"][0]["label"],
+        ask(&second, Operation::List, second_cx)["result"]["panes"][0]["label"],
         Value::Null
     );
-    let stale = Descriptor {
+    let stale = Target {
         window: "previous-incarnation".into(),
-        grant: first_access.grant.clone(),
-        socket: first_access.socket.clone(),
-        key: first_access.key.clone(),
+        socket: first.socket.clone(),
     };
-    assert_eq!(ask(&stale, Operation::List, first_cx)["outcome"], "denied");
+    assert_eq!(
+        ask(&stale, Operation::List, first_cx)["outcome"],
+        "invalid_request"
+    );
 }
 
-#[gpui::test]
-fn public_client_reports_denied_credentials_and_revoked_endpoint(cx: &mut gpui::TestAppContext) {
-    if !private_runtime(module_path!(), cx) {
-        return;
-    }
-    let (workspace, cx) = test_support::test_workspace(cx);
-    let descriptor = approve(&workspace, cx, true, false);
-    let bad = Descriptor {
-        window: descriptor.window.clone(),
-        grant: descriptor.grant.clone(),
-        socket: descriptor.socket.clone(),
-        key: "00".repeat(32),
-    };
-    let (code, denied) = public_cli(&bad, &["panes", "list"], cx);
-    assert_eq!(code, 5);
-    assert_eq!(denied["outcome"], "denied");
-    workspace.update(cx, |workspace, cx| {
-        workspace.revoke_control(descriptor.grant.parse().unwrap(), cx)
-    });
-    let (code, closed) = public_cli(&descriptor, &["panes", "list"], cx);
-    assert_eq!(code, 5);
-    assert_eq!(closed["outcome"], "closing");
-}
-
-mod authorization;
 mod lifecycle;
 
 /// The numeric pane ID in a created pane's address (`window:id`).
@@ -856,11 +656,10 @@ fn created_pane(response: &Value) -> u64 {
     id.rsplit_once(':').unwrap().1.parse().unwrap()
 }
 
-/// Closes a pane through Pane Control, answering the owner's confirmation when
-/// the pane looks busy, and checks it is gone afterwards.
+/// Closes a pane through Pane Control and checks it is gone afterwards.
 fn close_by_control(
     workspace: &gpui::Entity<Workspace>,
-    descriptor: &Descriptor,
+    descriptor: &Target,
     pane: u64,
     cx: &mut gpui::VisualTestContext,
 ) {
@@ -868,13 +667,7 @@ fn close_by_control(
         pane: format!("{}:{pane}", descriptor.window),
     };
     let closed = ask(descriptor, request(), cx);
-    if closed["outcome"] == "confirmation_required" {
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.answer_control(true, window, cx)
-        });
-    } else {
-        assert_eq!(closed["outcome"], "ok", "{closed}");
-    }
+    assert_eq!(closed["outcome"], "ok", "{closed}");
     workspace.read_with(cx, |workspace, _| {
         assert!(
             workspace.tabs.get(PaneId(pane)).is_none(),
@@ -884,12 +677,12 @@ fn close_by_control(
 }
 
 #[gpui::test]
-fn every_way_of_closing_a_pane_takes_it_out_of_grant_scopes(cx: &mut gpui::TestAppContext) {
+fn every_way_of_closing_a_pane_forgets_its_label(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
     let (workspace, cx) = test_support::test_workspace(cx);
-    let fixed = approve_scope(&workspace, cx, &[0]);
+    let fixed = target(&workspace, cx);
     let human = format!("{}:0", fixed.window);
     let beside = || Operation::Create {
         beside: Some(human.clone()),
@@ -906,47 +699,61 @@ fn every_way_of_closing_a_pane_takes_it_out_of_grant_scopes(cx: &mut gpui::TestA
         },
         cx,
     ));
-    let scoped = |cx: &mut gpui::VisualTestContext| {
-        workspace.read_with(cx, |workspace, _| workspace.scoped_panes())
+    for pane in [0, by_control, exited, focused, own_tab] {
+        let renamed = ask(
+            &fixed,
+            Operation::Rename {
+                pane: format!("{}:{pane}", fixed.window),
+                label: Some(format!("pane {pane}")),
+            },
+            cx,
+        );
+        assert_eq!(renamed["outcome"], "ok");
+    }
+    let labelled = |cx: &mut gpui::VisualTestContext| {
+        workspace.read_with(cx, |workspace, _| workspace.labelled_panes())
     };
     assert_eq!(
-        scoped(cx),
+        labelled(cx),
         [0, by_control, exited, focused, own_tab]
             .into_iter()
             .collect()
     );
 
     close_by_control(&workspace, &fixed, by_control, cx);
-    assert!(!scoped(cx).contains(&by_control), "Pane Control close");
+    assert!(!labelled(cx).contains(&by_control), "Pane Control close");
 
     workspace.update(cx, |workspace, cx| {
         let tab = workspace.tabs.tab_of(PaneId(exited)).unwrap();
         workspace.close_exited_pane(tab, PaneId(exited), cx);
     });
-    assert!(!scoped(cx).contains(&exited), "a pane whose program exited");
+    assert!(
+        !labelled(cx).contains(&exited),
+        "a pane whose program exited"
+    );
 
     workspace.update(cx, |workspace, cx| {
         assert!(workspace.tabs.focus_pane(PaneId(focused)));
         workspace.close_focused_pane(false, cx);
     });
-    assert!(!scoped(cx).contains(&focused), "the close-pane key");
+    assert!(!labelled(cx).contains(&focused), "the close-pane key");
 
     workspace.update(cx, |workspace, cx| {
         let tab = workspace.tabs.tab_of(PaneId(own_tab)).unwrap();
         assert!(workspace.tabs.focus_tab(tab));
         workspace.close_active_tab(false, cx);
     });
-    assert!(!scoped(cx).contains(&own_tab), "the close-tab key");
-    assert_eq!(scoped(cx), [0].into_iter().collect());
+    assert!(!labelled(cx).contains(&own_tab), "the close-tab key");
+    assert_eq!(labelled(cx), [0].into_iter().collect());
 }
 
 #[gpui::test]
-fn a_fixed_grant_counts_only_its_open_panes_toward_the_cap(cx: &mut gpui::TestAppContext) {
+fn only_open_panes_count_toward_the_cap(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
     let (workspace, cx) = test_support::test_workspace(cx);
-    let fixed = approve_scope(&workspace, cx, &[0]);
+    let fixed = target(&workspace, cx);
     let human = format!("{}:0", fixed.window);
     for _ in 0..control::MAX_PANES {
         let pane = created_pane(&ask(
@@ -971,4 +778,67 @@ fn a_fixed_grant_counts_only_its_open_panes_toward_the_cap(cx: &mut gpui::TestAp
         },
         cx,
     ));
+}
+
+/// A full control lane refuses at once, and a request a caller already gave
+/// up on is never applied later.
+#[gpui::test]
+fn a_full_control_lane_refuses_without_late_mutation(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
+    let (workspace, cx) = test_support::test_workspace(cx);
+    let target = target(&workspace, cx);
+    workspace.update(cx, |workspace, _| {
+        for _ in 0..control::MAX_CONNECTIONS {
+            let (tx, _) = std::sync::mpsc::sync_channel(1);
+            let (reply, claim) = Relayed::waiting(tx);
+            assert!(claim.abandon());
+            workspace
+                .control_sender
+                .try_send(Message {
+                    request: Request {
+                        protocol: PROTOCOL.into(),
+                        id: "abandoned".into(),
+                        window: target.window.clone(),
+                        operation: Operation::Rename {
+                            pane: format!("{}:0", target.window),
+                            label: Some("late".into()),
+                        },
+                    },
+                    reply,
+                    connection: None,
+                })
+                .unwrap_or_else(|_| panic!("fill lane"));
+        }
+    });
+    let request = Request {
+        protocol: PROTOCOL.into(),
+        id: "overflow".into(),
+        window: target.window.clone(),
+        operation: Operation::List,
+    };
+    let socket = target.socket.clone();
+    let line = json!(request).to_string();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let thread = std::thread::spawn(move || {
+        tx.send(control::client::exchange(
+            &socket,
+            &line,
+            std::time::Duration::from_secs(2),
+        ))
+        .unwrap()
+    });
+    assert_eq!(
+        rx.recv_timeout(crate::test_blocking_wait::watchdog())
+            .unwrap()
+            .unwrap()["outcome"],
+        "busy"
+    );
+    thread.join().unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        ask(&target, Operation::List, cx)["result"]["panes"][0]["label"],
+        Value::Null
+    );
 }

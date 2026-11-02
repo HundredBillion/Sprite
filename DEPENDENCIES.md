@@ -52,7 +52,7 @@ The serialization feature enables existing `toml_edit`/`toml_write` packages,
 without adding a package or changing a resolved version.
 
 **Scope today.** Fonts, colors, highlights, cursor, grid padding, shell launch,
-scrollback, graphics budgets, and pane observation, read at window startup and
+scrollback and graphics budgets, read at window startup and
 on explicit `sprite config reload`. Whole-file reload errors preserve active
 settings; field-level complaints retain defaults or clamp values while the
 rest apply. No schema version, configurable keybinding table, or filesystem
@@ -188,8 +188,8 @@ tests re-run.
 
 ### `serde_json` `=1.0.151`
 
-**Capability.** Encoding the observation response: the versioned JSON object
-that `sprite panes snapshot` returns.
+**Capability.** Encoding the pane read response: the versioned terminal JSON
+that `sprite panes read` returns.
 
 **Not provided.** Correct JSON encoding is mostly correct *escaping*, and the
 data being encoded is arbitrary terminal output chosen by arbitrary programs —

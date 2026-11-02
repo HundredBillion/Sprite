@@ -3,8 +3,7 @@ pub(crate) fn test_workspace(
     cx: &mut gpui::TestAppContext,
 ) -> (gpui::Entity<super::Workspace>, &mut gpui::VisualTestContext) {
     cx.add_window_view(|window, cx| {
-        let mut settings = crate::config::Settings::default();
-        settings.pane_observation.enabled = false;
+        let settings = crate::config::Settings::default();
         super::Workspace::new(
             Some(vec!["/sprite-test-command-does-not-exist".into()]),
             settings,
@@ -79,11 +78,6 @@ impl sprite_pane::Pane for BusyPane {
     fn set_allocated(&mut self, _: gpui::Size<gpui::Pixels>) {}
     fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
         None
-    }
-    fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
-        Some(sprite_pane::CloseWarning {
-            program: Some("busy".into()),
-        })
     }
 }
 

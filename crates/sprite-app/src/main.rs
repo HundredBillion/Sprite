@@ -1,7 +1,7 @@
 //! The `sprite` executable.
 //!
 //! With no arguments it opens a window, which is all it has ever done. The
-//! command line is read before anything else starts, so `sprite panes snapshot`
+//! command line is read before anything else starts, so `sprite panes list`
 //! never touches a display, a GPU, or a terminal session — it is a small client
 //! that happens to live in the same binary.
 
@@ -15,7 +15,7 @@ use gpui::{
 };
 use sprite_app::{
     Invocation, Settings, USAGE, WindowArgs, Workspace, parse_arguments, run_config_print,
-    run_config_reload, run_snapshot, run_surface_focus, run_surface_open, run_token_register,
+    run_config_reload, run_surface_focus, run_surface_open, run_token_register,
 };
 
 fn main() -> ExitCode {
@@ -27,25 +27,20 @@ fn main() -> ExitCode {
             open_window(args, started, logging);
             ExitCode::SUCCESS
         }
-        Ok(Invocation::Snapshot(args)) => {
-            let mut out = std::io::stdout().lock();
-            let mut errors = std::io::stderr().lock();
-            ExitCode::from(run_snapshot(&args, &mut out, &mut errors) as u8)
-        }
         Ok(Invocation::PaneControl(args)) => ExitCode::from(sprite_app::control::client::run(
             &args,
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )),
-        Ok(Invocation::ConfigReload) => {
+        Ok(Invocation::ConfigReload(window)) => {
             let mut out = std::io::stdout().lock();
             let mut errors = std::io::stderr().lock();
-            ExitCode::from(run_config_reload(&mut out, &mut errors) as u8)
+            ExitCode::from(run_config_reload(window.as_deref(), &mut out, &mut errors))
         }
         Ok(Invocation::ConfigPrint(args)) => {
             let mut out = std::io::stdout().lock();
             let mut errors = std::io::stderr().lock();
-            ExitCode::from(run_config_print(&args, &mut out, &mut errors) as u8)
+            ExitCode::from(run_config_print(&args, &mut out, &mut errors))
         }
         Ok(Invocation::SurfaceOpen(args)) => {
             let mut errors = std::io::stderr().lock();

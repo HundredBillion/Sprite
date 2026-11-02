@@ -22,9 +22,8 @@ pub use changes::*;
 pub use validated::*;
 
 /// Everything Sprite reads from a configuration file today.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
-    pub pane_observation: PaneObservation,
     pub graphics: Graphics,
     pub font: Font,
     pub surface_font: Option<Font>,
@@ -47,15 +46,6 @@ pub struct Settings {
 pub struct ActiveSettings(pub Settings);
 
 impl gpui::Global for ActiveSettings {}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PaneObservation {
-    /// Whether this window offers observation at all.
-    ///
-    /// Disabled means no socket, no key, and nothing injected into the sessions
-    /// it starts — not a socket that refuses politely.
-    pub enabled: bool,
-}
 
 /// The text a terminal is mostly made of.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -303,27 +293,6 @@ impl Default for Graphics {
     }
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            font: Font::default(),
-            surface_font: None,
-            colors: Colors::default(),
-            highlights: Highlights::default(),
-            cursor: Cursor::default(),
-            grid: Grid::default(),
-            shell: Shell::default(),
-            scrollback: Scrollback::default(),
-            graphics: Graphics::default(),
-            // Observation is on by default: the PRD makes it automatically
-            // available to local tools without prompting, and a window that
-            // silently offered nothing would be indistinguishable from one
-            // where the feature was broken.
-            pane_observation: PaneObservation { enabled: true },
-        }
-    }
-}
-
 impl Settings {
     pub fn effective_surface_font(&self) -> &Font {
         self.surface_font.as_ref().unwrap_or(&self.font)
@@ -466,11 +435,6 @@ impl Settings {
         out.push_str(&format!(
             "\n[graphics]\nenabled = {}\nstorage_bytes = {}\ntexture_bytes = {}\n",
             self.graphics.enabled, self.graphics.storage_bytes, self.graphics.texture_bytes
-        ));
-
-        out.push_str(&format!(
-            "\n[pane_observation]\nenabled = {}\n",
-            self.pane_observation.enabled
         ));
 
         out
@@ -646,31 +610,32 @@ mod tests {
         assert_eq!(global.0.font.size, 17.0);
     }
 
+    /// A file written for a Sprite that still had a `[pane_observation]`
+    /// section loads as if the section were not there, and the log says it
+    /// was ignored.
     #[test]
-    fn observation_is_offered_unless_a_file_says_otherwise() {
-        assert!(Settings::default().pane_observation.enabled);
-        assert!(parsed("").pane_observation.enabled);
-        assert!(
-            parsed("[some_other_section]\nkey = 1\n")
-                .pane_observation
-                .enabled
+    fn a_leftover_pane_observation_section_is_ignored_with_a_warning() {
+        let text = "[pane_observation]\nenabled = false\n";
+        let ((settings, complaints), logs) =
+            crate::workspace::test_support::capture_logs("sprite_app=warn", || {
+                Settings::parse(text)
+            });
+        assert_eq!(settings, Settings::default());
+        assert!(complaints.0.is_empty(), "{:?}", complaints.0);
+        assert_eq!(
+            logs.matches("pane_observation").count(),
+            1,
+            "one warning: {logs}"
         );
-    }
-
-    #[test]
-    fn observation_can_be_turned_off() {
-        let settings = parsed("[pane_observation]\nenabled = false\n");
-        assert!(!settings.pane_observation.enabled);
-        assert!(complaints("[pane_observation]\nenabled = false\n").is_empty());
     }
 
     /// A typo must not stop a terminal starting, and must not silently do the
     /// opposite of what was written either — so it says what it ignored.
     #[test]
     fn a_broken_file_leaves_defaults_and_says_so() {
-        let text = "[pane_observation]\nenabled = \"no\"\n";
+        let text = "[graphics]\nenabled = \"no\"\n";
         assert!(
-            parsed(text).pane_observation.enabled,
+            parsed(text).graphics.enabled,
             "the default survives a bad value"
         );
         assert!(
@@ -679,8 +644,8 @@ mod tests {
             complaints(text)
         );
 
-        let broken = "[pane_observation\nenabled = false";
-        assert!(parsed(broken).pane_observation.enabled);
+        let broken = "[graphics\nenabled = false";
+        assert!(parsed(broken).graphics.enabled);
         assert!(complaints(broken)[0].contains("not valid TOML"));
     }
 

@@ -15,11 +15,6 @@ pub enum TerminalEvent {
     /// The text of the current selection, in answer to `CopySelection`. Empty
     /// when nothing is selected.
     SelectionCopied(String),
-    /// A paste was withheld because it would execute on arrival.
-    ///
-    /// Carries the text back so the application can show what it is and offer
-    /// to proceed with `PasteConfirmed`. Nothing has been written to the child.
-    UnsafePaste(String),
     /// The child rang the bell.
     Bell,
     /// The child set a new title.

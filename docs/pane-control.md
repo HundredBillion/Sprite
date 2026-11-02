@@ -1,209 +1,168 @@
 # Pane control
 
-Sprite Terminal lets a local agent manage existing and newly created panes when
-you approve a Pane Grant. This includes panes used by a person, panes in
-background tabs, and panes hosting native Surfaces.
+Any program you run can list, read, create, label, move, focus, resize, close
+and type into Sprite panes, in every Sprite window, with no prompt and no
+access file. This includes panes a person is using, panes in background tabs,
+and panes hosting native Surfaces. An orchestrator such as an agent manager uses
+this to drive the panes it works in.
 
-## Grant access
+## Who can use it
 
-Run inside the Sprite window you want to authorize:
+Each window listens on a local socket:
 
-```sh
-sprite panes access request --all-panes --manage --output /tmp/my-sprite-access.json
-```
+- macOS: `$TMPDIR/sprite/window-<window>.sock`
+- Linux: `$XDG_RUNTIME_DIR/sprite/window-<window>.sock`
 
-Sprite displays the requested scope and rights. Choose Allow or Deny. A request
-expires after 60 seconds; another pending request receives `busy`. The displayed
-requester pane ID is a claim, not verified identification of a program.
+The directory is mode 0700 and the socket 0600, so only processes running as
+your user can connect. That is the whole check: there is no key and no Allow
+button. Anything running as you can drive every pane, including typing commands
+into a shell, just as it could already run those commands itself.
 
-The output file is created exclusively with private permissions. Choose a new
-path for each request. Approval stores the credential there; stdout reports the
-file path, window and grant ID without printing the token. Never share the file
-unless you intend to delegate its rights. A failed save requires revoking that
-grant in Pane Access. Credentials are not automatically inherited by new panes.
+`<window>` is 24 hex characters, chosen at random when the window opens. A
+pane's address is `<window>:<pane>`, and a tab's is `<window>:t<tab>`. A
+restarted window gets a new id, so an old address never reaches a new pane.
 
-For selected existing panes, replace `--all-panes` with one or more `--pane N`
-options using the numeric IDs from `sprite panes snapshot --window`. An
-all-panes grant includes future human and agent panes. A selected-pane grant
-includes panes created with that grant, but excludes unrelated future panes.
-Its scope holds at most 128 open panes. A closed pane leaves the scope, so a
-long-lived grant can keep creating and closing panes.
+Every pane's session gets `SPRITE_PANE=<window>:<pane>`, so a program knows
+which pane and window it is running in.
 
-Rights are separate:
+## Use the CLI
 
-| Requested flags | Rights |
-| --- | --- |
-| Neither | Read metadata and supported terminal content. |
-| `--manage` | Read plus create, rename, move, focus, resize and close. |
-| `--input` | Read plus terminal text/key input, which can execute commands. |
-| Both | Both management and input. |
-
-Creating a pane starts the configured shell, without accepting an arbitrary
-command. Manage alone cannot type into that shell. Existing observation and
-Surface credentials gain no control rights. Observation must be enabled to
-request a new grant; previously approved grants retain their independently
-managed rights until revoked or their window closes.
-
-Click **Pane Access** in Sprite to revoke a grant, remove management, or remove
-input. Restoring rights needs another request and approval. Revocation checks
-also apply to queued operations and pending human confirmations. Work already
-committed before revocation remains committed.
-
-This is a local bearer-capability interface, not an OS sandbox against hostile
-code running as the same user.
-
-## Use the public CLI
-
-The examples use `jq` to extract returned addresses. Replace the access path as
-needed. Requests return JSON on stdout; diagnostics go to stderr.
+Requests print JSON on stdout; diagnostics go to stderr. The examples use `jq`
+to pull out addresses.
 
 ```sh
-access=/tmp/my-sprite-access.json
-sprite panes list --access "$access"
-human=$(sprite panes list --access "$access" | jq -r '.result.panes[0].id')
-pane=$(sprite panes create --access "$access" --beside "$human" --side right | jq -r '.result.id')
-sprite panes read --access "$access" --pane "$pane" --lines 100
-sprite panes rename --access "$access" --pane "$pane" --label 'Agent work'
-sprite panes resize --access "$access" --pane "$human" --side right --pixels 400
-sprite panes move --access "$access" --pane "$pane"
-sprite panes focus --access "$access" --pane "$pane"
-sprite panes close --access "$access" --pane "$pane"
+sprite panes list
+human=$(sprite panes list | jq -r '.result.panes[0].id')
+pane=$(sprite panes create --beside "$human" --side right | jq -r '.result.id')
+sprite panes read --pane "$pane" --lines 100
+sprite panes rename --pane "$pane" --label 'Agent work'
+sprite panes resize --pane "$human" --side right --pixels 400
+sprite panes move --pane "$pane"
+sprite panes focus --pane "$pane"
+sprite panes input --pane "$pane" --text 'echo hello'
+sprite panes input --pane "$pane" --key enter
+sprite panes close --pane "$pane"
 ```
+
+Which window a command talks to:
+
+- `panes list` asks every running window and merges their panes into one
+  answer. Sockets left by a window that was killed are skipped.
+- A command that names a pane, or `create --beside`, talks to that pane's
+  window.
+- `panes create` without `--beside`, `config reload` and `config print` use the
+  window named by `--window <id>`, else the window in `SPRITE_PANE`, else the
+  only window running. With several running and neither given, they fail and ask
+  for `--window`.
 
 `create` without `--beside` opens a new tab. `move` without `--beside` moves the
-existing pane to a new tab. With `--beside ID --side left|right|up|down`, each
-operates beside an addressed pane. Moves preserve pane and Terminal Session
-identity, content and Surface connections. They do not silently select a
-background tab; if the selected tab disappears, the usual tab fallback applies.
-Moving beside itself is invalid. A selected-pane grant also needs access to its
-destination anchor. An empty tab disappears through normal tab lifecycle.
+pane to a new tab. With `--beside ADDRESS --side left|right|up|down`, each works
+beside the addressed pane. Moves keep the pane's identity, Terminal Session,
+content and Surface connections. They don't switch to a background tab; if the
+selected tab disappears, the usual tab fallback applies. Moving a pane beside
+itself is invalid. An empty tab disappears as usual. Moving a pane to another
+window returns `unsupported`.
 
-`rename --clear` removes a Pane Label. Labels, user Tab Names and child-provided
-Pane Titles are separate response fields; naming one never overwrites another.
-Labels are available in the control inventory; a label does not rewrite the
-child's terminal title.
+`rename --clear` removes a Pane Label. Labels, Tab Names and child-provided Pane
+Titles are separate fields; setting one never overwrites another, and a label
+doesn't change the child's terminal title.
 
-`resize --side SIDE --pixels N` positions the divider N logical pixels from the
-start of its containing split. It is not a cell count or an absolute width of
-the addressed pane. Sprite applies its usual minimum allocation and clamping,
-returns the accepted position and geometry, and stores the split ratio so the
-next redraw preserves it. A side without a divider returns `unsupported`.
-Background tabs use their owning window's viewport; their PTY allocation is
-applied when shown. Later window-size changes adjust pane allocation normally.
-A resize, create, move, focus or close during a human divider drag returns `busy`.
+`resize --side SIDE --pixels N` puts the divider N logical pixels from the start
+of its split. It is not a cell count or the pane's width. Sprite applies its
+usual minimum sizes, returns the accepted position and geometry, and keeps the
+ratio for later redraws. A side with no divider returns `unsupported`. A resize,
+create, move, focus or close during a person's divider drag returns `busy`.
 
-`focus` selects the target tab and Current Pane, requests window activation and
-reports actual window activation at response time. Desktop focus policies can
-prevent or delay activation; accepted focus is not proof of foreground input.
-
-For another authorized window, repeat the access request inside that window and
-supply its access file. Multiple `--access` files are supported: `list` collects
-their inventories; other commands require a single matching descriptor, selected
-with `--window ID` when necessary. Pane/tab addresses contain their window's
-random incarnation ID, so restarting cannot make an old address refer to a new
-pane. Cross-window moves return `unsupported` without transferring ownership.
+`focus` selects the pane's tab and makes it the Current Pane, asks for the
+window to be activated, and reports whether it was active when it answered.
+Desktop focus rules can delay or prevent activation.
 
 ## Terminal input
 
-Request `--input` explicitly, then use either text or one named key:
-
-```sh
-sprite panes input --access "$access" --pane "$pane" --text 'echo hello'
-sprite panes input --access "$access" --pane "$pane" --key enter
-```
+Send either text or one named key. Text is written as typed, wrapped in
+bracketed-paste markers when the program has turned that on. Sprite does not
+check it or hold it back: a newline in text runs the line.
 
 Supported keys: `enter`, `tab`, `escape`, `backspace`, `up`, `down`, `left`,
-`right`, `ctrl-c`, `ctrl-d`. Each named key is one key press; remote key-release
-or hold events are unsupported. Keys use the existing terminal encoder and its live
-terminal modes. Text uses terminal paste encoding. Admission means Sprite
-accepted input; it does not report command execution or completion.
-
-Potentially unsafe paste requires an explicit human decision tied to that grant,
-pane and exact payload. This check is conservative even when bracketed paste is
-currently enabled. Repeating an input request never confirms it. Approval
-rechecks authorization before submitting the confirmed payload. Input always
-targets the terminal, even when a Surface has keyboard focus; synthetic Surface
-input is unsupported. No permission exposes an arbitrary host-process PID signal.
+`right`, `ctrl-c`, `ctrl-d`. Each is one key press, encoded with the terminal's
+current modes. `ok` means Sprite accepted the input, not that a command ran.
+Input always goes to the terminal, even when a Surface has keyboard focus.
 
 ## Content and pane kinds
 
-`list` reports metadata for every authorized pane: address, tab, Pane Label,
-child title, Tab Name, Current Pane, visibility, logical-pixel geometry,
+`list` reports, for every pane: address, tab, Pane Label, child title, Tab Name,
+whether it is the Current Pane, visibility, geometry in logical pixels,
 lifecycle, content support and capabilities.
 
-| Presentation | Pane management | Read | Input |
+| Pane | Management | Read | Input |
 | --- | --- | --- | --- |
-| Terminal | All listed operations | Bounded terminal text/history | Terminal text and named keys. |
-| Terminal with fill/dock/overlay Surface | All listed operations, retaining Surface | Underlying terminal text; native content explicitly unavailable | Terminal target only. |
-| Other hosted PaneHandle implementation | Layout, label, focus and close | Metadata; unsupported terminal content | `unsupported`. |
+| Terminal | All operations | Terminal text and history | Text and named keys |
+| Terminal with a Surface | All operations; the Surface stays | The terminal text underneath; native content unavailable | Terminal only |
+| Other pane kinds | Layout, label, focus and close | Metadata only | `unsupported` |
 
-Surface metadata identifies elements/grid/list bodies and placement. It does not
-expose Surface documents, editor buffers, raster pixels or arbitrary native UI.
-An unknown create kind is invalid: only the configured terminal factory exists.
-Read content is untrusted terminal output. The nested terminal snapshot keeps
-its existing `complete` and failure information; top-level `ok` does not imply
-that an ended, failed or slow terminal supplied complete content.
+Read content is untrusted terminal output. The nested terminal snapshot keeps its
+own `complete` flag and failures, so a top-level `ok` doesn't mean an ended or
+slow terminal supplied everything.
 
 ## Close and outcomes
 
-Idle panes can close unattended. A pane with a foreground-job warning returns
-`confirmation_required` and displays Confirm/Cancel in Sprite. Repeated close
-requests cannot answer it. Confirmation expires after 30 seconds, and approval
-checks the original target and current permission. Denial, expiry or revocation
-performs no operation. The requester may inspect pane state after a human
-confirms; there is no command/event stream or automatic retry.
-
-Successful close reports `removed: true` and `cleanup: scheduled`. It uses the
-existing bounded Terminal Session cleanup and foreground-job safeguards. It is
-not a promise that cleanup has already finished. Closing the last pane sends its
-reply before canceling its control endpoint; Sprite still waits for owned
-pending cleanup before quitting.
+`close` removes the pane at once, even when a program is running in it. The
+program is ended by the usual bounded Terminal Session cleanup. The answer says
+`removed: true` and `cleanup: scheduled`; cleanup may still be running. Closing a
+window's last pane sends the answer before the window's socket closes, and Sprite
+still waits for cleanup before quitting.
 
 | Outcome | Meaning |
 | --- | --- |
-| `ok` | Operation accepted; inspect the result for admission, focus and cleanup details. |
-| `denied` | Missing grant/rights or a target outside scope. Does not reveal existence. |
-| `gone` | An authorized, previously allocated target has closed. |
-| `unsupported` | Target content/operation, divider side or cross-window move is unsupported. |
-| `invalid_request` | Invalid grammar, version, fields, sizes or option combination. |
-| `busy` | A request/resource bound or active human gesture prevents admission. |
-| `confirmation_required` | A human decision is pending; no unattended confirmation is accepted. |
-| `closing` | Window/session is closing. |
-| `outcome_unknown` | A claimed/sent operation might have applied but its result could not be recovered. Inspect state before acting again. |
+| `ok` | Accepted; the result has the details. |
+| `gone` | The pane has closed, or never existed in this window. |
+| `unsupported` | The pane kind, divider side or cross-window move isn't supported. |
+| `invalid_request` | Bad grammar, protocol version, fields, sizes, or an address for another window. |
+| `busy` | A limit or a person's divider drag prevents it. |
+| `closing` | The window or session is closing. |
+| `outcome_unknown` | It may have been applied, but the answer was lost. Check the state before trying again. |
 
-CLI exits: 0 for `ok`, 2 for argument errors, 4 for local file/transport errors,
-5 for protocol refusals and unknown outcomes. Legacy `panes snapshot` retains its
-existing schema and partial-success exit behavior. Control clients never retry
-a non-idempotent operation automatically. Request IDs correlate answers; no
-replay cache or durable deduplication is promised.
+CLI exit codes: 0 for `ok`, 2 for argument errors, 4 when no window could be
+reached (including an address whose window isn't running), 5 for any other
+outcome. The CLI never retries an operation.
 
-Limits: 16 grants/window, 16 active connections/grant, 16 queued control
-operations/window, 8 KiB authenticated request lines, 256-byte labels, 4 KiB input
-payloads and 16 MiB responses. Agent creation refuses at 128 live panes or 16
-unfinished cleanups/window; agent close refuses at 16 unfinished cleanups.
-Keyboard behavior remains available and keyboard-created resources count toward
-later agent admission. Read history keeps the observation bound of 5,000 lines
-and its single broker deadline. Invalid and saturated requests never silently
-succeed or leave a late mutation queued after abandonment.
+Limits per window: 16 connections at once, 16 queued operations, 8 KiB request
+lines, 256-byte labels, 4 KiB input and 16 MiB responses. `create` is refused at
+128 open panes or 16 unfinished cleanups, and `close` at 16 unfinished cleanups.
+Reads return at most 5,000 lines of history.
+
+## Configuration
+
+```sh
+sprite config reload [--window <id>]
+sprite config print [--window <id>] [--config <path>]
+```
+
+`config reload` re-reads the window's configuration file and prints what
+changed; a file the window couldn't apply exits 5. `config print` prints the
+settings a window is actually using. With `--config`, or with no window running,
+it prints what Sprite would load from the file.
 
 ## Direct protocol
 
-A descriptor is a private JSON document with `window`, `grant`, `socket` and
-`key`. Connect to its Unix socket and send one UTF-8 line:
+Connect to the window's socket and send one UTF-8 JSON line:
 
 ```text
-<key> {"protocol":"sprite-pane-control/1","id":"unique-request","window":"<window>","operation":{"op":"list"}}
+{"protocol":"sprite-pane-control/2","id":"unique-request","window":"<window>","operation":{"op":"list"}}
 ```
 
-Sprite replies with one JSON line and closes the connection:
+Sprite answers with one JSON line and closes the connection:
 
 ```json
-{"protocol":"sprite-pane-control/1","id":"unique-request","outcome":"ok","result":{"window":"<window>","panes":[]}}
+{"protocol":"sprite-pane-control/2","id":"unique-request","outcome":"ok","result":{"window":"<window>","panes":[]}}
 ```
 
-Request IDs are at most 64 bytes. Unknown fields are rejected. Operation shapes:
+Request IDs are at most 64 bytes, and unknown fields are rejected. A request with
+another protocol version gets `invalid_request` with
+`{"supported":"sprite-pane-control/2"}`. Operations:
 
 ```json
+{"op":"list"}
 {"op":"read","pane":"<window>:0","lines":100}
 {"op":"create","beside":"<window>:0","side":"right"}
 {"op":"create"}
@@ -216,12 +175,9 @@ Request IDs are at most 64 bytes. Unknown fields are rejected. Operation shapes:
 {"op":"close","pane":"<window>:0"}
 {"op":"input","pane":"<window>:0","text":"hello"}
 {"op":"input","pane":"<window>:0","key":"enter"}
+{"op":"config_reload"}
+{"op":"config_print"}
 ```
 
-Access requests travel on the existing authenticated observation endpoint as
-`<observation-key> panes access <JSON>`. JSON contains `all_panes`, `panes`
-(an array of numeric IDs), `manage`, `input` and optional unverified `from`.
-Choose either all panes or a nonempty fixed list. Only the UI can approve it.
-The response uses ID `access` and returns the descriptor on approval. Missing or
-incorrect control authentication returns `denied` with an empty request ID;
-malformed input may also have an empty ID because no valid request was decoded.
+`config_reload` answers `{"applied":true|false,"message":"…"}` and
+`config_print` answers `{"settings":"<TOML>"}`.

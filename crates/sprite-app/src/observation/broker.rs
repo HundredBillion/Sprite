@@ -100,34 +100,7 @@ pub trait PaneSource: Send + Sync {
     fn begin(&self, pane: PaneId, lines: HistoryLines) -> Result<Pending, String>;
 }
 
-/// The request grammar lives in `request`, beside the text it is read from
-/// and written to. Re-exported so this module's own signatures still read as
-/// though it owned them.
-pub use crate::observation::request::{Query, Scope, parse};
-
-/// The private request protocol between the bundled client and the window.
-///
-/// Versioned for mismatch diagnostics, not as a third-party contract: tools
-/// integrate through the command's JSON output, not by speaking this.
-pub const PROTOCOL: &str = "sprite-observation/1";
-
-/// Why a request was not carried out.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Refusal {
-    /// Anything about which panes exist or may be seen.
-    ///
-    /// One answer for "no such pane" and "not your pane", so a caller cannot
-    /// map the window by watching the refusal change.
-    Denied,
-    /// The request text could not be read. Says nothing about any pane, so it
-    /// is safe to distinguish from `Denied`: it describes the caller's own
-    /// words, not the window's contents.
-    Malformed(&'static str),
-    /// The caller speaks a version of the private protocol this window does
-    /// not. Distinguished so a mismatched client can say so plainly instead of
-    /// reporting its own request as nonsense.
-    UnsupportedProtocol,
-}
+pub use crate::observation::request::{Query, Scope};
 
 /// The only refusal a carried-out request can produce.
 ///
@@ -334,6 +307,110 @@ pub fn order_for_schema(report: &mut Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The private request protocol between the bundled client and the window.
+    ///
+    /// Versioned for mismatch diagnostics, not as a third-party contract: tools
+    /// integrate through the command's JSON output, not by speaking this.
+    const PROTOCOL: &str = "sprite-observation/1";
+
+    /// Why a request was not carried out.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum Refusal {
+        /// The request text could not be read.
+        Malformed(&'static str),
+        /// The caller speaks a version of the private protocol this window does
+        /// not. Distinguished so a mismatched client can say so plainly instead of
+        /// reporting its own request as nonsense.
+        UnsupportedProtocol,
+    }
+
+    /// Reads a request body into a query.
+    ///
+    /// The grammar is deliberately tiny. Anything unrecognised is refused rather
+    /// than ignored, so a client cannot smuggle a verb past a lenient parser.
+    fn parse(body: &str) -> Result<Query, Refusal> {
+        let mut words = body.split_whitespace().peekable();
+        // The protocol token is optional so that a client older than this window
+        // is understood rather than refused; a *newer* one names a version this
+        // window does not know, and is told so.
+        if let Some(word) = words.peek()
+            && word.starts_with("sprite-observation/")
+        {
+            let spoken = *word;
+            words.next();
+            if spoken != PROTOCOL {
+                return Err(Refusal::UnsupportedProtocol);
+            }
+        }
+        match (words.next(), words.next()) {
+            (Some("panes"), Some("snapshot")) => {}
+            _ => return Err(Refusal::Malformed("the only request is: panes snapshot")),
+        }
+
+        let mut from = None;
+        let mut scope = None;
+        let mut include_self = false;
+        let mut pretty = false;
+        let mut lines = HistoryLines::default();
+
+        while let Some(word) = words.next() {
+            match word {
+                "--include-self" => include_self = true,
+                "--pretty" => pretty = true,
+                "--window" => {
+                    if scope.is_some() {
+                        return Err(Refusal::Malformed("scope given twice"));
+                    }
+                    scope = Some(Scope::Window);
+                }
+                "--pane" => {
+                    if scope.is_some() {
+                        return Err(Refusal::Malformed("scope given twice"));
+                    }
+                    let value = words
+                        .next()
+                        .ok_or(Refusal::Malformed("--pane needs a number"))?;
+                    let pane = value
+                        .parse()
+                        .map_err(|_| Refusal::Malformed("--pane needs a number"))?;
+                    scope = Some(Scope::Pane(PaneId(pane)));
+                }
+                "--from" => {
+                    let value = words
+                        .next()
+                        .ok_or(Refusal::Malformed("--from needs a number"))?;
+                    let pane = value
+                        .parse()
+                        .map_err(|_| Refusal::Malformed("--from needs a number"))?;
+                    from = Some(PaneId(pane));
+                }
+                "--lines" => {
+                    let value = words
+                        .next()
+                        .ok_or(Refusal::Malformed("--lines needs a number"))?;
+                    let count: usize = value
+                        .parse()
+                        .map_err(|_| Refusal::Malformed("--lines needs a number"))?;
+                    // Clamped, not refused, exactly as the extraction path does.
+                    lines = HistoryLines::new(count);
+                }
+                _ => return Err(Refusal::Malformed("unknown option")),
+            }
+        }
+
+        if include_self && !matches!(scope, None | Some(Scope::Tab { .. })) {
+            return Err(Refusal::Malformed("--include-self only applies to a tab"));
+        }
+
+        Ok(Query {
+            from,
+            scope: scope.unwrap_or(Scope::Tab { include_self }),
+            lines,
+            pretty,
+        })
+    }
+
     use sprite_term::{PaneRow, ScreenKind, ValidTerminalSize};
     use std::collections::HashMap;
     use std::sync::Mutex;

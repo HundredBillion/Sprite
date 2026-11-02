@@ -8,7 +8,6 @@ mod block_elements;
 mod box_drawing;
 mod cli;
 mod config;
-mod confirmation;
 pub mod control;
 #[doc(hidden)]
 pub mod diagnostics;
@@ -39,13 +38,12 @@ mod workspace;
 
 pub use cli::{Invocation, SurfaceOpenArgs, TokenRegisterArgs, USAGE, WindowArgs, parse_arguments};
 pub use config::Settings;
+pub use control::client::{run_config_print, run_config_reload};
+pub use local_socket::SocketKey;
 pub use observation::broker::{
     Failure, FailureKind, PaneAddress, PaneReport, PaneSource, Pending, Report, Withdraw,
-    collect as collect_panes, parse as parse_request,
+    collect as collect_panes,
 };
-pub use observation::client::{run_config_print, run_config_reload, run_snapshot};
-pub use observation::endpoint::Endpoint;
-pub use observation::endpoint::ObservationKey;
 pub use observation::schema::render as render_schema;
 pub use pane_tree::{PaneId, Rect};
 pub use sprite_term::HistoryLines;

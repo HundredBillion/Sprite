@@ -1,4 +1,4 @@
-//! The observation surface opens no TCP port.
+//! Sprite's local sockets open no TCP port.
 //!
 //! A listening port is reachable by anything on the machine that can talk to
 //! loopback, which is a far larger set of things than "processes this window
@@ -11,8 +11,6 @@
 
 use std::collections::HashSet;
 use std::fs;
-
-use sprite_app::Endpoint;
 
 /// Socket inodes this process holds, read from its own descriptor table.
 fn socket_inodes() -> HashSet<u64> {
@@ -77,7 +75,9 @@ fn an_open_endpoint_holds_no_tcp_socket() {
     // A directory of this test's own rather than `XDG_RUNTIME_DIR`, which a
     // container does not set and macOS does not have.
     let directory = std::env::temp_dir().join(format!("sprite-no-tcp-{}", std::process::id()));
-    let endpoint = Endpoint::open_in(directory.clone(), |_request| "unused".to_owned())
+    let (lanes, _receivers) = sprite_app::surface_lanes();
+    let key = std::sync::Arc::new(sprite_app::SocketKey::generate().expect("key"));
+    let endpoint = sprite_app::SurfaceEndpoint::open_in(directory.clone(), key, lanes)
         .expect("open an endpoint");
 
     // The endpoint is listening, so if it were ever going to open a port it
@@ -97,7 +97,7 @@ fn an_open_endpoint_holds_no_tcp_socket() {
     let overlap: Vec<u64> = ours.intersection(&tcp).copied().collect();
     assert!(
         overlap.is_empty(),
-        "the process holds TCP socket inodes {overlap:?}; observation must be \
-         reachable only through the private Unix socket"
+        "the process holds TCP socket inodes {overlap:?}; a window must be \
+         reachable only through its private Unix sockets"
     );
 }

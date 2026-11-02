@@ -26,9 +26,9 @@ interfaces around it.
 
 [kitty](https://sw.kovidgoyal.net/kitty/remote-control/) and
 [WezTerm](https://wezterm.org/cli/cli/get-text.html) can also let programs read
-pane text. Their control tools can send text to panes too. Sprite keeps pane
-observation, management, terminal input and native drawing separately authorized.
-A read-only credential cannot type into a pane.
+pane text. Their control tools can send text to panes too, and so can Sprite's:
+any program running as you can read, manage and type into Sprite panes with no
+setup. Drawing native UI in a pane needs that pane's own key.
 
 [Warp](https://docs.warp.dev/agents/) includes a built-in coding agent.
 Sprite supplies no agent of its own. It gives the assistant you choose a way
@@ -37,17 +37,13 @@ to read pane context and present an interface beside your work.
 ## What Sprite is working toward
 
 An assistant should be able to understand what is happening across your
-workspace and help without taking it over. Sprite lets programs read the text
-shown in other panes in the same window. A program can also create, update,
-and remove a visual interface in its own pane: a file tree, an editor, or a
-small control panel. Reading a pane does not grant permission to change it.
-
-With an owner-approved [Pane Grant](docs/pane-control.md), an assistant can
-create, read, label, move, focus, resize and close existing or new panes,
-including panes in background tabs. Terminal input requires its own permission.
-You can revoke either right in Sprite's Pane Access controls. Sprite is still
-in development; the [technical reference](docs/technical-reference.md) describes
-what works today and its current limits.
+workspace and help without taking it over. Through [pane control](docs/pane-control.md),
+any program you run can list, read, create, label, move, focus, resize, close
+and type into panes in every Sprite window, including panes in background tabs,
+without a prompt. A program can also create, update, and remove a visual
+interface in its own pane: a file tree, an editor, or a small control panel.
+Sprite is still in development; the [technical reference](docs/technical-reference.md)
+describes what works today and its current limits.
 
 Sprite is available under either the MIT or Apache 2.0 license.
 

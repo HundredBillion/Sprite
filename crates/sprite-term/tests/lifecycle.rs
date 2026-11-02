@@ -44,7 +44,6 @@ fn child_exit_is_reported() {
         }
         other @ (TerminalEvent::Ready
         | TerminalEvent::SelectionCopied(_)
-        | TerminalEvent::UnsafePaste(_)
         | TerminalEvent::Bell
         | TerminalEvent::TitleChanged(_)
         | TerminalEvent::History { .. }
@@ -78,7 +77,6 @@ fn missing_executable_reports_spawn_error() {
         other @ (TerminalEvent::Ready
         | TerminalEvent::Exited(_)
         | TerminalEvent::SelectionCopied(_)
-        | TerminalEvent::UnsafePaste(_)
         | TerminalEvent::Bell
         | TerminalEvent::TitleChanged(_)
         | TerminalEvent::History { .. }
@@ -384,7 +382,6 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
         TerminalEvent::Exited(exit) => assert!(exit.requested),
         other @ (TerminalEvent::Ready
         | TerminalEvent::SelectionCopied(_)
-        | TerminalEvent::UnsafePaste(_)
         | TerminalEvent::Bell
         | TerminalEvent::TitleChanged(_)
         | TerminalEvent::History { .. }
@@ -545,7 +542,6 @@ os._exit(7)
         }
         other @ (TerminalEvent::Ready
         | TerminalEvent::SelectionCopied(_)
-        | TerminalEvent::UnsafePaste(_)
         | TerminalEvent::Bell
         | TerminalEvent::TitleChanged(_)
         | TerminalEvent::History { .. }
@@ -589,7 +585,6 @@ os._exit(7)
         TerminalEvent::Exited(exit) => assert_eq!(exit.code, Some(7)),
         other @ (TerminalEvent::Ready
         | TerminalEvent::SelectionCopied(_)
-        | TerminalEvent::UnsafePaste(_)
         | TerminalEvent::Bell
         | TerminalEvent::TitleChanged(_)
         | TerminalEvent::History { .. }
@@ -681,7 +676,6 @@ os._exit(0)
         TerminalEvent::Exited(exit) => assert!(!exit.requested),
         other @ (TerminalEvent::Ready
         | TerminalEvent::SelectionCopied(_)
-        | TerminalEvent::UnsafePaste(_)
         | TerminalEvent::Bell
         | TerminalEvent::TitleChanged(_)
         | TerminalEvent::History { .. }

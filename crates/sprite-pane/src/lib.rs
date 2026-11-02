@@ -39,9 +39,6 @@ pub trait Pane: Render + Focusable + gpui::EventEmitter<TitleChanged> + 'static 
     /// Cycles focus among the pane's contents, when the pane supports it.
     fn cycle_surface_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
-    /// Withdraws input awaiting confirmation when the workspace consumes a gesture.
-    fn cancel_pending_input(&mut self, _cx: &mut Context<Self>) {}
-
     /// One beat of the window's clock, about twice a second, delivered to every
     /// pane in the window whether or not it is in front.
     ///
@@ -68,10 +65,6 @@ pub trait Pane: Render + Focusable + gpui::EventEmitter<TitleChanged> + 'static 
     /// closure rather than a named handle type, so that "a pane is a thing
     /// with a child process" never becomes part of the contract.
     fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>>;
-
-    /// What closing this pane would interrupt, or `None` if closing is
-    /// uneventful.
-    fn close_warning(&self) -> Option<CloseWarning>;
 }
 
 /// A pane emits its new display title when that title changes, including resets to unknown.
@@ -87,16 +80,6 @@ pub trait PaneRequest {
     fn refuse(self);
 }
 
-/// What a person is told before a pane that is busy is closed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloseWarning {
-    /// The program that would be interrupted, when it can be named.
-    ///
-    /// `None` still warns: "something is running" is the part that matters,
-    /// and inventing a name would be worse than admitting to none.
-    pub program: Option<SharedString>,
-}
-
 /// The object-safe view of a pane. Implemented on the handle, never written by
 /// hand: the blanket implementation below covers every `Pane`.
 ///
@@ -110,8 +93,6 @@ pub trait PaneHandle {
     fn surface_request(&self, request: Self::Request, window: &mut Window, cx: &mut App);
     /// See [`Pane::cycle_surface_focus`].
     fn cycle_surface_focus(&self, window: &mut Window, cx: &mut App);
-    /// See [`Pane::cancel_pending_input`].
-    fn cancel_pending_input(&self, cx: &mut App);
     /// See [`Pane::tick`].
     fn tick(&self, cx: &mut App);
     /// The pane as an element the workspace can place.
@@ -126,8 +107,6 @@ pub trait PaneHandle {
     fn set_allocated(&self, size: Size<Pixels>, cx: &mut App);
     /// See [`Pane::begin_shutdown`].
     fn begin_shutdown(&self, cx: &mut App) -> Option<Box<dyn FnOnce() + Send>>;
-    /// See [`Pane::close_warning`].
-    fn close_warning(&self, cx: &App) -> Option<CloseWarning>;
 }
 
 impl<V: Pane> PaneHandle for gpui::Entity<V> {
@@ -139,10 +118,6 @@ impl<V: Pane> PaneHandle for gpui::Entity<V> {
 
     fn cycle_surface_focus(&self, window: &mut Window, cx: &mut App) {
         self.update(cx, |pane, cx| pane.cycle_surface_focus(window, cx));
-    }
-
-    fn cancel_pending_input(&self, cx: &mut App) {
-        self.update(cx, |pane, cx| pane.cancel_pending_input(cx));
     }
 
     fn tick(&self, cx: &mut App) {
@@ -171,10 +146,6 @@ impl<V: Pane> PaneHandle for gpui::Entity<V> {
 
     fn begin_shutdown(&self, cx: &mut App) -> Option<Box<dyn FnOnce() + Send>> {
         self.update(cx, |pane, _cx| pane.begin_shutdown())
-    }
-
-    fn close_warning(&self, cx: &App) -> Option<CloseWarning> {
-        self.read(cx).close_warning()
     }
 }
 
@@ -223,10 +194,6 @@ mod tests {
         fn begin_shutdown(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
             None
         }
-
-        fn close_warning(&self) -> Option<CloseWarning> {
-            None
-        }
     }
 
     /// Compiles only if the blanket implementation reaches a second type. The
@@ -263,18 +230,5 @@ mod tests {
             ["gpui"],
             "sprite-pane depends on gpui and nothing else"
         );
-    }
-
-    #[test]
-    fn a_close_warning_names_the_program_when_it_can() {
-        let named = CloseWarning {
-            program: Some("vim".into()),
-        };
-        let unnamed = CloseWarning { program: None };
-        assert_eq!(
-            named.program.as_ref().map(|p| -> &str { p.as_ref() }),
-            Some("vim")
-        );
-        assert!(unnamed.program.is_none());
     }
 }

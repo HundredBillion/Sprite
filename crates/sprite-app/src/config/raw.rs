@@ -63,7 +63,7 @@ section!(RawConfig {
     font: RawFont, surface_font: RawFont, grid: RawGrid, colors: RawColors,
     highlights: BTreeMap<String, Field<RawHighlight>>,
     cursor: RawCursor, shell: RawShell, scrollback: RawScrollback,
-    graphics: RawGraphics, pane_observation: RawObservation,
+    graphics: RawGraphics, pane_observation: toml::Value,
 });
 section!(RawFont {
     family: String,
@@ -93,7 +93,6 @@ section!(RawGraphics {
     storage_bytes: u64,
     texture_bytes: usize
 });
-section!(RawObservation { enabled: bool });
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum Underline {
@@ -303,14 +302,10 @@ impl RawConfig {
         {
             settings.graphics.texture_bytes = TextureBytes::new(bytes);
         }
-        let observation = self.pane_observation.section("pane_observation", c);
-        unknown(observation.unknown, "pane_observation", c);
-        if let Some(enabled) =
-            observation
-                .enabled
-                .read("pane_observation.enabled", "true or false", c)
-        {
-            settings.pane_observation.enabled = enabled;
+        // Pane observation was removed; a file written before then still
+        // loads, and the log says what was ignored.
+        if !matches!(self.pane_observation, Field::Missing) {
+            tracing::warn!(target: "sprite_app::config", "the [pane_observation] section is no longer used and was ignored");
         }
         (settings, complaints)
     }

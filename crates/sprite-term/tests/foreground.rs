@@ -85,10 +85,6 @@ fn a_shell_at_its_prompt_is_idle() {
         *state == ForegroundState::Idle
     });
     assert_eq!(state, ForegroundState::Idle);
-    assert!(
-        !state.should_confirm(),
-        "closing a pane sitting at a prompt asks nobody anything"
-    );
 }
 
 fn cat_has_answered(session: &mut TerminalSession, snapshots: &SnapshotPump) {
@@ -101,7 +97,7 @@ fn cat_has_answered(session: &mut TerminalSession, snapshots: &SnapshotPump) {
 }
 
 #[test]
-fn a_directly_launched_program_requires_confirmation() {
+fn a_directly_launched_program_is_busy() {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -120,7 +116,7 @@ fn a_directly_launched_program_requires_confirmation() {
 }
 
 #[test]
-fn a_program_that_replaces_the_idle_shell_requires_confirmation() {
+fn a_program_that_replaces_the_idle_shell_is_busy() {
     let (mut session, snapshots) = interactive_shell();
     wait_for(&session, "the shell's initial idle state", |state| {
         *state == ForegroundState::Idle
@@ -164,8 +160,7 @@ fn a_running_program_is_reported_by_name() {
     });
 }
 
-/// The other half: a pane that *was* busy must go back to idle, or every pane
-/// that ever ran anything would ask forever.
+/// The other half: a pane that *was* busy goes back to idle.
 #[test]
 fn a_finished_program_leaves_the_pane_idle_again() {
     let (mut session, _snapshots) = interactive_shell();
@@ -173,11 +168,9 @@ fn a_finished_program_leaves_the_pane_idle_again() {
     session
         .send(TerminalCommand::Input(b"sleep 1\n".to_vec()))
         .expect("send input");
-    wait_for(
-        &session,
-        "the program to start",
-        ForegroundState::should_confirm,
-    );
+    wait_for(&session, "the program to start", |state| {
+        matches!(state, ForegroundState::Busy(_))
+    });
 
     let state = wait_for(&session, "the program to finish", |state| {
         *state == ForegroundState::Idle

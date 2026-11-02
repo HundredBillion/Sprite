@@ -2,10 +2,9 @@
 //! Channel, so every language has one for free — a shell pipes it, Lua
 //! drives it through `jobstart`, Python through `subprocess`.
 //!
-//! It mirrors `sprite panes snapshot`: socket and key from the environment a
-//! window gives its sessions, a refusal on standard error with a distinct
-//! exit code, and nothing on standard output that is not the window's own
-//! answer.
+//! Socket and key come from the environment a window gives its sessions, a
+//! refusal goes to standard error with a distinct exit code, and nothing
+//! reaches standard output that is not the window's own answer.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
@@ -22,12 +21,24 @@ use serde_json::{Value, json};
 
 use super::socket_reader::SocketReader;
 use crate::cli::{SurfaceOpenArgs, TokenRegisterArgs};
-pub use crate::observation::client::Exit;
-use crate::observation::client::PANE_VARIABLE;
+use crate::control::client::PANE_VARIABLE;
 use crate::surface::channel::{KEY_VARIABLE, SOCKET_VARIABLE, VERSION};
 use crate::surface::wire::versioned;
 
 use crate::timeouts::bound_client;
+
+/// What the command should exit with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Exit {
+    Ok = 0,
+    Usage = 2,
+    /// Not running inside a Sprite window, so there is nothing to ask.
+    NoWindow = 3,
+    /// The window's socket could not be reached or did not answer.
+    Unreachable = 4,
+    /// The window answered, but refused.
+    Refused = 5,
+}
 
 /// One line to the window, flushed, with the truth about whether it went.
 fn send_line(stream: &UnixStream, line: &str) -> bool {
@@ -56,7 +67,13 @@ fn credentials(errors: &mut dyn Write) -> Result<Credentials, Exit> {
         .ok();
         return Err(Exit::NoWindow);
     };
-    let pane = match environment(PANE_VARIABLE).map(|text| text.parse::<u64>()) {
+    // `<window>:<pane>`, or a bare pane id from a window older than this
+    // command.
+    let pane = match environment(PANE_VARIABLE).map(|text| {
+        text.rsplit_once(':')
+            .map_or(text.as_str(), |(_, pane)| pane)
+            .parse::<u64>()
+    }) {
         Some(Ok(pane)) => pane,
         Some(Err(_)) => {
             writeln!(errors, "sprite: {PANE_VARIABLE} is not a pane id").ok();

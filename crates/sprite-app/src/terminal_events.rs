@@ -11,7 +11,6 @@ pub(crate) enum Effect {
     Status(SharedString),
     /// The child set, or cleared, its title.
     Title(Option<String>),
-    HoldPaste(String),
     HyperlinkResolved {
         position: sprite_term::CellPosition,
         request_id: u64,
@@ -59,10 +58,6 @@ fn describe_exit(exit: &sprite_term::ChildExit) -> String {
     }
 }
 
-/// How the status line begins while a paste is held for confirmation, so the
-/// view can clear that line, and only that line, when the hold is dropped.
-pub(crate) const PASTE_HELD_NOTICE: &str = "[paste held:";
-
 /// One event in, the effects it implies out.
 ///
 /// Pure on purpose. Every arm of the view's old event loop only *wrote* view
@@ -100,19 +95,6 @@ pub(crate) fn decide(event: Result<TerminalEvent, SessionError>) -> Decision {
 
         // A Pane Title, shown on the tab and in the window's title bar.
         Ok(TerminalEvent::TitleChanged(title)) => effects.push(Effect::Title(title)),
-
-        Ok(TerminalEvent::UnsafePaste(text)) => {
-            // Held, not performed. The person sees why and repeats the paste.
-            let lines = text.lines().count();
-            effects.push(Effect::HoldPaste(text));
-            effects.push(Effect::Status(
-                format!(
-                    "{PASTE_HELD_NOTICE} {lines} lines would run as commands — \
-                     repeat the paste shortcut to paste anyway]"
-                )
-                .into(),
-            ));
-        }
 
         // Belongs to whoever holds the ticket. The view forwards because it is
         // the single consumer of this session's events; the ticket, not the
@@ -231,18 +213,6 @@ pub(crate) mod tests {
                 assert!(effects.is_empty());
             }
         }
-    }
-
-    #[test]
-    fn a_held_paste_explains_itself_and_is_kept() {
-        let held = effects(TerminalEvent::UnsafePaste("one\ntwo\n".to_owned()));
-        assert_eq!(held.len(), 2, "a held paste both holds and explains");
-        assert!(matches!(held[0], Effect::HoldPaste(ref text) if text == "one\ntwo\n"));
-        assert!(matches!(held[1], Effect::Status(ref line) if line.contains("2 lines")));
-        assert!(matches!(
-            &held[1],
-            Effect::Status(line) if line.contains("repeat the paste shortcut")
-        ));
     }
 
     #[test]

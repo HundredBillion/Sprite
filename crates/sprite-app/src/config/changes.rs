@@ -9,7 +9,6 @@ pub enum LiveChange {
     Highlights,
     Cursor,
     TextureBudget,
-    Observation,
 }
 impl LiveChange {
     fn name(self) -> &'static str {
@@ -21,7 +20,6 @@ impl LiveChange {
             Self::Highlights => "highlights",
             Self::Cursor => "cursor",
             Self::TextureBudget => "graphics.texture_bytes",
-            Self::Observation => "pane_observation",
         }
     }
 }
@@ -106,10 +104,6 @@ impl Settings {
             (
                 self.graphics.texture_bytes != next.graphics.texture_bytes,
                 LiveChange::TextureBudget,
-            ),
-            (
-                self.pane_observation != next.pane_observation,
-                LiveChange::Observation,
             ),
         ] {
             if changed {

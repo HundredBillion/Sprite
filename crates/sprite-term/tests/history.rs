@@ -53,7 +53,6 @@ fn wait_for_history(events: &EventPump) -> HistorySnapshot {
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
             | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::Graphics(_)
@@ -533,7 +532,6 @@ fn every_answer_carries_the_ticket_it_was_asked_with() {
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
             | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::Graphics(_)

@@ -24,7 +24,7 @@ impl Workspace {
                 allocated,
                 PaneServices {
                     panes: &self.panes,
-                    endpoint: self.endpoint.as_ref(),
+                    window: self.control.window(),
                     surfaces: self.surfaces.as_ref(),
                     exit: self.exit_sender.clone(),
                 },
@@ -49,7 +49,7 @@ impl Workspace {
             )),
             PaneServices {
                 panes: &self.panes,
-                endpoint: self.endpoint.as_ref(),
+                window: self.control.window(),
                 surfaces: self.surfaces.as_ref(),
                 exit: self.exit_sender.clone(),
             },
@@ -62,7 +62,8 @@ impl Workspace {
 }
 pub(super) struct PaneServices<'a> {
     pub(super) panes: &'a Arc<WindowPanes>,
-    pub(super) endpoint: Option<&'a Endpoint>,
+    /// The window id each session is told in `SPRITE_PANE`.
+    pub(super) window: &'a str,
     pub(super) surfaces: Option<&'a SurfaceEndpoint>,
     pub(super) exit: async_channel::Sender<(TabId, PaneId)>,
 }
@@ -82,7 +83,7 @@ pub(super) fn make_pane<'a>(
     cx: &'a mut Context<Workspace>,
 ) -> impl FnOnce(TabId, PaneId) -> Rc<dyn PaneHandle<Request = SurfaceRequest>> + 'a {
     move |tab, pane| {
-        let environment = session_environment(services.endpoint, services.surfaces, pane);
+        let environment = session_environment(services.window, services.surfaces, pane);
         let link = pane_link(services.panes, tab, pane);
         let view = cx.new(|cx| {
             TerminalView::new_allocated(
@@ -111,13 +112,7 @@ pub(super) fn make_pane<'a>(
     }
 }
 
-/// How a pane is reached by observation.
-///
-/// Every pane is linked, whether or not the window has an endpoint right now:
-/// a reload can turn observation on while panes are running, and it then has
-/// to find every one of them, not only those opened afterwards. The registry
-/// is reachable only through an endpoint, so a window without one exposes
-/// nothing by keeping it filled.
+/// How a pane is reached by Pane Control reads.
 pub(super) fn pane_link(panes: &Arc<WindowPanes>, tab: TabId, pane: PaneId) -> PaneLink {
     PaneLink {
         pane,
@@ -126,23 +121,18 @@ pub(super) fn pane_link(panes: &Arc<WindowPanes>, tab: TabId, pane: PaneId) -> P
     }
 }
 
-/// What one pane's session is told about observation.
-///
-/// A window with no endpoint tells its sessions nothing, rather than half of
-/// it: a session holding a socket path with no key, or a key with no socket,
-/// could only produce confusing failures.
+/// What one pane's session is told: its own address, `SPRITE_PANE`, as
+/// `<window>:<pane>`, and how to reach the Surface Channel when the window has
+/// one.
 pub(super) fn session_environment(
-    endpoint: Option<&Endpoint>,
+    window: &str,
     surfaces: Option<&SurfaceEndpoint>,
     pane: PaneId,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    let mut environment = endpoint
-        .map(|endpoint| endpoint.environment(pane))
-        .unwrap_or_default();
-    environment.extend(
-        surfaces
-            .into_iter()
-            .flat_map(|surfaces| surfaces.environment(pane)),
-    );
+    let mut environment = vec![(
+        std::ffi::OsString::from("SPRITE_PANE"),
+        std::ffi::OsString::from(format!("{window}:{}", pane.0)),
+    )];
+    environment.extend(surfaces.into_iter().flat_map(SurfaceEndpoint::environment));
     environment
 }

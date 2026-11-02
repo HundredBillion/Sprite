@@ -1,5 +1,7 @@
 # Authorize pane control separately from observation
 
+Superseded 2026-11-01 by ADR 0036: grants, access requests, owner approval and control confirmations are removed.
+
 Approved for issue #106 on 2026-10-26.
 
 Pane Control uses separate credentials and a versioned local protocol, over the

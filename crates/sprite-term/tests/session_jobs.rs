@@ -216,7 +216,6 @@ sleep 30
             sprite_term::TerminalEvent::Exited(exit) => assert!(!exit.requested),
             other @ (sprite_term::TerminalEvent::Ready
             | sprite_term::TerminalEvent::SelectionCopied(_)
-            | sprite_term::TerminalEvent::UnsafePaste(_)
             | sprite_term::TerminalEvent::Bell
             | sprite_term::TerminalEvent::TitleChanged(_)
             | sprite_term::TerminalEvent::History { .. }

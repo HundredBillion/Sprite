@@ -1,5 +1,4 @@
 use super::*;
-use crate::confirmation::Confirmation;
 
 #[cfg(test)]
 thread_local! {
@@ -31,9 +30,6 @@ impl Workspace {
         self.stopping = true;
         self.control.close(None);
         self.surfaces = None;
-        if let Some(endpoint) = self.endpoint.as_mut() {
-            endpoint.close();
-        }
         let mut panes = self.tabs.all_panes();
         panes.sort_unstable_by_key(|(_, pane, _)| *pane);
         let panes: Vec<_> = panes
@@ -281,10 +277,10 @@ impl Workspace {
             reply.cancel();
         }
     }
-    /// Whether a close may go ahead now, or must be asked about first.
+    /// Whether a close may go ahead now.
     ///
-    /// Application quit always asks through the timed quit gesture.
-    /// Closing a pane or tab asks only when a pane reports a running program.
+    /// Closing a pane or a tab always goes ahead. Closing the window or
+    /// quitting asks through the timed quit gesture.
     pub(super) fn may_close(
         &mut self,
         scope: CloseScope,
@@ -295,74 +291,18 @@ impl Workspace {
             return false;
         }
         match scope {
-            CloseScope::Window => return self.request_quit(QuitSource::Window, is_held, cx),
-            CloseScope::Quit => return self.request_quit(QuitSource::Shortcut, is_held, cx),
-            CloseScope::Pane | CloseScope::Tab => self.cancel_quit(),
-        }
-        // `key_down` already drops a held key's repeats for the close
-        // actions, which do not repeat. The flag still comes through, so the
-        // rule that a held key never answers lives in `Confirmation` alone
-        // rather than in every route a close can arrive by.
-        let confirmed = match &mut self.mode {
-            Mode::ConfirmingClose(pending) => pending.confirmation.answer(&scope, is_held),
-            Mode::Idle | Mode::Renaming(_) | Mode::DraggingDivider(_) => false,
-        };
-        let running = if confirmed {
-            Vec::new()
-        } else {
-            self.running_programs(scope, cx)
-        };
-        match CloseGate::decide(confirmed, scope, &running) {
-            CloseGate::Allow => {
+            CloseScope::Window => self.request_quit(QuitSource::Window, is_held, cx),
+            CloseScope::Quit => self.request_quit(QuitSource::Shortcut, is_held, cx),
+            CloseScope::Pane | CloseScope::Tab => {
+                self.cancel_quit();
                 self.mode = Mode::Idle;
                 true
             }
-            CloseGate::Ask(pending) => {
-                self.mode = Mode::ConfirmingClose(pending);
-                cx.notify();
-                false
-            }
         }
-    }
-    /// The programs a close would interrupt, one entry per busy pane.
-    pub(super) fn running_programs(
-        &self,
-        scope: CloseScope,
-        cx: &Context<Self>,
-    ) -> Vec<Option<String>> {
-        let panes: Vec<&Rc<dyn PaneHandle<Request = SurfaceRequest>>> = match scope {
-            CloseScope::Pane => self
-                .tabs
-                .active()
-                .and_then(|tab| tab.focused())
-                .into_iter()
-                .collect(),
-            CloseScope::Tab => self
-                .tabs
-                .layout()
-                .into_iter()
-                .map(|(_, _, pane)| pane)
-                .collect(),
-            CloseScope::Window | CloseScope::Quit => self
-                .tabs
-                .all_panes()
-                .into_iter()
-                .map(|(_, _, pane)| pane)
-                .collect(),
-        };
-        panes
-            .into_iter()
-            .filter_map(|pane| pane.close_warning(cx))
-            .map(|warning| warning.program.map(|program| program.to_string()))
-            .collect()
     }
     pub(super) fn dismiss_pending_close(&mut self, cx: &mut Context<Self>) {
         if self.quit_gesture.visible() {
             self.cancel_quit();
-            cx.notify();
-        }
-        if matches!(self.mode, Mode::ConfirmingClose(_)) {
-            self.mode = Mode::Idle;
             cx.notify();
         }
     }
@@ -465,25 +405,6 @@ pub(super) struct PendingCleanup {
     pub(super) completed: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// A close waiting on a second press.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct PendingClose {
-    /// Armed with the scope that asked, so only the same close answers it.
-    pub(super) confirmation: Confirmation<CloseScope>,
-    pub(super) label: SharedString,
-}
-
-impl PendingClose {
-    pub(super) fn new(scope: CloseScope, label: SharedString) -> Self {
-        let mut confirmation = Confirmation::default();
-        confirmation.arm(scope);
-        Self {
-            confirmation,
-            label,
-        }
-    }
-}
-
 /// How much a close would take with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CloseScope {
@@ -491,71 +412,6 @@ pub(super) enum CloseScope {
     Tab,
     Window,
     Quit,
-}
-
-impl CloseScope {
-    pub(super) fn noun(self) -> &'static str {
-        match self {
-            Self::Pane => "pane",
-            Self::Tab => "tab",
-            Self::Window | Self::Quit => "window",
-        }
-    }
-
-    /// How to repeat the gesture that raised the question.
-    ///
-    /// The confirmation model is "do the same thing again", and the title-bar
-    /// close is a click rather than a binding.
-    pub(super) fn again(self) -> &'static str {
-        match self {
-            Self::Pane | Self::Tab => "press the same keys again",
-            Self::Window => "click close again",
-            Self::Quit => "quit again",
-        }
-    }
-}
-
-/// Names the programs a close would interrupt.
-///
-/// A pane whose program could not be named still counts — "something is
-/// running" is the part that matters, and inventing a name would be worse than
-/// admitting to none.
-pub(super) fn describe_running(running: &[Option<String>]) -> String {
-    let mut names: Vec<&str> = running.iter().filter_map(Option::as_deref).collect();
-    names.sort_unstable();
-    names.dedup();
-    let unnamed = running.len() - running.iter().filter(|name| name.is_some()).count();
-
-    match (names.as_slice(), unnamed) {
-        ([], _) => "a program is running".to_owned(),
-        ([one], 0) => format!("{one} is running"),
-        (many, 0) => format!("{} are running", many.join(", ")),
-        (many, _) => format!("{} and other programs are running", many.join(", ")),
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum CloseGate {
-    Allow,
-    Ask(PendingClose),
-}
-
-impl CloseGate {
-    /// `confirmed` is whether this gesture answered a question already asked.
-    fn decide(confirmed: bool, scope: CloseScope, running: &[Option<String>]) -> Self {
-        if confirmed || running.is_empty() {
-            return Self::Allow;
-        }
-        Self::Ask(PendingClose::new(
-            scope,
-            display_text(format!(
-                "{} — {} to close this {}, Esc to keep it",
-                describe_running(running),
-                scope.again(),
-                scope.noun()
-            )),
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -751,7 +607,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn native_text_commit_without_key_cancels_pending_close(cx: &mut gpui::TestAppContext) {
+    fn native_text_commit_without_key_cancels_a_pending_quit(cx: &mut gpui::TestAppContext) {
         use gpui::{AppContext, ElementInputHandler, InputHandler};
         let (workspace, cx) = test_workspace(cx);
         let view = terminal_view(&workspace, PaneId(0), cx);
@@ -766,29 +622,23 @@ mod tests {
         });
         draw_workspace(cx);
         let mut handler = ElementInputHandler::new(gpui::Bounds::default(), view);
-        for scope in [CloseScope::Tab, CloseScope::Window, CloseScope::Quit] {
+        for scope in [CloseScope::Window, CloseScope::Quit] {
             workspace.update(cx, |workspace, cx| {
                 assert!(!workspace.may_close(scope, false, cx));
-                assert!(
-                    matches!(workspace.mode, Mode::ConfirmingClose(_))
-                        || workspace.quit_gesture.visible()
-                );
+                assert!(workspace.quit_gesture.visible());
             });
             cx.update(|window, cx| {
                 handler.replace_text_in_range(None, "", window, cx);
                 handler.replace_text_in_range_from_key(None, "a", window, cx);
             });
             workspace.read_with(cx, |workspace, _| {
-                assert!(
-                    matches!(workspace.mode, Mode::ConfirmingClose(_))
-                        || workspace.quit_gesture.visible()
-                );
+                assert!(workspace.quit_gesture.visible());
             });
             cx.update(|window, cx| handler.replace_text_in_range(None, "é", window, cx));
             workspace.update(cx, |workspace, cx| {
                 assert!(
-                    matches!(workspace.mode, Mode::Idle) && !workspace.quit_gesture.visible(),
-                    "native text left close armed"
+                    !workspace.quit_gesture.visible(),
+                    "native text left the quit armed"
                 );
                 assert!(
                     !workspace.may_close(scope, false, cx),
@@ -799,36 +649,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn consent_is_only_for_the_repeated_scope_and_idle_panes_need_none() {
-        let busy = [Some("editor".to_owned()), None];
-        let scopes = [
-            CloseScope::Pane,
-            CloseScope::Tab,
-            CloseScope::Window,
-            CloseScope::Quit,
-        ];
-        for scope in scopes {
-            assert_eq!(CloseGate::decide(false, scope, &[]), CloseGate::Allow);
-            assert_eq!(CloseGate::decide(true, scope, &busy), CloseGate::Allow);
-            let CloseGate::Ask(pending) = CloseGate::decide(false, scope, &busy) else {
-                panic!("a busy {scope:?} close must ask");
-            };
-            for answer in scopes {
-                let mut confirmation = pending.confirmation.clone();
-                assert_eq!(
-                    confirmation.answer(&answer, false),
-                    answer == scope,
-                    "{scope:?} answered by {answer:?}"
-                );
-            }
-            let mut held = pending.confirmation.clone();
-            assert!(
-                !held.answer(&scope, true),
-                "an auto-repeat is not an answer"
-            );
-        }
-    }
     struct ShutdownPane {
         focus: gpui::FocusHandle,
         id: PaneId,
@@ -857,9 +677,6 @@ mod tests {
 
     impl sprite_pane::Pane for ShutdownPane {
         type Request = crate::surface::channel::SurfaceRequest;
-        fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
-            None
-        }
         fn title(&self) -> Option<gpui::SharedString> {
             None
         }
@@ -875,49 +692,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn what_is_running_is_named_where_it_can_be() {
-        let named = |name: &str| Some(name.to_owned());
-
-        assert_eq!(describe_running(&[named("vim")]), "vim is running");
-        assert_eq!(
-            describe_running(&[named("vim"), named("cargo")]),
-            "cargo, vim are running"
-        );
-        // The same program in two panes is one name, not two.
-        assert_eq!(
-            describe_running(&[named("vim"), named("vim")]),
-            "vim is running"
-        );
-    }
-    /// A pane whose program cannot be named still counts. "Something is
-    /// running" is the part that matters, and a guess would be worse than an
-    /// admission.
-    #[test]
-    fn an_unnamed_program_still_asks() {
-        assert_eq!(describe_running(&[None]), "a program is running");
-        assert_eq!(describe_running(&[None, None]), "a program is running");
-        assert_eq!(
-            describe_running(&[Some("vim".to_owned()), None]),
-            "vim and other programs are running"
-        );
-    }
-    #[test]
-    fn a_close_question_says_what_it_would_close() {
-        assert_eq!(CloseScope::Pane.noun(), "pane");
-        assert_eq!(CloseScope::Tab.noun(), "tab");
-        assert_eq!(CloseScope::Window.noun(), "window");
-        assert_eq!(CloseScope::Quit.noun(), "window");
-    }
-    /// The banner tells a person how to answer. A title-bar close was not a
-    /// keystroke, so it must not be described as one.
-    #[test]
-    fn a_close_question_names_the_gesture_that_answers_it() {
-        assert_eq!(CloseScope::Pane.again(), "press the same keys again");
-        assert_eq!(CloseScope::Tab.again(), "press the same keys again");
-        assert_eq!(CloseScope::Window.again(), "click close again");
-        assert_eq!(CloseScope::Quit.again(), "quit again");
-    }
     /// The quit shortcut asks like any close, and holding it down cannot
     /// answer its own question.
     #[gpui::test]
@@ -1216,12 +990,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn queued_reload_cannot_reenable_observation_during_shutdown(cx: &mut gpui::TestAppContext) {
+    fn a_queued_reload_is_not_applied_during_shutdown(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
         let (_completed, gates) = gated_panes(&workspace, cx);
         let path =
             std::env::temp_dir().join(format!("sprite-stop-reload-{}.toml", std::process::id()));
-        std::fs::write(&path, "[pane_observation]\nenabled = true\n").unwrap();
+        std::fs::write(&path, "[font]\nsize = 31.0\n").unwrap();
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         workspace.update(cx, |workspace, cx| {
             workspace.config_path = Some(path.clone());
@@ -1232,7 +1006,6 @@ mod tests {
                 .try_send(ReloadRequest {
                     what: ConfigVerb::Reload,
                     reply: reply.into(),
-                    reply_connection: None,
                 })
                 .unwrap();
         });
@@ -1241,8 +1014,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(answer, "this window is closing");
         workspace.read_with(cx, |workspace, _| {
-            assert!(!workspace.settings.pane_observation.enabled);
-            assert!(workspace.endpoint.is_none());
+            assert_ne!(workspace.settings.font.size.get(), 31.0);
         });
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 0);
         for index in 0..gates.len() {
@@ -1393,9 +1165,6 @@ mod tests {
 
     impl sprite_pane::Pane for RendezvousPane {
         type Request = crate::surface::channel::SurfaceRequest;
-        fn close_warning(&self) -> Option<sprite_pane::CloseWarning> {
-            None
-        }
         fn title(&self) -> Option<gpui::SharedString> {
             None
         }

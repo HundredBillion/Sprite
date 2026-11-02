@@ -10,7 +10,7 @@ mod support;
 
 use std::ffi::OsString;
 
-use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession};
+use sprite_term::{SessionConfig, TerminalCommand, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
@@ -73,8 +73,7 @@ fn bracketed_paste_wraps_the_text() {
 ///
 /// This bounds what Sprite sends; it does not make an unbracketed paste safe.
 /// The line discipline converts that carriage return straight back into a
-/// newline unless `icrnl` is off, which is exactly why bracketed paste exists
-/// and why paste protection is still owed (see the TSP).
+/// newline unless `icrnl` is off, which is why bracketed paste exists.
 #[test]
 fn unbracketed_paste_converts_newlines_to_carriage_returns() {
     let sprite_term::Spawned {
@@ -87,10 +86,8 @@ fn unbracketed_paste_converts_newlines_to_carriage_returns() {
     events.expect_ready();
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
-    // Confirmed explicitly: this test is about the encoding, not the safety
-    // gate, and an unconfirmed unbracketed newline is now withheld by design.
     session
-        .send(TerminalCommand::PasteConfirmed("a\nb".to_owned()))
+        .send(TerminalCommand::Paste("a\nb".to_owned()))
         .expect("paste");
 
     let bundle = snapshots.wait_for("the converted paste", |b| pane_text(b).contains("61"));
@@ -212,11 +209,10 @@ fn focus_loss_is_reported_after_focus_gain() {
     );
 }
 
-/// An unbracketed paste containing a newline would execute on arrival, because
-/// the line discipline turns Sprite's carriage return back into one. Such a
-/// paste is withheld and reported, not performed.
+/// An unbracketed paste containing a newline is written as typed. Sprite has no
+/// paste-safety check: what a person or agent pastes reaches the program.
 #[test]
-fn an_unsafe_unbracketed_paste_is_withheld_and_reported() {
+fn an_unbracketed_paste_with_a_newline_is_written_as_typed() {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -228,78 +224,21 @@ fn an_unsafe_unbracketed_paste_is_withheld_and_reported() {
     snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
 
     session
-        .send(TerminalCommand::Paste("rm -rf /\nyes".to_owned()))
-        .expect("send an unsafe paste");
+        .send(TerminalCommand::Paste("a\nb".to_owned()))
+        .expect("send a paste with a newline");
 
-    let mut reported = None;
-    for _ in 0..8 {
-        match events.next() {
-            TerminalEvent::UnsafePaste(text) => {
-                reported = Some(text);
-                break;
-            }
-            TerminalEvent::Error(error) => panic!("unexpected error: {error}"),
-            TerminalEvent::Ready
-            | TerminalEvent::Exited(_)
-            | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::Bell
-            | TerminalEvent::TitleChanged(_)
-            | TerminalEvent::History { .. }
-            | TerminalEvent::HistoryFailed { .. }
-            | TerminalEvent::Graphics(_)
-            | TerminalEvent::WorkingDirectoryChanged(_)
-            | TerminalEvent::Hyperlink { .. }
-            | TerminalEvent::ClipboardWrite(_) => {}
-        }
-    }
-    assert_eq!(
-        reported.as_deref(),
-        Some("rm -rf /\nyes"),
-        "the paste is handed back for confirmation, not performed"
-    );
-
-    // Nothing reached the child: `head -c 3` is still waiting.
-    session
-        .send(TerminalCommand::Capture)
-        .expect("request a capture");
-    let bundle = snapshots.wait_for("a capture", |b| b.generation > 0);
-    assert!(
-        !pane_text(&bundle).contains("72 6d"),
-        "no byte of the unsafe paste reached the child, got:\n{}",
-        pane_text(&bundle)
-    );
-}
-
-/// The same paste goes through once explicitly confirmed. Confirmation is the
-/// person's decision, and Sprite performs it without further argument.
-#[test]
-fn a_confirmed_unsafe_paste_is_performed() {
-    let sprite_term::Spawned {
-        mut session,
-        events,
-        snapshots,
-    } = session(&hex_reader("", 3));
-    let events = EventPump::new(events);
-    let snapshots = SnapshotPump::new(snapshots);
-    events.expect_ready();
-    snapshots.wait_for("ready", |b| pane_text(b).contains("READY"));
-
-    session
-        .send(TerminalCommand::PasteConfirmed("a\nb".to_owned()))
-        .expect("send a confirmed paste");
-
-    let bundle = snapshots.wait_for("the performed paste", |b| pane_text(b).contains("61"));
+    let bundle = snapshots.wait_for("the written paste", |b| pane_text(b).contains("61"));
     assert!(
         pane_text(&bundle).contains("61 0d 62"),
-        "the confirmed paste was written, got:\n{}",
+        "the paste was written, got:\n{}",
         pane_text(&bundle)
     );
 }
 
-/// A bracketed paste is safe by construction, so it is never withheld even when
-/// it contains newlines: the child is told where it starts and ends.
+/// A program that enabled bracketed paste is told where a paste starts and ends,
+/// so a newline inside it is data.
 #[test]
-fn a_bracketed_paste_with_newlines_needs_no_confirmation() {
+fn a_bracketed_paste_with_newlines_is_wrapped() {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -319,11 +258,11 @@ fn a_bracketed_paste_with_newlines_needs_no_confirmation() {
     });
     assert!(
         pane_text(&bundle).contains("1b 5b 32 30 30 7e"),
-        "bracketing makes it safe, so it went through unchallenged"
+        "the paste was wrapped in bracketed-paste markers"
     );
 }
 
-fn paste_from_history(command: TerminalCommand, accepted: bool) {
+fn paste_from_history(command: TerminalCommand) {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -336,33 +275,22 @@ fn paste_from_history(command: TerminalCommand, accepted: bool) {
     session
         .send(TerminalCommand::Scroll(sprite_term::Scroll::Top))
         .unwrap();
-    let before = snapshots.wait_for("history viewport", |b| !b.render.viewport.at_bottom());
+    snapshots.wait_for("history viewport", |b| !b.render.viewport.at_bottom());
     session.send(command).unwrap();
     session.send(TerminalCommand::Capture).unwrap();
-    if accepted {
-        snapshots.wait_for("paste returns to live output", |b| {
-            b.render.viewport.at_bottom()
-        });
-    } else {
-        assert!(matches!(events.next(), TerminalEvent::UnsafePaste(_)));
-        let after = snapshots.wait_for("post-paste capture", |b| b.generation >= before.generation);
-        assert_eq!(after.render.viewport.offset, before.render.viewport.offset);
-    }
+    snapshots.wait_for("paste returns to live output", |b| {
+        b.render.viewport.at_bottom()
+    });
 }
 
 #[test]
-fn accepted_paste_returns_to_live_output() {
-    paste_from_history(TerminalCommand::Paste("z".into()), true);
+fn a_paste_returns_to_live_output() {
+    paste_from_history(TerminalCommand::Paste("z".into()));
 }
 
 #[test]
-fn confirmed_paste_returns_to_live_output() {
-    paste_from_history(TerminalCommand::PasteConfirmed("z".into()), true);
-}
-
-#[test]
-fn withheld_paste_keeps_the_history_viewport() {
-    paste_from_history(TerminalCommand::Paste("z\n".into()), false);
+fn a_paste_with_a_newline_returns_to_live_output() {
+    paste_from_history(TerminalCommand::Paste("z\n".into()));
 }
 
 /// A bracketed paste of the largest text a paste may carry is queued whole.

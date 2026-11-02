@@ -1,23 +1,6 @@
 use crate::SessionError;
 use libghostty_vt::Terminal;
 const MODE_BRACKETED_PASTE: u16 = 2004;
-/// Whether a paste can be performed without asking.
-///
-/// Bracketed paste is safe by construction: the child is told where the text
-/// begins and ends, so a newline inside it is data. Without bracketing, a
-/// newline arrives as if typed — Sprite writes a carriage return, but the line
-/// discipline converts it straight back — so anything libghostty considers
-/// unsafe needs a person's confirmation first.
-pub(crate) fn paste_is_safe_to_perform(terminal: &Terminal<'_, '_>, text: &str) -> bool {
-    use libghostty_vt::paste;
-    use libghostty_vt::terminal::{Mode, ModeKind};
-
-    let bracketed = terminal
-        .mode(Mode::new(MODE_BRACKETED_PASTE, ModeKind::Dec))
-        .unwrap_or(false);
-    bracketed || paste::is_safe(text)
-}
-
 /// Prepares clipboard text for the PTY.
 ///
 /// libghostty does the dangerous part: it strips control bytes, neutralises a

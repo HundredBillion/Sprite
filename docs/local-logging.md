@@ -1,6 +1,6 @@
 # Local application diagnostics
 
-Sprite writes window-process diagnostics to private files. CLI commands retain their normal stdout and stderr; diagnostic events never go to stdout or pane-observation replies. The default filter records warnings and errors from Sprite. Events include a Unix timestamp in milliseconds, severity, subsystem and process ID; pane and connection IDs are included where available.
+Sprite writes window-process diagnostics to private files. CLI commands retain their normal stdout and stderr; diagnostic events never go to stdout or pane control replies. The default filter records warnings and errors from Sprite. Events include a Unix timestamp in milliseconds, severity, subsystem and process ID; pane and connection IDs are included where available.
 
 On macOS the directory is `~/Library/Logs/Sprite`. On Linux it is `$XDG_STATE_HOME/sprite/logs` when `XDG_STATE_HOME` is an absolute path, otherwise `~/.local/state/sprite/logs`. Each window process creates a directory named `run-PID-TIMESTAMP` with a `sprite.log` file. For example, choose the right PID from `pgrep -fl sprite`, then follow its file:
 

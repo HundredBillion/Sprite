@@ -1,70 +1,63 @@
-use std::collections::{BTreeMap, HashMap};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
 use super::*;
-use crate::control::{self, AccessRequest, Message, Operation, Request, failure, response};
-use crate::local_socket::{LocalSocket, ObservationKey, ReplyConnection};
+use crate::control::{self, Message, Operation, Request, failure, response};
+use crate::local_socket::{LocalSocket, ReplyConnection, SocketKey};
 
+/// What Pane Control keeps for one window: its id, its socket, and the labels
+/// callers gave its panes.
 pub(super) struct ControlState {
     window: String,
-    next_grant: u64,
-    next_prompt: u64,
-    grants: BTreeMap<u64, Grant>,
-    pending: Option<PendingAccess>,
-    confirmation: Option<PendingOperation>,
+    socket: Option<LocalSocket>,
     labels: HashMap<PaneId, String>,
-    show_access: bool,
 }
 
-struct Grant {
-    endpoint: LocalSocket,
-    scope: AccessRequest,
-}
-struct PendingAccess {
-    prompt: u64,
-    request: AccessRequest,
-    reply: Relayed<Value>,
-    expires: Instant,
-}
-struct PendingOperation {
-    prompt: u64,
-    grant: u64,
-    request: Request,
-    expires: Instant,
-    label: String,
-}
+/// Hex digits in a window id. Short enough that `window-<id>.sock` fits a
+/// macOS socket path inside `$TMPDIR`, and long enough that two windows never
+/// share one.
+const WINDOW_ID_HEX: usize = 24;
 
 impl ControlState {
     pub(super) fn new() -> Self {
+        let mut window = SocketKey::generate()
+            .map(|key| key.to_hex())
+            .unwrap_or_default();
+        window.truncate(WINDOW_ID_HEX);
         Self {
-            window: ObservationKey::generate()
-                .map(|key| key.to_hex())
-                .unwrap_or_default(),
-            next_grant: 0,
-            next_prompt: 0,
-            grants: BTreeMap::new(),
-            pending: None,
-            confirmation: None,
+            window,
+            socket: None,
             labels: HashMap::new(),
-            show_access: false,
         }
     }
+
+    /// Opens this window's socket. A window that can't open one still runs;
+    /// its panes just can't be reached from outside.
+    pub(super) fn open(&mut self, lanes: control::Lanes) {
+        let opened = crate::local_socket::runtime_directory().and_then(|directory| {
+            control::open_window_socket(&directory, self.window.clone(), lanes)
+        });
+        self.socket = opened
+            .inspect_err(|error| { tracing::warn!(target: "sprite_app::ipc", kind = ?error.kind(), "pane control socket failed"); })
+            .ok();
+    }
+
+    pub(super) fn window(&self) -> &str {
+        &self.window
+    }
+
+    #[cfg(test)]
+    pub(super) fn socket_path(&self) -> Option<&std::path::Path> {
+        self.socket.as_ref().map(LocalSocket::socket_path)
+    }
+
+    /// Stops serving and removes the socket, letting `connection` finish the
+    /// reply it is writing.
     pub(super) fn close(&mut self, connection: Option<&ReplyConnection>) {
-        for grant in self.grants.values_mut() {
-            grant.endpoint.close_after_reply(connection);
+        if let Some(mut socket) = self.socket.take() {
+            socket.close_after_reply(connection);
         }
-        self.grants.clear();
-        if let Some(pending) = self.pending.take() {
-            pending.reply.send(failure("access", "closing")).ok();
-        }
-        self.confirmation = None;
-    }
-    fn permits(&self, grant: u64, pane: PaneId) -> bool {
-        self.grants
-            .get(&grant)
-            .is_some_and(|g| g.scope.all_panes || g.scope.panes.contains(&pane.0))
     }
 }
 
@@ -78,47 +71,13 @@ impl Workspace {
         Ok(())
     }
 
-    /// Forgets closed panes everywhere Pane Control recorded them: their
-    /// labels and every selected-pane grant's scope. Every way of closing a
-    /// pane ends in a layout refresh, which calls this, so no close path has
-    /// to remember it. A pane's identity is never reused, so a forgotten one
-    /// can't authorize anything again, and a scope holds only open panes,
-    /// which is what its limit counts.
+    /// Forgets the labels of closed panes. Every way of closing a pane ends in
+    /// a layout refresh, which calls this, so no close path has to remember it.
     pub(super) fn prune_closed_panes(&mut self) {
         let tabs = &self.tabs;
         self.control
             .labels
             .retain(|pane, _| tabs.get(*pane).is_some());
-        for grant in self.control.grants.values_mut() {
-            grant
-                .scope
-                .panes
-                .retain(|pane| tabs.get(PaneId(*pane)).is_some());
-        }
-    }
-
-    pub(super) fn expire_control(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        if self
-            .control
-            .pending
-            .as_ref()
-            .is_some_and(|p| now >= p.expires)
-        {
-            if let Some(pending) = self.control.pending.take() {
-                pending.reply.send(failure("access", "denied")).ok();
-            }
-            cx.notify();
-        }
-        if self
-            .control
-            .confirmation
-            .as_ref()
-            .is_some_and(|p| now >= p.expires)
-        {
-            self.control.confirmation = None;
-            cx.notify();
-        }
     }
 
     pub(super) fn serve_control(
@@ -127,135 +86,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.expire_control(cx);
-        match message {
-            Message::Access { request, reply } => {
-                if self.stopping {
-                    reply.send(failure("access", "closing")).ok();
-                    return;
-                }
-                if self.control.pending.is_some()
-                    || self.control.grants.len() >= control::MAX_GRANTS
-                    || self.control.window.is_empty()
-                {
-                    reply.send(failure("access", "busy")).ok();
-                    return;
-                }
-                if request.all_panes == !request.panes.is_empty()
-                    || request.panes.len() > control::MAX_PANES
-                    || request
-                        .panes
-                        .iter()
-                        .any(|p| self.tabs.get(PaneId(*p)).is_none())
-                {
-                    reply.send(failure("access", "denied")).ok();
-                    return;
-                }
-                // The claim remains waiting until the owner decides, so an expired requester cannot gain a grant later.
-                let prompt = self.control.next_prompt;
-                self.control.next_prompt += 1;
-                self.control.pending = Some(PendingAccess {
-                    prompt,
-                    request,
-                    reply,
-                    expires: Instant::now() + Duration::from_secs(control::ACCESS_SECONDS),
-                });
-                cx.notify();
-            }
-            Message::Control {
-                grant,
-                request,
-                reply,
-                connection,
-            } => {
-                if !reply.claim() {
-                    return;
-                }
-                let answer =
-                    self.apply_control(grant, &request, false, connection.as_ref(), window, cx);
-                reply.send(answer).ok();
-            }
-        }
-    }
-
-    pub(super) fn answer_access_prompt(
-        &mut self,
-        prompt: u64,
-        allow: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .control
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.prompt == prompt)
-        {
-            self.answer_access(allow, cx);
-        }
-    }
-
-    pub(super) fn answer_access(&mut self, allow: bool, cx: &mut Context<Self>) {
-        let Some(pending) = self.control.pending.take() else {
-            return;
-        };
-        if !pending.reply.claim() {
-            cx.notify();
+        let Message {
+            request,
+            reply,
+            connection,
+        } = message;
+        if !reply.claim() {
             return;
         }
-        if !allow || Instant::now() >= pending.expires || self.stopping {
-            pending.reply.send(failure("access", "denied")).ok();
-            cx.notify();
-            return;
-        }
-        let grant = self.control.next_grant;
-        self.control.next_grant += 1;
-        let answer = match control::open_grant(
-            self.control.window.clone(),
-            grant,
-            self.control_sender.clone(),
-            Arc::clone(&self.panes),
-        ) {
-            Ok((endpoint, descriptor)) => {
-                self.control.grants.insert(
-                    grant,
-                    Grant {
-                        endpoint,
-                        scope: pending.request,
-                    },
-                );
-                response("access", "ok", json!(descriptor))
-            }
-            Err(_) => failure("access", "busy"),
-        };
-        pending.reply.send(answer).ok();
-        cx.notify();
-    }
-
-    pub(super) fn remove_control_right(&mut self, id: u64, input: bool, cx: &mut Context<Self>) {
-        if let Some(grant) = self.control.grants.get_mut(&id) {
-            if input {
-                grant.scope.input = false;
-            } else {
-                grant.scope.manage = false;
-            }
-        }
-        cx.notify();
-    }
-
-    pub(super) fn revoke_control(&mut self, grant: u64, cx: &mut Context<Self>) {
-        self.control.grants.remove(&grant);
-        if self.control.grants.is_empty() {
-            self.control.show_access = false;
-        }
-        if self
-            .control
-            .confirmation
-            .as_ref()
-            .is_some_and(|p| p.grant == grant)
-        {
-            self.control.confirmation = None;
-        }
-        cx.notify();
+        let answer = self.apply_control(&request, connection.as_ref(), window, cx);
+        reply.send(answer).ok();
     }
 
     fn pane_address(&self, pane: PaneId) -> String {
@@ -293,9 +133,7 @@ impl Workspace {
 
     fn apply_control(
         &mut self,
-        grant: u64,
         request: &Request,
-        confirmed: bool,
         connection: Option<&ReplyConnection>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -307,41 +145,15 @@ impl Workspace {
         if request.protocol != control::PROTOCOL || !request.operation.valid() || id.len() > 64 {
             return failure(id, "invalid_request");
         }
-        let Some(permission) = self.control.grants.get(&grant) else {
-            return failure(id, "denied");
-        };
         if request.window != self.control.window {
-            return failure(id, "denied");
-        }
-        let allowed = match request.operation {
-            Operation::List | Operation::Read { .. } => true,
-            Operation::Input { .. } => permission.scope.input,
-            Operation::Create { .. }
-            | Operation::Rename { .. }
-            | Operation::Move { .. }
-            | Operation::Focus { .. }
-            | Operation::Resize { .. }
-            | Operation::Close { .. } => permission.scope.manage,
-        };
-        if !allowed {
-            return failure(id, "denied");
+            return failure(id, "invalid_request");
         }
         let pane = if let Some(address) = request.operation.pane() {
             let Some(pane) = self.parse_control_pane(address) else {
-                return failure(id, "denied");
+                return failure(id, "invalid_request");
             };
-            if !self.control.permits(grant, pane) {
-                return failure(id, "denied");
-            }
             if self.tabs.get(pane).is_none() {
-                return failure(
-                    id,
-                    if self.tabs.was_allocated(pane) {
-                        "gone"
-                    } else {
-                        "denied"
-                    },
-                );
+                return failure(id, "gone");
             }
             Some(pane)
         } else {
@@ -353,14 +165,13 @@ impl Workspace {
                     .tabs
                     .all_panes()
                     .into_iter()
-                    .filter(|(_, pane, _)| self.control.permits(grant, *pane))
                     .filter_map(|(_, pane, _)| self.control_metadata(pane, cx))
                     .collect();
                 Ok(json!({"window": self.control.window, "panes": panes}))
             }
             Operation::Read { .. } => {
                 let metadata = self
-                    .control_metadata(pane.ok_or("denied")?, cx)
+                    .control_metadata(pane.ok_or("invalid_request")?, cx)
                     .ok_or("gone")?;
                 if metadata["content"]["terminal_read"] != true {
                     return Err("unsupported");
@@ -375,14 +186,9 @@ impl Workspace {
                 {
                     return Err("busy");
                 }
-                self.control.grants.get(&grant).ok_or("denied")?;
                 let anchor = beside
                     .as_ref()
-                    .map(|s| {
-                        self.parse_control_pane(s)
-                            .filter(|p| self.control.permits(grant, *p))
-                            .ok_or("denied")
-                    })
+                    .map(|s| self.parse_control_pane(s).ok_or("invalid_request"))
                     .transpose()?;
                 if anchor.is_some_and(|p| self.tabs.get(p).is_none()) {
                     return Err("gone");
@@ -395,7 +201,7 @@ impl Workspace {
                     None,
                     PaneServices {
                         panes: &self.panes,
-                        endpoint: self.endpoint.as_ref(),
+                        window: &self.control.window,
                         surfaces: self.surfaces.as_ref(),
                         exit: self.exit_sender.clone(),
                     },
@@ -416,17 +222,12 @@ impl Workspace {
                 if let Some(old) = old_tab {
                     self.tabs.focus_tab(old);
                 }
-                if let Some(g) = self.control.grants.get_mut(&grant)
-                    && !g.scope.all_panes
-                {
-                    g.scope.panes.insert(created.0);
-                }
                 self.refresh_layout(cx);
                 cx.notify();
                 self.control_metadata(created, cx).ok_or("gone")
             }
             Operation::Rename { label, .. } => {
-                let pane = pane.ok_or("denied")?;
+                let pane = pane.ok_or("invalid_request")?;
                 if let Some(label) = label {
                     self.control.labels.insert(pane, label.clone());
                 } else {
@@ -436,7 +237,7 @@ impl Workspace {
                 self.control_metadata(pane, cx).ok_or("gone")
             }
             Operation::Move { beside, side, .. } => {
-                let pane = pane.ok_or("denied")?;
+                let pane = pane.ok_or("invalid_request")?;
                 let destination = match (beside, side) {
                     (Some(address), Some(side)) => {
                         let (target_window, _) =
@@ -444,10 +245,7 @@ impl Workspace {
                         if target_window != self.control.window {
                             return Err("unsupported");
                         }
-                        let anchor = self
-                            .parse_control_pane(address)
-                            .filter(|p| self.control.permits(grant, *p))
-                            .ok_or("denied")?;
+                        let anchor = self.parse_control_pane(address).ok_or("invalid_request")?;
                         if self.tabs.get(anchor).is_none() {
                             return Err("gone");
                         }
@@ -468,7 +266,7 @@ impl Workspace {
                 self.control_metadata(pane, cx).ok_or("gone")
             }
             Operation::Focus { .. } => {
-                let pane = pane.ok_or("denied")?;
+                let pane = pane.ok_or("invalid_request")?;
                 self.prepare_control_layout(cx)?;
                 self.tabs.focus_tab(self.tabs.tab_of(pane).ok_or("gone")?);
                 self.tabs.focus_pane(pane);
@@ -484,7 +282,7 @@ impl Workspace {
                 if matches!(self.mode, Mode::DraggingDivider(_)) {
                     return Err("busy");
                 }
-                let pane = pane.ok_or("denied")?;
+                let pane = pane.ok_or("invalid_request")?;
                 let tab = self.tabs.tab_of(pane).ok_or("gone")?;
                 let divider = self
                     .tabs
@@ -514,19 +312,7 @@ impl Workspace {
                 Ok(json!({"pixels": accepted, "pane": self.control_metadata(pane, cx)}))
             }
             Operation::Close { .. } => {
-                let pane = pane.ok_or("denied")?;
-                let handle = Rc::clone(self.tabs.get(pane).ok_or("gone")?);
-                if !confirmed && let Some(warning) = handle.close_warning(cx) {
-                    let program = warning
-                        .program
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "a running program".into());
-                    return self.confirm_control(
-                        grant,
-                        request,
-                        format!("Close pane {} and stop {program}?", pane.0),
-                    );
-                }
+                let pane = pane.ok_or("invalid_request")?;
                 self.pending_cleanups
                     .retain(|c| !c.completed.load(std::sync::atomic::Ordering::Acquire));
                 if self.pending_cleanups.len() >= control::MAX_CLEANUPS {
@@ -544,8 +330,8 @@ impl Workspace {
                     json!({"pane": request.operation.pane(), "removed": true, "cleanup": "scheduled"}),
                 )
             }
-            Operation::Input { text, .. } => {
-                let pane = pane.ok_or("denied")?;
+            Operation::Input { .. } => {
+                let pane = pane.ok_or("invalid_request")?;
                 let view = self
                     .tabs
                     .get(pane)
@@ -553,28 +339,14 @@ impl Workspace {
                     .view()
                     .downcast::<TerminalView>()
                     .map_err(|_| "unsupported")?;
-                if !confirmed
-                    && let Some(text) = text
-                    && sprite_term::unbracketed_paste_requires_confirmation(text)
-                {
-                    return self.confirm_control(
-                        grant,
-                        request,
-                        format!(
-                            "Send this text to terminal pane {}? {}",
-                            pane.0,
-                            text.escape_debug()
-                        ),
-                    );
-                }
-                view.update(cx, |view, cx| {
-                    view.control_input(&request.operation, confirmed, cx)
-                })?;
+                view.update(cx, |view, _| view.control_input(&request.operation))?;
                 self.dismiss_pending_close(cx);
                 Ok(
                     json!({"pane": self.pane_address(pane), "input": "admitted", "target": "terminal"}),
                 )
             }
+            // Answered on the socket thread, through the reload lane.
+            Operation::ConfigReload | Operation::ConfigPrint => Err("invalid_request"),
         })();
         cx.notify();
         match result {
@@ -582,175 +354,12 @@ impl Workspace {
             Err(outcome) => failure(id, outcome),
         }
     }
-
-    fn confirm_control(
-        &mut self,
-        grant: u64,
-        request: &Request,
-        label: String,
-    ) -> Result<Value, &'static str> {
-        if self.control.confirmation.is_some() {
-            return Err("confirmation_required");
-        }
-        let prompt = self.control.next_prompt;
-        self.control.next_prompt += 1;
-        self.control.confirmation = Some(PendingOperation {
-            prompt,
-            grant,
-            request: request.clone(),
-            expires: Instant::now() + Duration::from_secs(30),
-            label,
-        });
-        Err("confirmation_required")
-    }
-
-    pub(super) fn answer_control_prompt(
-        &mut self,
-        prompt: u64,
-        allow: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .control
-            .confirmation
-            .as_ref()
-            .is_some_and(|pending| pending.prompt == prompt)
-        {
-            self.answer_control(allow, window, cx);
-        }
-    }
-
-    pub(super) fn answer_control(
-        &mut self,
-        allow: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(pending) = self.control.confirmation.take() {
-            if allow && Instant::now() < pending.expires {
-                self.apply_control(pending.grant, &pending.request, true, None, window, cx);
-            }
-            cx.notify();
-        }
-    }
-
-    pub(super) fn control_elements(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let mut elements = Vec::new();
-        if !self.control.grants.is_empty() {
-            elements.push(
-                div()
-                    .absolute()
-                    .top(px(0.))
-                    .right(px(0.))
-                    .px(px(8.))
-                    .bg(rgb(TAB_ACTIVE_BG))
-                    .text_color(rgb(TAB_ACTIVE_FG))
-                    .debug_selector(|| "control-access-toggle".into())
-                    .child("Pane Access")
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|workspace, _, _, cx| {
-                            workspace.control.show_access = !workspace.control.show_access;
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-            );
-        }
-        let mut panel = div()
-            .debug_selector(|| "control-access-panel".into())
-            .absolute()
-            .top(self.viewport.height * 0.05)
-            .max_h(self.viewport.height * 0.9)
-            .id("pane-control-panel")
-            .overflow_y_scroll()
-            .overflow_x_hidden()
-            .left(px(12.))
-            .right(px(12.))
-            .p(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .bg(rgb(CONFIRM_BG))
-            .text_color(rgb(CONFIRM_FG))
-            .occlude()
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        let mut visible = false;
-        if let Some(pending) = &self.control.pending {
-            let prompt = pending.prompt;
-            visible = true;
-            panel = panel.child(format!("Pane access requested (claimed requester: {:?}). Scope: {}. Read: yes. Manage: {} (starts shells). Input: {} (can execute commands).", pending.request.from,
-                if pending.request.all_panes { "all existing and future panes".to_owned() } else { format!("panes {:?}", pending.request.panes) }, pending.request.manage, pending.request.input))
-                .child(div().child("Allow").on_mouse_down(gpui::MouseButton::Left, cx.listener(move |workspace, _, _, cx| workspace.answer_access_prompt(prompt, true, cx))))
-                .child(div().child("Deny").on_mouse_down(gpui::MouseButton::Left, cx.listener(move |workspace, _, _, cx| workspace.answer_access_prompt(prompt, false, cx))));
-        }
-        if let Some(pending) = &self.control.confirmation {
-            let prompt = pending.prompt;
-            visible = true;
-            panel = panel
-                .child(pending.label.clone())
-                .child(div().child("Confirm").on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |workspace, _, window, cx| {
-                        workspace.answer_control_prompt(prompt, true, window, cx)
-                    }),
-                ))
-                .child(div().child("Cancel").on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |workspace, _, window, cx| {
-                        workspace.answer_control_prompt(prompt, false, window, cx)
-                    }),
-                ));
-        }
-        if self.control.show_access {
-            visible = true;
-            for (id, grant) in &self.control.grants {
-                let id = *id;
-                panel = panel
-                    .child(format!(
-                        "Grant {id}: {}; manage {}; input {}",
-                        if grant.scope.all_panes {
-                            "all existing and future panes".to_owned()
-                        } else {
-                            format!("selected panes {:?}", grant.scope.panes)
-                        },
-                        grant.scope.manage,
-                        grant.scope.input
-                    ))
-                    .child(div().child("Revoke access").on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |workspace, _, _, cx| workspace.revoke_control(id, cx)),
-                    ))
-                    .child(div().child("Remove management").on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |workspace, _, _, cx| {
-                            workspace.remove_control_right(id, false, cx)
-                        }),
-                    ))
-                    .child(div().child("Remove input").on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |workspace, _, _, cx| {
-                            workspace.remove_control_right(id, true, cx)
-                        }),
-                    ));
-            }
-        }
-        if visible {
-            elements.push(panel.into_any_element());
-        }
-        elements
-    }
 }
 
 #[cfg(test)]
 impl Workspace {
-    /// Every pane any selected-pane grant's scope names.
-    pub(super) fn scoped_panes(&self) -> std::collections::BTreeSet<u64> {
-        self.control
-            .grants
-            .values()
-            .flat_map(|grant| grant.scope.panes.iter().copied())
-            .collect()
+    /// Every pane that has a label.
+    pub(super) fn labelled_panes(&self) -> std::collections::BTreeSet<u64> {
+        self.control.labels.keys().map(|pane| pane.0).collect()
     }
 }

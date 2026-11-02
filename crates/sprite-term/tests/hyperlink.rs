@@ -48,7 +48,6 @@ fn resolve_event(
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
             | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }

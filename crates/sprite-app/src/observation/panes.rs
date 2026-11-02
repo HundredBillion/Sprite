@@ -270,7 +270,6 @@ impl PaneSource for WindowPanes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::endpoint::Endpoint;
     use sprite_term::{
         PaneRow, PromptKind, ScreenKind, SessionConfig, Spawned, TerminalCommand, TerminalEvent,
         TerminalSession,
@@ -747,47 +746,6 @@ mod tests {
             .expect("released rather than left waiting");
         assert!(answer.unwrap_err().contains("closed"));
         assert!(panes.panes().is_empty());
-    }
-
-    /// Turning observation off must not disturb a session that is running. The
-    /// pane keeps its child and its output; it simply becomes unreachable.
-    #[test]
-    fn a_session_keeps_running_when_observation_is_switched_off() {
-        let panes = WindowPanes::new();
-        let mut session = session();
-        panes.register(PaneId(0), TabId(0), session.session.commands());
-
-        // What switching observation off does to a window: the endpoint is
-        // destroyed. Nothing here touches the session.
-        let directory = std::env::temp_dir().join(format!("sprite-panes-{}", std::process::id()));
-        drop(Endpoint::open_in(directory.clone(), |_| String::new()).expect("an endpoint"));
-        std::fs::remove_dir_all(&directory).ok();
-
-        // The child is still there, and the session still takes commands.
-        assert!(
-            session
-                .session
-                .send(TerminalCommand::Resize(
-                    sprite_term::ValidTerminalSize::DEFAULT
-                ))
-                .is_ok(),
-            "the session is alive and accepting commands"
-        );
-        session
-            .session
-            .send(TerminalCommand::CaptureHistory {
-                ticket: Ticket::new(0),
-                lines: HistoryLines::default(),
-            })
-            .expect("request a fresh answer after disabling observation");
-        assert!(matches!(
-            session
-                .events
-                .next_blocking()
-                .expect("worker still answers"),
-            TerminalEvent::History { .. }
-        ));
-        assert_eq!(panes.panes().len(), 1, "and the pane is still a pane");
     }
 
     #[test]

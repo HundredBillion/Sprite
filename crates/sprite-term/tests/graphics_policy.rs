@@ -35,7 +35,6 @@ fn wait_for_graphics(events: &EventPump) -> GraphicsSnapshot {
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
             | TerminalEvent::SelectionCopied(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }

@@ -77,7 +77,6 @@ fn settings() -> impl Strategy<Value = Settings> {
         ),
         any::<usize>(),
         (any::<bool>(), any::<u64>(), any::<usize>()),
-        any::<bool>(),
     )
         .prop_map(
             |(
@@ -90,7 +89,6 @@ fn settings() -> impl Strategy<Value = Settings> {
                 shell,
                 scrollback,
                 graphics,
-                observation,
             )| {
                 use sprite_term::CursorStyle;
                 Settings {
@@ -138,9 +136,6 @@ fn settings() -> impl Strategy<Value = Settings> {
                         enabled: graphics.0,
                         storage_bytes: StorageBytes::new(graphics.1),
                         texture_bytes: TextureBytes::new(graphics.2),
-                    },
-                    pane_observation: PaneObservation {
-                        enabled: observation,
                     },
                 }
             },
@@ -197,7 +192,7 @@ proptest! {
     }
 
     #[test]
-    fn malformed_sections_preserve_other_sections(section in proptest::sample::select(vec!["font", "surface_font", "colors", "highlights", "cursor", "shell", "scrollback", "graphics", "pane_observation"]), value in proptest::sample::select(vec!["false", "[]", "7", "\"oops\""]), padding in 0u32..65) {
+    fn malformed_sections_preserve_other_sections(section in proptest::sample::select(vec!["font", "surface_font", "colors", "highlights", "cursor", "shell", "scrollback", "graphics"]), value in proptest::sample::select(vec!["false", "[]", "7", "\"oops\""]), padding in 0u32..65) {
         let (settings, complaints) = Settings::parse_candidate(&format!("{section} = {value}\n[grid]\npadding = {padding}\n")).unwrap();
         prop_assert_eq!(settings.grid.padding.get(), padding as f32);
         prop_assert!(complaints.0.iter().any(|message| message.contains(section)));

@@ -250,7 +250,6 @@ fn copying_returns_the_selected_text() {
             TerminalEvent::Error(error) => panic!("copy failed: {error}"),
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }
@@ -296,7 +295,6 @@ fn copying_without_a_selection_yields_nothing() {
             TerminalEvent::Error(error) => panic!("copy failed: {error}"),
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }
@@ -463,7 +461,6 @@ fn copied(events: &EventPump) -> String {
             TerminalEvent::Error(error) => panic!("selection failed: {error}"),
             TerminalEvent::Ready
             | TerminalEvent::Exited(_)
-            | TerminalEvent::UnsafePaste(_)
             | TerminalEvent::Bell
             | TerminalEvent::TitleChanged(_)
             | TerminalEvent::History { .. }

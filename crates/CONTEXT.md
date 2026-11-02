@@ -68,7 +68,7 @@ tab's focused pane (that is the Current Pane)
 The one Pane in a tab's layout that keyboard focus goes to whenever that tab
 is shown. Every tab has exactly one at all times, whether or not its window is
 active or the tab is in front, so a Current Pane need not have Pane Focus.
-Observation reports it to clients as `focused`.
+Pane Control reports it to clients as `current`.
 _Avoid_: focused pane (ambiguous with Pane Focus)
 
 **Pane Title**:
@@ -107,28 +107,16 @@ requests end Sprite once present Pane cleanup completes. Unrelated input or
 window deactivation cancels an unconfirmed request.
 _Avoid_: close (that ends a Pane, tab or window), terminate, exit
 
-**Pane Observation**:
-Protected, local, read-only access by a process launched inside Sprite to Pane
-content in the same Sprite Window. It never grants control of a Pane or its
-child.
-_Avoid_: pane sharing, screen scraping, AI integration
-
 **Pane Snapshot**:
-An owned, text-focused view of a Pane's identity and active terminal content for
-authorized observation and accessibility consumers. Its terminal text is
-always untrusted data.
+An owned, text-focused view of a Pane's identity and active terminal content,
+returned by a Pane Control `read`. Its terminal text is always untrusted data.
 _Avoid_: transcript, terminal dump, screen capture
 
 **Render Snapshot**:
 An owned, immutable view of one Terminal Generation containing the rich visual
 state Sprite needs to draw a Pane. It is internal to Sprite and is not the Pane
-Observation format.
+Snapshot format.
 _Avoid_: Pane Snapshot, screen buffer, frame
-
-**Observation Client**:
-A local shell tool, initially `sprite panes snapshot`, that requests Pane
-Snapshots from its Sprite Window.
-_Avoid_: LLM client, agent, remote client
 
 **Surface**:
 Native UI that a program running in a Pane describes and Sprite draws inside
@@ -141,9 +129,9 @@ _Avoid_: panel, widget, popup, view (unqualified), native pane
 **Surface Channel**:
 Protected, local access by a process launched inside Sprite to open and
 update Surfaces in its own Pane and to receive their input and events. It is
-the one line that grants control of what a Pane shows; Pane Observation grants
-none, and the two never share a grammar.
-_Avoid_: the observation socket, the socket (unqualified), IPC, the API
+the one line that controls what a Pane shows natively, keyed per window and
+given only to the window's own sessions; Pane Control never draws Surfaces.
+_Avoid_: the window socket, the socket (unqualified), IPC, the API
 
 **Surface Description**:
 The versioned document a program sends over the Surface Channel saying what a
@@ -183,14 +171,18 @@ its moving `main`; it is not part of Sprite Terminal or a required CI gate.
 _Avoid_: Croft dependency, Croft fork, required Croft gate
 
 **Pane Control**:
-Owner-authorized local access to manage and read addressed panes, including
-existing human panes and panes in background tabs. Terminal input is a separate
-permission. Pane Observation alone never grants Pane Control.
+Local access, by any process running as the same user, to list, read, create,
+label, move, focus, resize, close and type into the Panes of every Sprite
+Window, including human Panes and Panes in background tabs, and to reload or
+print a window's configuration. Each Sprite Window serves it on its own socket
+in a directory only that user can enter; there is no key and no prompt.
+_Avoid_: observation, grant, access request, remote control
 
-**Pane Grant**:
-A revocable capability approved by the owner for all panes in one Sprite Window
-or an explicit set of panes, with read, manage and input permissions.
-_Avoid_: ownership (a grant does not transfer ownership of a Terminal Session)
+**Pane Address**:
+`<window>:<pane>`: a Sprite Window's random id and a Pane's identity within it.
+Every Pane's session is told its own in `SPRITE_PANE`. A restarted window has a
+new id, so an old address never names a new Pane.
+_Avoid_: pane id (unqualified; that is the number after the colon)
 
 **Pane Label**:
 A name assigned to one Pane independently of its child-provided Pane Title and

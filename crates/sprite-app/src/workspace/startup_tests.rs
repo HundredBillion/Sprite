@@ -67,7 +67,6 @@ fn default_startup_tab_and_splits_spawn_at_their_allocated_size(cx: &mut gpui::T
 fn exercise_launch_sizes(cx: &mut gpui::TestAppContext, font_size: f32, padding: f32) {
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         let mut settings = crate::config::Settings::default();
-        settings.pane_observation.enabled = false;
         settings.font.size = crate::config::FontSize::new(font_size);
         settings.grid.padding = crate::config::Padding::new(padding);
         Workspace::new(
