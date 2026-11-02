@@ -14,11 +14,11 @@
 [[finding]]
 id = "SPR-024"
 title = "Direct applications and shell exec replacements bypass close warnings"
-status = "resolved"
+status = "wontfix"
 source = "https://github.com/HundredBillion/Sprite/issues/89"
 issue = 89
 fixed_by = "#100"
-test = ["review_direct_program_requires_close_confirmation", "a_directly_launched_program_requires_confirmation", "a_program_that_replaces_the_idle_shell_requires_confirmation"]
+reason = "The close confirmation it concerned was removed in #154 (ADR 0036): busy panes, tabs and windows now close at once."
 
 [[finding]]
 id = "SPR-025"
@@ -63,7 +63,7 @@ title = "An accepted paste from history does not return to live output"
 status = "resolved"
 source = "docs/reviews/sprite-bug-audit.md"
 fixed_by = "#53"
-test = "accepted_paste_returns_to_live_output"
+test = ["a_paste_returns_to_live_output", "a_paste_with_a_newline_returns_to_live_output"]
 
 [[finding]]
 id = "SPR-003"
@@ -190,10 +190,10 @@ test = "native_ime_ranges_use_utf16"
 [[finding]]
 id = "SPR-018"
 title = "The close confirmation banner shifts pane geometry under cached dividers"
-status = "resolved"
+status = "wontfix"
 source = "docs/reviews/sprite-gap-audit.md"
 fixed_by = "#54"
-test = "confirmation_keeps_drawn_panes_and_dividers_in_window_coordinates"
+reason = "The close confirmation it concerned was removed in #154 (ADR 0036): busy panes, tabs and windows now close at once."
 
 [[finding]]
 id = "SPR-019"
@@ -248,10 +248,10 @@ test = "pane_focus_follows_the_keyboard_and_the_window_and_reaches_the_child"
 [[finding]]
 id = "BCA-02"
 title = "Holding the close key answers its own confirmation through auto-repeat"
-status = "resolved"
+status = "wontfix"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
 fixed_by = "#58"
-test = "a_held_close_key_cannot_answer_its_own_question"
+reason = "The close confirmation it concerned was removed in #154 (ADR 0036): busy panes, tabs and windows now close at once."
 
 [[finding]]
 id = "BCA-03"
@@ -272,10 +272,10 @@ test = "shaping_happens_only_for_cells_whose_drawn_text_changed"
 [[finding]]
 id = "BCA-05"
 title = "A held unsafe paste never expires and resends the old text"
-status = "resolved"
+status = "wontfix"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
 fixed_by = "#58"
-test = "a_confirming_paste_rereads_the_clipboard"
+reason = "The unsafe-paste hold it concerned was removed in #154 (ADR 0036): every paste is sent as typed."
 
 [[finding]]
 id = "BCA-06"
@@ -320,10 +320,10 @@ test = "an_update_keeps_the_decode_of_an_unchanged_svg_and_decodes_a_changed_one
 [[finding]]
 id = "BCA-11"
 title = "Panes register with observation only while an endpoint exists"
-status = "resolved"
+status = "wontfix"
 source = "docs/PRDs/10-09-2026-bug-class-audit.md"
 fixed_by = "#58"
-test = "panes_opened_while_observation_was_off_are_observable_once_reload_turns_it_on"
+reason = "Pane Observation was removed in #154 (ADR 0036); every window's own socket now serves its panes."
 
 [[finding]]
 id = "BCA-12"
@@ -575,7 +575,7 @@ title = "A relayed request refused at admission is reported as 'did not answer i
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
 fixed_by = "#76"
-test = "a_refused_admission_says_the_window_is_busy_not_that_it_did_not_answer"
+test = "a_config_request_refused_at_admission_is_busy_at_once"
 
 [[finding]]
 id = "GAP-C10"
@@ -610,10 +610,7 @@ title = "The Surface and observation clients time out before the window's 'still
 status = "resolved"
 source = "docs/PRDs/10-12-2026-findings-ledger-and-admission.md"
 fixed_by = "#76"
-test = [
-  "an_observation_exchange_is_bounded_by_the_client_timeout",
-  "a_surface_exchange_is_bounded_by_the_client_timeout",
-]
+test = "a_surface_exchange_is_bounded_by_the_client_timeout"
 
 [[finding]]
 id = "GAP-C14"
