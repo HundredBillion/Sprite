@@ -110,7 +110,8 @@ fn surface_window(
 ) -> (sprite_app::SurfaceEndpoint, std::thread::JoinHandle<()>) {
     let (lanes, receivers) = sprite_app::surface_lanes();
     let key = std::sync::Arc::new(sprite_app::SocketKey::generate().expect("key"));
-    let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), key, lanes).expect("endpoint");
+    let endpoint = sprite_app::SurfaceEndpoint::open_in(scratch(), "f00d".to_owned(), key, lanes)
+        .expect("endpoint");
     // Both lanes feed the one script, whichever lane a request came by.
     let (merged, requests) = std::sync::mpsc::channel();
     for lane in [receivers.stream, receivers.one_shot] {
@@ -224,7 +225,7 @@ fn a_refused_surface_open_reports_the_reason_and_exits_five() {
         | sprite_app::SurfaceRequest::List { .. }
         | sprite_app::SurfaceRequest::RegisterToken { .. } => false,
     });
-    let credentials = surface_credentials(&endpoint, "4");
+    let credentials = surface_credentials(&endpoint, "f00d:4");
     let outcome = run_with_input(
         &["surface", "open", "--fill"],
         &borrowed(&credentials),
@@ -256,7 +257,7 @@ fn a_malformed_later_document_closes_the_surface_and_exits_two() {
         | sprite_app::SurfaceRequest::List { .. }
         | sprite_app::SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
     });
-    let credentials = surface_credentials(&endpoint, "4");
+    let credentials = surface_credentials(&endpoint, "f00d:4");
     let input = format!("{DESCRIPTION}\nthis is not json\n");
 
     let outcome = run_with_input(
@@ -315,7 +316,7 @@ fn a_token_registration_is_acknowledged() {
         | sprite_app::SurfaceRequest::Grid { .. }
         | sprite_app::SurfaceRequest::List { .. } => false,
     });
-    let credentials = surface_credentials(&endpoint, "4");
+    let credentials = surface_credentials(&endpoint, "f00d:4");
     let outcome = run(
         &[
             "token",
@@ -695,7 +696,7 @@ fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
             | sprite_app::SurfaceRequest::List { .. }
             | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
         });
-        let environment = surface_credentials(&endpoint, "4");
+        let environment = surface_credentials(&endpoint, "f00d:4");
         let mut child = Command::new(SPRITE)
             .args(["surface", "open", "--fill"])
             .env_clear()
@@ -793,7 +794,7 @@ fn surface_output_failure_interrupts_open_stdin_and_partial_json() {
             | sprite_app::SurfaceRequest::List { .. }
             | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
         });
-        let environment = surface_credentials(&endpoint, "4");
+        let environment = surface_credentials(&endpoint, "f00d:4");
         let mut child = Command::new(SPRITE)
             .args(["surface", "open", "--fill"])
             .env_clear()
@@ -885,7 +886,7 @@ fn surface_stdin_eof_drains_the_windows_final_event() {
         | sprite_app::SurfaceRequest::List { .. }
         | sprite_app::SurfaceRequest::RegisterToken { .. } => true,
     });
-    let environment = surface_credentials(&endpoint, "4");
+    let environment = surface_credentials(&endpoint, "f00d:4");
     let outcome = run_with_input(
         &["surface", "open", "--fill"],
         &borrowed(&environment),
@@ -913,7 +914,7 @@ fn surface_event_eof_releases_a_blocked_socket_write() {
         .env_clear()
         .env("SPRITE_SURFACE_SOCKET", &socket)
         .env("SPRITE_SURFACE_KEY", "a".repeat(64))
-        .env("SPRITE_PANE", "4")
+        .env("SPRITE_PANE", "f00d:4")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

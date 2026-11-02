@@ -289,7 +289,10 @@ change as one JSON line, sends each further document on standard input as a
 replacement, and closes the Surface when standard input closes. A Surface
 takes the keyboard when it opens; the program hands it back with
 `{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Drawing uses the Surface
-socket and a key that only the pane's own sessions are given.
+socket and a key that only the pane's own sessions are given. A program that
+speaks the Surface Channel itself names its pane by the address in
+`SPRITE_PANE`, passed as the string it is (`"pane":"<window>:<pane>"`); the
+window refuses an address that isn't one of its own.
 
 What a Surface hears is what a terminal program hears. A key press arrives with
 the text it typed (`{"type":"input","key":"shift-1","text":"!"}`), so a program
@@ -370,7 +373,7 @@ directory, so an `href` that points at a file resolves to nothing; embed
 what the picture needs.
 
 Programs that want a native dock first send an authenticated `capabilities`
-request with the pane id, their PID, and a `return_target` of `"terminal"` or
+request with the pane address, their PID, and a `return_target` of `"terminal"` or
 the id of a live fill Surface in that pane. The answer lists supported feature
 names and limits without opening anything. Unknown panes, unsupported versions,
 invalid owners, or owners outside the pane's foreground process group receive

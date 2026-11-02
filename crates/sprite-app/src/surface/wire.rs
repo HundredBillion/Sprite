@@ -65,10 +65,10 @@ impl<'a> Envelope<'a> {
     }
 }
 
-pub(crate) fn first_line(body: &str) -> Result<FirstRequest, Refusal> {
+pub(crate) fn first_line(body: &str, window: &str) -> Result<FirstRequest, Refusal> {
     let message = serde_json::from_str(body)
         .map_err(|error| Refusal::Malformed(format!("the first message is not JSON: {error}")))?;
-    parse_first(&message)
+    parse_first(&message, window)
 }
 
 pub(crate) fn stream_line(body: &str) -> Result<Message, Refusal> {
@@ -77,13 +77,13 @@ pub(crate) fn stream_line(body: &str) -> Result<Message, Refusal> {
     parse_message(&message)
 }
 
-pub(crate) fn parse_first(message: &Value) -> Result<FirstRequest, Refusal> {
+pub(crate) fn parse_first(message: &Value, window: &str) -> Result<FirstRequest, Refusal> {
     let Envelope { message, kind } = Envelope::parse(message, true)?;
     match kind {
-        "open" => parse_open(message).map(|(pane, open)| FirstRequest::Open { pane, open }),
-        "capabilities" => parse_capabilities(message),
+        "open" => parse_open(message, window).map(|(pane, open)| FirstRequest::Open { pane, open }),
+        "capabilities" => parse_capabilities(message, window),
         "focus" => Ok(FirstRequest::Focus {
-            pane: pane_of(message)?,
+            pane: pane_of(message, window)?,
             target: focus_target(message)?,
         }),
         "token" => parse_token(message),
@@ -118,12 +118,21 @@ pub(crate) fn versioned(mut message: Value) -> Value {
     message
 }
 
-fn pane_of(message: &Value) -> Result<PaneId, Refusal> {
+/// A pane is named by the address its session was given in `SPRITE_PANE`,
+/// `<window>:<pane>`, the same name Pane Control uses. A program passes it
+/// through as it is; only this window's addresses are accepted here.
+fn pane_of(message: &Value, window: &str) -> Result<PaneId, Refusal> {
     message
         .get("pane")
-        .and_then(Value::as_u64)
+        .and_then(Value::as_str)
+        .and_then(|address| address.split_once(':'))
+        .filter(|(owner, _)| *owner == window)
+        .and_then(|(_, pane)| pane.parse().ok())
+        .filter(|pane| *pane <= MAX_SAFE_INTEGER)
         .map(PaneId)
-        .ok_or_else(|| Refusal::Malformed("a pane id is needed".to_owned()))
+        .ok_or_else(|| {
+            Refusal::Malformed("pane is this pane's address, from SPRITE_PANE".to_owned())
+        })
 }
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -135,8 +144,8 @@ fn safe_integer(value: Option<&Value>, reason: &str) -> Result<u64, Refusal> {
         .ok_or_else(|| Refusal::Malformed(reason.to_owned()))
 }
 
-fn parse_capabilities(message: &Value) -> Result<FirstRequest, Refusal> {
-    let pane = safe_integer(message.get("pane"), "a pane id is needed").map(PaneId)?;
+fn parse_capabilities(message: &Value, window: &str) -> Result<FirstRequest, Refusal> {
+    let pane = pane_of(message, window)?;
     let owner_pid = safe_integer(
         message.get("owner_pid"),
         "owner_pid is a positive process id",
@@ -201,8 +210,8 @@ fn focus_target(message: &Value) -> Result<FocusTarget, Refusal> {
     }
 }
 
-fn parse_open(message: &Value) -> Result<(PaneId, Open), Refusal> {
-    let pane = pane_of(message)?;
+fn parse_open(message: &Value, window: &str) -> Result<(PaneId, Open), Refusal> {
+    let pane = pane_of(message, window)?;
     let position = message
         .get("position")
         .and_then(Value::as_str)
@@ -516,25 +525,25 @@ mod tests {
     fn one_envelope_checks_every_first_message_and_preserves_legacy_defaults() {
         let requests = [
             open_message(1),
-            json!({"type":"capabilities","version":1,"pane":1,"owner_pid":42,"return_target":"terminal"}),
-            json!({"type":"focus","pane":1}),
+            json!({"type":"capabilities","version":1,"pane":"f00d:1","owner_pid":42,"return_target":"terminal"}),
+            json!({"type":"focus","pane":"f00d:1"}),
             json!({"type":"token","name":"custom","default":"#010203"}),
         ];
         for message in requests {
-            assert!(parse_first(&message).is_ok(), "{message}");
+            assert!(parse_first(&message, WINDOW).is_ok(), "{message}");
             let mut emitted = versioned(message.clone());
             assert_eq!(emitted["version"], VERSION);
-            assert!(parse_first(&emitted).is_ok());
+            assert!(parse_first(&emitted, WINDOW).is_ok());
             for unsupported in [json!(2), json!(-1), json!("1"), Value::Null, json!(1.5)] {
                 emitted["version"] = unsupported;
                 assert!(matches!(
-                    parse_first(&emitted),
+                    parse_first(&emitted, WINDOW),
                     Err(Refusal::UnsupportedVersion)
                 ));
             }
             emitted.as_object_mut().unwrap().remove("version");
             let legacy = matches!(emitted["type"].as_str(), Some("focus" | "token"));
-            assert_eq!(parse_first(&emitted).is_ok(), legacy);
+            assert_eq!(parse_first(&emitted, WINDOW).is_ok(), legacy);
         }
     }
 
@@ -557,9 +566,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_pane_is_named_by_its_address_in_this_window() {
+        for (pane, accepted) in [
+            (json!("f00d:3"), Some(PaneId(3))),
+            (json!(3), None),
+            (json!("3"), None),
+            (json!("beef:3"), None),
+            (json!("f00d:"), None),
+            (json!("f00d:x"), None),
+            (json!("f00d:3:4"), None),
+        ] {
+            for mut message in [
+                open_message(0),
+                json!({"type":"capabilities","version":1,"owner_pid":42,"return_target":"terminal"}),
+                json!({"type":"focus"}),
+            ] {
+                message["pane"] = pane.clone();
+                let parsed = match parse_first(&message, WINDOW) {
+                    Ok(FirstRequest::Open { pane, .. })
+                    | Ok(FirstRequest::Capabilities { pane, .. })
+                    | Ok(FirstRequest::Focus { pane, .. }) => Some(pane),
+                    Ok(FirstRequest::Token { .. }) => unreachable!(),
+                    Err(refusal) => {
+                        assert!(matches!(refusal, Refusal::Malformed(_)), "{message}");
+                        None
+                    }
+                };
+                assert_eq!(parsed, accepted, "{message}");
+            }
+        }
+    }
+
+    const WINDOW: &str = "f00d";
+
     fn open_message(pane: u64) -> Value {
         json!({
-            "type": "open", "version": VERSION, "pane": pane, "position": "dock",
+            "type": "open", "version": VERSION, "pane": format!("{WINDOW}:{pane}"), "position": "dock",
             "side": "left", "size": 200, "focus": false,
             "description": { "version": 1, "root": { "kind": "box" } }
         })
@@ -572,7 +615,7 @@ mod tests {
         .expect("shared fixture");
         let request = &fixture["capabilities"]["request"];
         assert!(matches!(
-            parse_first(request),
+            parse_first(request, WINDOW),
             Ok(FirstRequest::Capabilities {
                 pane: PaneId(9),
                 owner_pid: 1234,
@@ -647,7 +690,7 @@ mod tests {
                     "CLI {position} {size}"
                 );
                 assert_eq!(
-                    parse_open(&message).is_ok(),
+                    parse_open(&message, WINDOW).is_ok(),
                     accepted,
                     "wire {position} {size}"
                 );
@@ -655,7 +698,8 @@ mod tests {
             let mut message = open_message(3);
             message["position"] = json!(position);
             message.as_object_mut().unwrap().remove("size");
-            if let Placement::Dock { size, .. } = parse_open(&message).unwrap().1.placement {
+            if let Placement::Dock { size, .. } = parse_open(&message, WINDOW).unwrap().1.placement
+            {
                 assert_eq!(size.pixels(), 240.0);
             }
         }
@@ -679,12 +723,12 @@ mod tests {
         ] {
             let mut message = open_message(3);
             message["size"] = size.clone();
-            assert!(parse_open(&message).is_err(), "{size}");
+            assert!(parse_open(&message, WINDOW).is_err(), "{size}");
         }
         let mut message = open_message(3);
         message["size"] = json!(240.5);
         assert!(
-            matches!(parse_open(&message).unwrap().1.placement, Placement::Dock { size, .. } if size.pixels() == 240.5)
+            matches!(parse_open(&message, WINDOW).unwrap().1.placement, Placement::Dock { size, .. } if size.pixels() == 240.5)
         );
     }
 
@@ -695,7 +739,7 @@ mod tests {
         message["return_target"] = json!(7);
         message["resizable"] = json!(true);
 
-        let (pane, open) = parse_open(&message).expect("owned open");
+        let (pane, open) = parse_open(&message, WINDOW).expect("owned open");
         assert_eq!(pane, PaneId(3));
         assert!(matches!(
             open.placement,
@@ -729,14 +773,17 @@ mod tests {
             fixed_owned_dock,
             owned_overlay,
         ] {
-            assert!(matches!(parse_open(&message), Err(Refusal::Malformed(_))));
+            assert!(matches!(
+                parse_open(&message, WINDOW),
+                Err(Refusal::Malformed(_))
+            ));
         }
 
         let mut registered_fill = open_message(3);
         registered_fill["position"] = json!("fill");
         registered_fill["owner_pid"] = json!(41);
         assert_eq!(
-            parse_open(&registered_fill)
+            parse_open(&registered_fill, WINDOW)
                 .expect("registered fill")
                 .1
                 .placement,
@@ -757,7 +804,7 @@ mod tests {
             message["owner_pid"] = json!(41);
             message[key] = value;
             assert_eq!(
-                parse_open(&message).unwrap_err().reason(),
+                parse_open(&message, WINDOW).unwrap_err().reason(),
                 "malformed: owned docks need owner_pid, return_target, and resizable true"
             );
         }

@@ -51,7 +51,7 @@ fn send_line(stream: &UnixStream, line: &str) -> bool {
 struct Credentials {
     socket: String,
     key: String,
-    pane: u64,
+    pane: String,
 }
 
 fn credentials(errors: &mut dyn Write) -> Result<Credentials, Exit> {
@@ -67,26 +67,14 @@ fn credentials(errors: &mut dyn Write) -> Result<Credentials, Exit> {
         .ok();
         return Err(Exit::NoWindow);
     };
-    // `<window>:<pane>`, or a bare pane id from a window older than this
-    // command.
-    let pane = match environment(PANE_VARIABLE).map(|text| {
-        text.rsplit_once(':')
-            .map_or(text.as_str(), |(_, pane)| pane)
-            .parse::<u64>()
-    }) {
-        Some(Ok(pane)) => pane,
-        Some(Err(_)) => {
-            writeln!(errors, "sprite: {PANE_VARIABLE} is not a pane id").ok();
-            return Err(Exit::Usage);
-        }
-        None => {
-            writeln!(
-                errors,
-                "sprite: {PANE_VARIABLE} is not set, so there is no pane to draw in"
-            )
-            .ok();
-            return Err(Exit::NoWindow);
-        }
+    // The pane's address, passed through as it is; the window checks it.
+    let Some(pane) = environment(PANE_VARIABLE) else {
+        writeln!(
+            errors,
+            "sprite: {PANE_VARIABLE} is not set, so there is no pane to draw in"
+        )
+        .ok();
+        return Err(Exit::NoWindow);
     };
     Ok(Credentials { socket, key, pane })
 }

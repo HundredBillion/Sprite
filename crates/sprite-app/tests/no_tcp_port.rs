@@ -77,8 +77,9 @@ fn an_open_endpoint_holds_no_tcp_socket() {
     let directory = std::env::temp_dir().join(format!("sprite-no-tcp-{}", std::process::id()));
     let (lanes, _receivers) = sprite_app::surface_lanes();
     let key = std::sync::Arc::new(sprite_app::SocketKey::generate().expect("key"));
-    let endpoint = sprite_app::SurfaceEndpoint::open_in(directory.clone(), key, lanes)
-        .expect("open an endpoint");
+    let endpoint =
+        sprite_app::SurfaceEndpoint::open_in(directory.clone(), "f00d".to_owned(), key, lanes)
+            .expect("open an endpoint");
 
     // The endpoint is listening, so if it were ever going to open a port it
     // would have one now.

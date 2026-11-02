@@ -180,8 +180,9 @@ _Avoid_: observation, grant, access request, remote control
 
 **Pane Address**:
 `<window>:<pane>`: a Sprite Window's random id and a Pane's identity within it.
-Every Pane's session is told its own in `SPRITE_PANE`. A restarted window has a
-new id, so an old address never names a new Pane.
+Every Pane's session is told its own in `SPRITE_PANE`. Pane Control and the
+Surface Channel both name a Pane by it, and programs pass it on unparsed. A
+restarted window has a new id, so an old address never names a new Pane.
 _Avoid_: pane id (unqualified; that is the number after the colon)
 
 **Pane Label**:
