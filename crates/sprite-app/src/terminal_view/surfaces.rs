@@ -4973,6 +4973,101 @@ mod tests {
         }
     }
     #[gpui::test]
+    fn native_markdown_hides_source_when_focus_moves_between_panes(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::test_support::{draw_workspace, terminal_view, test_workspace};
+        use serde_json::json;
+
+        gpui::ink_test_glyphs(true);
+        let (workspace, cx) = test_workspace(cx);
+        cx.simulate_resize(gpui::size(px(1400.0), px(800.0)));
+        cx.update(|window, _| window.activate_window());
+        draw_workspace(cx);
+        cx.simulate_keystrokes("ctrl-shift-d");
+        draw_workspace(cx);
+        let pane = crate::pane_tree::PaneId(1);
+        let host = terminal_view(&workspace, pane, cx);
+        let id = SurfaceId(1003);
+        let (answer, _peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(json!({"version":1,"root":{"kind":"grid","cols":60,"rows":24}})),
+        );
+        assert_eq!(answer, Ok(()));
+        let mut fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/native-markdown-v1.json"))
+                .unwrap();
+        fixture["state"]["windows"][0]["width"] = json!(40);
+        fixture["state"]["windows"][0]["height"] = json!(15);
+        dispatch(&host, cx, SurfaceRequest::Grid {
+            id,
+            pane,
+            ops: crate::surface::grid::parse_ops(&json!({"type":"batch","ops":[
+                {"type":"rows","rows":[{"row":0,"cells":[["#",0],[" ",0],["S",0],["o",0],["u",0],["r",0],["c",0],["e",0]]}]},
+                fixture["document"], fixture["state"]
+            ]})).unwrap(),
+        });
+        draw_workspace(cx);
+        cx.run_until_parked();
+        draw_workspace(cx);
+
+        for target in ["workspace-pane-1", "workspace-pane-0", "workspace-pane-1"] {
+            let bounds = cx
+                .debug_bounds(if target == "workspace-pane-1" {
+                    "markdown-preview-1000"
+                } else {
+                    target
+                })
+                .unwrap();
+            let click = bounds.bottom_right() - point(px(20.0), px(20.0));
+            cx.simulate_mouse_down(click, MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(click, MouseButton::Left, Default::default());
+            draw_workspace(cx);
+            let preview = cx.debug_bounds("markdown-preview-1000").unwrap();
+            let scale = cx.update(|window, _| window.scale_factor());
+            let drawn = cx.drawn_primitives();
+            let mask = drawn
+                .iter()
+                .position(|p| p.kind == gpui::DrawnKind::Quad && p.bounds == preview.scale(scale))
+                .expect("the preview paints a background over the source grid");
+            assert!(
+                drawn[..mask].iter().any(|p| {
+                    p.kind == gpui::DrawnKind::MonochromeSprite
+                        && p.bounds.intersects(&preview.scale(scale))
+                }),
+                "source glyphs are painted underneath the preview"
+            );
+            assert!(
+                cx.debug_bounds("markdown-block-1000-0").is_some(),
+                "the prepared document is shown"
+            );
+            assert_eq!(
+                drawn[mask].background,
+                Some(rgb(0x1e1f22).into()),
+                "preview must hide source with pane {target} focused"
+            );
+            let host_bounds = cx.debug_bounds("workspace-pane-1").unwrap().scale(scale);
+            let tint = drawn.iter().rposition(|p| {
+                p.bounds == host_bounds
+                    && p.background == Some(gpui::Hsla::from(rgb(0x101014)).opacity(0.08).into())
+            });
+            if target == "workspace-pane-0" {
+                let tint = tint.expect("the unfocused pane is dimmed");
+                assert!(tint > mask, "the tint is painted over the preview");
+                assert!(
+                    drawn[tint + 1..]
+                        .iter()
+                        .all(|p| !p.bounds.intersects(&preview.scale(scale))),
+                    "the tint covers the completed pane"
+                );
+            } else {
+                assert!(tint.is_none(), "the focused pane has no dimming tint");
+            }
+        }
+        gpui::ink_test_glyphs(false);
+    }
+
+    #[gpui::test]
     fn native_markdown_toolbar_pointer_copy_links_and_source_transition(
         cx: &mut gpui::TestAppContext,
     ) {

@@ -1,21 +1,21 @@
 --- a/src/app/test_context.rs
 +++ b/src/app/test_context.rs
-@@ -833,6 +833,12 @@ impl VisualTestContext {
+@@ -831,6 +831,12 @@
+     /// debug_bounds returns the bounds of the element with the given selector.
+     pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
          self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
-     }
- 
++    }
++
 +    /// Every primitive of the last drawn frame, in the order the renderer
 +    /// draws them.
 +    pub fn drawn_primitives(&mut self) -> Vec<crate::DrawnPrimitive> {
 +        self.update(|window, _| window.rendered_frame.scene.drawn_primitives())
-+    }
-+
+     }
+ 
      /// Draw an element to the window. Useful for simulating events or actions
-     pub fn draw<E>(
-         &mut self,
 --- a/src/platform.rs
 +++ b/src/platform.rs
-@@ -659,6 +659,20 @@ pub(crate) trait PlatformTextSystem: Send + Sync {
+@@ -659,6 +659,20 @@
  
  pub(crate) struct NoopTextSystem;
  
@@ -36,7 +36,7 @@
  impl NoopTextSystem {
      #[allow(dead_code)]
      pub fn new() -> Self {
-@@ -718,6 +732,16 @@ impl PlatformTextSystem for NoopTextSystem {
+@@ -718,6 +732,16 @@
      }
  
      fn glyph_raster_bounds(&self, _params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
@@ -55,7 +55,7 @@
  
 --- a/src/scene.rs
 +++ b/src/scene.rs
-@@ -424,6 +424,77 @@ impl<'a> Iterator for BatchIterator<'a> {
+@@ -424,6 +424,80 @@
      }
  }
  
@@ -87,6 +87,8 @@
 +    pub kind: DrawnKind,
 +    /// Where it is drawn, in device pixels.
 +    pub bounds: Bounds<ScaledPixels>,
++    /// The fill of a quad, including the opacity inherited from its parents.
++    pub background: Option<Background>,
 +}
 +
 +#[cfg(any(test, feature = "test-support"))]
@@ -95,35 +97,36 @@
 +    /// drawn over any earlier one it overlaps.
 +    pub(crate) fn drawn_primitives(&self) -> Vec<DrawnPrimitive> {
 +        let mut drawn = Vec::new();
-+        let mut push = |kind, bounds: &Bounds<ScaledPixels>| {
++        let mut push = |kind, bounds: &Bounds<ScaledPixels>, background| {
 +            drawn.push(DrawnPrimitive {
 +                kind,
 +                bounds: *bounds,
++                background,
 +            })
 +        };
 +        for batch in self.batches() {
 +            match batch {
-+                PrimitiveBatch::Shadows(shadows) => {
-+                    shadows.iter().for_each(|p| push(DrawnKind::Shadow, &p.bounds))
-+                }
-+                PrimitiveBatch::Quads(quads) => {
-+                    quads.iter().for_each(|p| push(DrawnKind::Quad, &p.bounds))
-+                }
-+                PrimitiveBatch::Paths(paths) => {
-+                    paths.iter().for_each(|p| push(DrawnKind::Path, &p.bounds))
-+                }
++                PrimitiveBatch::Shadows(shadows) => shadows
++                    .iter()
++                    .for_each(|p| push(DrawnKind::Shadow, &p.bounds, None)),
++                PrimitiveBatch::Quads(quads) => quads
++                    .iter()
++                    .for_each(|p| push(DrawnKind::Quad, &p.bounds, Some(p.background))),
++                PrimitiveBatch::Paths(paths) => paths
++                    .iter()
++                    .for_each(|p| push(DrawnKind::Path, &p.bounds, None)),
 +                PrimitiveBatch::Underlines(underlines) => underlines
 +                    .iter()
-+                    .for_each(|p| push(DrawnKind::Underline, &p.bounds)),
++                    .for_each(|p| push(DrawnKind::Underline, &p.bounds, None)),
 +                PrimitiveBatch::MonochromeSprites { sprites, .. } => sprites
 +                    .iter()
-+                    .for_each(|p| push(DrawnKind::MonochromeSprite, &p.bounds)),
++                    .for_each(|p| push(DrawnKind::MonochromeSprite, &p.bounds, None)),
 +                PrimitiveBatch::PolychromeSprites { sprites, .. } => sprites
 +                    .iter()
-+                    .for_each(|p| push(DrawnKind::PolychromeSprite, &p.bounds)),
-+                PrimitiveBatch::Surfaces(surfaces) => {
-+                    surfaces.iter().for_each(|p| push(DrawnKind::Surface, &p.bounds))
-+                }
++                    .for_each(|p| push(DrawnKind::PolychromeSprite, &p.bounds, None)),
++                PrimitiveBatch::Surfaces(surfaces) => surfaces
++                    .iter()
++                    .for_each(|p| push(DrawnKind::Surface, &p.bounds, None)),
 +            }
 +        }
 +        drawn
