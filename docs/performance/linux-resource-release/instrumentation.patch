@@ -1,0 +1,24 @@
+diff --git i/vendor/gpui/src/platform/blade/blade_renderer.rs w/vendor/gpui/src/platform/blade/blade_renderer.rs
+index d00fbdc..9f502ec 100644
+--- i/vendor/gpui/src/platform/blade/blade_renderer.rs
++++ w/vendor/gpui/src/platform/blade/blade_renderer.rs
+@@ -912,6 +912,7 @@ impl BladeRenderer {
+         profiling::scope!("finish");
+         self.instance_belt.flush(&sync_point);
+         self.atlas.after_frame(&sync_point);
++        eprintln!("[SPRITE141_PRESENT] {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+ 
+         self.wait_for_gpu();
+         self.last_sync_point = Some(sync_point);
+diff --git i/vendor/gpui/src/window.rs w/vendor/gpui/src/window.rs
+index 04da107..11dfea4 100644
+--- i/vendor/gpui/src/window.rs
++++ w/vendor/gpui/src/window.rs
+@@ -1066,6 +1066,7 @@ impl Window {
+             let last_input_timestamp = last_input_timestamp.clone();
+             let mut idle_since: Option<Instant> = None;
+             move |request_frame_options| {
++                eprintln!("[SPRITE141_FRAME] {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+                 let callbacks = next_frame_callbacks.take();
+                 let had_callbacks = !callbacks.is_empty();
+                 if had_callbacks {

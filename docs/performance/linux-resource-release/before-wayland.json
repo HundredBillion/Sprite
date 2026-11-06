@@ -1,0 +1,150 @@
+{
+  "binary": "/tmp/sprite-141-before",
+  "backend": "wayland",
+  "pid": 2585581,
+  "seconds": 15,
+  "pane": "1e4bcfec89ac3b6315d7e600:0",
+  "window": {
+    "address": "0x55669993f4e0",
+    "xwayland": false,
+    "workspace": {
+      "id": 1,
+      "name": "1"
+    },
+    "size": [
+      941,
+      1150
+    ],
+    "visible": true
+  },
+  "visible_idle": {
+    "cpu_percent": 0.5333302988615761,
+    "frames": 871,
+    "presents": 0,
+    "resources": {
+      "ticks": 32,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 87400,
+      "gpu_kib": {
+        "drm-resident-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-system0": 240892,
+        "drm-total-stolen-system0": 0
+      }
+    }
+  },
+  "hidden_idle": {
+    "cpu_percent": 0.0,
+    "frames": 0,
+    "presents": 0,
+    "resources": {
+      "ticks": 38,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 89036,
+      "gpu_kib": {
+        "drm-resident-system0": 353364,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-system0": 353364,
+        "drm-total-stolen-system0": 0
+      }
+    }
+  },
+  "wake_to_submission_ms": [
+    20.660211,
+    3.160027,
+    24.074245,
+    4.704684,
+    5.198189,
+    3.657217,
+    6.563563,
+    5.135182
+  ],
+  "before_images": {
+    "ticks": 62,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 89948,
+    "gpu_kib": {
+      "drm-resident-system0": 249100,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-system0": 249100,
+      "drm-total-stolen-system0": 0
+    }
+  },
+  "after_60_images": {
+    "ticks": 85,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 97764,
+    "gpu_kib": {
+      "drm-resident-system0": 249100,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-system0": 249100,
+      "drm-total-stolen-system0": 0
+    }
+  },
+  "after_delete": {
+    "ticks": 87,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 97764,
+    "gpu_kib": {
+      "drm-resident-system0": 249100,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-system0": 249100,
+      "drm-total-stolen-system0": 0
+    }
+  },
+  "after_delete_all": {
+    "ticks": 90,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 97764,
+    "gpu_kib": {
+      "drm-resident-system0": 249100,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-system0": 249100,
+      "drm-total-stolen-system0": 0
+    }
+  },
+  "with_4_extra_panes": {
+    "resources": {
+      "ticks": 96,
+      "threads": 40,
+      "fds": 100,
+      "rss_kib": 100172,
+      "gpu_kib": {
+        "drm-resident-system0": 249100,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-system0": 249100,
+        "drm-total-stolen-system0": 0
+      }
+    },
+    "baseline": {
+      "ticks": 90,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 97764,
+      "gpu_kib": {
+        "drm-resident-system0": 249100,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-system0": 249100,
+        "drm-total-stolen-system0": 0
+      }
+    }
+  },
+  "after_close_panes": {
+    "ticks": 101,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 100088,
+    "gpu_kib": {
+      "drm-resident-system0": 249100,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-system0": 249100,
+      "drm-total-stolen-system0": 0
+    }
+  }
+}

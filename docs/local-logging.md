@@ -19,6 +19,21 @@ Set `SPRITE_LOG` before launching a window for more detail. This uses tracing-su
 SPRITE_LOG='sprite_app=info,sprite_app::ipc=debug,sprite_app::startup=debug' sprite
 ```
 
+On Linux, a desktop launcher uses its own environment; setting `SPRITE_LOG` in
+an unrelated terminal does not change that environment. For desktop launches,
+copy `/usr/share/applications/sprite.desktop` to
+`~/.local/share/applications/sprite.desktop`, then change the copy's `Exec` line:
+
+```ini
+Exec=env SPRITE_LOG=sprite_app=debug sprite
+```
+
+Create `~/.local/share/applications` first if needed. Keep `TryExec=sprite`.
+The `env` command sets the filter for that launch, including launches from the
+application menu; a desktop entry does not interpret shell-style assignments
+on its own. Remove the `env SPRITE_LOG=sprite_app=debug` prefix when finished.
+Each launch creates a separate window process with its own log directory.
+
 Levels are `error`, `warn`, `info`, `debug`, and `trace`. An invalid filter falls back to `sprite_app=warn`. Timings at debug level are monotonic elapsed milliseconds: they include scheduling and waiting and are not CPU time. Use a profiler or the existing benchmarks to investigate CPU or memory; log messages alone do not demonstrate a performance improvement. On macOS 26 a value set with `launchctl setenv` does not reach an app the Dock starts. To log a desktop launch, quit Sprite completely first, then start it with `open -a Sprite --env SPRITE_LOG='sprite_app=debug'`: if Sprite is already running, `open` only brings the running copy forward and the value is ignored.
 
 Each event is capped at 4 KiB and the queue holds at most 512 events. Producers do not wait for the writer; when the queue is full, events are dropped and a count is recorded when the writer next succeeds. The worker maintains up to four 1 MiB segments per running process (`sprite.log`, `sprite.1.log`, etc.) and retains up to ten completed runs. Active runs are protected with file locks, so total usage can grow with the number of active processes. Cleanup runs when a logger starts or exits; after an abrupt termination, the next launch can reclaim old runs. A locked, slow, full, or unwritable destination can lose logs or delay cleanup; it does not block terminal activity. Shutdown waits at most 200 ms for the writer, and abrupt termination, process aborts, or native crashes may lose buffered events. Rust panics are recorded best-effort with source location, and the previous panic hook still runs.

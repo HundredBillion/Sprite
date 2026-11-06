@@ -1,0 +1,216 @@
+{
+  "baseline": {
+    "ticks": 81,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 88148,
+    "gpu_kib": {
+      "drm-total-system0": 240892,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-stolen-system0": 0,
+      "drm-resident-system0": 240892
+    }
+  },
+  "malloc_baseline": {
+    "system_bytes": 15948432,
+    "in_use_bytes": 12798384
+  },
+  "cycles": [
+    {
+      "ticks": 86,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 91212,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 91,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 93852,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 94,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 94808,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 99,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 97312,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 102,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 98348,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 105,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 99856,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 107,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 100420,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 110,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 100728,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 111,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 100200,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    },
+    {
+      "ticks": 113,
+      "threads": 28,
+      "fds": 72,
+      "rss_kib": 100200,
+      "gpu_kib": {
+        "drm-total-system0": 240892,
+        "drm-resident-stolen-system0": 0,
+        "drm-total-stolen-system0": 0,
+        "drm-resident-system0": 240892
+      }
+    }
+  ],
+  "malloc_cycles": [
+    {
+      "system_bytes": 18664080,
+      "in_use_bytes": 13241648
+    },
+    {
+      "system_bytes": 21424784,
+      "in_use_bytes": 13255408
+    },
+    {
+      "system_bytes": 21809808,
+      "in_use_bytes": 13261536
+    },
+    {
+      "system_bytes": 24570512,
+      "in_use_bytes": 13266112
+    },
+    {
+      "system_bytes": 25205392,
+      "in_use_bytes": 13321136
+    },
+    {
+      "system_bytes": 26684048,
+      "in_use_bytes": 13329920
+    },
+    {
+      "system_bytes": 26696336,
+      "in_use_bytes": 13331296
+    },
+    {
+      "system_bytes": 26696336,
+      "in_use_bytes": 13339600
+    },
+    {
+      "system_bytes": 26696336,
+      "in_use_bytes": 13336896
+    },
+    {
+      "system_bytes": 26696336,
+      "in_use_bytes": 13352416
+    }
+  ],
+  "before_trim": {
+    "ticks": 113,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 100200,
+    "gpu_kib": {
+      "drm-total-system0": 240892,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-stolen-system0": 0,
+      "drm-resident-system0": 240892
+    }
+  },
+  "malloc_after_cycles": {
+    "system_bytes": 26696336,
+    "in_use_bytes": 13352224
+  },
+  "gdb_status": 0,
+  "trim_returned_one": true,
+  "after_trim": {
+    "ticks": 114,
+    "threads": 28,
+    "fds": 72,
+    "rss_kib": 95916,
+    "gpu_kib": {
+      "drm-total-system0": 240892,
+      "drm-resident-stolen-system0": 0,
+      "drm-total-stolen-system0": 0,
+      "drm-resident-system0": 240892
+    }
+  },
+  "malloc_after_trim": {
+    "system_bytes": 26737296,
+    "in_use_bytes": 13355488
+  }
+}

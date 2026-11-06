@@ -1,0 +1,236 @@
+--- a/src/platform/blade/blade_atlas.rs
++++ b/src/platform/blade/blade_atlas.rs
+@@ -104,9 +104,10 @@
+     fn remove(&self, key: &AtlasKey) {
+         let mut lock = self.0.lock();
+ 
+-        let Some(id) = lock.tiles_by_key.remove(key).map(|tile| tile.texture_id) else {
++        let Some(tile) = lock.tiles_by_key.remove(key) else {
+             return;
+         };
++        let id = tile.texture_id;
+ 
+         let Some(texture_slot) = lock.storage[id.kind].textures.get_mut(id.index as usize) else {
+             return;
+@@ -120,6 +121,7 @@
+                     .push(texture.id.index as usize);
+                 texture.destroy(&lock.gpu);
+             } else {
++                texture.allocator.deallocate(tile.tile_id.into());
+                 *texture_slot = Some(texture);
+             }
+         }
+--- a/src/platform/linux/wayland/window.rs
++++ b/src/platform/linux/wayland/window.rs
+@@ -85,6 +85,8 @@
+ pub struct WaylandWindowState {
+     xdg_surface: xdg_surface::XdgSurface,
+     acknowledged_first_configure: bool,
++    frame_delivery: bool,
++    frame_pending: bool,
+     pub surface: wl_surface::WlSurface,
+     decoration: Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
+     app_id: Option<String>,
+@@ -123,6 +125,15 @@
+ }
+ 
+ impl WaylandWindowState {
++    fn set_frame_delivery(&mut self, active: bool) {
++        self.frame_delivery = active;
++        if active && !self.frame_pending {
++            self.surface.frame(&self.globals.qh, self.surface.id());
++            self.frame_pending = true;
++            self.surface.commit();
++        }
++    }
++
+     pub(crate) fn new(
+         handle: AnyWindowHandle,
+         surface: wl_surface::WlSurface,
+@@ -160,6 +171,8 @@
+         Ok(Self {
+             xdg_surface,
+             acknowledged_first_configure: false,
++            frame_delivery: true,
++            frame_pending: false,
+             surface,
+             decoration,
+             app_id: None,
+@@ -355,8 +368,13 @@
+ 
+     pub fn frame(&self) {
+         let mut state = self.state.borrow_mut();
++        state.frame_pending = false;
++        state.resize_throttle = false;
++        if !state.frame_delivery {
++            return;
++        }
+         state.surface.frame(&state.globals.qh, state.surface.id());
+-        state.resize_throttle = false;
++        state.frame_pending = true;
+         drop(state);
+ 
+         let mut cb = self.callbacks.borrow_mut();
+@@ -978,6 +996,25 @@
+         self.borrow().fullscreen
+     }
+ 
++    fn set_frame_delivery(&self, active: bool) {
++        self.borrow_mut().set_frame_delivery(active);
++    }
++
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        let state = Rc::downgrade(&self.0.state);
++        let executor = self.borrow().globals.executor.clone();
++        Some(Rc::new(move || {
++            let state = state.clone();
++            executor
++                .spawn(async move {
++                    if let Some(state) = state.upgrade() {
++                        state.borrow_mut().set_frame_delivery(true);
++                    }
++                })
++                .detach();
++        }))
++    }
++
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+         self.0.callbacks.borrow_mut().request_frame = Some(callback);
+     }
+--- a/src/platform/linux/x11/client.rs
++++ b/src/platform/linux/x11/client.rs
+@@ -81,6 +81,7 @@
+ pub(crate) struct WindowRef {
+     window: X11WindowStatePtr,
+     refresh_state: Option<RefreshState>,
++    frame_delivery: bool,
+     expose_event_received: bool,
+     last_visibility: Visibility,
+     is_mapped: bool,
+@@ -101,7 +102,7 @@
+ }
+ 
+ enum RefreshState {
+-    Hidden {
++    Stopped {
+         refresh_rate: Duration,
+     },
+     PeriodicRefresh {
+@@ -222,6 +223,17 @@
+ pub struct X11ClientStatePtr(pub Weak<RefCell<X11ClientState>>);
+ 
+ impl X11ClientStatePtr {
++    pub fn set_frame_delivery(&self, x_window: u32, active: bool) {
++        let Some(client) = self.get_client() else {
++            return;
++        };
++        let mut state = client.0.borrow_mut();
++        if let Some(window) = state.windows.get_mut(&x_window) {
++            window.frame_delivery = active;
++        }
++        state.update_refresh_loop(x_window);
++    }
++
+     fn get_client(&self) -> Option<X11Client> {
+         self.0.upgrade().map(X11Client)
+     }
+@@ -609,11 +621,13 @@
+                 break;
+             }
+ 
+-            for window in windows_to_refresh.into_iter() {
++            for x_window in windows_to_refresh.into_iter() {
+                 let mut state = self.0.borrow_mut();
+-                if let Some(window) = state.windows.get_mut(&window) {
++                if let Some(window) = state.windows.get_mut(&x_window) {
+                     window.expose_event_received = true;
+-                }
++                    window.frame_delivery = true;
++                }
++                state.update_refresh_loop(x_window);
+             }
+ 
+             for event in events.into_iter() {
+@@ -748,6 +762,7 @@
+                 let mut state = self.0.borrow_mut();
+                 if let Some(window_ref) = state.windows.get_mut(&event.window) {
+                     window_ref.is_mapped = true;
++                    window_ref.frame_delivery = true;
+                 }
+                 state.update_refresh_loop(event.window);
+             }
+@@ -755,6 +770,7 @@
+                 let mut state = self.0.borrow_mut();
+                 if let Some(window_ref) = state.windows.get_mut(&event.window) {
+                     window_ref.last_visibility = event.state;
++                    window_ref.frame_delivery = true;
+                 }
+                 state.update_refresh_loop(event.window);
+             }
+@@ -1488,6 +1504,7 @@
+         let window_ref = WindowRef {
+             window: window.0.clone(),
+             refresh_state: None,
++            frame_delivery: true,
+             expose_event_received: false,
+             last_visibility: Visibility::UNOBSCURED,
+             is_mapped: false,
+@@ -1699,10 +1716,11 @@
+         let Some(window_ref) = self.windows.get_mut(&x_window) else {
+             return;
+         };
+-        let is_visible = window_ref.is_mapped
++        let is_visible = window_ref.frame_delivery
++            && window_ref.is_mapped
+             && !matches!(window_ref.last_visibility, Visibility::FULLY_OBSCURED);
+         match (is_visible, window_ref.refresh_state.take()) {
+-            (false, refresh_state @ Some(RefreshState::Hidden { .. }))
++            (false, refresh_state @ Some(RefreshState::Stopped { .. }))
+             | (false, refresh_state @ None)
+             | (true, refresh_state @ Some(RefreshState::PeriodicRefresh { .. })) => {
+                 window_ref.refresh_state = refresh_state;
+@@ -1715,9 +1733,9 @@
+                 }),
+             ) => {
+                 self.loop_handle.remove(event_loop_token);
+-                window_ref.refresh_state = Some(RefreshState::Hidden { refresh_rate });
+-            }
+-            (true, Some(RefreshState::Hidden { refresh_rate })) => {
++                window_ref.refresh_state = Some(RefreshState::Stopped { refresh_rate });
++            }
++            (true, Some(RefreshState::Stopped { refresh_rate })) => {
+                 let event_loop_token = self.start_refresh_loop(x_window, refresh_rate);
+                 let Some(window_ref) = self.windows.get_mut(&x_window) else {
+                     return;
+--- a/src/platform/linux/x11/window.rs
++++ b/src/platform/linux/x11/window.rs
+@@ -1431,6 +1431,29 @@
+         self.0.state.borrow().fullscreen
+     }
+ 
++    fn set_frame_delivery(&self, active: bool) {
++        self.0
++            .state
++            .borrow()
++            .client
++            .set_frame_delivery(self.0.x_window, active);
++    }
++
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        let state = self.0.state.borrow();
++        let client = state.client.clone();
++        let executor = state.executor.clone();
++        let x_window = self.0.x_window;
++        Some(Rc::new(move || {
++            let client = client.clone();
++            executor
++                .spawn(async move {
++                    client.set_frame_delivery(x_window, true);
++                })
++                .detach();
++        }))
++    }
++
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+         self.0.callbacks.borrow_mut().request_frame = Some(callback);
+     }
