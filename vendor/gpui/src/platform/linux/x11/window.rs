@@ -1431,6 +1431,29 @@ impl PlatformWindow for X11Window {
         self.0.state.borrow().fullscreen
     }
 
+    fn set_frame_delivery(&self, active: bool) {
+        self.0
+            .state
+            .borrow()
+            .client
+            .set_frame_delivery(self.0.x_window, active);
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let state = self.0.state.borrow();
+        let client = state.client.clone();
+        let executor = state.executor.clone();
+        let x_window = self.0.x_window;
+        Some(Rc::new(move || {
+            let client = client.clone();
+            executor
+                .spawn(async move {
+                    client.set_frame_delivery(x_window, true);
+                })
+                .detach();
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.callbacks.borrow_mut().request_frame = Some(callback);
     }

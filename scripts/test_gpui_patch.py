@@ -1,4 +1,5 @@
 """Exact-source integrity and portable native dispatch policy regressions."""
+import os
 import re
 import shutil
 import subprocess
@@ -19,6 +20,42 @@ def rust_test(source):
 
 
 class GpuiPatchTests(unittest.TestCase):
+    def test_wayland_frame_pause_and_wake(self):
+        source = (ROOT / "vendor/gpui/src/platform/linux/wayland/window.rs").read_text()
+        harness = (ROOT / "tests/wayland_frame_delivery.rs").read_text()
+        for marker, signature in (
+                ("SET_FRAME_DELIVERY", "    fn set_frame_delivery(&mut self, active: bool) {"),
+                ("FRAME", "    pub fn frame(&self) {")):
+            start = source.index(signature)
+            end = source.index("\n    }", start) + len("\n    }")
+            harness = harness.replace("    // PRODUCTION_" + marker, source[start:end])
+        result = rust_test(harness)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = rust_test(harness.replace(
+            "if !state.frame_delivery {", "if false {"))
+        self.assertNotEqual(result.returncode, 0, "unconditional rearming must fail")
+        self.assertIn("a paused callback must not reach GPUI", result.stdout)
+
+    def test_blade_atlas_reuses_removed_image_space(self):
+        source = (ROOT / "vendor/gpui/src/platform/blade/blade_atlas.rs").read_text()
+        start = source.index("    fn remove(&self, key: &AtlasKey) {")
+        end = source.index("\n    }\n}", start) + len("\n    }")
+        harness = (ROOT / "tests/blade_atlas.rs").read_text().replace(
+            "    // PRODUCTION_REMOVE", source[start:end])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / "Cargo.toml").write_text(
+                '[package]\nname = "blade-atlas-regression"\nversion = "0.0.0"\n'
+                'edition = "2024"\n[dependencies]\netagere = "=0.2.15"\n'
+                'parking_lot = "=0.12.5"\n')
+            (path / "src").mkdir()
+            (path / "src/lib.rs").write_text(harness)
+            result = subprocess.run(
+                ["cargo", "test", "--offline", "--manifest-path", str(path / "Cargo.toml")],
+                env={**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target/blade-atlas-regression")},
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_exact_source_and_tamper_negative_control(self):
         archive = archive_path()
         verify(ROOT / "vendor/gpui", archive)

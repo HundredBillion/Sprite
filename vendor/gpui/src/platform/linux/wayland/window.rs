@@ -85,6 +85,8 @@ struct InProgressConfigure {
 pub struct WaylandWindowState {
     xdg_surface: xdg_surface::XdgSurface,
     acknowledged_first_configure: bool,
+    frame_delivery: bool,
+    frame_pending: bool,
     pub surface: wl_surface::WlSurface,
     decoration: Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
     app_id: Option<String>,
@@ -123,6 +125,15 @@ pub struct WaylandWindowStatePtr {
 }
 
 impl WaylandWindowState {
+    fn set_frame_delivery(&mut self, active: bool) {
+        self.frame_delivery = active;
+        if active && !self.frame_pending {
+            self.surface.frame(&self.globals.qh, self.surface.id());
+            self.frame_pending = true;
+            self.surface.commit();
+        }
+    }
+
     pub(crate) fn new(
         handle: AnyWindowHandle,
         surface: wl_surface::WlSurface,
@@ -160,6 +171,8 @@ impl WaylandWindowState {
         Ok(Self {
             xdg_surface,
             acknowledged_first_configure: false,
+            frame_delivery: true,
+            frame_pending: false,
             surface,
             decoration,
             app_id: None,
@@ -355,8 +368,13 @@ impl WaylandWindowStatePtr {
 
     pub fn frame(&self) {
         let mut state = self.state.borrow_mut();
-        state.surface.frame(&state.globals.qh, state.surface.id());
+        state.frame_pending = false;
         state.resize_throttle = false;
+        if !state.frame_delivery {
+            return;
+        }
+        state.surface.frame(&state.globals.qh, state.surface.id());
+        state.frame_pending = true;
         drop(state);
 
         let mut cb = self.callbacks.borrow_mut();
@@ -976,6 +994,25 @@ impl PlatformWindow for WaylandWindow {
 
     fn is_fullscreen(&self) -> bool {
         self.borrow().fullscreen
+    }
+
+    fn set_frame_delivery(&self, active: bool) {
+        self.borrow_mut().set_frame_delivery(active);
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let state = Rc::downgrade(&self.0.state);
+        let executor = self.borrow().globals.executor.clone();
+        Some(Rc::new(move || {
+            let state = state.clone();
+            executor
+                .spawn(async move {
+                    if let Some(state) = state.upgrade() {
+                        state.borrow_mut().set_frame_delivery(true);
+                    }
+                })
+                .detach();
+        }))
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {

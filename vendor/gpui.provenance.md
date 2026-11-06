@@ -240,6 +240,37 @@ Sprite uses it to test that a bar, underline or outline cursor is drawn after
 the glyph it marks
 (`grid_paint::tests::a_cursor_drawn_as_a_shape_is_drawn_over_the_glyph_it_marks`).
 
+## Linux picture release and idle frames
+
+`patches/gpui-0.2.2-linux-release-and-idle.patch` follows the drawn-primitives
+patch. It preserves the existing public pause/wake interface.
+
+- Blade `remove` retains the removed tile and deallocates its etagere allocation
+  when the texture still has live keys. Removing the key first makes repeats
+  harmless; the last key still destroys the texture and returns its slot.
+  `scripts.test_gpui_patch` compiles the exact production removal method against
+  etagere 0.2.15, pinned to Cargo.lock, with a GPU-destruction counter. It replaces
+  a 512×512 allocation 60 times beside a surviving allocation, for both kinds,
+  then checks repeated removal and one final destruction. This test exercises
+  allocation reuse, not a graphics driver.
+- Wayland stops rearming `wl_surface.frame` after GPUI pauses delivery. A pending
+  callback drains without invoking GPUI, while releasing resize throttling. The
+  weak frame waker schedules a resume on the foreground executor, requests a
+  callback if none is pending and commits it. An outstanding callback can carry
+  the wake without another callback request. The portable source trace covers
+  pause, drained callbacks, repeated wake and wake with a pending callback;
+  an unconditional-rearm negative control fails the same trace.
+- X11 includes delivery state in its existing refresh-loop gate. Pausing removes
+  the calloop timer; the weak client waker schedules its restart at the existing
+  refresh rate. Map, visibility and expose events also resume delivery, so native
+  presentation requests cannot be stranded by an idle pause. `Stopped` now names
+  either invisibility or idle, and window destruction keeps its existing timer
+  cleanup.
+
+The native Linux before/after measurements and their limits are recorded in
+`docs/performance/linux-resource-release/`. X11 was exercised through Xwayland
+on Hyprland, rather than a separate native Xorg session.
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.

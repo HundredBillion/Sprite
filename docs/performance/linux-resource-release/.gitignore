@@ -1,0 +1,3 @@
+*.frames.log
+__pycache__/
+*.images.png

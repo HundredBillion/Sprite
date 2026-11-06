@@ -81,6 +81,7 @@ const GPUI_X11_SCALE_FACTOR_ENV: &str = "GPUI_X11_SCALE_FACTOR";
 pub(crate) struct WindowRef {
     window: X11WindowStatePtr,
     refresh_state: Option<RefreshState>,
+    frame_delivery: bool,
     expose_event_received: bool,
     last_visibility: Visibility,
     is_mapped: bool,
@@ -101,7 +102,7 @@ impl Deref for WindowRef {
 }
 
 enum RefreshState {
-    Hidden {
+    Stopped {
         refresh_rate: Duration,
     },
     PeriodicRefresh {
@@ -222,6 +223,17 @@ pub struct X11ClientState {
 pub struct X11ClientStatePtr(pub Weak<RefCell<X11ClientState>>);
 
 impl X11ClientStatePtr {
+    pub fn set_frame_delivery(&self, x_window: u32, active: bool) {
+        let Some(client) = self.get_client() else {
+            return;
+        };
+        let mut state = client.0.borrow_mut();
+        if let Some(window) = state.windows.get_mut(&x_window) {
+            window.frame_delivery = active;
+        }
+        state.update_refresh_loop(x_window);
+    }
+
     fn get_client(&self) -> Option<X11Client> {
         self.0.upgrade().map(X11Client)
     }
@@ -609,11 +621,13 @@ impl X11Client {
                 break;
             }
 
-            for window in windows_to_refresh.into_iter() {
+            for x_window in windows_to_refresh.into_iter() {
                 let mut state = self.0.borrow_mut();
-                if let Some(window) = state.windows.get_mut(&window) {
+                if let Some(window) = state.windows.get_mut(&x_window) {
                     window.expose_event_received = true;
+                    window.frame_delivery = true;
                 }
+                state.update_refresh_loop(x_window);
             }
 
             for event in events.into_iter() {
@@ -748,6 +762,7 @@ impl X11Client {
                 let mut state = self.0.borrow_mut();
                 if let Some(window_ref) = state.windows.get_mut(&event.window) {
                     window_ref.is_mapped = true;
+                    window_ref.frame_delivery = true;
                 }
                 state.update_refresh_loop(event.window);
             }
@@ -755,6 +770,7 @@ impl X11Client {
                 let mut state = self.0.borrow_mut();
                 if let Some(window_ref) = state.windows.get_mut(&event.window) {
                     window_ref.last_visibility = event.state;
+                    window_ref.frame_delivery = true;
                 }
                 state.update_refresh_loop(event.window);
             }
@@ -1488,6 +1504,7 @@ impl LinuxClient for X11Client {
         let window_ref = WindowRef {
             window: window.0.clone(),
             refresh_state: None,
+            frame_delivery: true,
             expose_event_received: false,
             last_visibility: Visibility::UNOBSCURED,
             is_mapped: false,
@@ -1699,10 +1716,11 @@ impl X11ClientState {
         let Some(window_ref) = self.windows.get_mut(&x_window) else {
             return;
         };
-        let is_visible = window_ref.is_mapped
+        let is_visible = window_ref.frame_delivery
+            && window_ref.is_mapped
             && !matches!(window_ref.last_visibility, Visibility::FULLY_OBSCURED);
         match (is_visible, window_ref.refresh_state.take()) {
-            (false, refresh_state @ Some(RefreshState::Hidden { .. }))
+            (false, refresh_state @ Some(RefreshState::Stopped { .. }))
             | (false, refresh_state @ None)
             | (true, refresh_state @ Some(RefreshState::PeriodicRefresh { .. })) => {
                 window_ref.refresh_state = refresh_state;
@@ -1715,9 +1733,9 @@ impl X11ClientState {
                 }),
             ) => {
                 self.loop_handle.remove(event_loop_token);
-                window_ref.refresh_state = Some(RefreshState::Hidden { refresh_rate });
+                window_ref.refresh_state = Some(RefreshState::Stopped { refresh_rate });
             }
-            (true, Some(RefreshState::Hidden { refresh_rate })) => {
+            (true, Some(RefreshState::Stopped { refresh_rate })) => {
                 let event_loop_token = self.start_refresh_loop(x_window, refresh_rate);
                 let Some(window_ref) = self.windows.get_mut(&x_window) else {
                     return;
