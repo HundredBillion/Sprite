@@ -534,7 +534,25 @@ impl Render for Workspace {
                         },
                     ))
                     .child(handle.view())
-                    .when(!is_focused, |element| element.opacity(0.92))
+                    .when(!is_focused, |element| {
+                        // Parent opacity makes Surface backgrounds reveal the content they cover.
+                        // Tint the completed pane so its internal layers stay opaque.
+                        element.child(
+                            gpui::canvas(
+                                |_, _, _| (),
+                                |bounds, (), window, _| {
+                                    window.paint_quad(gpui::fill(
+                                        bounds,
+                                        gpui::Hsla::from(rgb(BACKGROUND)).opacity(0.08),
+                                    ));
+                                },
+                            )
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .size_full(),
+                        )
+                    })
             })
             .collect();
 

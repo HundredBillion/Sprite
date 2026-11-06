@@ -452,6 +452,8 @@ pub struct DrawnPrimitive {
     pub kind: DrawnKind,
     /// Where it is drawn, in device pixels.
     pub bounds: Bounds<ScaledPixels>,
+    /// The fill of a quad, including the opacity inherited from its parents.
+    pub background: Option<Background>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -460,35 +462,36 @@ impl Scene {
     /// drawn over any earlier one it overlaps.
     pub(crate) fn drawn_primitives(&self) -> Vec<DrawnPrimitive> {
         let mut drawn = Vec::new();
-        let mut push = |kind, bounds: &Bounds<ScaledPixels>| {
+        let mut push = |kind, bounds: &Bounds<ScaledPixels>, background| {
             drawn.push(DrawnPrimitive {
                 kind,
                 bounds: *bounds,
+                background,
             })
         };
         for batch in self.batches() {
             match batch {
-                PrimitiveBatch::Shadows(shadows) => {
-                    shadows.iter().for_each(|p| push(DrawnKind::Shadow, &p.bounds))
-                }
-                PrimitiveBatch::Quads(quads) => {
-                    quads.iter().for_each(|p| push(DrawnKind::Quad, &p.bounds))
-                }
-                PrimitiveBatch::Paths(paths) => {
-                    paths.iter().for_each(|p| push(DrawnKind::Path, &p.bounds))
-                }
+                PrimitiveBatch::Shadows(shadows) => shadows
+                    .iter()
+                    .for_each(|p| push(DrawnKind::Shadow, &p.bounds, None)),
+                PrimitiveBatch::Quads(quads) => quads
+                    .iter()
+                    .for_each(|p| push(DrawnKind::Quad, &p.bounds, Some(p.background))),
+                PrimitiveBatch::Paths(paths) => paths
+                    .iter()
+                    .for_each(|p| push(DrawnKind::Path, &p.bounds, None)),
                 PrimitiveBatch::Underlines(underlines) => underlines
                     .iter()
-                    .for_each(|p| push(DrawnKind::Underline, &p.bounds)),
+                    .for_each(|p| push(DrawnKind::Underline, &p.bounds, None)),
                 PrimitiveBatch::MonochromeSprites { sprites, .. } => sprites
                     .iter()
-                    .for_each(|p| push(DrawnKind::MonochromeSprite, &p.bounds)),
+                    .for_each(|p| push(DrawnKind::MonochromeSprite, &p.bounds, None)),
                 PrimitiveBatch::PolychromeSprites { sprites, .. } => sprites
                     .iter()
-                    .for_each(|p| push(DrawnKind::PolychromeSprite, &p.bounds)),
-                PrimitiveBatch::Surfaces(surfaces) => {
-                    surfaces.iter().for_each(|p| push(DrawnKind::Surface, &p.bounds))
-                }
+                    .for_each(|p| push(DrawnKind::PolychromeSprite, &p.bounds, None)),
+                PrimitiveBatch::Surfaces(surfaces) => surfaces
+                    .iter()
+                    .for_each(|p| push(DrawnKind::Surface, &p.bounds, None)),
             }
         }
         drawn
