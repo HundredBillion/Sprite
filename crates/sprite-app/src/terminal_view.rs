@@ -145,6 +145,7 @@ pub struct TerminalView {
     pending_link_click: Option<u64>,
     hovered_cell: Option<sprite_term::CellPosition>,
     layout_cache: crate::grid::LayoutCache,
+    retained_grid: crate::grid_paint::RetainedGrid,
     /// Shaped glyphs kept between frames, beside the layout they belong to.
     shape_cache: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
     hovered_link: Option<(u64, sprite_term::HyperlinkSpan)>,
@@ -595,6 +596,7 @@ impl TerminalView {
             hovered_cell: None,
             hovered_link: None,
             layout_cache: Default::default(),
+            retained_grid: Default::default(),
             shape_cache: Default::default(),
             hover_request: None,
             hover_basis: None,
@@ -690,6 +692,7 @@ impl TerminalView {
             hovered_cell: None,
             hovered_link: None,
             layout_cache: Default::default(),
+            retained_grid: Default::default(),
             shape_cache: Default::default(),
             hover_request: None,
             hover_basis: None,

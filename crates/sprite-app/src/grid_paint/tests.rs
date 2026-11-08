@@ -1259,3 +1259,45 @@ fn a_cursor_on_a_decorated_cell_is_drawn_over_its_decorations(cx: &mut gpui::Tes
         "the cursor is drawn after the cell's decorations: {with:?}"
     );
 }
+
+
+struct RetainedProbe {
+    rows: crate::grid::PositionedRows,
+    cache: RetainedGrid,
+    shapes: Rc<RefCell<ShapeCache>>,
+}
+
+impl gpui::Render for RetainedProbe {
+    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::{ParentElement, Styled};
+        let grid = GridPaint::new(GridPaintSpec {
+            rows: Arc::clone(&self.rows), pass: RowPass::Whole,
+            cursor: None, cursor_color: None, default_fg: unpack(0xffffff),
+            default_bg: unpack(0x112233), palette: None, cell_width: px(8.0),
+            cell_height: px(18.0), font_family: "monospace".into(), font_size: px(14.0),
+            shapes: Rc::clone(&self.shapes), focused: true,
+        });
+        gpui::div().size_full().child(self.cache.prepare(grid, window.scale_factor(), cx))
+    }
+}
+
+#[gpui::test]
+fn a_small_update_repaints_only_its_row_in_the_same_frame(cx: &mut gpui::TestAppContext) {
+    gpui::ink_test_glyphs(true);
+    let (probe, cx) = cx.add_window_view(|_, _| RetainedProbe {
+        rows: Arc::from([one_cell_row(|_| {}), one_cell_row(|_| {}), one_cell_row(|_| {})]),
+        cache: Default::default(), shapes: Default::default(),
+    });
+    let glyphs = |cx: &mut gpui::VisualTestContext| cx.drawn_primitives().iter()
+        .filter(|p| p.kind == gpui::DrawnKind::MonochromeSprite).count();
+    assert_eq!(glyphs(cx), 3);
+    PAINTED_ROWS.with(|rows| rows.borrow_mut().clear());
+    probe.update(cx, |probe, cx| {
+        Arc::make_mut(&mut probe.rows)[1] = one_cell_row(|cell| cell.text = "".into());
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert_eq!(glyphs(cx), 2, "the changed row is visible immediately and other rows remain");
+    assert_eq!(PAINTED_ROWS.with(|rows| rows.borrow().clone()), vec![1],
+        "unchanged rows reuse their previous paint");
+}

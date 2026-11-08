@@ -81,6 +81,7 @@ thread_local! {
     /// How many cells this thread has asked the text system to shape. Counted
     /// beside the one grid `shape_line` call, so a test can see what a frame
     /// actually cost.
+    pub(crate) static PAINTED_ROWS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     pub(crate) static SHAPED_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -380,6 +381,9 @@ pub(crate) fn decorations(
     });
     (underline, strikethrough)
 }
+
+mod retained;
+pub(crate) use retained::RetainedGrid;
 
 /// The grid of one pane, painted without a layout pass.
 pub(crate) struct GridPaint {
@@ -898,6 +902,8 @@ impl GridPaint {
         let mut overlay = Overlay::default();
         // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
+            #[cfg(test)]
+            PAINTED_ROWS.with(|rows| rows.borrow_mut().push(index));
             let top = row_edge(Row(index));
             let bottom = row_edge(Row(index + 1));
 

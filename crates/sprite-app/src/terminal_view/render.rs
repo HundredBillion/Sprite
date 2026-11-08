@@ -421,6 +421,8 @@ impl Render for TerminalView {
 
         let (background_grid, text_grid) =
             GridPaint::prepare(snapshot, rows, &metrics, split, &self.shape_cache);
+        let background_grid =
+            self.retained_grid.prepare(background_grid, window.scale_factor(), cx);
 
         // With nothing hosted, the frame must cost what it cost before
         // Surfaces existed: no registry clone, no layer construction.
