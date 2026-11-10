@@ -214,7 +214,8 @@ title follows the focused pane.
 ## Terminal links
 
 Sprite opens visible `http://` and `https://` URLs, with one open per click.
-OSC 8 metadata does not make descriptive labels clickable or replace a printed URL's destination.
+A descriptive OSC 8 label opens its `http://` or `https://` target when that address is shown nowhere on its row, since the label is then the only way to reach the page.
+OSC 8 metadata never replaces a printed URL's destination: linked text that shows a URL offers only that URL, and a label printed beside its own address stays plain text.
 Ordinary clicks belong to a program that has enabled mouse reporting, so Sprite does not also open its links.
 Use Cmd-click or Ctrl-click to ask Sprite to open a URL directly; Sprite consumes that whole gesture.
 Dragging text selects it instead of opening a link.

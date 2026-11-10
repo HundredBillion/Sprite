@@ -34,6 +34,9 @@ pub(crate) struct ResolvedHyperlink {
     pub(crate) span: crate::HyperlinkSpan,
 }
 
+/// A visible URL wins over everything: what the person can read is where the
+/// click goes. Failing that, an OSC 8 label is a link only when its address is
+/// shown nowhere on the row — see `titled_link_at`.
 pub(crate) fn resolve_hyperlink(
     terminal: &Terminal<'_, '_>,
     position: CellPosition,
@@ -56,7 +59,9 @@ pub(crate) fn resolve_hyperlink(
             *character = *first;
         }
     }
-    url_at(&row, usize::from(position.column)).map(|(uri, start, end)| ResolvedHyperlink {
+    let (uri, start, end) = url_at(&row, usize::from(position.column))
+        .or_else(|| titled_link_at(terminal, &row, position))?;
+    Some(ResolvedHyperlink {
         uri,
         span: crate::HyperlinkSpan {
             row: position.row,
@@ -66,9 +71,67 @@ pub(crate) fn resolve_hyperlink(
     })
 }
 
+/// The OSC 8 target of a descriptive label, when the label is the only way to
+/// reach it (issue #161).
+///
+/// Two refusals keep the label from misleading. Linked text that shows a URL
+/// offers only that URL, so a label cannot display one address and open
+/// another. And a label whose address is printed elsewhere on the row stays
+/// plain text: the address is the link, and the label beside it is not a
+/// second one (issue #96).
+fn titled_link_at(
+    terminal: &Terminal<'_, '_>,
+    row: &[char],
+    position: CellPosition,
+) -> Option<(String, usize, usize)> {
+    let column = usize::from(position.column);
+    let target = osc8_target(terminal, position.row, column)?;
+    if !is_allowed_link(&target) {
+        return None;
+    }
+    let same_link = |column: usize| {
+        osc8_target(terminal, position.row, column).is_some_and(|other| other == target)
+    };
+    let mut start = column;
+    while start > 0 && same_link(start - 1) {
+        start -= 1;
+    }
+    let mut end = column + 1;
+    while end < row.len() && same_link(end) {
+        end += 1;
+    }
+    let address_is_shown = visible_urls(row)
+        .any(|(uri, url_start, url_end)| uri == target || (url_start < end && start < url_end));
+    (!address_is_shown).then_some((target, start, end))
+}
+
+fn osc8_target(terminal: &Terminal<'_, '_>, row: u16, column: usize) -> Option<String> {
+    use libghostty_vt::terminal::{Point, PointCoordinate};
+
+    let cell = terminal
+        .grid_ref(Point::Viewport(PointCoordinate {
+            x: u16::try_from(column).ok()?,
+            y: u32::from(row),
+        }))
+        .ok()?;
+    let mut buffer = [0_u8; 2048];
+    let written = cell.hyperlink_uri(&mut buffer).ok()?;
+    if written == 0 {
+        return None;
+    }
+    std::str::from_utf8(&buffer[..written])
+        .ok()
+        .map(str::to_owned)
+}
+
 fn url_at(row: &[char], column: usize) -> Option<(String, usize, usize)> {
-    for start in 0..row.len() {
-        let Some(scheme) = ALLOWED_LINK_SCHEMES.iter().find(|scheme| {
+    visible_urls(row).find(|(_, start, end)| *start <= column && column < *end)
+}
+
+/// Every allowed URL printed on a row, with its cell span.
+fn visible_urls(row: &[char]) -> impl Iterator<Item = (String, usize, usize)> + '_ {
+    (0..row.len()).filter_map(|start| {
+        let scheme = ALLOWED_LINK_SCHEMES.iter().find(|scheme| {
             row.get(start..start + scheme.len() + 3)
                 .is_some_and(|characters| {
                     characters
@@ -76,9 +139,7 @@ fn url_at(row: &[char], column: usize) -> Option<(String, usize, usize)> {
                         .copied()
                         .eq(scheme.chars().chain("://".chars()))
                 })
-        }) else {
-            continue;
-        };
+        })?;
         let mut end = start + scheme.len() + 3;
         while end < row.len() && !row[end].is_whitespace() {
             end += 1;
@@ -86,14 +147,9 @@ fn url_at(row: &[char], column: usize) -> Option<(String, usize, usize)> {
         while end > start && ".,!?;:)]}>".contains(row[end - 1]) {
             end -= 1;
         }
-        if start <= column && column < end {
-            let uri: String = row[start..end].iter().collect();
-            if crate::is_allowed_link(&uri) {
-                return Some((uri, start, end));
-            }
-        }
-    }
-    None
+        let uri: String = row[start..end].iter().collect();
+        is_allowed_link(&uri).then_some((uri, start, end))
+    })
 }
 
 #[cfg(test)]

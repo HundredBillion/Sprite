@@ -45,7 +45,14 @@ jobs:
       - name: Install shell integration test dependencies
         run: sudo apt-get update && sudo apt-get install -y fish zsh
       - name: Test release, packaging and optional shell integration
-        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration scripts.test_ci_policy scripts.test_findings scripts.test_stress_tests -v
+        run: python3 -m unittest scripts.test_release_automation scripts.test_packaging_automation scripts.test_shell_integration scripts.test_ci_policy scripts.test_findings scripts.test_capabilities scripts.test_stress_tests -v
+      - name: Refuse a capability dropped without being retired
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          python3 scripts/check_capabilities.py --base FETCH_HEAD
 
   arch:
     name: arch linux
