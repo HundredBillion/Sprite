@@ -246,3 +246,83 @@ fn only_the_displayed_url_opens_once_for_each_intentional_click(cx: &mut gpui::T
         std::panic::resume_unwind(panic);
     }
 }
+
+/// A program that prints only a title — Claude Code renders Markdown links this
+/// way — leaves no address to click, so the title opens the page (issue #161).
+#[gpui::test]
+fn a_titled_link_with_no_visible_address_opens_once_for_each_click(cx: &mut gpui::TestAppContext) {
+    const URL: &str = "https://github.com/HundredBillion/Sprite/issues/161";
+    LINK_OPENS.with(|count| count.set(0));
+    let settings = crate::config::Settings::default();
+    cx.set_global(crate::config::ActiveSettings(settings.clone()));
+    let (sender, _exits) = async_channel::unbounded();
+    let script = format!(
+        "stty -echo; printf '\\033]8;;{URL}\\007Sprite issue 161\\033]8;;\\007 after\\r\\nREADY'; sleep 30"
+    );
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("READY"))
+        });
+        focus_and_draw(&view, cx);
+        let point_at = |column: f32, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                let origin = view.content_origin.unwrap_or(view.origin);
+                gpui::point(
+                    origin.x + view.metrics.width() * column,
+                    origin.y + view.metrics.height() * 0.5,
+                )
+            })
+        };
+        let title = point_at(5.5, cx);
+        cx.simulate_mouse_move(title, None, gpui::Modifiers::default());
+        settle_hover(&view, cx);
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.hovered_link
+                    .map(|(_, span)| (span.start_column, span.end_column)),
+                Some((0, 16)),
+                "the whole title, and nothing after it, shows as the link"
+            );
+        });
+        for expected in 1..=2 {
+            cx.simulate_mouse_down(title, gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_up(title, gpui::MouseButton::Left, gpui::Modifiers::default());
+            wait_for_view(&view, cx, |view| view.pending_link_click.is_none());
+            assert_eq!(LINK_OPENS.with(|count| count.get()), expected);
+            assert_eq!(cx.opened_url().as_deref(), Some(URL));
+        }
+        let after = point_at(18.5, cx);
+        cx.simulate_mouse_down(after, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(after, gpui::MouseButton::Left, gpui::Modifiers::default());
+        wait_for_view(&view, cx, |view| view.pending_link_click.is_none());
+        assert_eq!(
+            LINK_OPENS.with(|count| count.get()),
+            2,
+            "text after the title is not part of the link"
+        );
+    }));
+    if let Some(cleanup) = view.update(cx, |view, _| view.begin_shutdown()) {
+        cleanup.wait().unwrap();
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

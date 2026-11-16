@@ -49,7 +49,6 @@ pub use graphics::{
 };
 
 pub(crate) use config::max_clipboard_bytes;
-pub(crate) use hyperlink::is_allowed_link;
 #[cfg(test)]
 pub(crate) use session::WORKER_QUEUE_CAPACITY;
 

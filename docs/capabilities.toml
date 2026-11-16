@@ -1,0 +1,322 @@
+# What Sprite promises a person using it, and the tests that hold each promise.
+#
+# scripts/check_capabilities.py fails CI when a kept capability names no test
+# that exists, when an area has no kept capability left, or when a capability
+# present on the base branch is missing here. So a behavior on this list cannot
+# be removed or inverted by renaming its test: the change has to edit this file,
+# where a reviewer sees it. To stop keeping a promise, set status = "retired"
+# and give the reason and the decision (an ADR or issue); do not delete the
+# entry. ADR 0038 has the reasoning.
+#
+# This list is seeded from existing tests, by area. It is not a claim that
+# every behavior is covered; add an entry whenever a behavior someone relies
+# on gets a test.
+#
+# Fields: id (<area>.<name>), area, promise, status (kept | retired), tests
+# (Rust test fns under crates/ or Python tests under scripts/); reason and
+# decision when retired.
+
+areas = [
+    "links",
+    "clipboard",
+    "selection",
+    "paste",
+    "mouse",
+    "history",
+    "colours",
+    "session",
+    "keys",
+    "tabs-and-panes",
+    "pane-control",
+    "configuration",
+    "images",
+    "drawing",
+    "command-line",
+]
+
+[[capability]]
+id = "links.visible-url-opens"
+area = "links"
+promise = "Clicking a visible http:// or https:// URL opens it, once per click."
+status = "kept"
+tests = [
+    "a_visible_url_resolves_without_osc8_metadata",
+    "only_the_displayed_url_opens_once_for_each_intentional_click",
+]
+
+[[capability]]
+id = "links.titled-label-opens"
+area = "links"
+promise = "Clicking a titled link whose address is not shown on its row opens its target, once per click (ADR 0037)."
+status = "kept"
+tests = [
+    "a_titled_link_with_no_visible_address_resolves_to_its_target",
+    "a_titled_link_with_no_visible_address_opens_once_for_each_click",
+]
+
+[[capability]]
+id = "links.visible-url-wins"
+area = "links"
+promise = "Hidden OSC 8 metadata never changes where a visible URL leads, and linked text that shows a URL offers only that URL."
+status = "kept"
+tests = [
+    "a_visible_url_does_not_inherit_the_hidden_osc8_target",
+    "a_label_that_shows_a_url_cannot_send_the_click_elsewhere",
+]
+
+[[capability]]
+id = "links.label-beside-address-is-text"
+area = "links"
+promise = "A label printed beside its own address stays plain text; the address is the link."
+status = "kept"
+tests = [
+    "a_label_printed_beside_its_address_stays_plain_text",
+]
+
+[[capability]]
+id = "links.only-web-schemes"
+area = "links"
+promise = "Only http and https targets open; file, javascript and other schemes resolve to nothing."
+status = "kept"
+tests = [
+    "a_file_link_is_denied_by_default",
+    "an_executable_scheme_is_denied",
+    "a_titled_link_to_a_denied_scheme_resolves_to_nothing",
+]
+
+[[capability]]
+id = "links.reporting-program-owns-plain-click"
+area = "links"
+promise = "A program that has enabled mouse reporting receives ordinary clicks, and Sprite does not open the link a second time."
+status = "kept"
+tests = [
+    "a_mouse_reporting_program_opens_a_plain_url_click_without_a_second_host_open",
+]
+
+[[capability]]
+id = "links.modified-click-opens-directly"
+area = "links"
+promise = "Cmd-click or Ctrl-click asks Sprite to open a URL itself, and the program sees no part of that gesture."
+status = "kept"
+tests = [
+    "a_modified_url_click_does_not_send_an_unpaired_release_to_the_program",
+    "link_activation_supports_plain_and_platform_modifier_clicks",
+]
+
+[[capability]]
+id = "links.drag-selects"
+area = "links"
+promise = "Dragging across a link selects text instead of opening it."
+status = "kept"
+tests = [
+    "link_click_distinguishes_local_taps_from_drags_and_selection",
+]
+
+[[capability]]
+id = "clipboard.focused-pane-writes"
+area = "clipboard"
+promise = "A focused pane's program may write the clipboard; an unfocused one may not."
+status = "kept"
+tests = [
+    "a_focused_pane_may_write_the_clipboard",
+    "an_unfocused_pane_may_not_write_the_clipboard",
+]
+
+[[capability]]
+id = "clipboard.never-read-by-programs"
+area = "clipboard"
+promise = "A program's request to read the clipboard is never answered."
+status = "kept"
+tests = [
+    "a_clipboard_read_request_is_never_answered",
+]
+
+[[capability]]
+id = "selection.word-and-copy"
+area = "selection"
+promise = "Double-click selects the whole word, and copying returns exactly the selected text."
+status = "kept"
+tests = [
+    "word_selection_expands_to_the_whole_word",
+    "copying_returns_the_selected_text",
+]
+
+[[capability]]
+id = "paste.bracketed-and-contained"
+area = "paste"
+promise = "Pasted text is bracketed when the program asks, and cannot break out of its brackets."
+status = "kept"
+tests = [
+    "bracketed_paste_wraps_the_text",
+    "paste_cannot_escape_its_own_brackets",
+]
+
+[[capability]]
+id = "paste.large-paste-is-delivered"
+area = "paste"
+promise = "A large paste is queued and delivered, not rejected."
+status = "kept"
+tests = [
+    "a_large_paste_is_queued_rather_than_rejected",
+]
+
+[[capability]]
+id = "mouse.reporting-is-opt-in"
+area = "mouse"
+promise = "A program receives mouse events only when it has enabled reporting."
+status = "kept"
+tests = [
+    "a_child_with_reporting_enabled_receives_mouse_events",
+    "a_child_without_reporting_receives_no_mouse_events",
+]
+
+[[capability]]
+id = "mouse.wheel-reaches-full-screen-programs"
+area = "mouse"
+promise = "The wheel reaches a reporting program, and scrolls a full-screen program without reporting through arrow keys."
+status = "kept"
+tests = [
+    "a_child_with_reporting_enabled_receives_the_wheel",
+    "a_full_screen_child_without_reporting_receives_arrow_keys",
+]
+
+[[capability]]
+id = "history.scrollback-is-readable"
+area = "history"
+promise = "Scrollback returns the lines asked for and runs continuously into the active screen."
+status = "kept"
+tests = [
+    "a_request_returns_the_active_screen_plus_the_lines_asked_for",
+    "history_runs_continuously_into_the_active_screen",
+]
+
+[[capability]]
+id = "history.viewport-follows-the-user"
+area = "history"
+promise = "A scrolled viewport stays put while output arrives and returns to live output on a keystroke."
+status = "kept"
+tests = [
+    "a_scrolled_viewport_stays_anchored_while_output_arrives",
+    "a_keystroke_returns_the_viewport_to_live_output",
+]
+
+[[capability]]
+id = "colours.configured-then-program"
+area = "colours"
+promise = "A pane starts with the configured colours, and a program that sets its own wins."
+status = "kept"
+tests = [
+    "configured_colours_are_what_a_pane_starts_with",
+    "a_program_that_sets_its_own_colours_wins",
+]
+
+[[capability]]
+id = "session.keys-and-resize-reach-the-program"
+area = "session"
+promise = "Key events reach the program in order, and a resize reaches both the pty and the screen."
+status = "kept"
+tests = [
+    "key_events_reach_the_child_in_order",
+    "resize_updates_pty_and_snapshot",
+]
+
+[[capability]]
+id = "session.exit-and-shutdown"
+area = "session"
+promise = "A program's exit is reported, and closing a pane reaps its processes."
+status = "kept"
+tests = [
+    "child_exit_is_reported",
+    "shutdown_reaps_the_child_and_is_idempotent",
+]
+
+[[capability]]
+id = "session.foreground-program-is-known"
+area = "session"
+promise = "Sprite knows whether a pane is idle at its prompt and which program is running in it."
+status = "kept"
+tests = [
+    "a_shell_at_its_prompt_is_idle",
+    "a_running_program_is_reported_by_name",
+]
+
+[[capability]]
+id = "keys.copy-paste-and-line-kill"
+area = "keys"
+promise = "Copy and paste shortcuts work in the platform and terminal families, and line-kill keys reach the shell."
+status = "kept"
+tests = [
+    "clipboard_shortcuts_accept_platform_and_terminal_families",
+    "command_backspace_kills_the_line",
+    "control_u_is_left_for_the_linux_shell_line_kill_binding",
+]
+
+[[capability]]
+id = "tabs-and-panes.tabs-own-their-sessions"
+area = "tabs-and-panes"
+promise = "A window starts with one tab and one session, and closing a tab ends its sessions and no others."
+status = "kept"
+tests = [
+    "a_window_starts_with_one_tab_holding_one_session",
+    "closing_a_tab_ends_every_session_it_owns_and_no_others",
+]
+
+[[capability]]
+id = "tabs-and-panes.names-persist"
+area = "tabs-and-panes"
+promise = "A tab keeps the name it is given."
+status = "kept"
+tests = [
+    "a_tab_keeps_the_name_it_is_given",
+]
+
+[[capability]]
+id = "pane-control.open-to-the-owner"
+area = "pane-control"
+promise = "Any process of the same user can drive a window's panes without a key, and each window answers only for its own panes (ADR 0036)."
+status = "kept"
+tests = [
+    "any_process_of_the_user_can_drive_a_window_without_a_key",
+    "each_window_answers_only_for_its_own_panes",
+]
+
+[[capability]]
+id = "configuration.bad-config-degrades"
+area = "configuration"
+promise = "A broken configuration file leaves defaults in place and says so; valid fields are read."
+status = "kept"
+tests = [
+    "a_broken_file_leaves_defaults_and_says_so",
+    "a_font_family_and_size_are_read",
+]
+
+[[capability]]
+id = "images.bounded-and-never-from-files"
+area = "images"
+promise = "Images are held within the configured limits and are never loaded from a file path."
+status = "kept"
+tests = [
+    "a_raw_image_is_accepted_and_held",
+    "an_image_is_never_read_from_a_file",
+    "the_storage_limit_is_the_one_configured",
+]
+
+[[capability]]
+id = "drawing.blocks-and-lines-tile"
+area = "drawing"
+promise = "Block elements and box-drawing lines tile across cells without seams."
+status = "kept"
+tests = [
+    "a_run_of_full_blocks_tiles_without_a_seam",
+    "a_column_of_light_verticals_tiles_without_a_seam",
+]
+
+[[capability]]
+id = "command-line.launch-and-config"
+area = "command-line"
+promise = "`sprite -e` hands a program to a new window, and `--config` reaches it."
+status = "kept"
+tests = [
+    "a_program_can_be_handed_to_a_new_window",
+    "an_explicit_configuration_file_reaches_the_window",
+]

@@ -1,5 +1,6 @@
-//! Only visible HTTP(S) URLs are terminal links. OSC 8 metadata must not
-//! turn descriptive labels into click targets or replace a printed URL's destination.
+//! Terminal links are visible HTTP(S) URLs, and OSC 8 labels whose address is
+//! not shown anywhere on their row. OSC 8 metadata must never replace a printed
+//! URL's destination, and a label printed beside its address stays plain text.
 #![expect(
     clippy::expect_used,
     reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
@@ -34,6 +35,11 @@ fn resolve_event(
     column: u16,
 ) -> TerminalEvent {
     snapshots.wait_for("the link", |bundle| pane_text(bundle).contains("DONE"));
+    ask(session, events, column)
+}
+
+/// Asks about another cell of a screen `resolve_event` has already waited for.
+fn ask(session: &mut TerminalSession, events: &EventPump, column: u16) -> TerminalEvent {
     session
         .send(TerminalCommand::ResolveHyperlink {
             position: CellPosition { row: 0, column },
@@ -73,8 +79,17 @@ fn resolve(
     uri
 }
 
+fn ask_uri(session: &mut TerminalSession, events: &EventPump, column: u16) -> Option<String> {
+    let TerminalEvent::Hyperlink { uri, .. } = ask(session, events, column) else {
+        unreachable!("ask returns a hyperlink event");
+    };
+    uri
+}
+
+/// A program that prints only a title leaves no other way to reach the page,
+/// so the title is the link (issue #161).
 #[test]
-fn a_named_osc8_label_is_not_clickable() {
+fn a_titled_link_with_no_visible_address_resolves_to_its_target() {
     let sprite_term::Spawned {
         mut session,
         events,
@@ -84,7 +99,89 @@ fn a_named_osc8_label_is_not_clickable() {
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
-    assert_eq!(resolve(&mut session, &events, &snapshots, 2), None);
+    assert!(matches!(
+        resolve_event(&mut session, &events, &snapshots, 2),
+        TerminalEvent::Hyperlink {
+            uri: Some(uri),
+            span: Some(sprite_term::HyperlinkSpan {
+                row: 0,
+                start_column: 0,
+                end_column: 8,
+            }),
+            ..
+        } if uri == "https://example.com/page"
+    ));
+}
+
+/// When the address is printed on the same row, the address is the link and
+/// the label beside it stays plain text (issue #96).
+#[test]
+fn a_label_printed_beside_its_address_stays_plain_text() {
+    const URL: &str = "https://example.com/pull/95";
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&format!(
+        "printf '\\033]8;;{URL}\\007Sprite PR\\033]8;;\\007 ({URL})\\n'; printf 'DONE\\n'; sleep 30"
+    ));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+
+    assert_eq!(
+        resolve(&mut session, &events, &snapshots, 2),
+        None,
+        "the label is not a second link to an address the row already shows"
+    );
+    assert_eq!(ask_uri(&mut session, &events, 14).as_deref(), Some(URL));
+}
+
+/// A label must not be able to show one address and send the click to another.
+#[test]
+fn a_label_that_shows_a_url_cannot_send_the_click_elsewhere() {
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&link_script(
+        "https://evil.example/steal",
+        "docs https://bank.example",
+    ));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+
+    assert_eq!(
+        resolve(&mut session, &events, &snapshots, 1),
+        None,
+        "linked text that shows a URL offers only that URL"
+    );
+    assert_eq!(
+        ask_uri(&mut session, &events, 8).as_deref(),
+        Some("https://bank.example")
+    );
+}
+
+/// The scheme policy applies to a titled link's hidden target as well.
+#[test]
+fn a_titled_link_to_a_denied_scheme_resolves_to_nothing() {
+    for target in ["file:///etc/passwd", "javascript:alert(1)"] {
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots,
+        } = session(&link_script(target, "harmless"));
+        let events = EventPump::new(events);
+        let snapshots = SnapshotPump::new(snapshots);
+        events.expect_ready();
+
+        assert_eq!(
+            resolve(&mut session, &events, &snapshots, 2),
+            None,
+            "{target} is not an allowed scheme"
+        );
+    }
 }
 
 #[test]
