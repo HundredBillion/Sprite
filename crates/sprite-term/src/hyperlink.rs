@@ -106,7 +106,7 @@ fn titled_link_at(
 }
 
 fn osc8_target(terminal: &Terminal<'_, '_>, row: u16, column: usize) -> Option<String> {
-    use libghostty_vt::terminal::{Point, PointCoordinate};
+    use libghostty_vt::point::{Coordinate as PointCoordinate, Point};
 
     let cell = terminal
         .grid_ref(Point::Viewport(PointCoordinate {
