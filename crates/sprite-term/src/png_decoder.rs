@@ -14,7 +14,7 @@
 //! allocated for it, and every failure is a `None` rather than a panic.
 
 use std::cell::RefCell;
-use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 
 use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{DecodePng, DecodedImage, set_png_decoder};
@@ -25,6 +25,18 @@ thread_local! {
     /// One worker thread per pane (ADR 0008) and libghostty decoding on the
     /// thread that writes to the terminal together make a thread-local the
     /// pane's own slot: a decode is always asked for by the pane it is for.
+    ///
+    /// **This is keyed by thread, not by terminal**, because libghostty's
+    /// decoder hook is told neither which terminal the PNG arrived on nor
+    /// anything else that would identify one. It is therefore only correct
+    /// while each terminal is written on a thread of its own:
+    ///
+    /// - A terminal written on a thread that was never given a decoder
+    ///   refuses every PNG. That is the safe direction, and it is what the
+    ///   in-crate tests and benchmarks that build a bare terminal get.
+    /// - Two terminals written on one thread would share the last decoder
+    ///   set there, and so each other's limit. Nothing in this crate does
+    ///   that; a design that did would have to stop using this slot.
     static PANE: RefCell<Option<PngDecoder>> = const { RefCell::new(None) };
 }
 
@@ -71,21 +83,38 @@ impl DecodePng for PaneDispatch {
 /// registration is a write libghostty does not synchronize, so it has to
 /// happen before any other thread can be inside the library. Every libghostty
 /// object in this crate is made on a worker after its terminal, and every
-/// terminal is made by `new_terminal`, which calls this first. The second and
-/// later calls find the registration done and write nothing.
+/// terminal is made by `new_terminal`, which calls this first. Once it has
+/// succeeded, later calls find the registration done and write nothing.
+///
+/// A failure is not remembered. The pane being started fails, and the next
+/// one tries again, so one refusal does not end image decoding, or pane
+/// creation, for as long as the process lives.
 #[allow(
     unsafe_code,
     reason = "the binding marks its unsynchronized process-wide registration unsafe"
 )]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the lock is held across the registration on purpose: it is what makes the registration exclusive"
+)]
 pub(crate) fn install() -> Result<(), libghostty_vt::Error> {
-    static INSTALLED: OnceLock<Result<(), libghostty_vt::Error>> = OnceLock::new();
-    *INSTALLED.get_or_init(|| {
-        // SAFETY: `get_or_init` runs this at most once and blocks every other
-        // caller until it returns. All use of libghostty in this process
-        // follows a `new_terminal` call, which reaches this line first, so no
-        // other thread is inside a libghostty call while the hook is written.
-        unsafe { set_png_decoder(Some(Box::new(PaneDispatch))) }
-    })
+    static INSTALLED: Mutex<bool> = Mutex::new(false);
+
+    // A poisoned lock still guards a plain flag, and a panic can only have
+    // left it false, which means "try again".
+    let mut installed = INSTALLED.lock().unwrap_or_else(PoisonError::into_inner);
+    if *installed {
+        return Ok(());
+    }
+    // SAFETY: the lock admits one caller at a time, and it is held until this
+    // call returns. All use of libghostty in this process follows a
+    // `new_terminal` call that got past this function, and none has while
+    // `installed` is false: a caller that failed here made no terminal. So no
+    // other thread is inside a libghostty call while the hook is written,
+    // on the first attempt or on a retry.
+    unsafe { set_png_decoder(Some(Box::new(PaneDispatch))) }?;
+    *installed = true;
+    Ok(())
 }
 
 /// Gives the pane whose worker is this thread a decoder bounded by `limit`
@@ -143,25 +172,27 @@ impl DecodePng for PngDecoder {
             return None;
         }
 
-        // Sized, not merely reserved: `next_frame` writes into the slice the
-        // vector's *length* describes, and a reserved-but-empty vector is a
-        // zero-length slice. This is the upstream bug this decoder exists to
-        // avoid repeating.
-        let mut decoded = vec![0_u8; needed];
-        let info = reader.next_frame(&mut decoded).ok()?;
+        // The buffer must come from libghostty's allocator: it takes ownership
+        // and frees it with the same allocator. It is allocated at its final
+        // size, the four bytes a pixel already checked against the limit, and
+        // the frame is decoded straight into the front of it, so no second
+        // image-sized buffer exists and nothing is copied. That matters more
+        // than it looks: every pane's decode runs under one process-wide
+        // lock, so time spent here is time another pane's PNG waits.
+        //
+        // The slice is sized, not merely reserved: `next_frame` writes into
+        // exactly the bytes it is handed.
+        let mut bytes = Bytes::new_zeroed_with_alloc(alloc, stored).ok()?;
+        let info = reader.next_frame(bytes.get_mut(..needed)?).ok()?;
         reader.finish().ok()?;
 
         let produced = info.buffer_size();
-        if info.bit_depth != png::BitDepth::Eight || produced == 0 || produced > decoded.len() {
+        if info.bit_depth != png::BitDepth::Eight || produced == 0 || produced > needed {
             return None;
         }
-
-        // The buffer must come from libghostty's allocator: it takes ownership
-        // and frees it with the same allocator. It holds the four bytes a
-        // pixel already checked against the limit; a frame that does not fill
-        // exactly that many pixels is refused by `widen_to_rgba`.
-        let mut bytes = Bytes::new_zeroed_with_alloc(alloc, stored).ok()?;
-        if !widen_to_rgba(info.color_type, &decoded[..produced], &mut bytes) {
+        // A frame that does not fill exactly the pixels the buffer holds is
+        // refused here.
+        if !widen_in_place(info.color_type, produced, &mut bytes) {
             return None;
         }
 
@@ -173,12 +204,17 @@ impl DecodePng for PngDecoder {
     }
 }
 
-/// Writes eight-bit `samples` of `color` into `rgba`, four bytes a pixel.
+/// Spreads the `produced` bytes of eight-bit `color` samples at the front of
+/// `rgba` over the whole of it, four bytes a pixel.
 ///
-/// Returns `false`, writing nothing useful, when the two do not describe the
-/// same number of pixels or the colour type is not one the transformations
-/// above can produce.
-fn widen_to_rgba(color: png::ColorType, samples: &[u8], rgba: &mut [u8]) -> bool {
+/// Works from the last pixel back to the first. A pixel's samples start no
+/// later than its four output bytes do, so writing pixel `i` can only touch
+/// samples of pixels after it, and those have already been read.
+///
+/// Returns `false`, leaving `rgba` unusable, when the samples and the buffer
+/// do not describe the same number of pixels or the colour type is not one
+/// the transformations above can produce.
+fn widen_in_place(color: png::ColorType, produced: usize, rgba: &mut [u8]) -> bool {
     let channels = match color {
         png::ColorType::Rgba => 4,
         png::ColorType::Rgb => 3,
@@ -187,20 +223,28 @@ fn widen_to_rgba(color: png::ColorType, samples: &[u8], rgba: &mut [u8]) -> bool
         // `ALPHA` expands every palette, so an index here is not a colour.
         png::ColorType::Indexed => return false,
     };
-    if !samples.len().is_multiple_of(channels) || samples.len() / channels != rgba.len() / 4 {
+    let pixels = rgba.len() / 4;
+    if !rgba.len().is_multiple_of(4)
+        || !produced.is_multiple_of(channels)
+        || produced / channels != pixels
+    {
         return false;
     }
-    for (pixel, out) in samples
-        .chunks_exact(channels)
-        .zip(rgba.as_chunks_mut::<4>().0)
-    {
-        *out = match *pixel {
-            [red, green, blue, alpha] => [red, green, blue, alpha],
-            [red, green, blue] => [red, green, blue, u8::MAX],
-            [gray, alpha] => [gray, gray, gray, alpha],
-            [gray] => [gray, gray, gray, u8::MAX],
+    if channels == 4 {
+        return true;
+    }
+    for pixel in (0..pixels).rev() {
+        let from = pixel * channels;
+        let wide = match rgba.get(from..from + channels) {
+            Some(&[red, green, blue]) => [red, green, blue, u8::MAX],
+            Some(&[gray, alpha]) => [gray, gray, gray, alpha],
+            Some(&[gray]) => [gray, gray, gray, u8::MAX],
             _ => return false,
         };
+        let Some(out) = rgba.get_mut(pixel * 4..pixel * 4 + 4) else {
+            return false;
+        };
+        out.copy_from_slice(&wide);
     }
     true
 }
@@ -288,6 +332,80 @@ mod tests {
         decoder
             .decode_png(&allocator, data)
             .map(|image| (image.width, image.height, image.data.len()))
+    }
+
+    /// The slot is the thread's. A thread never given a decoder refuses, a
+    /// pane with images decodes, and a pane without them refuses again.
+    #[test]
+    fn a_png_is_decoded_only_on_a_thread_that_was_given_a_decoder() {
+        std::thread::spawn(|| {
+            let allocator = Allocator::GLOBAL;
+            let png = png_bytes(2, 2);
+            let mut dispatch = PaneDispatch;
+
+            assert!(dispatch.decode_png(&allocator, &png).is_none());
+
+            set_for_this_pane(Some(1024));
+            assert!(dispatch.decode_png(&allocator, &png).is_some());
+
+            set_for_this_pane(None);
+            assert!(dispatch.decode_png(&allocator, &png).is_none());
+        })
+        .join()
+        .expect("the decoding thread");
+    }
+
+    /// One thread's decoder is not another's: the limit a pane was given is
+    /// not what a different pane decodes with.
+    #[test]
+    fn a_decoder_given_to_one_thread_is_not_seen_by_another() {
+        std::thread::spawn(|| {
+            set_for_this_pane(Some(1024 * 1024));
+            std::thread::spawn(|| {
+                let allocator = Allocator::GLOBAL;
+                assert!(
+                    PaneDispatch
+                        .decode_png(&allocator, &png_bytes(2, 2))
+                        .is_none()
+                );
+            })
+            .join()
+            .expect("the other thread");
+        })
+        .join()
+        .expect("the thread with a decoder");
+    }
+
+    /// Gray and alpha are widened inside the buffer they were decoded into,
+    /// so every pixel must differ: a pass that overwrote samples it had not
+    /// read yet would still get a uniform image right.
+    #[test]
+    fn gray_and_alpha_pixels_are_widened_without_overwriting_each_other() {
+        let (width, height) = (5_u32, 3_u32);
+        let samples: Vec<u8> = (0..width * height)
+            .flat_map(|pixel| [pixel as u8 * 7 + 1, 255 - pixel as u8 * 11])
+            .collect();
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, width, height);
+            encoder.set_color(png::ColorType::GrayscaleAlpha);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("write the header");
+            writer.write_image_data(&samples).expect("write the pixels");
+        }
+
+        let allocator = Allocator::GLOBAL;
+        let image = PngDecoder::new(1024)
+            .decode_png(&allocator, &png)
+            .expect("a gray and alpha image decodes");
+
+        let expected: Vec<u8> = samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[gray, alpha]| [gray, gray, gray, alpha])
+            .collect();
+        assert_eq!(image.data.to_vec(), expected);
     }
 
     #[test]

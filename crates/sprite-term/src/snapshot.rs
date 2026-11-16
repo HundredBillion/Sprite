@@ -121,9 +121,13 @@ impl<'vt> Projector<'vt> {
         let first = available.saturating_sub(history_rows);
 
         let mut rows = Vec::with_capacity(total_rows.saturating_sub(first));
+        // One formatter for the whole capture: only the selection changes
+        // from row to row.
+        let mut formatter = row_formatter(terminal)?;
         for y in first..total_rows {
-            rows.push(history_row(terminal, size, y)?);
+            rows.push(history_row(terminal, &mut formatter, size, y)?);
         }
+        drop(formatter);
 
         // Read from the same terminal, in the same call, as the rows above: an
         // answer that mixed one generation's rows with another's cursor would
@@ -134,18 +138,8 @@ impl<'vt> Projector<'vt> {
             offset: usize::try_from(scrollbar.offset).unwrap_or(0),
             visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows())),
         };
-        let title = terminal
-            .title()
-            .ok()
-            .and_then(|value| std::str::from_utf8(value).ok())
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        let working_directory = terminal
-            .pwd()
-            .ok()
-            .and_then(|value| std::str::from_utf8(value).ok())
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+        let title = crate::reported(terminal.title());
+        let working_directory = crate::reported(terminal.pwd());
         let snapshot = render_state.update(terminal).map_err(vt("render_update"))?;
         let cursor = cursor_snapshot(&snapshot)?;
 
@@ -222,18 +216,8 @@ impl<'vt> Projector<'vt> {
             .is_mouse_tracking()
             .map_err(vt("is_mouse_tracking"))?;
         // Empty means the child never set one; that is unknown, not a title.
-        let title = terminal
-            .title()
-            .ok()
-            .and_then(|value| std::str::from_utf8(value).ok())
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        let working_directory = terminal
-            .pwd()
-            .ok()
-            .and_then(|value| std::str::from_utf8(value).ok())
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+        let title = crate::reported(terminal.title());
+        let working_directory = crate::reported(terminal.pwd());
         let viewport = Viewport {
             total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),
             offset: usize::try_from(scrollbar.offset).unwrap_or(0),
@@ -494,29 +478,43 @@ impl<'vt> Projector<'vt> {
     }
 }
 
-/// The plain text inside `selection`, as the screen holds it.
+/// A formatter that reads rows as the screen holds them.
+///
+/// Neither unwrapped nor trimmed: a soft-wrapped row stays its own row, and
+/// trailing spaces a program actually wrote are part of the row. Unwrapping
+/// would destroy exactly the boundary `wrapped` reports.
 ///
 /// A formatter of its own rather than the terminal's active selection: the
 /// active selection is the user's, and reading a row must not move it.
-#[allow(
-    unsafe_code,
-    reason = "the binding cannot prove a selection belongs to the formatter's terminal"
-)]
-fn format_row<'t>(
-    terminal: &'t Terminal<'_, '_>,
-    selection: &Selection<'t>,
-) -> Result<String, SessionError> {
+fn row_formatter<'t, 'alloc: 'cb, 'cb: 't>(
+    terminal: &'t Terminal<'alloc, 'cb>,
+) -> Result<Formatter<'t, 'alloc, 'cb>, SessionError> {
     let mut formatter = Formatter::new(terminal).map_err(vt("history_format"))?;
     formatter
         .set_format(Format::Plain)
         .and_then(|formatter| formatter.set_unwrap(false))
         .and_then(|formatter| formatter.set_trim(false))
         .map_err(vt("history_format"))?;
-    // SAFETY: `selection` borrows `terminal` for `'t`, the same borrow the
-    // formatter holds, and its only caller builds both endpoints from
-    // `terminal.grid_ref` on the active screen immediately before this call.
-    // Nothing can write to, resize or switch the screen of a terminal that is
-    // shared-borrowed, so the endpoints are still that screen's.
+    Ok(formatter)
+}
+
+/// The plain text inside `selection`, which replaces whatever selection
+/// `formatter` held before.
+#[allow(
+    unsafe_code,
+    reason = "the binding cannot prove a selection belongs to the formatter's terminal"
+)]
+fn format_row<'t>(
+    formatter: &mut Formatter<'t, '_, '_>,
+    selection: &Selection<'t>,
+) -> Result<String, SessionError> {
+    // SAFETY: `selection` and `formatter` borrow one terminal for `'t`: the
+    // only caller makes the formatter from the terminal it then builds both
+    // endpoints from, with `terminal.grid_ref` on the active screen,
+    // immediately before this call. Nothing can write to, resize or switch
+    // the screen of a terminal that is shared-borrowed, so the endpoints are
+    // still that screen's. A refused selection leaves the previous one in
+    // place, and the `?` below returns before anything is formatted from it.
     unsafe { formatter.set_selection(Some(selection)) }.map_err(vt("history_format"))?;
     let bytes = formatter.format_alloc(None).map_err(vt("history_format"))?;
 
@@ -524,8 +522,9 @@ fn format_row<'t>(
 }
 
 /// One row of the active screen in screen coordinates, history included.
-fn history_row(
-    terminal: &Terminal<'_, '_>,
+fn history_row<'t>(
+    terminal: &'t Terminal<'_, '_>,
+    formatter: &mut Formatter<'t, '_, '_>,
     size: ValidTerminalSize,
     y: usize,
 ) -> Result<PaneRow, SessionError> {
@@ -551,11 +550,8 @@ fn history_row(
         libghostty_vt::screen::RowSemanticPrompt::Continuation => PromptKind::Continuation,
     };
 
-    // Neither unwrapped nor trimmed: a soft-wrapped row stays its own row, and
-    // trailing spaces a program actually wrote are part of the row. Unwrapping
-    // here would destroy exactly the boundary `wrapped` is reporting.
     let selection = Selection::new(start, end, false);
-    let text = format_row(terminal, &selection)?;
+    let text = format_row(formatter, &selection)?;
     // One row was asked for, so a trailing row separator carries no
     // information and would otherwise appear inside the row's own text.
     let text = text.strip_suffix('\n').unwrap_or(&text);

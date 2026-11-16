@@ -161,10 +161,10 @@ SVG rendering and font validation; locked CI does not automatically update it.
 **Capability.** Decoding PNG images transmitted through the Kitty graphics
 protocol.
 
-**Not provided.** `libghostty-vt` accepts a decoder through `set_png_decoder`
-but does not supply a usable one — see its entry for the two reasons.
-Sprite therefore implements `DecodePng` itself, and needs a PNG decoder to do
-it. Writing one is out of the question: PNG is a container format with
+**Not provided in the form Sprite needs.** `libghostty-vt` accepts a decoder
+through `set_png_decoder`, and its own, behind the `png` feature, has no
+per-pane limit — see its entry. Sprite therefore implements `DecodePng` itself,
+and needs a PNG decoder to do it. Writing one is out of the question: PNG is a container format with
 filtering, interlacing, palettes, and multiple bit depths, decoded from bytes an
 arbitrary program printed.
 
@@ -299,8 +299,15 @@ than that pane's storage limit before allocating for it.
 keeps one decoder for the process rather than one per thread, serializes
 decodes behind a lock, and marks `set_png_decoder` unsafe because libghostty
 does not synchronize the registration. Sprite registers once, before the first
-terminal is created, and never clears it. Two panes decoding PNGs at the same
-moment therefore take turns.
+terminal is created, and never clears it; a registration that fails is tried
+again by the next pane rather than remembered. Two panes decoding PNGs at the
+same moment therefore take turns, so Sprite decodes straight into libghostty's
+buffer to keep each turn short, and a pane's per-image limit bounds it.
+
+The hook is told neither which terminal a PNG arrived on nor anything that
+identifies one, so Sprite finds the pane's decoder by thread. That is correct
+only while each terminal is written on a thread of its own (ADR 0008); a
+terminal written anywhere else refuses PNGs.
 
 **A fourth, found while testing the memory limits.** When a Kitty transmission
 exceeds either bound — the image storage limit or the APC byte cap — the parser
@@ -333,13 +340,14 @@ libghostty-vt 1.0.1. The compatibility suite guards this pairing; changes to
 either pin go through ADR 0003 review. Sprite returns to a crates.io release
 once one is built against a Ghostty that supports Zig 0.17 (ADR 0009, amended).
 
-**Upstream documentation defect.** `GhosttyTerminalOptions.max_scrollback` is
-documented in `include/ghostty/vt/terminal.h` as "Maximum number of lines to
-keep in scrollback history". It is not lines. `src/terminal/Screen.zig` states
-the value is "the amount of scrollback to keep in bytes… rounded UP to the
-nearest page size", and measurement confirms it. Checkpoint 1 believed the
-header and set 10,000 intending lines; it meant ten kilobytes. Sprite's field is
-now named `scrollback_bytes`.
+**Scrollback is measured in bytes.** Ghostty's header once documented
+`GhosttyTerminalOptions.max_scrollback` as "Maximum number of lines to keep in
+scrollback history" while `src/terminal/Screen.zig` treated the value as bytes
+rounded up to a page. Checkpoint 1 believed the header and set 10,000 intending
+lines; it meant ten kilobytes. Sprite's field is named `scrollback_bytes` for
+that reason. At the pinned source the option is gone: there are separate
+byte and line limits with names that say which they are, and Sprite sets the
+byte one.
 
 Retention is also coarsely quantized. Measured against 3,000 lines of output:
 budgets of 4 KiB, 64 KiB, and 1 MiB each retained 661 rows, while 16 MiB

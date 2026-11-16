@@ -305,6 +305,13 @@ pub(crate) fn capture_graphics(
         let mut iteration = placements
             .update(&graphics)
             .map_err(vt("placement_iterator"))?;
+        // The iterator is shared with the frame and placement captures, and
+        // its layer filter outlives `update`: left alone, this would list only
+        // the layer the last of those passes ended on. An empty mask is the
+        // binding's "every layer".
+        iteration
+            .set_layer(libghostty_vt::kitty::graphics::Layer::empty())
+            .map_err(vt("placement_layer"))?;
         while iteration.next().is_some() {
             let image_id = iteration.image_id().map_err(vt("placement_image_id"))?;
             placed.push(PlacementSummary {
@@ -576,6 +583,38 @@ mod tests {
             key(&pair[0]) <= key(&pair[1])
         }));
         work
+    }
+
+    /// The shared iterator keeps its layer filter between captures, and a
+    /// frame capture ends on the layer above the text.
+    #[test]
+    fn a_graphics_capture_after_a_frame_capture_lists_every_layer() {
+        let mut terminal = crate::new_terminal(80, 24, 1000).unwrap();
+        terminal.set_kitty_image_storage_limit(1024 * 1024).unwrap();
+        terminal.vt_write(b"\x1b_Ga=t,f=32,s=1,v=1,i=1;ESIzRA==\x1b\\");
+        // One placement in each layer: below the background, below the text
+        // and above it.
+        for (placement, z) in [(1, -1_073_741_825_i64), (2, -1), (3, 0)] {
+            terminal.vt_write(
+                format!("\x1b[H\x1b_Ga=p,i=1,p={placement},z={z},c=1,r=1,C=1\x1b\\").as_bytes(),
+            );
+        }
+        let mut iterator = PlacementIterator::new().unwrap();
+        let mut cache = PixelCache::default();
+
+        let frame = capture_frame(&terminal, &mut iterator, &mut cache)
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.placements.len(), 3);
+
+        let snapshot = capture_graphics(&terminal, &mut iterator).unwrap();
+        let mut listed: Vec<u32> = snapshot
+            .placements
+            .iter()
+            .map(|placement| placement.placement)
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(listed, vec![1, 2, 3]);
     }
 
     #[test]

@@ -203,7 +203,7 @@ fn register_title(
 ) -> Result<(), libghostty_vt::Error> {
     terminal
         .on_title_changed(move |terminal: &Terminal<'_, '_>| {
-            notices.borrow_mut().title = Some(reported(terminal.title()));
+            notices.borrow_mut().title = Some(crate::reported(terminal.title()));
         })
         .map(|_| ())
 }
@@ -214,22 +214,9 @@ fn register_pwd(
 ) -> Result<(), libghostty_vt::Error> {
     terminal
         .on_pwd_changed(move |terminal: &Terminal<'_, '_>| {
-            notices.borrow_mut().working_directory = Some(reported(terminal.pwd()));
+            notices.borrow_mut().working_directory = Some(crate::reported(terminal.pwd()));
         })
         .map(|_| ())
-}
-
-/// What a title or directory change reports: the new value, or `None` when
-/// the program cleared it or it could not be read.
-fn reported<E>(value: Result<&[u8], E>) -> Option<String> {
-    value
-        .ok()
-        // The binding hands back the bytes the program sent. A value that is
-        // not UTF-8 is reported as unknown, as it was when the binding itself
-        // refused it.
-        .and_then(|value| std::str::from_utf8(value).ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
 }
 
 struct Pending {
