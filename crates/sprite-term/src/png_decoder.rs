@@ -1,43 +1,97 @@
 //! Sprite's PNG decoder for the Kitty graphics protocol.
 //!
 //! **Why Sprite has its own.** `libghostty-vt` ships a `RustPngDecoder` behind
-//! its `png` feature, and it cannot be used: the struct has a private field and
-//! neither a constructor nor a `Default`, so nothing outside that crate can
-//! build one. Its `decode_png` is also wrong — it reserves buffer *capacity*
-//! and never sets the buffer's length, then hands `next_frame` a zero-length
-//! slice — so it would decode nothing even if it could be constructed. Both are
-//! recorded in `DEPENDENCIES.md`, and both are worth reporting upstream.
+//! its `png` feature. When this was written that decoder could not be built
+//! from outside its crate and decoded nothing; upstream has since replaced it
+//! with one that works. Sprite keeps its own because the limit here is the
+//! *pane's*: libghostty has one decoder for the whole process, and only a
+//! decoder on this side can refuse an image by the storage limit of the pane
+//! that received it. `DEPENDENCIES.md` records the history.
 //!
 //! **This is a parser for hostile input.** Every byte reaching it was printed by
 //! an arbitrary child. It therefore refuses more than it accepts: anything
 //! larger than the pane's own storage limit is rejected before a buffer is
 //! allocated for it, and every failure is a `None` rather than a panic.
 
+use std::cell::RefCell;
+use std::sync::OnceLock;
+
 use libghostty_vt::alloc::{Allocator, Bytes};
-use libghostty_vt::kitty::graphics::{DecodePng, DecodedImage};
+use libghostty_vt::kitty::graphics::{DecodePng, DecodedImage, set_png_decoder};
 
-/// The decoder a pane that shows no images installs.
-///
-/// Installed rather than clearing the decoder, because clearing is not the
-/// thread-local act it looks like. `set_png_decoder(None)` writes the
-/// thread-local *and* calls `ghostty_sys_set(GHOSTTY_SYS_OPT_DECODE_PNG, null)`,
-/// which is a library-wide option: one disabled pane would turn PNG decoding
-/// off for every other pane in the process. Refusing here leaves that callback
-/// registered for the panes that want it, while this thread declines — which is
-/// what a disabled pane means.
-///
-/// The defence is unchanged. No PNG parser runs: this returns before looking at
-/// a byte, and the pane's storage limit is zero besides.
-pub(crate) struct RefusingDecoder;
+thread_local! {
+    /// The decoder of the pane whose worker is this thread, when it has one.
+    ///
+    /// One worker thread per pane (ADR 0008) and libghostty decoding on the
+    /// thread that writes to the terminal together make a thread-local the
+    /// pane's own slot: a decode is always asked for by the pane it is for.
+    static PANE: RefCell<Option<PngDecoder>> = const { RefCell::new(None) };
+}
 
-impl DecodePng for RefusingDecoder {
+/// The one decoder libghostty knows about, which hands each PNG to the decoder
+/// of the pane that received it.
+///
+/// **Why there is only one.** The binding keeps a single process-wide decoder
+/// and libghostty a single process-wide callback; neither is per terminal.
+/// Sprite's limit is per pane, so the per-pane part lives on this side, in
+/// [`PANE`], and this type only routes.
+///
+/// A thread with no decoder refuses. That is what a pane that shows no images
+/// is: no PNG parser runs for it, and its storage limit is zero besides. It is
+/// also why a disabled pane cannot turn decoding off for the others, which is
+/// what `tests/png_decoder_leak.rs` pins.
+///
+/// The binding holds a lock for the length of a decode, so two panes decoding
+/// at once take turns. Nothing here waits on another pane or re-enters
+/// libghostty, which is the one thing that lock forbids.
+struct PaneDispatch;
+
+impl DecodePng for PaneDispatch {
     fn decode_png<'alloc>(
         &mut self,
-        _alloc: &'alloc Allocator<'_>,
-        _data: &[u8],
+        alloc: &'alloc Allocator<'_>,
+        data: &[u8],
     ) -> Option<DecodedImage<'alloc>> {
-        None
+        // Both failures are refusals, never panics: this runs inside a C
+        // callback, where unwinding aborts the process. `try_with` fails only
+        // while the thread is exiting, and `try_borrow_mut` only if a decode
+        // were somehow asked for during a decode.
+        PANE.try_with(|pane| {
+            let mut pane = pane.try_borrow_mut().ok()?;
+            pane.as_mut()?.decode_png(alloc, data)
+        })
+        .ok()
+        .flatten()
     }
+}
+
+/// Registers [`PaneDispatch`] with libghostty, once for the process.
+///
+/// Called before every terminal is created, and it must stay that way: the
+/// registration is a write libghostty does not synchronize, so it has to
+/// happen before any other thread can be inside the library. Every libghostty
+/// object in this crate is made on a worker after its terminal, and every
+/// terminal is made by `new_terminal`, which calls this first. The second and
+/// later calls find the registration done and write nothing.
+#[allow(
+    unsafe_code,
+    reason = "the binding marks its unsynchronized process-wide registration unsafe"
+)]
+pub(crate) fn install() -> Result<(), libghostty_vt::Error> {
+    static INSTALLED: OnceLock<Result<(), libghostty_vt::Error>> = OnceLock::new();
+    *INSTALLED.get_or_init(|| {
+        // SAFETY: `get_or_init` runs this at most once and blocks every other
+        // caller until it returns. All use of libghostty in this process
+        // follows a `new_terminal` call, which reaches this line first, so no
+        // other thread is inside a libghostty call while the hook is written.
+        unsafe { set_png_decoder(Some(Box::new(PaneDispatch))) }
+    })
+}
+
+/// Gives the pane whose worker is this thread a decoder bounded by `limit`
+/// bytes for one image, or none when the pane shows no images.
+pub(crate) fn set_for_this_pane(limit: Option<u64>) {
+    PANE.with(|pane| pane.replace(limit.map(PngDecoder::new)));
 }
 
 /// Decodes PNG transmissions into the RGBA pixels libghostty expects.
@@ -54,7 +108,7 @@ pub(crate) struct PngDecoder {
 }
 
 impl PngDecoder {
-    pub(crate) fn new(limit: u64) -> Self {
+    fn new(limit: u64) -> Self {
         Self {
             limit: usize::try_from(limit).unwrap_or(usize::MAX),
         }
@@ -106,7 +160,7 @@ impl DecodePng for PngDecoder {
         // and frees it with the same allocator. It holds the four bytes a
         // pixel already checked against the limit; a frame that does not fill
         // exactly that many pixels is refused by `widen_to_rgba`.
-        let mut bytes = Bytes::new_with_alloc(alloc, stored).ok()?;
+        let mut bytes = Bytes::new_zeroed_with_alloc(alloc, stored).ok()?;
         if !widen_to_rgba(info.color_type, &decoded[..produced], &mut bytes) {
             return None;
         }

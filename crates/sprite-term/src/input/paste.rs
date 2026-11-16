@@ -11,8 +11,8 @@ pub(crate) fn encode_paste(
     terminal: &Terminal<'_, '_>,
     text: &str,
 ) -> Result<Vec<u8>, SessionError> {
+    use libghostty_vt::mode::{Kind as ModeKind, Mode};
     use libghostty_vt::paste;
-    use libghostty_vt::terminal::{Mode, ModeKind};
 
     let bracketed = terminal
         .mode(Mode::new(MODE_BRACKETED_PASTE, ModeKind::Dec))

@@ -3,8 +3,9 @@ use crate::{
     CellPosition, KeyAction, KeyEvent, KeyModifiers, MouseAction, MouseButton, MouseEvent,
     SelectionMode, SessionError, ValidTerminalSize, WheelEvent,
 };
-use libghostty_vt::screen::{GridRef, Screen, TrackedGridRef};
-use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
+use libghostty_vt::grid_ref::{GridRef, TrackedGridRef};
+use libghostty_vt::point::{Coordinate as PointCoordinate, Point, Space as PointSpace};
+use libghostty_vt::screen::Screen;
 use libghostty_vt::{Terminal, key};
 const MAX_WHEEL_TURNS: u32 = 32;
 /// Who a wheel turn belongs to.
@@ -61,7 +62,7 @@ pub(crate) fn wheel_destination(
         libghostty_vt::screen::Screen::Alternate
     );
     let alternate_scroll = terminal
-        .mode(libghostty_vt::terminal::Mode::ALT_SCROLL)
+        .mode(libghostty_vt::mode::Mode::ALT_SCROLL)
         .map_err(|error| SessionError::new("alt_scroll_mode", error))?;
     if alternate && alternate_scroll {
         return Ok(WheelDestination::Child(WheelKind::CursorKeys));
@@ -144,16 +145,18 @@ fn encode_wheel_report(
     });
 
     encoder.set_options_from_terminal(terminal);
-    encoder.set_size(EncoderSize {
-        screen_width: u32::from(size.cols()) * size.cell_width_px(),
-        screen_height: u32::from(size.rows()) * size.cell_height_px(),
-        cell_width: size.cell_width_px(),
-        cell_height: size.cell_height_px(),
-        padding_top: 0,
-        padding_bottom: 0,
-        padding_right: 0,
-        padding_left: 0,
-    });
+    encoder
+        .set_size(EncoderSize {
+            screen_width: u32::from(size.cols()) * size.cell_width_px(),
+            screen_height: u32::from(size.rows()) * size.cell_height_px(),
+            cell_width: size.cell_width_px(),
+            cell_height: size.cell_height_px(),
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        })
+        .map_err(|error| SessionError::new("mouse_size", error))?;
 
     encoder
         .encode_to_vec(&encoded, out)
@@ -208,16 +211,18 @@ pub(crate) fn encode_mouse(
     });
 
     encoder.set_options_from_terminal(terminal);
-    encoder.set_size(EncoderSize {
-        screen_width: u32::from(size.cols()) * size.cell_width_px(),
-        screen_height: u32::from(size.rows()) * size.cell_height_px(),
-        cell_width: size.cell_width_px(),
-        cell_height: size.cell_height_px(),
-        padding_top: 0,
-        padding_bottom: 0,
-        padding_right: 0,
-        padding_left: 0,
-    });
+    encoder
+        .set_size(EncoderSize {
+            screen_width: u32::from(size.cols()) * size.cell_width_px(),
+            screen_height: u32::from(size.rows()) * size.cell_height_px(),
+            cell_width: size.cell_width_px(),
+            cell_height: size.cell_height_px(),
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        })
+        .map_err(|error| SessionError::new("mouse_size", error))?;
 
     let mut bytes = Vec::new();
     encoder
@@ -460,14 +465,23 @@ pub(crate) fn apply_selection(
 
 /// The current selection as text, or empty when nothing is selected.
 pub(crate) fn selection_text(terminal: &Terminal<'_, '_>) -> Result<String, SessionError> {
-    use libghostty_vt::selection::FormatOptions;
+    use libghostty_vt::fmt::{Format, Formatter};
 
-    let formatted = terminal
-        .format_selection_alloc(None, FormatOptions::new())
-        .map_err(|error| SessionError::new("format_selection", error))?;
+    let failed = |error| SessionError::new("format_selection", error);
 
-    let Some(bytes) = formatted else {
+    let Some(mut formatter) = Formatter::new_selection(terminal).map_err(failed)? else {
         return Ok(String::new());
     };
+    // Stated rather than inherited: plain text, rows kept as the screen wraps
+    // them, trailing blanks kept. These are the values the binding's one-shot
+    // selection formatter used before it was replaced by `Formatter`, whose
+    // own default trims.
+    formatter
+        .set_format(Format::Plain)
+        .and_then(|formatter| formatter.set_unwrap(false))
+        .and_then(|formatter| formatter.set_trim(false))
+        .map_err(failed)?;
+    let bytes = formatter.format_alloc(None).map_err(failed)?;
+
     String::from_utf8(bytes.to_vec()).map_err(|error| SessionError::new("selection_utf8", error))
 }

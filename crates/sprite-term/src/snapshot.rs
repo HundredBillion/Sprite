@@ -9,12 +9,14 @@
 use std::sync::Arc;
 
 use libghostty_vt::Terminal;
+use libghostty_vt::color::Rgb as RgbColor;
+use libghostty_vt::fmt::{Format, Formatter};
 use libghostty_vt::kitty::graphics::PlacementIterator;
+use libghostty_vt::point::{Coordinate as PointCoordinate, Point};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::{CellContentTag, CellWide, Screen};
-use libghostty_vt::selection::{FormatOptions, Selection};
-use libghostty_vt::style::{RgbColor, StyleColor, Underline};
-use libghostty_vt::terminal::{Point, PointCoordinate};
+use libghostty_vt::selection::Selection;
+use libghostty_vt::style::{StyleColor, Underline};
 
 use crate::{
     CellStyle, CellText, CellWidth, CursorSnapshot, CursorStyle, HistorySnapshot, PaneRow,
@@ -135,11 +137,13 @@ impl<'vt> Projector<'vt> {
         let title = terminal
             .title()
             .ok()
+            .and_then(|value| std::str::from_utf8(value).ok())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let working_directory = terminal
             .pwd()
             .ok()
+            .and_then(|value| std::str::from_utf8(value).ok())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let snapshot = render_state.update(terminal).map_err(vt("render_update"))?;
@@ -221,11 +225,13 @@ impl<'vt> Projector<'vt> {
         let title = terminal
             .title()
             .ok()
+            .and_then(|value| std::str::from_utf8(value).ok())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let working_directory = terminal
             .pwd()
             .ok()
+            .and_then(|value| std::str::from_utf8(value).ok())
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let viewport = Viewport {
@@ -488,6 +494,35 @@ impl<'vt> Projector<'vt> {
     }
 }
 
+/// The plain text inside `selection`, as the screen holds it.
+///
+/// A formatter of its own rather than the terminal's active selection: the
+/// active selection is the user's, and reading a row must not move it.
+#[allow(
+    unsafe_code,
+    reason = "the binding cannot prove a selection belongs to the formatter's terminal"
+)]
+fn format_row<'t>(
+    terminal: &'t Terminal<'_, '_>,
+    selection: &Selection<'t>,
+) -> Result<String, SessionError> {
+    let mut formatter = Formatter::new(terminal).map_err(vt("history_format"))?;
+    formatter
+        .set_format(Format::Plain)
+        .and_then(|formatter| formatter.set_unwrap(false))
+        .and_then(|formatter| formatter.set_trim(false))
+        .map_err(vt("history_format"))?;
+    // SAFETY: `selection` borrows `terminal` for `'t`, the same borrow the
+    // formatter holds, and its only caller builds both endpoints from
+    // `terminal.grid_ref` on the active screen immediately before this call.
+    // Nothing can write to, resize or switch the screen of a terminal that is
+    // shared-borrowed, so the endpoints are still that screen's.
+    unsafe { formatter.set_selection(Some(selection)) }.map_err(vt("history_format"))?;
+    let bytes = formatter.format_alloc(None).map_err(vt("history_format"))?;
+
+    String::from_utf8(bytes.to_vec()).map_err(|error| SessionError::new("history_utf8", error))
+}
+
 /// One row of the active screen in screen coordinates, history included.
 fn history_row(
     terminal: &Terminal<'_, '_>,
@@ -520,19 +555,7 @@ fn history_row(
     // trailing spaces a program actually wrote are part of the row. Unwrapping
     // here would destroy exactly the boundary `wrapped` is reporting.
     let selection = Selection::new(start, end, false);
-    let options = FormatOptions::new()
-        .with_selection(&selection)
-        .with_unwrap(false)
-        .with_trim(false);
-    let formatted = terminal
-        .format_selection_alloc(None, options)
-        .map_err(vt("history_format"))?;
-
-    let text = match formatted {
-        Some(bytes) => String::from_utf8(bytes.to_vec())
-            .map_err(|error| SessionError::new("history_utf8", error))?,
-        None => String::new(),
-    };
+    let text = format_row(terminal, &selection)?;
     // One row was asked for, so a trailing row separator carries no
     // information and would otherwise appear inside the row's own text.
     let text = text.strip_suffix('\n').unwrap_or(&text);
@@ -846,7 +869,7 @@ mod sharing_tests {
             .unwrap();
         let mut palette = terminal.default_color_palette().unwrap();
         palette.set(
-            libghostty_vt::style::PaletteIndex(1),
+            libghostty_vt::color::PaletteIndex(1),
             RgbColor { r: 7, g: 8, b: 9 },
         );
         terminal.set_default_color_palette(Some(palette)).unwrap();

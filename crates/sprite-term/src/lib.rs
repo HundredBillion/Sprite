@@ -62,6 +62,9 @@ pub(crate) fn new_terminal<'alloc: 'cb, 'cb>(
     rows: u16,
     scrollback_bytes: usize,
 ) -> Result<libghostty_vt::Terminal<'alloc, 'cb>, libghostty_vt::Error> {
+    // Before the terminal exists, because registering the decoder is only
+    // sound while no thread is inside libghostty; see `png_decoder::install`.
+    png_decoder::install()?;
     let mut terminal = libghostty_vt::Terminal::new(cols, rows)?;
     terminal.set_scrollback_max_bytes(Some(scrollback_bytes))?;
     Ok(terminal)

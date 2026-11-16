@@ -233,9 +233,8 @@ fn an_image_is_never_read_from_a_file() {
 }
 
 /// None of the three filesystem mediums may turn terminal output into a file
-/// read. Two are denied explicitly; the temporary-file medium cannot be, because
-/// the binding's setter for it aborts the process — so all three are asserted
-/// here by behaviour, which is the property that actually matters.
+/// read. All three are denied explicitly, and all three are asserted here by
+/// behaviour, which is the property that actually matters.
 #[test]
 fn no_filesystem_medium_can_load_an_image() {
     let directory = std::env::temp_dir().join(format!("sprite-mediums-{}", std::process::id()));

@@ -38,7 +38,7 @@ pub(crate) fn resolve_hyperlink(
     terminal: &Terminal<'_, '_>,
     position: CellPosition,
 ) -> Option<ResolvedHyperlink> {
-    use libghostty_vt::terminal::{Point, PointCoordinate};
+    use libghostty_vt::point::{Coordinate as PointCoordinate, Point};
 
     let columns = usize::from(terminal.cols().ok()?);
     let mut row = vec![' '; columns];

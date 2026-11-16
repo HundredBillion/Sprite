@@ -37,3 +37,28 @@ libghostty-rs fork remains pinned to bindings generated for `92fb5d0`: changes
 to the VT C headers since then add entries while preserving the values and
 layout Sprite uses. Sprite's terminal integration tests pass against the new
 source on macOS. Regenerate the bindings if Sprite needs a newly added C API.
+
+## Amended (2026-11-16): upstream binding and a tagged Ghostty
+
+Both forks are retired. Upstream caught up on its own: Ghostty `main` now
+requires Zig 0.17, and `libghostty-rs` moved its pin to a commit that does.
+
+- Ghostty is pinned to `108cacb17ed8990840cd14abfce43d8ed8503ca1`, tagged
+  `vt-1.0.1` on ghostty-org/ghostty `main`, and fetched from that repository.
+- `libghostty-vt` comes from uzaaft/libghostty-rs at
+  `483ea3d5247b214060da58ef6037a95f30ae89fb`, whose bindings are generated for
+  that same commit. The reviewed-pair rule holds again: the binding and the
+  source are one Ghostty commit rather than a newer source under older
+  bindings.
+- It is still a git revision, not a crates.io release. The newest release,
+  0.2.2, predates Zig 0.17 support, so the return to crates.io waits for the
+  next one.
+
+The binding changed its interface between the two revisions. Sprite's
+adaptations: types moved to `point`, `mode`, `grid_ref`, `color` and `effect`;
+the placement layer filter became a mask; titles, working directories and
+clipboard MIME types arrive as bytes, and Sprite keeps treating a value that is
+not UTF-8 as unknown; one-shot selection formatting was replaced by
+`Formatter`; and the PNG decoder became a process-wide registration, so Sprite
+registers one decoder before the first terminal and routes each image to the
+decoder of the pane that received it.

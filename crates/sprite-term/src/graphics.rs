@@ -30,18 +30,38 @@ use crate::SessionError;
 /// the number of placements, never to cells on screen.
 const LAYERS: [(libghostty_vt::kitty::graphics::Layer, Layer); 3] = [
     (
-        libghostty_vt::kitty::graphics::Layer::BelowBg,
+        libghostty_vt::kitty::graphics::Layer::BELOW_BACKGROUND,
         Layer::BelowBackground,
     ),
     (
-        libghostty_vt::kitty::graphics::Layer::BelowText,
+        libghostty_vt::kitty::graphics::Layer::BELOW_TEXT,
         Layer::BelowText,
     ),
     (
-        libghostty_vt::kitty::graphics::Layer::AboveText,
+        libghostty_vt::kitty::graphics::Layer::ABOVE_TEXT,
         Layer::AboveText,
     ),
 ];
+
+/// The terminal's image storage.
+///
+/// The binding reports storage as absent when libghostty was built without
+/// Kitty graphics. Sprite always builds it with them (the `kitty-graphics`
+/// feature in `Cargo.toml`), so absence is a build that is not Sprite's, and
+/// is an error rather than an empty pane.
+fn storage<'t>(
+    terminal: &'t Terminal<'_, '_>,
+) -> Result<libghostty_vt::kitty::graphics::Graphics<'t>, SessionError> {
+    terminal
+        .kitty_graphics()
+        .map_err(|error| SessionError::new("kitty_graphics", error))?
+        .ok_or_else(|| {
+            SessionError::new(
+                "kitty_graphics",
+                "libghostty was built without Kitty graphics",
+            )
+        })
+}
 
 /// The wire vocabulary for a transmitted image format.
 ///
@@ -275,7 +295,7 @@ pub(crate) fn capture_graphics(
 ) -> Result<Arc<GraphicsSnapshot>, SessionError> {
     let vt = |what: &'static str| move |error| SessionError::new(what, error);
 
-    let graphics = terminal.kitty_graphics().map_err(vt("kitty_graphics"))?;
+    let graphics = storage(terminal)?;
     let generation = graphics.generation().map_err(vt("graphics_generation"))?;
 
     let mut images: Vec<ImageSummary> = Vec::new();
@@ -341,7 +361,7 @@ pub(crate) fn capture_frame(
 ) -> Result<Option<Arc<GraphicsFrame>>, SessionError> {
     let vt = |what: &'static str| move |error| SessionError::new(what, error);
 
-    let graphics = terminal.kitty_graphics().map_err(vt("kitty_graphics"))?;
+    let graphics = storage(terminal)?;
     let generation = graphics.generation().map_err(vt("graphics_generation"))?;
     if generation == 0 && cache.images.is_empty() {
         // Nothing has ever been transmitted to this pane. One call, no
@@ -473,7 +493,7 @@ pub(crate) fn capture_placements(
 ) -> Result<Vec<PlacementMetadata>, SessionError> {
     let vt = |what: &'static str| move |error| SessionError::new(what, error);
 
-    let graphics = terminal.kitty_graphics().map_err(vt("kitty_graphics"))?;
+    let graphics = storage(terminal)?;
     let mut found = Vec::new();
 
     for layer in LAYERS {

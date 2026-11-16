@@ -221,9 +221,13 @@ fn register_pwd(
 
 /// What a title or directory change reports: the new value, or `None` when
 /// the program cleared it or it could not be read.
-fn reported<E>(value: Result<&str, E>) -> Option<String> {
+fn reported<E>(value: Result<&[u8], E>) -> Option<String> {
     value
         .ok()
+        // The binding hands back the bytes the program sent. A value that is
+        // not UTF-8 is reported as unknown, as it was when the binding itself
+        // refused it.
+        .and_then(|value| std::str::from_utf8(value).ok())
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
 }
