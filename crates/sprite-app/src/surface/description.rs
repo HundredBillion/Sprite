@@ -116,6 +116,16 @@ pub struct ListHeader {
     pub font_weight: Option<ListFontWeight>,
     pub left_padding: Option<f32>,
     pub icon_gap: Option<f32>,
+    /// Icon buttons at the header's right edge, drawn in the order given.
+    pub actions: Vec<ListHeaderAction>,
+}
+
+/// An icon button in a list header. Clicking it emits `list_action` naming
+/// `id`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListHeaderAction {
+    pub id: String,
+    pub icon: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +163,17 @@ pub struct ListColors {
     pub scrollbar: ColorRef,
     pub scrollbar_hover: ColorRef,
     pub scrollbar_active: ColorRef,
+    pub input_background: ColorRef,
+    pub input_border: ColorRef,
+    pub input_foreground: ColorRef,
+    pub input_placeholder: ColorRef,
+    pub button_background: ColorRef,
+    pub button_hover: ColorRef,
+    pub button_foreground: ColorRef,
+    pub button_separator: ColorRef,
+    pub count_background: ColorRef,
+    pub count_foreground: ColorRef,
+    pub action_hover: ColorRef,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -172,6 +193,16 @@ pub struct ListConfig {
     pub scrollbar_opacity: f32,
     pub scrollbar_hover_opacity: f32,
     pub scrollbar_active_opacity: f32,
+    /// The corner radius of a row's hover, selection, and focus outline.
+    pub row_radius: f32,
+    /// The field height of an `input` row, centred in the row.
+    pub input_height: f32,
+    /// The button height of a `button` row, centred in the row.
+    pub button_height: f32,
+    /// The corner radius of input fields and buttons.
+    pub control_radius: f32,
+    /// The space between an input field's border and its text.
+    pub control_padding: f32,
     pub heading: Option<ListHeader>,
     pub section: Option<ListHeader>,
     pub colors: ListColors,
@@ -554,6 +585,20 @@ fn list_config(
     let inactive_guide = optional_color("inactive_guide", &guide, warnings)?;
     let scrollbar_hover = optional_color("scrollbar_hover", &scrollbar, warnings)?;
     let scrollbar_active = optional_color("scrollbar_active", &scrollbar, warnings)?;
+    // Decorated rows are optional, so a description written before they
+    // existed still parses: each of their colours falls back to the nearest
+    // role every list already names.
+    let input_background = optional_color("input_background", &background, warnings)?;
+    let input_border = optional_color("input_border", &border, warnings)?;
+    let input_foreground = optional_color("input_foreground", &foreground, warnings)?;
+    let input_placeholder = optional_color("input_placeholder", &foreground, warnings)?;
+    let button_background = optional_color("button_background", &selected, warnings)?;
+    let button_hover = optional_color("button_hover", &button_background, warnings)?;
+    let button_foreground = optional_color("button_foreground", &selected_foreground, warnings)?;
+    let button_separator = optional_color("button_separator", &button_foreground, warnings)?;
+    let count_background = optional_color("count_background", &inactive_selected, warnings)?;
+    let count_foreground = optional_color("count_foreground", &foreground, warnings)?;
+    let action_hover = optional_color("action_hover", &hover, warnings)?;
     let optional_metric = |key: &str, default: f32, min: f32, max: f32| -> Result<f32, Refusal> {
         if object.contains_key(key) {
             finite_field(object, key, min, max)
@@ -601,6 +646,11 @@ fn list_config(
         scrollbar_opacity: optional_metric("scrollbar_opacity", 1.0, 0.0, 1.0)?,
         scrollbar_hover_opacity: optional_metric("scrollbar_hover_opacity", 1.0, 0.0, 1.0)?,
         scrollbar_active_opacity: optional_metric("scrollbar_active_opacity", 1.0, 0.0, 1.0)?,
+        row_radius: optional_metric("row_radius", 0.0, 0.0, 32.0)?,
+        input_height: optional_metric("input_height", 26.0, 12.0, 128.0)?,
+        button_height: optional_metric("button_height", 28.0, 12.0, 128.0)?,
+        control_radius: optional_metric("control_radius", 4.0, 0.0, 32.0)?,
+        control_padding: optional_metric("control_padding", 7.0, 0.0, 64.0)?,
         heading: list_header(object, "heading")?,
         section: list_header(object, "section")?,
         colors: ListColors {
@@ -617,6 +667,17 @@ fn list_config(
             scrollbar,
             scrollbar_hover,
             scrollbar_active,
+            input_background,
+            input_border,
+            input_foreground,
+            input_placeholder,
+            button_background,
+            button_hover,
+            button_foreground,
+            button_separator,
+            count_background,
+            count_foreground,
+            action_hover,
         },
     })
 }
@@ -651,7 +712,42 @@ fn list_header(
         font_weight,
         left_padding: optional_metric(header, "left_padding", 0.0, 128.0)?,
         icon_gap: optional_metric(header, "icon_gap", 0.0, 128.0)?,
+        actions: header_actions(header, key)?,
     }))
+}
+
+fn header_actions(
+    header: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<ListHeaderAction>, Refusal> {
+    const MAX_HEADER_ACTIONS: usize = 8;
+    // The same limit a row's strings have: an id is echoed in every event and
+    // an icon name is looked up on every frame.
+    const MAX_ACTION_BYTES: usize = 4_096;
+    let malformed = || {
+        Refusal::Malformed(format!(
+            "{key} actions is at most {MAX_HEADER_ACTIONS} objects with id and icon"
+        ))
+    };
+    match header.get("actions") {
+        None => Ok(Vec::new()),
+        Some(Value::Array(actions)) if actions.len() <= MAX_HEADER_ACTIONS => actions
+            .iter()
+            .map(|action| {
+                let action = action.as_object().ok_or_else(malformed)?;
+                let field = |name: &str| {
+                    string_field(action, name)?
+                        .filter(|text| !text.is_empty() && text.len() <= MAX_ACTION_BYTES)
+                        .ok_or_else(malformed)
+                };
+                Ok(ListHeaderAction {
+                    id: field("id")?,
+                    icon: field("icon")?,
+                })
+            })
+            .collect(),
+        Some(_) => Err(malformed()),
+    }
 }
 
 fn optional_metric(

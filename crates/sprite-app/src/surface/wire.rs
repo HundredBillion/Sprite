@@ -181,7 +181,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"],
+        "features": ["owned-dock-v1", "virtual-list-v1", "virtual-list-rows-v2", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
@@ -370,6 +370,11 @@ pub fn event_list_click(
 
 pub fn event_list_action(revision: u64, action: &str) -> String {
     json!({ "type": "list_action", "revision": revision, "action": action }).to_string()
+}
+
+/// A click on an icon button inside row `row`.
+pub fn event_list_row_action(revision: u64, action: &str, row: &str) -> String {
+    json!({ "type": "list_action", "revision": revision, "action": action, "row": row }).to_string()
 }
 
 pub fn event_list_scroll(revision: u64, top: &str, offset: f32, visible_rows: u32) -> String {

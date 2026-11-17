@@ -415,6 +415,46 @@ events from stale revisions. On a theme replacement, reopen the Surface to
 release its scoped assets. Current limits are 16 MiB per message, 100,000 rows,
 4,096 assets, and 64 MiB of SVG text per Surface; batch assets below 8 MiB.
 
+A host that lists `virtual-list-rows-v2` in `capabilities` also draws
+*decorated* rows, which is what a source-control panel needs. Every field below
+is optional, and a row that sends none is drawn exactly as before. The
+[decorated rows fixture](../tests/fixtures/surface-list-rows-v2.json) has a
+description, rows, refusals, and events to copy from.
+
+| Row field | Meaning |
+| --- | --- |
+| `kind` | `item` (the default), `input` (a bordered text field), or `button` (a filled button). |
+| `height` | This row's height in pixels, 12–128. Rows without it use `row_height`. |
+| `description` | Dimmed text after the label, such as a file's directory. |
+| `badge` | `{"text":"M","color":"#e2c08d"}`: a short label at the right edge. `color` is optional. |
+| `count` | A number drawn in a pill at the right edge. |
+| `strikethrough`, `bold` | `true` to strike through or embolden the label. |
+| `placeholder` | What an empty `input` shows. Only an `input` may have empty `text`. |
+| `cursor` | A character offset. An `input` that is selected, focused, and has a `cursor` draws a caret there. |
+| `trailing` | An asset id drawn inside an `input`'s right edge. |
+| `actions` | Up to eight `{"id":…,"icon":…}` icon buttons, shown while an `item` is hovered or selected. A `button` draws only the first, as its split menu. |
+
+A decorated `item` without an `icon` reserves no icon slot, so a group
+heading's label starts where the icon would have; a plain row always reserves
+it. `heading` and `section` take the same `actions`, drawn at their right edge.
+Pressing a row's button emits
+`{"type":"list_action","revision":1,"action":"stage","row":"<row id>"}`; a
+header's button emits the same event without `row`. Neither also clicks the
+row or header beneath it.
+
+Sprite does not edit an `input`. It delivers keys as `input` events, as for
+any focused dock, and the owning program sends the row again with new `text`
+and `cursor`. A `list_state` scroll `offset` is checked against the height of
+the row it names.
+
+The description gains optional metrics `row_radius` (0), `input_height` (26),
+`button_height` (28), `control_radius` (4), and `control_padding` (7), and
+optional colours `input_background`, `input_border`, `input_foreground`,
+`input_placeholder`, `button_background`, `button_hover`, `button_foreground`,
+`button_separator`, `count_background`, `count_foreground`, and
+`action_hover`. Each colour falls back to the nearest role every list already
+names, so an older description still parses.
+
 An editor draws differently: it opens a *grid* Surface (`{"kind":"grid",
 "cols":80,"rows":24}`) and streams cells with highlight ids — `rows`,
 `highlights`, `cursor`, `scroll`, and friends, alone or in a `batch` that
