@@ -2729,6 +2729,122 @@ mod tests {
         });
     }
 
+    /// A pane nothing has changed keeps its last drawing and is not rendered,
+    /// so the per-render owner check never runs for it. The window's clock
+    /// checks too: a Surface whose owner no longer holds the terminal closes
+    /// on the next beat even while the pane stays silent.
+    #[gpui::test]
+    fn clock_closes_an_owned_surface_whose_owner_is_gone_without_a_render(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (sender, _exits) = async_channel::unbounded();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::new(
+                Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf '\033]0;%s\007' "$$"; exec /bin/cat"#.into(),
+                ]),
+                settings,
+                Vec::new(),
+                None,
+                super::super::PaneExit {
+                    sender,
+                    identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                },
+                window,
+                cx,
+            )
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        executor.block_test(crate::test_blocking_wait::condition(
+            &host,
+            cx,
+            |host, _| {
+                host.bundle
+                    .as_ref()
+                    .is_some_and(|bundle| bundle.pane.title.is_some())
+            },
+        ));
+        let owner_pid = host.read_with(cx, |host, _| {
+            host.bundle
+                .as_ref()
+                .and_then(|bundle| bundle.pane.title.as_ref())
+                .and_then(|title| title.parse::<u32>().ok())
+                .expect("the owner's pid is the title")
+        });
+        let mut open = open_description(
+            serde_json::json!({"version":1,"root":{"kind":"text","text":"owned"}}),
+        );
+        open.placement = Placement::Dock {
+            side: Side::Left,
+            size: crate::surface::DockSize::default(),
+            ownership: Ownership::Owned {
+                pid: owner_pid,
+                return_target: ReturnTarget::Terminal,
+            },
+        };
+        let (answer, _peer) = open_request(&host, cx, SurfaceId(301), open);
+        assert_eq!(answer, Ok(()));
+        // One beat first: it settles the blink phase, so the beat under test
+        // changes nothing drawn and renders nothing.
+        let pane: &dyn sprite_pane::PaneHandle<Request = SurfaceRequest> = &host;
+        cx.update(|_, cx| pane.tick(cx));
+        cx.run_until_parked();
+        draw_test_window(cx);
+        // Then quiet: the shell's start-up output and title have all arrived
+        // once the pane goes several waits without being notified.
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = notified.clone();
+        let _observer =
+            cx.update(|_, cx| cx.observe(&host, move |_, _| counter.set(counter.get() + 1)));
+        let mut quiet = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while quiet < 5 {
+            assert!(std::time::Instant::now() < deadline, "the pane goes quiet");
+            let before = notified.get();
+            crate::test_blocking_wait::pause(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+            quiet = if notified.get() == before {
+                quiet + 1
+            } else {
+                0
+            };
+        }
+        let notified_before = notified.get();
+
+        // The owner stops holding the terminal, with no output and no notify:
+        // it is recorded as belonging to a group that is not the foreground.
+        host.update(cx, |host, _| {
+            let dock = host.surfaces.left.as_mut().expect("the owned dock");
+            let HostedPlacement::Dock {
+                owner: Some(owner), ..
+            } = &mut dock.placement
+            else {
+                panic!("an owned dock");
+            };
+            owner.group = owner.group.wrapping_add(1);
+        });
+        assert_eq!(
+            notified.get(),
+            notified_before,
+            "nothing has redrawn the pane since its owner changed"
+        );
+        cx.update(|_, cx| pane.tick(cx));
+        cx.run_until_parked();
+        assert!(
+            host.read_with(cx, |host, _| host.surfaces.is_empty()),
+            "the clock closes a Surface whose owner no longer holds the terminal"
+        );
+        if let Some(cleanup) = host.update(cx, |host, _| host.begin_shutdown()) {
+            cleanup.wait().ok();
+        }
+    }
+
     fn drag_native_tab(
         cx: &mut gpui::VisualTestContext,
         start: gpui::Point<Pixels>,

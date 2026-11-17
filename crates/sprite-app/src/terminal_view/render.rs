@@ -690,8 +690,11 @@ impl Render for TerminalView {
                                 })
                             })
                         });
-                        if !remains_on_link {
-                            view.hovered_link = None;
+                        // The pane is a cached view: un-drawing the link takes
+                        // a notify of its own, or the underline stays until the
+                        // pane next changes.
+                        if !remains_on_link && view.hovered_link.take().is_some() {
+                            cx.notify();
                         }
                         if !remains_on_link && let Some(cell) = cell {
                             view.request_hover_link(cell);

@@ -288,9 +288,11 @@ patch.
   `push_layer`, so a cached view's frame is ordered the same way.
 - What changes for drawing: primitives inside the nested layer share the outer
   layer's order, and the renderer draws one order by kind (quads, then
-  underlines, then glyphs). Sprite's only layer is the terminal grid's, and the
-  lines nested in it hold glyphs only, so its drawing is unchanged; the cursor
-  and decorations are painted after the layer, as before.
+  underlines, then glyphs). Sprite opens a layer only in `GridPaint`, which
+  draws terminal grids and grid Surfaces. The layer itself paints quads and
+  paths (grounds, blocks, box drawing), and the lines nested in it hold glyphs
+  only, so its drawing is unchanged; the cursor and decorations are painted
+  after the layer, as before.
 - `bounds_tree.rs` and `test_context.rs`, compiled only with `test` or
   `test-support`: `BoundsTree::len` and `VisualTestContext::ordered_regions`,
   how many regions the last frame put in the tree.
