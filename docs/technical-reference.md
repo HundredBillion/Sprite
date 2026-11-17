@@ -156,6 +156,11 @@ The Ghostty source is a submodule:
 git submodule update --init --recursive
 ```
 
+A checkout made before 2026-11-16 still has the submodule's old address
+recorded locally, because Git copies it out of `.gitmodules` once. Run
+`git submodule sync --recursive` first so the source is fetched from
+ghostty-org/ghostty.
+
 Then:
 
 ```sh

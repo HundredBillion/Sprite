@@ -68,6 +68,12 @@ Sprite can catch — it is not an error return, it is the end of the program.
 Calling it defensively would trade a denial that currently holds for a crash
 that certainly does.
 
+> **Since this review (2026-11-16).** The binding replaced that setter with
+> `set_kitty_image_temp_file_dir`, which takes the permitted directory or
+> `None`. Sprite now passes `None`, so all three mediums are denied explicitly
+> *and* asserted by behaviour. The finding above describes the binding as it
+> was at `5806e45`.
+
 So the denial rests on Ghostty's default limits being `.direct`, asserted by
 `tests/graphics_policy.rs` sending a transmission on each medium and requiring
 that no image appears. The exposure is real and correctly stated: a future
@@ -155,6 +161,18 @@ The PNG decoder is installed in thread-local storage on the pane's own worker,
 so even the decoder is not shared. Eviction is least-recently-placed *within one
 cache*. I looked for a shared allocator or a process-wide budget that would
 couple two panes and did not find one.
+
+> **Since this review (2026-11-16).** The last two sentences no longer hold as
+> written. The binding now keeps one PNG decoder for the whole process and
+> serializes decodes behind one lock. Sprite registers a single dispatcher and
+> keeps each pane's decoder, with that pane's limit, in thread-local storage
+> behind it. Eviction and storage are still per pane, so the answer to the
+> question is still no. What changed is timing: a pane that decodes large PNGs
+> continuously can make another pane wait at the moment that pane receives a
+> PNG of its own, and its worker does nothing else while it waits. A pane
+> showing only text is unaffected. The per-image limit bounds each hold of the
+> lock. See `DEPENDENCIES.md` and ADR
+> 0009.
 
 **A wedged pane holds its textures indefinitely — acceptable.** `retain` is
 driven by arriving snapshots, so a pane that stops producing them keeps whatever

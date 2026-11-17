@@ -76,7 +76,8 @@ them a boundary defect:
 
 **Graphics — the denials hold.** All three image-source mediums are denied, the
 temporary-file one necessarily by behaviour rather than by a setter that would
-abort the process. The PNG decoder is bounded on *both* sides of its allocation:
+abort the process. (Since 2026-11-16 the binding has a working setter and Sprite
+denies that medium explicitly as well.) The PNG decoder is bounded on *both* sides of its allocation:
 the declared size is checked before `resize`, and the produced size is
 re-checked against the limit and the buffer afterwards. One finding:
 

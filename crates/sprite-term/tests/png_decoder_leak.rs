@@ -1,8 +1,9 @@
 //! Does one pane's graphics policy reach another pane?
 //!
-//! `set_png_decoder` keeps the decoder in thread-local storage but registers the
-//! callback with `ghostty_sys_set`, which is a library-wide option. Clearing it
-//! for a disabled pane therefore clears it for every pane in the process.
+//! libghostty has one PNG decoder for the whole process, registered with
+//! `ghostty_sys_set`. Clearing it for a disabled pane would clear it for every
+//! pane, so Sprite registers one decoder and gives each pane its own behind it;
+//! a pane that shows no images simply has none.
 #![expect(
     clippy::expect_used,
     reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"

@@ -98,17 +98,17 @@ pub(super) fn initialize(
     let registered_clipboard = terminal.on_clipboard_write({
         let focused = Rc::clone(&focused);
         let pending = Rc::clone(&clipboard_pending);
-        move |_terminal: &Terminal<'_, '_>, write: libghostty_vt::terminal::ClipboardWrite<'_>| {
+        move |_terminal: &Terminal<'_, '_>, write: libghostty_vt::effect::ClipboardWrite<'_>| {
             let verdict = (|| {
                 if !focused.get() {
-                    return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
+                    return Err(libghostty_vt::effect::ClipboardWriteError::Denied);
                 }
 
                 let mut text = String::new();
                 for content in write.contents() {
                     // Only plain text is honoured; a richer representation is not
                     // something Sprite can vouch for.
-                    if content.mime.is_empty() || content.mime.starts_with("text/") {
+                    if content.mime.is_empty() || content.mime.starts_with(b"text/") {
                         // Text that is not UTF-8 is not text Sprite can put on a clipboard.
                         if let Ok(data) = std::str::from_utf8(content.data) {
                             text.push_str(data);
@@ -117,10 +117,10 @@ pub(super) fn initialize(
                 }
 
                 if text.is_empty() {
-                    return Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported);
+                    return Err(libghostty_vt::effect::ClipboardWriteError::Unsupported);
                 }
                 if text.len() > crate::max_clipboard_bytes() {
-                    return Err(libghostty_vt::terminal::ClipboardWriteError::Denied);
+                    return Err(libghostty_vt::effect::ClipboardWriteError::Denied);
                 }
 
                 pending.borrow_mut().push(text);
@@ -180,7 +180,7 @@ pub(crate) fn apply_color_defaults(
     terminal: &mut Terminal<'_, '_>,
     colors: &crate::ColorDefaults,
 ) -> Result<(), SessionError> {
-    use libghostty_vt::style::{PaletteIndex, RgbColor};
+    use libghostty_vt::color::{PaletteIndex, Rgb as RgbColor};
 
     if colors.is_empty() {
         return Ok(());
@@ -271,27 +271,20 @@ fn apply_graphics_policy(
     terminal: &mut Terminal<'_, '_>,
     policy: crate::GraphicsPolicy,
 ) -> Result<(), SessionError> {
-    use libghostty_vt::kitty::graphics;
-
     let vt = |what: &'static str| move |error| SessionError::new(what, error);
 
     terminal
         .set_kitty_image_from_file_allowed(false)
         .map_err(vt("kitty_from_file"))?;
-    // The temporary-file medium is *not* set here, and must not be: the
-    // binding's `set_kitty_image_from_temp_file_allowed` takes a `bool`, while
-    // the option it writes expects a string — the permitted directory — so the
-    // Zig side `@alignCast`s a one-byte pointer to an eight-byte-aligned type
-    // and aborts the process. Calling it is not a refusal Sprite can catch; it
-    // is an abort.
-    //
-    // It is denied anyway: Ghostty's default limits are `.direct`, which
-    // disables the file, temporary-file, and shared-memory mediums together.
-    // That is a default rather than an instruction, so it is asserted by
-    // behaviour instead — `tests/graphics_policy.rs` sends a transmission on
-    // each medium and requires that no image appears. A future libghostty that
-    // changed the default would fail those tests rather than silently open a
-    // path from terminal output to the filesystem.
+    // `None` is the binding's way of saying no directory is permitted. All
+    // three mediums are also asserted by behaviour: `tests/graphics_policy.rs`
+    // sends a transmission on each and requires that no image appears, so a
+    // future libghostty that changed what these calls mean would fail those
+    // tests rather than silently open a path from terminal output to the
+    // filesystem.
+    terminal
+        .set_kitty_image_temp_file_dir(None)
+        .map_err(vt("kitty_from_temp_file"))?;
     terminal
         .set_kitty_image_from_shared_mem_allowed(false)
         .map_err(vt("kitty_from_shared_mem"))?;
@@ -310,27 +303,17 @@ fn apply_graphics_policy(
         .set_apc_max_bytes_kitty(Some(policy.apc_max_bytes))
         .map_err(vt("kitty_apc_max_bytes"))?;
 
-    // Installed here, on this thread, because the binding requires the decoder
-    // to belong to the thread that owns the terminal — it is stored in thread
-    // local storage, so a decoder set anywhere else would simply not be found.
-    // One worker thread per pane therefore means one decoder per pane, each
+    // This pane's decoder, on this pane's thread. libghostty has one decoder
+    // hook for the whole process, registered before the terminal was made;
+    // it routes each PNG to the decoder of the thread that received it, so
+    // one worker thread per pane still means one decoder per pane, each
     // bounded by that pane's own storage limit.
     //
-    // A disabled pane installs a decoder that refuses rather than passing
-    // `None`, because `None` is not the thread-local act it looks like: the
-    // binding also writes a null into `ghostty_sys_set`, a *library-wide*
-    // option, so one disabled pane turned PNG decoding off for every other pane
-    // in the process. That is what `tests/png_decoder_leak.rs` pins.
-    //
-    // A pane that stores no images still runs no parser over bytes an arbitrary
-    // child printed: the refusing decoder returns before reading one, and the
-    // storage limit above is zero.
-    let decoder: Box<dyn graphics::DecodePng> = if policy.enabled {
-        Box::new(crate::png_decoder::PngDecoder::new(policy.storage_bytes))
-    } else {
-        Box::new(crate::png_decoder::RefusingDecoder)
-    };
-    graphics::set_png_decoder(Some(decoder)).map_err(vt("kitty_png_decoder"))?;
+    // A disabled pane has none, and a thread with none refuses. No parser runs
+    // over bytes an arbitrary child printed, and the storage limit above is
+    // zero besides. The hook itself stays registered for the panes that want
+    // it, which is what `tests/png_decoder_leak.rs` pins.
+    crate::png_decoder::set_for_this_pane(policy.enabled.then_some(policy.storage_bytes));
 
     Ok(())
 }

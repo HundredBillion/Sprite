@@ -7,7 +7,7 @@ pub(crate) fn encode_focus(
     gained: bool,
 ) -> Result<Option<Vec<u8>>, SessionError> {
     use libghostty_vt::focus;
-    use libghostty_vt::terminal::{Mode, ModeKind};
+    use libghostty_vt::mode::{Kind as ModeKind, Mode};
 
     let reporting = terminal
         .mode(Mode::new(MODE_FOCUS_EVENT, ModeKind::Dec))

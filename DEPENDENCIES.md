@@ -161,10 +161,10 @@ SVG rendering and font validation; locked CI does not automatically update it.
 **Capability.** Decoding PNG images transmitted through the Kitty graphics
 protocol.
 
-**Not provided.** `libghostty-vt` accepts a decoder through `set_png_decoder`
-but does not supply a usable one — see its entry for the two reasons.
-Sprite therefore implements `DecodePng` itself, and needs a PNG decoder to do
-it. Writing one is out of the question: PNG is a container format with
+**Not provided in the form Sprite needs.** `libghostty-vt` accepts a decoder
+through `set_png_decoder`, and its own, behind the `png` feature, has no
+per-pane limit — see its entry. Sprite therefore implements `DecodePng` itself,
+and needs a PNG decoder to do it. Writing one is out of the question: PNG is a container format with
 filtering, interlacing, palettes, and multiple bit depths, decoded from bytes an
 arbitrary program printed.
 
@@ -269,7 +269,7 @@ caller coverage, default-client compatibility, and native execution limits.
 between patch releases; updates require a deliberate review of window, input,
 and accessibility behavior on both platforms.
 
-### `libghostty-vt` 0.2.1, from the HundredBillion fork
+### `libghostty-vt` 0.2.1, from upstream at an exact commit
 
 **Capability.** Terminal semantics: VT parsing, screen and scrollback state,
 styling, and key encoding, matching Ghostty's own behavior.
@@ -284,13 +284,30 @@ Checkpoint 4 so a pane can show images. Turning it on required no lock-file
 change at all. `log`, `tracing`, `allocator_api`, and `link-dynamic` stay off.
 
 **`png` stays off deliberately**, even though it sounds like the feature a
-terminal decoding PNGs would want. It provides `RustPngDecoder`, which cannot be
-used: the struct has a private field and neither a constructor nor a `Default`
-implementation, so nothing outside the crate can build one — and its
-`decode_png` reserves buffer *capacity* without setting the buffer's length,
-then hands `next_frame` a zero-length slice, so it would decode nothing even if
-it could be constructed. Sprite installs its own decoder through
-`set_png_decoder`, which is not gated on that feature.
+terminal decoding PNGs would want. It provides `RustPngDecoder`. At the fork's
+revision that decoder could not be used: the struct had a private field and
+neither a constructor nor a `Default` implementation, and its `decode_png`
+reserved buffer *capacity* without setting the buffer's length, so it would
+have decoded nothing. Upstream has since replaced it with a constructible,
+working decoder. Sprite still installs its own through `set_png_decoder`, which
+is not gated on that feature, because libghostty has one decoder for the whole
+process and Sprite's limit is per pane: the registered decoder routes each PNG
+to the decoder of the pane that received it, which refuses anything larger
+than that pane's storage limit before allocating for it.
+
+**The decoder is process-wide.** At the pinned commit the binding
+keeps one decoder for the process rather than one per thread, serializes
+decodes behind a lock, and marks `set_png_decoder` unsafe because libghostty
+does not synchronize the registration. Sprite registers once, before the first
+terminal is created, and never clears it; a registration that fails is tried
+again by the next pane rather than remembered. Two panes decoding PNGs at the
+same moment therefore take turns, so Sprite decodes straight into libghostty's
+buffer to keep each turn short, and a pane's per-image limit bounds it.
+
+The hook is told neither which terminal a PNG arrived on nor anything that
+identifies one, so Sprite finds the pane's decoder by thread. That is correct
+only while each terminal is written on a thread of its own (ADR 0008); a
+terminal written anywhere else refuses PNGs.
 
 **A fourth, found while testing the memory limits.** When a Kitty transmission
 exceeds either bound — the image storage limit or the APC byte cap — the parser
@@ -300,35 +317,37 @@ refusal should be swallowed. Sprite cannot intervene, since the parsing is
 libghostty's; the mitigation is that the default limits are generous enough that
 ordinary images never reach them.
 
-**A third defect in the same area, worked around rather than fixed here.**
-`set_kitty_image_from_temp_file_allowed` takes a `bool`, but the option it
-writes expects a string — the permitted directory — so the Zig side
-`@alignCast`s a one-byte pointer to an eight-byte-aligned type and **aborts the
-process**. It is never called. The medium is denied anyway by Ghostty's default
-limits, and `tests/graphics_policy.rs` asserts that by behaviour rather than
-trusting the default. All three are worth reporting upstream.
+**A third defect in the same area, since fixed upstream.** At the fork's
+revision `set_kitty_image_from_temp_file_allowed` took a `bool`, but the option
+it wrote expects a string — the permitted directory — so the Zig side
+`@alignCast` a one-byte pointer to an eight-byte-aligned type and **aborted the
+process**; Sprite never called it. The binding now offers
+`set_kitty_image_temp_file_dir`, and Sprite passes `None` to deny the medium
+explicitly. `tests/graphics_policy.rs` still asserts all three filesystem
+mediums by behaviour rather than trusting any setter or default.
 
 **License and source.** MIT OR Apache-2.0. Upstream is
-<https://github.com/uzaaft/libghostty-rs>; Sprite builds the fork
-<https://github.com/HundredBillion/libghostty-rs>, branch `ghostty-zig-0.17`,
-whose only changes are the Ghostty pin and bindings regenerated for it. No
-crates.io release is built against a Ghostty that accepts Zig 0.17 yet.
+<https://github.com/uzaaft/libghostty-rs>, and Sprite builds it directly, at
+commit `483ea3d5247b214060da58ef6037a95f30ae89fb` of `master` (2026-11-14). The
+HundredBillion fork that carried the Zig 0.17 bindings is no longer used. No
+crates.io release is built against a Ghostty that accepts Zig 0.17 yet; the
+newest, 0.2.2, predates that work.
 
 **Pin policy.** A git dependency at an exact revision, built against the exact
-Ghostty source commit below through `GHOSTTY_SOURCE_DIR`. The fork's generated
-bindings target Ghostty `92fb5d0`, and the newer pinned source adds C API entries
-without changing the layout or values used by Sprite. The compatibility suite
-guards this pairing; changes to either pin go through ADR 0003 review. Sprite
-returns to a crates.io release once one is built against a Ghostty that
-supports Zig 0.17 (ADR 0009, amended).
+Ghostty source commit below through `GHOSTTY_SOURCE_DIR`. The binding's
+generated bindings and the pinned source are the same Ghostty commit,
+libghostty-vt 1.0.1. The compatibility suite guards this pairing; changes to
+either pin go through ADR 0003 review. Sprite returns to a crates.io release
+once one is built against a Ghostty that supports Zig 0.17 (ADR 0009, amended).
 
-**Upstream documentation defect.** `GhosttyTerminalOptions.max_scrollback` is
-documented in `include/ghostty/vt/terminal.h` as "Maximum number of lines to
-keep in scrollback history". It is not lines. `src/terminal/Screen.zig` states
-the value is "the amount of scrollback to keep in bytes… rounded UP to the
-nearest page size", and measurement confirms it. Checkpoint 1 believed the
-header and set 10,000 intending lines; it meant ten kilobytes. Sprite's field is
-now named `scrollback_bytes`.
+**Scrollback is measured in bytes.** Ghostty's header once documented
+`GhosttyTerminalOptions.max_scrollback` as "Maximum number of lines to keep in
+scrollback history" while `src/terminal/Screen.zig` treated the value as bytes
+rounded up to a page. Checkpoint 1 believed the header and set 10,000 intending
+lines; it meant ten kilobytes. Sprite's field is named `scrollback_bytes` for
+that reason. At the pinned source the option is gone: there are separate
+byte and line limits with names that say which they are, and Sprite sets the
+byte one.
 
 Retention is also coarsely quantized. Measured against 3,000 lines of output:
 budgets of 4 KiB, 64 KiB, and 1 MiB each retained 661 rows, while 16 MiB
@@ -408,15 +427,14 @@ interface directly.
 These are not runtime Rust dependencies.
 
 - **Ghostty source**, submodule `vendor/ghostty` pinned to
-  `5064b3265e500d55f5f44ff48ca59b8685543bb8`, the head of
-  ghostty-org/ghostty#14519 ("Update to Zig 0.17") on 2026-10-18. The
-  submodule is fetched from <https://github.com/HundredBillion/ghostty>, branch
-  `sprite/zig-0.17-5064b32`, so the commit stays reachable if the PR is
-  rebased. `.cargo/config.toml` forces `GHOSTTY_SOURCE_DIR` to the submodule so
-  the pin in this ledger is what actually compiles. Ghostty v1.3.1 lacks the
-  terminal/render C interface the binding uses; Sprite returns to stable tags
-  when a compatible release passes qualification. `gpui-ghostty` and `tty7`
-  remain references only.
+  `108cacb17ed8990840cd14abfce43d8ed8503ca1`, the commit tagged `vt-1.0.1`
+  (libghostty-vt 1.0.1) on ghostty-org/ghostty `main`, and the commit the
+  binding's own build script pins. The submodule is fetched from
+  <https://github.com/ghostty-org/ghostty>; the HundredBillion mirror of the
+  Zig 0.17 pull request is no longer used. `.cargo/config.toml` forces
+  `GHOSTTY_SOURCE_DIR` to the submodule so the pin in this ledger is what
+  actually compiles. Ghostty v1.3.1 lacks the terminal/render C interface the
+  binding uses. `gpui-ghostty` and `tty7` remain references only.
 - **Zig 0.17.0**, exactly, downloaded from ziglang.org and checked against the
   SHA-256 digests in `.github/workflows/ci.yml`. Required by
   `libghostty-vt-sys`'s build script to compile libghostty-vt, and by the
