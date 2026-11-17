@@ -25,7 +25,9 @@ const MAX_ROW_HEIGHT: f32 = 128.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListRow {
-    pub id: String,
+    /// Shared with the id index, which names every row: one string for
+    /// both, where each used to hold its own.
+    pub id: Arc<str>,
     pub text: Arc<str>,
     pub indent: f32,
     pub icon: Option<String>,
@@ -196,7 +198,7 @@ pub struct ScrollAnchor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexedRows {
     rows: Vec<Arc<ListRow>>,
-    ids: HashMap<String, usize>,
+    ids: HashMap<Arc<str>, usize>,
 }
 
 /// One run of rows replaced by a `list_patch`: `delete` rows starting at
@@ -248,7 +250,7 @@ pub struct ListModel {
     /// With how many guides carry each, so a patch can take a row's guides
     /// away without walking the rows that remain.
     guide_ids: HashMap<String, usize>,
-    ids: HashMap<String, usize>,
+    ids: HashMap<Arc<str>, usize>,
     row_height: f32,
     /// Running row tops, present only while some row has its own height.
     offsets: Option<Arc<Vec<f32>>>,
@@ -289,7 +291,7 @@ impl ListModel {
         let height = self
             .scroll
             .as_ref()
-            .and_then(|scroll| self.ids.get(&scroll.id))
+            .and_then(|scroll| self.ids.get(scroll.id.as_str()))
             .map_or(row_height, |index| self.layout().height(*index));
         if let Some(scroll) = &mut self.scroll {
             scroll.offset = scroll.offset.min(below(height));
@@ -361,7 +363,7 @@ impl ListModel {
         }
         if selected
             .as_ref()
-            .is_some_and(|selected| !ids.contains_key(selected))
+            .is_some_and(|selected| !ids.contains_key(selected.as_str()))
         {
             return Err(malformed("selected row does not exist"));
         }
@@ -382,7 +384,7 @@ impl ListModel {
     fn anchor_index(&self) -> Option<usize> {
         self.scroll
             .as_ref()
-            .and_then(|scroll| self.ids.get(&scroll.id).copied())
+            .and_then(|scroll| self.ids.get(scroll.id.as_str()).copied())
     }
 
     /// Makes `rows` the list. `ids` and `guide_ids` already describe them.
@@ -399,7 +401,7 @@ impl ListModel {
         self.selected = selected;
         self.scroll = scroll;
         if let Some(scroll) = &mut self.scroll {
-            let height = match (&self.offsets, self.ids.get(&scroll.id)) {
+            let height = match (&self.offsets, self.ids.get(scroll.id.as_str())) {
                 (Some(offsets), Some(index)) => offsets[index + 1] - offsets[*index],
                 _ => self.row_height,
             };
@@ -455,12 +457,15 @@ impl ListModel {
         let mut arriving = HashSet::with_capacity(added);
         for row in splices.iter().flat_map(|splice| &splice.rows) {
             let stays = self.ids.get(&row.id).is_some_and(|index| !removed(*index));
-            if stays || !arriving.insert(row.id.as_str()) {
+            if stays || !arriving.insert(&*row.id) {
                 return Err(malformed(format!("duplicate row id {:?}", row.id)));
             }
         }
         if let Some(selected) = &selected {
-            let stays = self.ids.get(selected).is_some_and(|index| !removed(*index));
+            let stays = self
+                .ids
+                .get(selected.as_str())
+                .is_some_and(|index| !removed(*index));
             if !stays && !arriving.contains(selected.as_str()) {
                 return Err(malformed("selected row does not exist"));
             }
@@ -712,7 +717,13 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
     let object = value
         .as_object()
         .ok_or_else(|| malformed("a list row is an object"))?;
-    let id = string(object, "id")?;
+    // Read once into the string the row and the id index share.
+    let id: Arc<str> = object
+        .get("id")
+        .ok_or_else(|| malformed("a list row needs id"))?
+        .as_str()
+        .ok_or_else(|| malformed("id is a string"))?
+        .into();
     validate_row_string(&id, "id")?;
     let text = object
         .get("text")
@@ -795,7 +806,7 @@ fn parse_active_guides(value: &Value) -> Result<HashSet<String>, Refusal> {
 #[cfg(test)]
 thread_local! { static INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
-fn id_index(rows: &[Arc<ListRow>]) -> Result<HashMap<String, usize>, Refusal> {
+fn id_index(rows: &[Arc<ListRow>]) -> Result<HashMap<Arc<str>, usize>, Refusal> {
     #[cfg(test)]
     INDEX_BUILDS.with(|count| count.set(count.get() + 1));
     let mut ids = HashMap::with_capacity(rows.len());
@@ -854,7 +865,7 @@ fn preserved_anchor(
     old: &[Arc<ListRow>],
     new: &[Arc<ListRow>],
     old_index: Option<usize>,
-    new_ids: &HashMap<String, usize>,
+    new_ids: &HashMap<Arc<str>, usize>,
     anchor: Option<&ScrollAnchor>,
 ) -> Option<ScrollAnchor> {
     let anchor = anchor?;
@@ -862,14 +873,14 @@ fn preserved_anchor(
     old[old_index..]
         .iter()
         .chain(old[..old_index].iter().rev())
-        .find(|row| new_ids.contains_key(row.id.as_str()))
+        .find(|row| new_ids.contains_key(&*row.id))
         .map(|row| ScrollAnchor {
-            id: row.id.clone(),
+            id: row.id.to_string(),
             offset: anchor.offset,
         })
         .or_else(|| {
             new.first().map(|row| ScrollAnchor {
-                id: row.id.clone(),
+                id: row.id.to_string(),
                 offset: anchor.offset,
             })
         })
@@ -885,7 +896,7 @@ fn revision(object: &Map<String, Value>) -> Result<u64, Refusal> {
 
 fn nullable_row(
     value: &Value,
-    ids: &HashMap<String, usize>,
+    ids: &HashMap<Arc<str>, usize>,
     key: &str,
 ) -> Result<Option<String>, Refusal> {
     match value {
@@ -897,22 +908,24 @@ fn nullable_row(
         | Value::Object(_) => Ok(Some(row(value, ids, key)?)),
     }
 }
-fn row(value: &Value, ids: &HashMap<String, usize>, key: &str) -> Result<String, Refusal> {
+fn row(value: &Value, ids: &HashMap<Arc<str>, usize>, key: &str) -> Result<String, Refusal> {
     let id = string_value(value, key)?;
-    ids.contains_key(&id)
+    ids.contains_key(id.as_str())
         .then_some(id)
         .ok_or_else(|| malformed(format!("{key} row does not exist")))
 }
 fn parse_anchor(
     value: &Value,
-    ids: &HashMap<String, usize>,
+    ids: &HashMap<Arc<str>, usize>,
     layout: &RowLayout,
 ) -> Result<ScrollAnchor, Refusal> {
     let object = value
         .as_object()
         .ok_or_else(|| malformed("scroll is an object"))?;
     let id = row(object.get("id").unwrap_or(&Value::Null), ids, "scroll")?;
-    let row_height = ids.get(&id).map_or(0.0, |index| layout.height(*index));
+    let row_height = ids
+        .get(id.as_str())
+        .map_or(0.0, |index| layout.height(*index));
     Ok(ScrollAnchor {
         id,
         offset: finite(
@@ -1242,7 +1255,7 @@ mod tests {
                 assert_eq!(model.selected, before.selected);
             }
         }
-        let ids: Vec<&str> = model.rows.iter().map(|row| row.id.as_str()).collect();
+        let ids: Vec<&str> = model.rows.iter().map(|row| &*row.id).collect();
         let expected: Vec<&str> = fixture["rows"]
             .as_array()
             .expect("rows")

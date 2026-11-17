@@ -105,7 +105,7 @@ struct WireRows {
 
 #[derive(Deserialize)]
 struct WireRow {
-    id: String,
+    id: Text,
     text: Text,
     indent: f64,
     #[serde(default, deserialize_with = "present")]
@@ -302,7 +302,7 @@ fn extra(wire: &mut WireRow) -> Option<Option<Box<RowExtra>>> {
 }
 
 fn row(mut wire: WireRow) -> Option<ListRow> {
-    row_string(&wire.id)?;
+    row_string(&wire.id.0)?;
     let extra = extra(&mut wire)?;
     // An input's text is what has been typed into it, which starts empty.
     let empty_input = wire.text.0.is_empty()
@@ -330,7 +330,7 @@ fn row(mut wire: WireRow) -> Option<ListRow> {
         });
     }
     Some(ListRow {
-        id: wire.id,
+        id: wire.id.0,
         text: wire.text.0,
         indent,
         icon: wire.icon,

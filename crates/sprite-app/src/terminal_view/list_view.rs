@@ -181,7 +181,7 @@ pub(super) struct VirtualListView {
     raster_width: f32,
     focused: bool,
     viewport: Option<Bounds<gpui::Pixels>>,
-    last_anchor: Option<(String, f32, u32)>,
+    last_anchor: Option<(Arc<str>, f32, u32)>,
     thumb_grab: Option<f32>,
     list_hovered: bool,
     thumb_hovered: bool,
@@ -240,7 +240,7 @@ impl VirtualListView {
             );
             if let Some(row) = self.model.rows.get(index) {
                 self.model.scroll = Some(ScrollAnchor {
-                    id: row.id.clone(),
+                    id: row.id.to_string(),
                     offset,
                 });
             }
@@ -289,7 +289,7 @@ impl VirtualListView {
         );
         if let Some(row) = self.model.rows.get(index) {
             self.model.scroll = Some(ScrollAnchor {
-                id: row.id.clone(),
+                id: row.id.to_string(),
                 offset: intra,
             });
         }
@@ -327,7 +327,7 @@ impl VirtualListView {
         if self.last_anchor.as_ref() != Some(&anchor) {
             self.last_anchor = Some(anchor);
             self.model.scroll = Some(ScrollAnchor {
-                id: row.id.clone(),
+                id: row.id.to_string(),
                 offset: intra,
             });
             let event = event_list_scroll(self.model.revision, &row.id, intra, visible);
@@ -947,7 +947,7 @@ impl ListPaint {
 
 fn row_element(paint: &ListPaint, row: &ListRow, height: f32, window: &mut Window) -> AnyElement {
     let config = &paint.config;
-    let is_selected = paint.selected_id.as_deref() == Some(row.id.as_str());
+    let is_selected = paint.selected_id.as_deref() == Some(&*row.id);
     let extra = row.extra();
     let kind = extra.kind;
     let mut line = div()
