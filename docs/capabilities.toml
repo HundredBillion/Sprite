@@ -271,6 +271,15 @@ tests = [
 ]
 
 [[capability]]
+id = "tabs-and-panes.keyboard-returns-to-its-holder"
+area = "tabs-and-panes"
+promise = "Moving back to a pane with a key gives the keyboard to whichever of its terminal or Surfaces held it last."
+status = "kept"
+tests = [
+    "returning_to_a_pane_by_key_gives_the_keyboard_back_to_what_held_it",
+]
+
+[[capability]]
 id = "pane-control.open-to-the-owner"
 area = "pane-control"
 promise = "Any process of the same user can drive a window's panes without a key, and each window answers only for its own panes (ADR 0036)."

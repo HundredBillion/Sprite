@@ -39,6 +39,16 @@ pub trait Pane: Render + Focusable + gpui::EventEmitter<TitleChanged> + 'static 
     /// Cycles focus among the pane's contents, when the pane supports it.
     fn cycle_surface_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
+    /// The handle to focus when the keyboard comes back to this pane.
+    ///
+    /// A pane with several things that take the keyboard returns whichever
+    /// held it when focus last left, so coming back with a key puts a person
+    /// where a click would. It must lie inside [`Focusable::focus_handle`]'s
+    /// subtree. A pane with one focusable thing keeps the default.
+    fn keyboard_handle(&self, cx: &App) -> FocusHandle {
+        self.focus_handle(cx)
+    }
+
     /// One beat of the window's clock, about twice a second, delivered to every
     /// pane in the window whether or not it is in front.
     ///
@@ -101,8 +111,12 @@ pub trait PaneHandle {
     fn title(&self, cx: &App) -> Option<SharedString>;
     /// Subscribes without retaining the pane; dropping the subscription stops delivery.
     fn subscribe_title(&self, cx: &mut App, listener: TitleListener) -> gpui::Subscription;
-    /// The handle the workspace focuses to hand this pane the keyboard.
+    /// The root of the pane's focus subtree: the pane has the keyboard when
+    /// this handle contains focus.
     fn focus_handle(&self, cx: &App) -> FocusHandle;
+    /// See [`Pane::keyboard_handle`]: what the workspace focuses to hand this
+    /// pane the keyboard.
+    fn keyboard_handle(&self, cx: &App) -> FocusHandle;
     /// See [`Pane::set_allocated`].
     fn set_allocated(&self, size: Size<Pixels>, cx: &mut App);
     /// See [`Pane::begin_shutdown`].
@@ -138,6 +152,10 @@ impl<V: Pane> PaneHandle for gpui::Entity<V> {
 
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.read(cx).focus_handle(cx)
+    }
+
+    fn keyboard_handle(&self, cx: &App) -> FocusHandle {
+        self.read(cx).keyboard_handle(cx)
     }
 
     fn set_allocated(&self, size: Size<Pixels>, cx: &mut App) {

@@ -78,10 +78,11 @@ impl Workspace {
         let Some(pane) = self.tabs.active().and_then(|tab| tab.focused()) else {
             return;
         };
-        let handle = pane.focus_handle(cx);
         // Hosted Surfaces share the pane's focus subtree and keep their keyboard focus.
-        if !handle.contains_focused(window, cx) {
-            window.focus(&handle);
+        if !pane.focus_handle(cx).contains_focused(window, cx) {
+            // Arriving from another pane: back to whatever in this pane held
+            // the keyboard last, which may be a Surface rather than the pane.
+            window.focus(&pane.keyboard_handle(cx));
         }
     }
     pub(super) fn focus_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
