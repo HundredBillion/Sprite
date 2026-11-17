@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "feature": "virtual-list-patch-v1",
+  "operations": [
+    {"request":{"type":"list_rows","revision":1,"selected":"b","rows":[{"id":"a","text":"a","indent":0,"guides":[]},{"id":"b","text":"b","indent":0,"guides":[]},{"id":"c","text":"c","indent":0,"guides":[]},{"id":"d","text":"d","indent":0,"guides":[]}]},"reply":{"type":"applied","operation":"list_rows","revision":1}},
+    {"request":{"type":"list_patch","revision":2,"base":1,"selected":"b","splices":[{"at":0,"delete":0,"rows":[{"id":"top","text":"top","indent":0,"guides":[]}]},{"at":2,"delete":1,"rows":[{"id":"c","text":"c, changed","indent":0,"guides":[]},{"id":"c2","text":"after c","indent":0,"guides":[]}]}]},"reply":{"type":"applied","operation":"list_patch","revision":2}},
+    {"request":{"type":"list_patch","revision":3,"base":1,"selected":null,"splices":[]},"reply":{"type":"refused","reason":"malformed: a patch changes the current rows, and base is not their revision"}},
+    {"request":{"type":"list_patch","revision":2,"base":2,"selected":null,"splices":[]},"reply":{"type":"refused","reason":"malformed: a row revision strictly increases"}},
+    {"request":{"type":"list_patch","revision":3,"base":2,"selected":null,"splices":[{"at":5,"delete":2,"rows":[]}]},"reply":{"type":"refused","reason":"malformed: a splice lies within the rows it changes"}},
+    {"request":{"type":"list_patch","revision":3,"base":2,"selected":null,"splices":[{"at":2,"delete":2,"rows":[]},{"at":3,"delete":1,"rows":[]}]},"reply":{"type":"refused","reason":"malformed: splices are in order and do not overlap"}},
+    {"request":{"type":"list_patch","revision":3,"base":2,"selected":null,"splices":[{"at":1,"delete":0,"rows":[{"id":"d","text":"again","indent":0,"guides":[]}]}]},"reply":{"type":"refused","reason":"malformed: duplicate row id \"d\""}},
+    {"request":{"type":"list_patch","revision":3,"base":2,"selected":"b","splices":[{"at":2,"delete":1,"rows":[]}]},"reply":{"type":"refused","reason":"malformed: selected row does not exist"}},
+    {"request":{"type":"list_patch","revision":3,"base":2,"selected":null,"splices":[{"at":0,"delete":1}]},"reply":{"type":"refused","reason":"malformed: a splice needs at most 100000 rows"}},
+    {"request":{"type":"list_patch","revision":3,"base":2,"splices":[]},"reply":{"type":"refused","reason":"malformed: list_patch needs selected, a row id or null"}},
+    {"request":{"type":"list_patch","revision":3,"base":2,"selected":"top","splices":[{"at":4,"delete":1,"rows":[]}]},"reply":{"type":"applied","operation":"list_patch","revision":3}}
+  ],
+  "rows": ["top", "a", "b", "c", "d"]
+}

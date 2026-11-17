@@ -199,12 +199,30 @@ pub struct IndexedRows {
     ids: HashMap<String, usize>,
 }
 
+/// One run of rows replaced by a `list_patch`: `delete` rows starting at
+/// `at`, an index into the rows being changed, give way to `rows`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Splice {
+    pub at: usize,
+    pub delete: usize,
+    pub rows: Vec<ListRow>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ListOp {
     Assets(BTreeMap<String, String>),
     Rows {
         revision: u64,
         rows: IndexedRows,
+        selected: Option<String>,
+    },
+    /// The rows of revision `base` with `splices` made in them, as revision
+    /// `revision`. A program that changes one row of a long list sends that
+    /// row, not the list.
+    Patch {
+        revision: u64,
+        base: u64,
+        splices: Vec<Splice>,
         selected: Option<String>,
     },
     State {
@@ -297,6 +315,12 @@ impl ListModel {
                 rows,
                 selected,
             } => self.apply_rows(revision, rows, selected),
+            ListOp::Patch {
+                revision,
+                base,
+                splices,
+                selected,
+            } => self.apply_patch(revision, base, splices, selected),
             ListOp::State { revision, patch } => self.apply_state(revision, patch),
         }
     }
@@ -357,6 +381,45 @@ impl ListModel {
         Ok(())
     }
 
+    /// Builds the patched rows beside the current ones and installs them as
+    /// `list_rows` would, so a refused patch leaves the list as it was and
+    /// selection, scroll and guides follow the same rules as a replacement.
+    fn apply_patch(
+        &mut self,
+        revision: u64,
+        base: u64,
+        splices: Vec<Splice>,
+        selected: Option<String>,
+    ) -> Result<(), Refusal> {
+        if base != self.revision {
+            return Err(malformed(
+                "a patch changes the current rows, and base is not their revision",
+            ));
+        }
+        let old = &self.rows;
+        let (mut kept, mut added) = (old.len(), 0);
+        for splice in &splices {
+            if splice.at + splice.delete > old.len() {
+                return Err(malformed("a splice lies within the rows it changes"));
+            }
+            kept -= splice.delete;
+            added += splice.rows.len();
+        }
+        if kept + added > MAX_ROWS {
+            return Err(malformed(format!("a patch leaves at most {MAX_ROWS} rows")));
+        }
+        let mut rows = Vec::with_capacity(kept + added);
+        let mut next = 0;
+        for splice in splices {
+            rows.extend_from_slice(&old[next..splice.at]);
+            rows.extend(splice.rows);
+            next = splice.at + splice.delete;
+        }
+        rows.extend_from_slice(&old[next..]);
+        let ids = id_index(&rows)?;
+        self.apply_rows(revision, IndexedRows { rows, ids }, selected)
+    }
+
     fn apply_state(&mut self, revision: u64, patch: Value) -> Result<(), Refusal> {
         if revision != self.revision {
             return Err(malformed("a state revision matches the current rows"));
@@ -410,6 +473,7 @@ pub fn parse_op(value: &Value) -> Result<ListOp, Refusal> {
     match object.get("type").and_then(Value::as_str) {
         Some("assets") => parse_assets(object),
         Some("list_rows") => parse_rows(object),
+        Some("list_patch") => parse_patch(object),
         Some("list_state") => parse_state(object),
         Some(kind) => Err(malformed(format!("{kind} is not a list operation"))),
         None => Err(malformed("a list operation needs a type")),
@@ -417,7 +481,7 @@ pub fn parse_op(value: &Value) -> Result<ListOp, Refusal> {
 }
 
 pub fn is_op(kind: &str) -> bool {
-    matches!(kind, "assets" | "list_rows" | "list_state")
+    matches!(kind, "assets" | "list_rows" | "list_patch" | "list_state")
 }
 
 fn parse_assets(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
@@ -458,6 +522,60 @@ fn parse_rows(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
     Ok(ListOp::Rows {
         revision,
         rows: IndexedRows { rows, ids },
+        selected,
+    })
+}
+
+fn parse_patch(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
+    let revision = revision(object)?;
+    let base = object
+        .get("base")
+        .and_then(Value::as_u64)
+        .filter(|base| (1..=MAX_SAFE_INTEGER).contains(base))
+        .ok_or_else(|| malformed("list_patch needs base, the revision of the rows it changes"))?;
+    let values = object
+        .get("splices")
+        .and_then(Value::as_array)
+        .filter(|splices| splices.len() <= MAX_ROWS)
+        .ok_or_else(|| malformed(format!("list_patch needs at most {MAX_ROWS} splices")))?;
+    let count = |splice: &Map<String, Value>, key: &str| -> Result<usize, Refusal> {
+        splice
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|count| *count <= MAX_ROWS as u64)
+            .map(|count| count as usize)
+            .ok_or_else(|| malformed(format!("a splice's {key} is from 0 to {MAX_ROWS}")))
+    };
+    let mut splices = Vec::with_capacity(values.len());
+    // Where the previous splice ended: the next may not start before it.
+    let mut end = 0;
+    for value in values {
+        let splice = value
+            .as_object()
+            .ok_or_else(|| malformed("a splice is an object"))?;
+        let (at, delete) = (count(splice, "at")?, count(splice, "delete")?);
+        if at < end {
+            return Err(malformed("splices are in order and do not overlap"));
+        }
+        end = at + delete;
+        let rows = splice
+            .get("rows")
+            .and_then(Value::as_array)
+            .filter(|rows| rows.len() <= MAX_ROWS)
+            .ok_or_else(|| malformed(format!("a splice needs at most {MAX_ROWS} rows")))?
+            .iter()
+            .map(parse_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        splices.push(Splice { at, delete, rows });
+    }
+    let selected = object
+        .get("selected")
+        .ok_or_else(|| malformed("list_patch needs selected, a row id or null"))
+        .and_then(|value| nullable_string(value, "selected"))?;
+    Ok(ListOp::Patch {
+        revision,
+        base,
+        splices,
         selected,
     })
 }
@@ -980,6 +1098,110 @@ mod tests {
         for (actual, expected) in emitted.iter().zip(events) {
             assert_eq!(&serde_json::from_str::<Value>(actual).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn the_patch_fixture_applies_and_refuses_as_it_says() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-patch-v1.json"
+        ))
+        .expect("patch fixture");
+        let mut model = ListModel::with_row_height(22.0);
+        for pair in fixture["operations"].as_array().expect("operations") {
+            let before = model.clone();
+            let result = parse_op(&pair["request"]).and_then(|op| model.apply(op));
+            if pair["reply"]["type"] == "applied" {
+                result.expect("fixture operation applies");
+                assert_eq!(pair["reply"]["revision"], model.revision);
+            } else {
+                let refusal = result.expect_err("fixture operation is refused");
+                assert_eq!(pair["reply"]["reason"], refusal.reason());
+                // A refused patch leaves the list exactly as it was.
+                assert_eq!(model.revision, before.revision);
+                assert_eq!(model.rows, before.rows);
+                assert_eq!(model.selected, before.selected);
+            }
+        }
+        let ids: Vec<&str> = model.rows.iter().map(|row| row.id.as_str()).collect();
+        let expected: Vec<&str> = fixture["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|id| id.as_str().expect("row id"))
+            .collect();
+        assert_eq!(ids, expected);
+        assert_eq!(model.selected.as_deref(), Some("top"));
+        for (index, id) in expected.iter().enumerate() {
+            assert_eq!(model.index_of(id), Some(index));
+        }
+    }
+
+    #[test]
+    fn a_patch_gives_the_rows_a_replacement_would() {
+        // Every way of cutting eight rows into kept, removed and added runs
+        // ends as the same list whether it is patched or sent whole.
+        let row =
+            |id: &str, text: &str| serde_json::json!({"id":id,"text":text,"indent":0,"guides":[]});
+        let old: Vec<String> = (0..8).map(|i| format!("r{i}")).collect();
+        let whole = |revision: u64, rows: &[Value]| serde_json::json!({"type":"list_rows","revision":revision,"rows":rows,"selected":null});
+        for at in 0..=8usize {
+            for delete in 0..=(8 - at) {
+                for insert in 0..3usize {
+                    let old_rows: Vec<Value> = old.iter().map(|id| row(id, id)).collect();
+                    let added: Vec<Value> =
+                        (0..insert).map(|i| row(&format!("n{i}"), "new")).collect();
+                    let mut expected = old_rows.clone();
+                    expected.splice(at..at + delete, added.iter().cloned());
+                    let mut patched = ListModel::with_row_height(22.0);
+                    patched
+                        .apply(parse_op(&whole(1, &old_rows)).unwrap())
+                        .unwrap();
+                    patched
+                        .apply(
+                            parse_op(&serde_json::json!({"type":"list_patch","revision":2,"base":1,
+                                "selected":null,"splices":[{"at":at,"delete":delete,"rows":added}]}))
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    let mut replaced = ListModel::with_row_height(22.0);
+                    replaced
+                        .apply(parse_op(&whole(2, &expected)).unwrap())
+                        .unwrap();
+                    assert_eq!(
+                        patched.rows, replaced.rows,
+                        "at {at} delete {delete} insert {insert}"
+                    );
+                    assert_eq!(patched.ids, replaced.ids);
+                    assert_eq!(patched.guide_ids, replaced.guide_ids);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_patch_keeps_the_scroll_anchor_a_replacement_would() {
+        let mut model = ListModel::with_row_height(22.0);
+        model
+            .apply(parse_op(&rows(1, &["a", "b", "c", "d"])).unwrap())
+            .unwrap();
+        model
+            .apply(parse_op(&serde_json::json!({"type":"list_state","revision":1,"scroll":{"id":"c","offset":4.0}})).unwrap())
+            .unwrap();
+        // The anchored row is removed: the view holds on to the row after it.
+        model
+            .apply(
+                parse_op(
+                    &serde_json::json!({"type":"list_patch","revision":2,"base":1,"selected":null,
+                    "splices":[{"at":2,"delete":1,"rows":[]}]}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            model.scroll.as_ref().map(|scroll| scroll.id.as_str()),
+            Some("d")
+        );
+        assert_eq!(model.scroll.as_ref().map(|scroll| scroll.offset), Some(4.0));
     }
 
     #[test]

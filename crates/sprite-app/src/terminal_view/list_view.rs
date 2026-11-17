@@ -228,7 +228,7 @@ impl VirtualListView {
     }
 
     pub(super) fn apply(&mut self, op: ListOp, cx: &mut Context<Self>) -> Result<(), Refusal> {
-        let rows = matches!(op, ListOp::Rows { .. });
+        let rows = matches!(op, ListOp::Rows { .. } | ListOp::Patch { .. });
         let previous_scroll = self.model.scroll.clone();
         let navigation = rows
             || matches!(&op, ListOp::State { patch, .. } if patch.get("scroll").is_some() || patch.get("reveal").is_some());

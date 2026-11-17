@@ -417,6 +417,32 @@ events from stale revisions. On a theme replacement, reopen the Surface to
 release its scoped assets. Current limits are 16 MiB per message, 100,000 rows,
 4,096 assets, and 64 MiB of SVG text per Surface; batch assets below 8 MiB.
 
+A host that lists `virtual-list-patch-v1` in `capabilities` also takes
+`list_patch`, which changes some rows of the current list where `list_rows`
+replaces all of them. A program that restyles one row of a long list sends
+that row, not a megabyte. The
+[patch fixture](../tests/fixtures/surface-list-patch-v1.json) has requests,
+acknowledgements and refusals to copy from.
+
+```json
+{"type":"list_patch","revision":8,"base":7,"selected":"b",
+ "splices":[{"at":12,"delete":1,"rows":[{"id":"b","text":"b","indent":0,"guides":[]}]}]}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `base` | The revision of the rows being changed. It must be the list's current revision; a patch against any other is refused. |
+| `revision` | The revision of the result, greater than `base`, as for `list_rows`. |
+| `splices` | Changes in ascending order that do not overlap. Each removes `delete` rows starting at index `at` and puts `rows` in their place. Every `at` counts rows of revision `base`, before any splice of this message is made. |
+| `selected` | The selected row's id in the result, or `null`, as for `list_rows`. |
+
+The result must be a list `list_rows` would accept: at most 100,000 rows, no
+id twice, and `selected` among them. The reply is `applied` with operation
+`list_patch` and the new revision. A refused patch leaves the list as it was,
+and the program can send `list_rows` with the same revision in its place.
+Selection, scroll position and guides follow a patch as they follow a
+replacement.
+
 A host that lists `virtual-list-rows-v2` in `capabilities` also draws
 *decorated* rows, which is what a source-control panel needs. Every field below
 is optional, and a row that sends none is drawn exactly as before. The
