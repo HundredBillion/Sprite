@@ -1280,6 +1280,23 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Notes which of the terminal and its Surfaces just gave up the keyboard.
+    pub(super) fn remember_keyboard(&mut self, blurred: &gpui::WeakFocusHandle) {
+        self.keyboard_surface = self
+            .surfaces
+            .iter()
+            .find(|surface| *blurred == surface.focus)
+            .map(|surface| surface.id);
+    }
+
+    /// The handle the keyboard returns to: the remembered Surface while it is
+    /// still open, else the terminal, which is always there.
+    pub(super) fn keyboard_return_handle(&self) -> FocusHandle {
+        self.keyboard_surface
+            .and_then(|id| self.surfaces.iter().find(|surface| surface.id == id))
+            .map_or_else(|| self.focus.clone(), |surface| surface.focus.clone())
+    }
+
     /// The Surface holding the keyboard, if one does; `None` means the
     /// terminal does. Only one focus handle is focused at a time, so the
     /// first match is the only one.

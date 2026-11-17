@@ -294,7 +294,9 @@ holds the Surface open, prints each click, keystroke, resize, and focus
 change as one JSON line, sends each further document on standard input as a
 replacement, and closes the Surface when standard input closes. A Surface
 takes the keyboard when it opens; the program hands it back with
-`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Drawing uses the Surface
+`{"type":"focus"}`, or Ctrl+Shift+Space cycles it. Moving to another pane
+and back with a key returns the keyboard to whichever of the terminal and its
+Surfaces held it. Drawing uses the Surface
 socket and a key that only the pane's own sessions are given. A program that
 speaks the Surface Channel itself names its pane by the address in
 `SPRITE_PANE`, passed as the string it is (`"pane":"<window>:<pane>"`); the

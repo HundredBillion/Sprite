@@ -235,6 +235,91 @@ mod tests {
         let split = focused_handle(&workspace, cx);
         cx.update(|window, _| assert!(split.is_focused(window)));
     }
+    /// Issue #165: coming back to a pane with a key used to hand the keyboard
+    /// to the terminal even when a Surface had it, so only a click reached an
+    /// editor drawn over the pane.
+    #[gpui::test]
+    fn returning_to_a_pane_by_key_gives_the_keyboard_back_to_what_held_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::surface::channel::{Open, SurfaceConnection};
+        let (workspace, cx) = test_workspace(cx);
+        // Focus events describe an active window only.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        draw_workspace(cx);
+        let terminal_focus = focused_handle(&workspace, cx);
+        let pane = workspace.read_with(cx, |workspace, _| {
+            workspace.tabs.active().unwrap().focus().unwrap()
+        });
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.serve_surface_request(crate::surface::channel::SurfaceRequest::Open {
+                id: crate::surface::SurfaceId(1), pane, open: Open {
+                    placement: crate::surface::channel::Placement::Fill { owner_pid: None }, focus: true,
+                    description: serde_json::json!({"version":1,"root":{"kind":"text","text":"Surface"}}),
+                }, connection: SurfaceConnection::new(&stream).unwrap(), reply: reply.into(),
+            }, window, cx);
+        });
+        assert_eq!(receiver.try_recv().unwrap(), Ok(()));
+        draw_workspace(cx);
+        let surface_focus = cx.update(|window, cx| window.focused(cx).unwrap());
+        assert_ne!(surface_focus, terminal_focus);
+
+        // Away to a new pane on the right, then back with each binding.
+        cx.simulate_keystrokes("ctrl-shift-d");
+        draw_workspace(cx);
+        let split = focused_handle(&workspace, cx);
+        cx.update(|window, _| assert!(split.is_focused(window)));
+        for (back, away) in [("cmd-[", "cmd-]"), ("ctrl-shift-left", "ctrl-shift-right")] {
+            cx.simulate_keystrokes(back);
+            draw_workspace(cx);
+            cx.update(|window, _| {
+                assert!(
+                    surface_focus.is_focused(window),
+                    "{back} returns to the Surface"
+                );
+            });
+            cx.simulate_keystrokes(away);
+            draw_workspace(cx);
+            cx.update(|window, _| assert!(split.is_focused(window)));
+        }
+
+        // The terminal is remembered the same way when it held the keyboard.
+        cx.simulate_keystrokes("cmd-[");
+        draw_workspace(cx);
+        cx.simulate_keystrokes("ctrl-shift-space");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(terminal_focus.is_focused(window)));
+        cx.simulate_keystrokes("cmd-]");
+        draw_workspace(cx);
+        cx.simulate_keystrokes("cmd-[");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(terminal_focus.is_focused(window)));
+
+        // A remembered Surface that closed while focus was away leaves the
+        // terminal, which is always there.
+        cx.simulate_keystrokes("ctrl-shift-space");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(surface_focus.is_focused(window)));
+        cx.simulate_keystrokes("cmd-]");
+        draw_workspace(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.serve_surface_request(
+                crate::surface::channel::SurfaceRequest::Close {
+                    id: crate::surface::SurfaceId(1),
+                    pane,
+                },
+                window,
+                cx,
+            );
+        });
+        draw_workspace(cx);
+        cx.simulate_keystrokes("cmd-[");
+        draw_workspace(cx);
+        cx.update(|window, _| assert!(terminal_focus.is_focused(window)));
+    }
     #[gpui::test]
     fn placeholder_surface_replies_complete_and_missing_panes_are_unknown(
         cx: &mut gpui::TestAppContext,

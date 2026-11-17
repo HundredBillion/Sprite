@@ -181,6 +181,10 @@ pub struct TerminalView {
     /// because the same fact decides whether the child may write the clipboard
     /// and whether it hears focus reports.
     pane_focus: pane_focus::PaneFocus,
+    /// The Surface that held the keyboard when focus last left this pane;
+    /// `None` when the terminal did. Read when the keyboard comes back by a
+    /// key or a control request, so it lands where it was.
+    keyboard_surface: Option<crate::surface::SurfaceId>,
     /// Keeps the focus and window-activation observers alive.
     _focus_observers: [gpui::Subscription; 3],
     /// Text an input method is composing.
@@ -604,6 +608,7 @@ impl TerminalView {
             preedit: None,
             blink_on: true,
             pane_focus: pane_focus::PaneFocus::default(),
+            keyboard_surface: None,
             _focus_observers: focus_observers,
             _events: event_task,
             #[cfg(test)]
@@ -701,6 +706,7 @@ impl TerminalView {
             preedit: None,
             blink_on: true,
             pane_focus: pane_focus::PaneFocus::default(),
+            keyboard_surface: None,
             _focus_observers: focus_observers,
             _events: Task::ready(()),
             #[cfg(test)]
@@ -807,7 +813,8 @@ impl TerminalView {
             cx.on_focus_in(focus, window, |view, window, cx| {
                 view.refresh_pane_focus(window, cx)
             }),
-            cx.on_focus_out(focus, window, |view, _, window, cx| {
+            cx.on_focus_out(focus, window, |view, event, window, cx| {
+                view.remember_keyboard(&event.blurred);
                 view.refresh_pane_focus(window, cx)
             }),
             cx.observe_window_activation(window, |view, window, cx| {
@@ -1163,6 +1170,10 @@ impl sprite_pane::Pane for TerminalView {
 
     fn cycle_surface_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle_focus(window, cx);
+    }
+
+    fn keyboard_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.keyboard_return_handle()
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
