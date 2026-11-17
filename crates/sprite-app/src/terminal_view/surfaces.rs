@@ -1246,6 +1246,14 @@ impl TerminalView {
         }
     }
 
+    /// Whether a Surface's owning program no longer holds the terminal.
+    pub(super) fn has_invalid_owned_surface(&self) -> bool {
+        self.surfaces
+            .iter()
+            .filter(|surface| surface.owner().is_some() || surface.registered_owner().is_some())
+            .any(|surface| self.validate_surface_owner(surface.id).is_err())
+    }
+
     pub(super) fn close_invalid_owned_surfaces(
         &mut self,
         window: &mut Window,

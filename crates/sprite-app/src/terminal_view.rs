@@ -13,6 +13,8 @@ mod native_tabs;
 mod pane_focus;
 mod placeholder;
 mod render;
+#[cfg(test)]
+pub(crate) use render::RENDERED;
 mod surfaces;
 mod theme;
 

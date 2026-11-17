@@ -321,6 +321,13 @@ tests = [
 ]
 
 [[capability]]
+id = "drawing.busy-pane-redraws-alone"
+area = "drawing"
+promise = "A pane whose content changes redraws by itself; the other panes keep their last drawing."
+status = "kept"
+tests = ["a_change_in_one_pane_redraws_only_that_pane"]
+
+[[capability]]
 id = "drawing.ordering-cost-independent-of-glyphs"
 area = "drawing"
 promise = "Working out what is drawn over what costs a grid the same however many glyphs it shows."
