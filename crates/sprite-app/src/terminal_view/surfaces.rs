@@ -3779,6 +3779,127 @@ mod tests {
         drop(host);
     }
 
+    /// A source-control list: a commit box and button taller than the rows
+    /// beneath them, rows with status letters and hover actions, and headers
+    /// with icon buttons. Each control reports itself and nothing else.
+    #[gpui::test]
+    fn decorated_rows_of_mixed_height_draw_and_report_their_own_clicks(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn list_events(peer: &mut Peer) -> Vec<serde_json::Value> {
+            events(peer)
+                .into_iter()
+                .filter(|event| event["type"] == "list_click" || event["type"] == "list_action")
+                .collect()
+        }
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-rows-v2.json"
+        ))
+        .unwrap();
+        let id = SurfaceId(987);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(fixture["description"].clone()),
+        );
+        assert_eq!(answer, Ok(()));
+        for pair in fixture["operations"].as_array().unwrap() {
+            if pair["reply"]["type"] != "applied" {
+                continue;
+            }
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::List {
+                    id,
+                    pane,
+                    op: crate::surface::list::parse_op(&pair["request"]).unwrap(),
+                },
+            );
+        }
+        // Put the list back at its top: the fixture's last state scrolled it.
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::List {
+                id,
+                pane,
+                op: crate::surface::list::parse_op(&serde_json::json!({
+                    "type": "list_state", "revision": 1, "scroll": {"id": "message", "offset": 0}
+                }))
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let viewport = host.read_with(cx, |host, cx| {
+            let Body::List { view, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+                panic!("list")
+            };
+            view.read(cx)
+                .viewport_bounds()
+                .expect("the list was laid out")
+        });
+        let left = viewport.origin.x;
+        let right = viewport.origin.x + viewport.size.width;
+        let top = viewport.origin.y;
+        let none = gpui::Modifiers::default();
+        list_events(&mut peer);
+        let mut press = |cx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>| {
+            cx.simulate_mouse_move(at, None, none);
+            draw_test_window(cx);
+            cx.simulate_mouse_down(at, MouseButton::Left, none);
+            cx.simulate_mouse_up(at, MouseButton::Left, none);
+            draw_test_window(cx);
+            list_events(&mut peer)
+        };
+
+        // Rows: message 0..36, commit 36..72, then 22-pixel rows from 72.
+        let commit = press(cx, gpui::point(left + px(60.0), top + px(54.0)));
+        assert_eq!(commit.len(), 1, "{commit:?}");
+        assert_eq!(commit[0]["type"], "list_click");
+        assert_eq!(commit[0]["id"], "commit");
+
+        let menu = press(cx, gpui::point(right - px(24.0), top + px(54.0)));
+        assert_eq!(menu.len(), 1, "{menu:?}");
+        assert_eq!(menu[0]["type"], "list_action");
+        assert_eq!(menu[0]["action"], "commit-menu");
+        assert_eq!(menu[0]["row"], "commit");
+
+        let file = press(cx, gpui::point(left + px(60.0), top + px(149.0)));
+        assert_eq!(file.len(), 1, "{file:?}");
+        assert_eq!(file[0]["id"], "changes/old.json");
+
+        // The row's last action sits just left of its status letter.
+        let stage = press(cx, gpui::point(right - px(47.0), top + px(149.0)));
+        assert_eq!(stage.len(), 1, "{stage:?}");
+        assert_eq!(stage[0]["type"], "list_action");
+        assert_eq!(stage[0]["action"], "stage");
+        assert_eq!(stage[0]["row"], "changes/old.json");
+
+        // The section header is the 22 pixels above the rows; its last icon
+        // button acts without also toggling the section.
+        let refresh = press(cx, gpui::point(right - px(18.0), top - px(11.0)));
+        assert_eq!(refresh.len(), 1, "{refresh:?}");
+        assert_eq!(refresh[0]["action"], "refresh");
+        assert!(refresh[0].get("row").is_none());
+
+        let toggle = press(cx, gpui::point(left + px(60.0), top - px(11.0)));
+        assert_eq!(toggle.len(), 1, "{toggle:?}");
+        assert_eq!(toggle[0]["action"], "section-toggle");
+
+        cx.update(|window, _| window.remove_window());
+        drop(host);
+    }
+
     /// The same guarantee for an element Surface's clickable elements: a
     /// press on one is never released as a click on whatever the update put
     /// under the pointer in its place.

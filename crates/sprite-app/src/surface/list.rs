@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use sprite_term::Rgb;
 
+use crate::config::Colors;
 use crate::surface::Refusal;
 
 pub const MAX_ROWS: usize = 100_000;
@@ -14,6 +16,9 @@ const MAX_STRING_BYTES: usize = 4_096;
 const MAX_GUIDES: usize = 64;
 const MAX_OFFSET: f32 = 16_384.0;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_ROW_ACTIONS: usize = 8;
+const MIN_ROW_HEIGHT: f32 = 12.0;
+const MAX_ROW_HEIGHT: f32 = 128.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListRow {
@@ -23,6 +28,154 @@ pub struct ListRow {
     pub icon: Option<String>,
     pub leading: Option<String>,
     pub guides: Vec<ListGuide>,
+    /// What only a decorated row carries, kept out of line so a plain tree
+    /// row costs one pointer more than it did before decorations existed.
+    pub extra: Option<Box<RowExtra>>,
+}
+
+impl ListRow {
+    /// The row's decorations, or the plain defaults for a row sent without any.
+    pub fn extra(&self) -> &RowExtra {
+        static PLAIN: RowExtra = RowExtra::PLAIN;
+        self.extra.as_deref().unwrap_or(&PLAIN)
+    }
+}
+
+/// How a row is drawn. An `Input` is a bordered text field and a `Button` a
+/// filled push button; both are still rows, so selection, clicks and keys
+/// reach the owning program exactly as an `Item`'s do.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RowKind {
+    #[default]
+    Item,
+    Input,
+    Button,
+}
+
+/// A short right-aligned label, such as a source-control status letter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowBadge {
+    pub text: Arc<str>,
+    pub color: Option<Rgb>,
+}
+
+/// An icon button at a row's right edge. Clicking it emits `list_action`
+/// naming `id` and the row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowAction {
+    pub id: String,
+    pub icon: String,
+}
+
+/// A row's decorations. Sending any of them makes the row *decorated*, which
+/// changes one thing about a plain row: a decorated `Item` without an `icon`
+/// reserves no icon slot, so a group heading's label starts where the icon
+/// would have. A plain row always reserves the slot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowExtra {
+    pub kind: RowKind,
+    /// This row's height; absent rows use the list's `row_height`.
+    pub height: Option<f32>,
+    /// Dimmed text after the label, such as a file's directory.
+    pub description: Option<Arc<str>>,
+    pub badge: Option<RowBadge>,
+    /// A count drawn in a pill at the right edge.
+    pub count: Option<Arc<str>>,
+    pub strikethrough: bool,
+    pub bold: bool,
+    /// What an empty `Input` shows.
+    pub placeholder: Option<Arc<str>>,
+    /// Where an `Input` draws its caret, in characters from the start.
+    pub cursor: Option<usize>,
+    /// An icon inside an `Input`'s right edge.
+    pub trailing: Option<String>,
+    /// Icon buttons shown at an `Item`'s right edge while it is hovered or
+    /// selected. A `Button` draws only the first, as its split menu.
+    pub actions: Vec<RowAction>,
+}
+
+impl RowExtra {
+    const PLAIN: RowExtra = RowExtra {
+        kind: RowKind::Item,
+        height: None,
+        description: None,
+        badge: None,
+        count: None,
+        strikethrough: false,
+        bold: false,
+        placeholder: None,
+        cursor: None,
+        trailing: None,
+        actions: Vec::new(),
+    };
+}
+
+/// Where each row sits. A list whose rows all share the configured height
+/// keeps the constant-time arithmetic it always had; one row with its own
+/// height switches the list to running offsets.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowLayout {
+    Uniform {
+        rows: usize,
+        row_height: f32,
+    },
+    /// `offsets[i]` is row `i`'s top; the last entry is the total height.
+    Variable(Arc<Vec<f32>>),
+}
+
+impl RowLayout {
+    pub fn rows(&self) -> usize {
+        match self {
+            Self::Uniform { rows, .. } => *rows,
+            Self::Variable(offsets) => offsets.len().saturating_sub(1),
+        }
+    }
+
+    pub fn total(&self) -> f32 {
+        match self {
+            Self::Uniform { rows, row_height } => *rows as f32 * row_height,
+            Self::Variable(offsets) => offsets.last().copied().unwrap_or(0.0),
+        }
+    }
+
+    pub fn top(&self, index: usize) -> f32 {
+        match self {
+            Self::Uniform { row_height, .. } => index as f32 * row_height,
+            Self::Variable(offsets) => offsets
+                .get(index)
+                .or(offsets.last())
+                .copied()
+                .unwrap_or(0.0),
+        }
+    }
+
+    pub fn height(&self, index: usize) -> f32 {
+        match self {
+            Self::Uniform { row_height, .. } => *row_height,
+            Self::Variable(offsets) => match (offsets.get(index), offsets.get(index + 1)) {
+                (Some(top), Some(bottom)) => bottom - top,
+                _ => 0.0,
+            },
+        }
+    }
+
+    /// The row drawn at `pixels` from the top of the content, clamped to the
+    /// last row.
+    pub fn index_at(&self, pixels: f32) -> usize {
+        let rows = self.rows();
+        if rows == 0 {
+            return 0;
+        }
+        match self {
+            Self::Uniform { row_height, .. } if *row_height > 0.0 => {
+                ((pixels.max(0.0) / row_height).floor() as usize).min(rows - 1)
+            }
+            Self::Uniform { .. } => 0,
+            Self::Variable(offsets) => offsets[1..]
+                .partition_point(|bottom| *bottom <= pixels)
+                .min(rows - 1),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +225,8 @@ pub struct ListModel {
     guide_ids: HashSet<String>,
     ids: HashMap<String, usize>,
     row_height: f32,
+    /// Running row tops, present only while some row has its own height.
+    offsets: Option<Arc<Vec<f32>>>,
 }
 
 impl Default for ListModel {
@@ -88,6 +243,7 @@ impl Default for ListModel {
             guide_ids: HashSet::new(),
             ids: HashMap::new(),
             row_height: 128.0,
+            offsets: None,
         }
     }
 }
@@ -104,10 +260,24 @@ impl ListModel {
     /// new row height, so configuration never invalidates saved navigation.
     pub fn set_row_height(&mut self, row_height: f32) {
         self.row_height = row_height;
+        self.offsets = row_offsets(&self.rows, row_height);
+        let height = self
+            .scroll
+            .as_ref()
+            .and_then(|scroll| self.ids.get(&scroll.id))
+            .map_or(row_height, |index| self.layout().height(*index));
         if let Some(scroll) = &mut self.scroll {
-            scroll.offset = scroll
-                .offset
-                .min((row_height - row_height.abs() * f32::EPSILON).max(0.0));
+            scroll.offset = scroll.offset.min(below(height));
+        }
+    }
+
+    pub fn layout(&self) -> RowLayout {
+        match &self.offsets {
+            Some(offsets) => RowLayout::Variable(Arc::clone(offsets)),
+            None => RowLayout::Uniform {
+                rows: self.rows.len(),
+                row_height: self.row_height,
+            },
         }
     }
     /// The renderer asks this map on every frame, keeping a selected-row lookup
@@ -166,10 +336,18 @@ impl ListModel {
         }
         let scroll = preserved_anchor(&self.rows, &rows, &self.ids, &ids, self.scroll.as_ref());
         self.revision = revision;
+        self.offsets = row_offsets(&rows, self.row_height);
         self.rows = Arc::new(rows);
         self.ids = ids;
         self.selected = selected;
         self.scroll = scroll;
+        if let Some(scroll) = &mut self.scroll {
+            let height = match (&self.offsets, self.ids.get(&scroll.id)) {
+                (Some(offsets), Some(index)) => offsets[index + 1] - offsets[*index],
+                _ => self.row_height,
+            };
+            scroll.offset = scroll.offset.min(below(height));
+        }
         self.reveal = None;
         self.guide_ids = guide_ids(&self.rows);
         self.active_guides.retain(|id| self.guide_ids.contains(id));
@@ -206,7 +384,7 @@ impl ListModel {
             ));
         }
         if let Some(value) = patch.get("scroll") {
-            scroll = Some(parse_anchor(value, &self.ids, self.row_height)?);
+            scroll = Some(parse_anchor(value, &self.ids, &self.layout())?);
             reveal = None;
         }
         if let Some(value) = patch.get("reveal") {
@@ -263,10 +441,12 @@ fn parse_rows(object: &Map<String, Value>) -> Result<ListOp, Refusal> {
         .and_then(Value::as_array)
         .filter(|rows| rows.len() <= MAX_ROWS)
         .ok_or_else(|| malformed(format!("list_rows needs at most {MAX_ROWS} rows")))?;
-    let rows = values
-        .iter()
-        .map(parse_row)
-        .collect::<Result<Vec<_>, _>>()?;
+    // Sized once: a row carries a pointer more than it used to, and growing
+    // the vector by doubling would pay for that several times over.
+    let mut rows = Vec::with_capacity(values.len());
+    for value in values {
+        rows.push(parse_row(value)?);
+    }
     let ids = id_index(&rows)?;
     let selected = object
         .get("selected")
@@ -328,7 +508,15 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
         .ok_or_else(|| malformed("a list row needs text"))?
         .as_str()
         .ok_or_else(|| malformed("text is a string"))?;
-    validate_row_string(text, "text")?;
+    let extra = parse_extra(object)?;
+    // An input's text is what has been typed into it, which starts empty.
+    let empty_input = text.is_empty()
+        && extra
+            .as_ref()
+            .is_some_and(|extra| extra.kind == RowKind::Input);
+    if !empty_input {
+        validate_row_string(text, "text")?;
+    }
     let indent = finite(object.get("indent"), "indent", 0.0, MAX_OFFSET)?;
     let icon = optional_string(object, "icon")?;
     let leading = optional_string(object, "leading")?;
@@ -370,6 +558,7 @@ fn parse_row(value: &Value) -> Result<ListRow, Refusal> {
         icon,
         leading,
         guides,
+        extra,
     })
 }
 
@@ -476,13 +665,15 @@ fn row(value: &Value, ids: &HashMap<String, usize>, key: &str) -> Result<String,
 fn parse_anchor(
     value: &Value,
     ids: &HashMap<String, usize>,
-    row_height: f32,
+    layout: &RowLayout,
 ) -> Result<ScrollAnchor, Refusal> {
     let object = value
         .as_object()
         .ok_or_else(|| malformed("scroll is an object"))?;
+    let id = row(object.get("id").unwrap_or(&Value::Null), ids, "scroll")?;
+    let row_height = ids.get(&id).map_or(0.0, |index| layout.height(*index));
     Ok(ScrollAnchor {
-        id: row(object.get("id").unwrap_or(&Value::Null), ids, "scroll")?,
+        id,
         offset: finite(
             object.get("offset"),
             "scroll offset",
@@ -490,6 +681,142 @@ fn parse_anchor(
             row_height - row_height.abs() * f32::EPSILON,
         )?,
     })
+}
+
+/// The largest offset still inside a row `height` tall.
+fn below(height: f32) -> f32 {
+    (height - height.abs() * f32::EPSILON).max(0.0)
+}
+
+/// Running row tops, or nothing when every row uses the list's own height.
+fn row_offsets(rows: &[ListRow], row_height: f32) -> Option<Arc<Vec<f32>>> {
+    if rows.iter().all(|row| row.extra().height.is_none()) {
+        return None;
+    }
+    let mut offsets = Vec::with_capacity(rows.len() + 1);
+    let mut top = 0.0;
+    offsets.push(top);
+    for row in rows {
+        top += row.extra().height.unwrap_or(row_height);
+        offsets.push(top);
+    }
+    Some(Arc::new(offsets))
+}
+
+fn parse_extra(object: &Map<String, Value>) -> Result<Option<Box<RowExtra>>, Refusal> {
+    const KEYS: [&str; 11] = [
+        "kind",
+        "height",
+        "description",
+        "badge",
+        "count",
+        "strikethrough",
+        "bold",
+        "placeholder",
+        "cursor",
+        "trailing",
+        "actions",
+    ];
+    if !KEYS.iter().any(|key| object.contains_key(*key)) {
+        return Ok(None);
+    }
+    let kind = match object.get("kind") {
+        None => RowKind::Item,
+        Some(Value::String(kind)) if kind == "item" => RowKind::Item,
+        Some(Value::String(kind)) if kind == "input" => RowKind::Input,
+        Some(Value::String(kind)) if kind == "button" => RowKind::Button,
+        Some(_) => return Err(malformed("a row kind is item, input, or button")),
+    };
+    let height = object
+        .get("height")
+        .map(|value| finite(Some(value), "height", MIN_ROW_HEIGHT, MAX_ROW_HEIGHT))
+        .transpose()?;
+    let label = |key: &str| -> Result<Option<Arc<str>>, Refusal> {
+        let Some(value) = object.get(key) else {
+            return Ok(None);
+        };
+        let text = value
+            .as_str()
+            .ok_or_else(|| malformed(format!("{key} is a string")))?;
+        validate_row_string(text, key)?;
+        Ok(Some(text.into()))
+    };
+    let flag = |key: &str| -> Result<bool, Refusal> {
+        match object.get(key) {
+            None => Ok(false),
+            Some(Value::Bool(flag)) => Ok(*flag),
+            Some(_) => Err(malformed(format!("{key} is true or false"))),
+        }
+    };
+    let badge = match object.get("badge") {
+        None => None,
+        Some(Value::Object(badge)) => {
+            let text = string(badge, "text")?;
+            validate_row_string(&text, "badge text")?;
+            let color = match badge.get("color") {
+                None => None,
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .filter(|text| text.starts_with('#'))
+                        .and_then(Colors::parse_hex)
+                        .ok_or_else(|| malformed("badge color is a #rrggbb colour"))?,
+                ),
+            };
+            Some(RowBadge {
+                text: text.into(),
+                color,
+            })
+        }
+        Some(_) => return Err(malformed("badge is an object with text")),
+    };
+    let cursor = match object.get("cursor") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .filter(|cursor| *cursor <= MAX_STRING_BYTES as u64)
+                .ok_or_else(|| malformed("cursor is a character offset"))? as usize,
+        ),
+    };
+    let trailing = optional_string(object, "trailing")?;
+    if let Some(trailing) = &trailing {
+        validate_asset_id(trailing)?;
+    }
+    let actions = match object.get("actions") {
+        None => Vec::new(),
+        Some(Value::Array(actions)) if actions.len() <= MAX_ROW_ACTIONS => actions
+            .iter()
+            .map(|action| {
+                let action = action
+                    .as_object()
+                    .ok_or_else(|| malformed("a row action is an object"))?;
+                let id = string(action, "id")?;
+                validate_row_string(&id, "action id")?;
+                let icon = string(action, "icon")?;
+                validate_asset_id(&icon)?;
+                Ok(RowAction { id, icon })
+            })
+            .collect::<Result<Vec<_>, Refusal>>()?,
+        Some(_) => {
+            return Err(malformed(format!(
+                "actions has at most {MAX_ROW_ACTIONS} entries"
+            )));
+        }
+    };
+    Ok(Some(Box::new(RowExtra {
+        kind,
+        height,
+        description: label("description")?,
+        badge,
+        count: label("count")?,
+        strikethrough: flag("strikethrough")?,
+        bold: flag("bold")?,
+        placeholder: label("placeholder")?,
+        cursor,
+        trailing,
+        actions,
+    })))
 }
 fn nullable_string(value: &Value, key: &str) -> Result<Option<String>, Refusal> {
     match value {
@@ -613,6 +940,166 @@ mod tests {
             "rows":ids.iter().map(|id| serde_json::json!({"id":id,"text":id,"indent":0,"guides":[]})).collect::<Vec<_>>(),
             "selected":null})
     }
+    #[test]
+    fn the_decorated_rows_fixture_applies_and_refuses_as_it_says() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/surface-list-rows-v2.json"
+        ))
+        .expect("decorated rows fixture");
+        let parsed = crate::surface::description::parse(
+            &fixture["description"],
+            &crate::tokens::TokenRegistry::new(&Colors::default()),
+        )
+        .expect("the fixture description parses");
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let mut model = ListModel::with_row_height(22.0);
+        for pair in fixture["operations"].as_array().expect("operations") {
+            let result = parse_op(&pair["request"]).and_then(|op| model.apply(op));
+            if pair["reply"]["type"] == "applied" {
+                result.expect("fixture operation applies");
+            } else {
+                let refusal = result.expect_err("fixture operation is refused");
+                assert_eq!(pair["reply"]["reason"], refusal.reason());
+            }
+        }
+        assert_eq!(model.revision, 1);
+        assert_eq!(model.layout().total(), 36.0 * 2.0 + 22.0 * 4.0);
+        let events = fixture["events"].as_array().expect("events");
+        let emitted = [
+            crate::surface::channel::event_list_row_action(1, "stage", "changes/old.json"),
+            crate::surface::channel::event_list_row_action(1, "commit-menu", "commit"),
+            crate::surface::channel::event_list_action(1, "refresh"),
+        ];
+        assert_eq!(emitted.len(), events.len());
+        for (actual, expected) in emitted.iter().zip(events) {
+            assert_eq!(&serde_json::from_str::<Value>(actual).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn a_decorated_row_carries_its_decorations_and_a_plain_row_carries_none() {
+        let message = serde_json::json!({"type":"list_rows","revision":1,"selected":null,"rows":[
+            {"id":"plain","text":"plain","indent":0,"guides":[]},
+            {"id":"file","text":"launch.json","indent":8,"guides":[],"icon":"json",
+             "description":".vscode","badge":{"text":"M","color":"#e2c08d"},"strikethrough":true,
+             "actions":[{"id":"stage","icon":"plus"}]},
+            {"id":"group","text":"Changes","indent":0,"guides":[],"leading":"down","count":"6","bold":true},
+            {"id":"message","text":"","indent":0,"guides":[],"kind":"input","height":36,
+             "placeholder":"Message","cursor":0,"trailing":"sparkle"},
+            {"id":"commit","text":"Commit","indent":0,"guides":[],"kind":"button","height":36,
+             "icon":"check","actions":[{"id":"more","icon":"down"}]}]});
+        let mut model = ListModel::with_row_height(22.0);
+        model.apply(parse_op(&message).unwrap()).unwrap();
+        assert!(model.rows[0].extra.is_none());
+        assert_eq!(model.rows[0].extra().kind, RowKind::Item);
+        let file = model.rows[1].extra();
+        assert_eq!(file.description.as_deref(), Some(".vscode"));
+        let badge = file.badge.as_ref().unwrap();
+        assert_eq!(&*badge.text, "M");
+        assert_eq!(
+            badge.color,
+            Some(Rgb {
+                r: 0xe2,
+                g: 0xc0,
+                b: 0x8d
+            })
+        );
+        assert!(file.strikethrough);
+        assert_eq!(file.actions[0].id, "stage");
+        let group = model.rows[2].extra();
+        assert_eq!(group.count.as_deref(), Some("6"));
+        assert!(group.bold);
+        let input = model.rows[3].extra();
+        assert_eq!(input.kind, RowKind::Input);
+        assert_eq!(input.placeholder.as_deref(), Some("Message"));
+        assert_eq!(input.cursor, Some(0));
+        assert_eq!(input.trailing.as_deref(), Some("sparkle"));
+        assert_eq!(model.rows[4].extra().kind, RowKind::Button);
+    }
+
+    #[test]
+    fn a_malformed_decoration_is_refused() {
+        for decoration in [
+            serde_json::json!({"kind":"menu"}),
+            serde_json::json!({"height":4}),
+            serde_json::json!({"height":"tall"}),
+            serde_json::json!({"description":""}),
+            serde_json::json!({"badge":"M"}),
+            serde_json::json!({"badge":{"text":"M","color":"amber"}}),
+            serde_json::json!({"count":7}),
+            serde_json::json!({"strikethrough":"yes"}),
+            serde_json::json!({"cursor":-1}),
+            serde_json::json!({"actions":[{"id":"stage"}]}),
+            serde_json::json!({"actions":"stage"}),
+        ] {
+            let mut row = serde_json::json!({"id":"r","text":"row","indent":0,"guides":[]});
+            row.as_object_mut()
+                .unwrap()
+                .extend(decoration.as_object().unwrap().clone());
+            let message =
+                serde_json::json!({"type":"list_rows","revision":1,"selected":null,"rows":[row]});
+            assert!(parse_op(&message).is_err(), "{decoration} was accepted");
+        }
+        // Only an input may be empty: every other row is found by its text.
+        let empty = serde_json::json!({"type":"list_rows","revision":1,"selected":null,
+            "rows":[{"id":"r","text":"","indent":0,"guides":[],"kind":"button"}]});
+        assert!(parse_op(&empty).is_err());
+    }
+
+    #[test]
+    fn rows_with_their_own_height_are_placed_at_running_offsets() {
+        let message = serde_json::json!({"type":"list_rows","revision":1,"selected":null,"rows":[
+            {"id":"input","text":"","indent":0,"guides":[],"kind":"input","height":36},
+            {"id":"button","text":"Commit","indent":0,"guides":[],"kind":"button","height":36},
+            {"id":"a","text":"a","indent":0,"guides":[]},
+            {"id":"b","text":"b","indent":0,"guides":[]}]});
+        let mut model = ListModel::with_row_height(22.0);
+        assert_eq!(
+            model.layout(),
+            RowLayout::Uniform {
+                rows: 0,
+                row_height: 22.0
+            }
+        );
+        model.apply(parse_op(&message).unwrap()).unwrap();
+        let layout = model.layout();
+        assert_eq!(layout.rows(), 4);
+        assert_eq!(layout.total(), 116.0);
+        assert_eq!(
+            (0..4).map(|row| layout.top(row)).collect::<Vec<_>>(),
+            [0.0, 36.0, 72.0, 94.0]
+        );
+        assert_eq!(layout.height(1), 36.0);
+        assert_eq!(layout.height(3), 22.0);
+        assert_eq!(layout.index_at(0.0), 0);
+        assert_eq!(layout.index_at(35.9), 0);
+        assert_eq!(layout.index_at(36.0), 1);
+        assert_eq!(layout.index_at(93.0), 2);
+        assert_eq!(layout.index_at(9_000.0), 3);
+        // A scroll offset is checked against the height of the row it names.
+        let scroll = |id: &str, offset: f32| {
+            parse_op(&serde_json::json!({"type":"list_state","revision":1,"scroll":{"id":id,"offset":offset}}))
+                .unwrap()
+        };
+        model.apply(scroll("input", 30.0)).unwrap();
+        assert!(model.apply(scroll("a", 30.0)).is_err());
+        assert_eq!(model.scroll.as_ref().unwrap().id, "input");
+        // A new list height moves only the rows that use it.
+        model.set_row_height(24.0);
+        assert_eq!(model.layout().total(), 120.0);
+        // Rows that all use the list's height go back to constant-time layout.
+        model
+            .apply(parse_op(&rows(2, &["a", "b"])).unwrap())
+            .unwrap();
+        assert_eq!(
+            model.layout(),
+            RowLayout::Uniform {
+                rows: 2,
+                row_height: 24.0
+            }
+        );
+    }
+
     #[test]
     fn a_stale_state_cannot_select_a_new_occupant() {
         let mut model = ListModel::default();
