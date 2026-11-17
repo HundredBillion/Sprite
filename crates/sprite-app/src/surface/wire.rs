@@ -72,6 +72,16 @@ pub(crate) fn first_line(body: &str, window: &str) -> Result<FirstRequest, Refus
 }
 
 pub(crate) fn stream_line(body: &str) -> Result<Message, Refusal> {
+    // A long list is read straight into rows. Anything that path is not
+    // certain of comes back as nothing and is read the general way below.
+    if let Some(rows) = super::list::rows_from_line(body, VERSION) {
+        return Ok(Message::List(rows));
+    }
+    stream_line_general(body)
+}
+
+/// Reads any message on an open stream by way of a JSON tree.
+pub(crate) fn stream_line_general(body: &str) -> Result<Message, Refusal> {
     let message =
         serde_json::from_str(body).map_err(|error| Refusal::Malformed(error.to_string()))?;
     parse_message(&message)

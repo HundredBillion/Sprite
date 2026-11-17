@@ -9,6 +9,9 @@ use sprite_term::Rgb;
 use crate::config::Colors;
 use crate::surface::Refusal;
 
+mod fast;
+pub(crate) use fast::rows as rows_from_line;
+
 pub const MAX_ROWS: usize = 100_000;
 pub const MAX_ASSETS: usize = 4_096;
 pub const MAX_ASSET_BYTES: usize = 64 * 1024 * 1024;

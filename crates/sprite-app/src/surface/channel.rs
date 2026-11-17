@@ -969,8 +969,11 @@ fn serve_surface(
 
     // Authentication may already have read the first stream messages into its buffer.
     let buffered = std::io::Cursor::new(reader.buffer().to_vec());
-    let socket = super::socket_reader::SocketReader(reader.into_inner());
-    let mut reader = BufReader::new(buffered.chain(socket));
+    let socket = reader.into_inner();
+    super::socket_reader::widen_receive_buffer(&socket);
+    let socket = super::socket_reader::SocketReader(socket);
+    let mut reader =
+        BufReader::with_capacity(super::socket_reader::READ_BUFFER, buffered.chain(socket));
     loop {
         let mut bytes = Vec::new();
         let count = match (&mut reader)
