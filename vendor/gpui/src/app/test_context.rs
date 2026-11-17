@@ -839,6 +839,11 @@ impl VisualTestContext {
         self.update(|window, _| window.rendered_frame.scene.drawn_primitives())
     }
 
+    /// How many regions the last drawn frame put in its draw-order tree.
+    pub fn ordered_regions(&mut self) -> usize {
+        self.update(|window, _| window.rendered_frame.scene.ordered_regions())
+    }
+
     /// Draw an element to the window. Useful for simulating events or actions
     pub fn draw<E>(
         &mut self,

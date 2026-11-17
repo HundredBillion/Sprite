@@ -533,7 +533,13 @@ impl Render for Workspace {
                             }
                         },
                     ))
-                    .child(handle.view())
+                    // Cached: a frame redraws only the panes that changed, so
+                    // one busy pane does not repaint every other pane's grid.
+                    .child(
+                        handle
+                            .view()
+                            .cached(gpui::StyleRefinement::default().size_full()),
+                    )
                     .when(!is_focused, |element| {
                         // Parent opacity makes Surface backgrounds reveal the content they cover.
                         // Tint the completed pane so its internal layers stay opaque.

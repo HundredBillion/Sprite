@@ -1215,9 +1215,25 @@ fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::Test
             "a change to the hovered row re-requests its link"
         );
 
+        // Leaving the link un-draws it at once. A pane is a cached view, so
+        // nothing else would redraw it: without a notify here the underline
+        // stays until the pane next changes.
+        let left = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = left.clone();
+        let observer =
+            cx.update(|_, cx| cx.observe(&view, move |_, _| counter.set(counter.get() + 1)));
+        cx.simulate_mouse_move(plain, None, gpui::Modifiers::default());
+        view.read_with(cx, |view, _| {
+            assert!(view.hovered_link.is_none(), "the link is no longer hovered")
+        });
+        assert!(
+            left.get() > 0,
+            "leaving a link repaints the pane before any answer arrives"
+        );
+        drop(observer);
+
         // Two plain cells in turn: the second answer agrees with the first,
         // so it must not repaint.
-        cx.simulate_mouse_move(plain, None, gpui::Modifiers::default());
         settle_hover(&view, cx);
         let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
         let counter = notified.clone();

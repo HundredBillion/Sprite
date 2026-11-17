@@ -258,3 +258,54 @@ fn only_a_paint_over_the_threshold_is_logged(cx: &mut gpui::TestAppContext) {
     crate::grid_paint::set_slow_paint_for_test(crate::grid_paint::SLOW_PAINT);
     assert!(!quiet.contains("slow paint"), "{quiet}");
 }
+
+/// A frame redraws only the panes that changed. One pane streaming output
+/// (an agent's status line, a build log) must not repaint every other pane's
+/// grid: before panes were cached, each of its updates redrew the whole window.
+#[gpui::test]
+fn a_change_in_one_pane_redraws_only_that_pane(cx: &mut gpui::TestAppContext) {
+    use super::test_support::{draw_workspace, terminal_view, test_workspace};
+    use crate::terminal_view::RENDERED;
+    let (workspace, cx) = test_workspace(cx);
+    draw_workspace(cx);
+    cx.simulate_keystrokes("ctrl-shift-d");
+    cx.run_until_parked();
+    let panes: Vec<_> = workspace.read_with(cx, |workspace, _| {
+        workspace
+            .tabs
+            .all_panes()
+            .into_iter()
+            .map(|(_, pane, _)| pane)
+            .collect()
+    });
+    assert_eq!(panes.len(), 2, "the split made a second pane");
+    let busy = terminal_view(&workspace, panes[0], cx);
+    let quiet = terminal_view(&workspace, panes[1], cx);
+    // A refreshed frame draws everything, which is where caching starts.
+    draw_workspace(cx);
+    // The test window may draw as soon as a view is notified, so the record
+    // starts before the change and ends after a frame that is sure to run.
+    let frame_after = |changed: &gpui::Entity<crate::terminal_view::TerminalView>,
+                       cx: &mut gpui::VisualTestContext| {
+        RENDERED.with(|rendered| rendered.borrow_mut().clear());
+        changed.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear());
+        RENDERED.with(|rendered| rendered.take())
+    };
+
+    let rendered = frame_after(&busy, cx);
+    assert!(
+        rendered.contains(&busy.entity_id()),
+        "the pane that changed is redrawn: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains(&quiet.entity_id()),
+        "the pane that did not change keeps its drawing: {rendered:?}"
+    );
+
+    let rendered = frame_after(&quiet, cx);
+    assert!(
+        rendered.contains(&quiet.entity_id()) && !rendered.contains(&busy.entity_id()),
+        "either pane can be the only one redrawn: {rendered:?}"
+    );
+}

@@ -188,10 +188,14 @@ impl TerminalView {
     /// so neither losing focus nor a program stopping the blink can leave the
     /// cursor hidden.
     pub(super) fn clock_tick(&mut self, cx: &mut Context<Self>) {
+        // Checked here as well as when rendering: a pane nothing has changed
+        // keeps its last drawing and is not rendered, however long its
+        // Surface's owner has been gone.
         if self
             .surfaces
             .iter()
             .any(|surface| surface.connection().is_dead())
+            || self.has_invalid_owned_surface()
         {
             let view = cx.entity().downgrade();
             let window = self.surface_window;
@@ -199,8 +203,11 @@ impl TerminalView {
             cx.defer(move |cx| {
                 window
                     .update(cx, |_, window, cx| {
-                        view.update(cx, |view, cx| view.close_dead_surfaces(window, cx))
-                            .ok();
+                        view.update(cx, |view, cx| {
+                            view.close_dead_surfaces(window, cx);
+                            view.close_invalid_owned_surfaces(window, cx);
+                        })
+                        .ok();
                     })
                     .ok();
             });
@@ -350,10 +357,21 @@ impl TerminalView {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Every terminal pane rendered on this thread, in order, for tests that
+    /// check which panes a frame redrew.
+    pub(crate) static RENDERED: std::cell::RefCell<Vec<gpui::EntityId>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Terminal activity causes frames, so ownership is rechecked without
-        // creating an idle timer that wakes otherwise quiet panes.
+        #[cfg(test)]
+        RENDERED.with(|rendered| rendered.borrow_mut().push(cx.entity_id()));
+        // Terminal activity renders this pane, so ownership is rechecked
+        // without an idle timer; a pane left untouched is rechecked on the
+        // window's clock (`clock_tick`), because a frame reuses its drawing.
         self.close_invalid_owned_surfaces(window, cx);
         self.synchronise_size(window);
 
@@ -672,8 +690,11 @@ impl Render for TerminalView {
                                 })
                             })
                         });
-                        if !remains_on_link {
-                            view.hovered_link = None;
+                        // The pane is a cached view: un-drawing the link takes
+                        // a notify of its own, or the underline stays until the
+                        // pane next changes.
+                        if !remains_on_link && view.hovered_link.take().is_some() {
+                            cx.notify();
                         }
                         if !remains_on_link && let Some(cell) = cell {
                             view.request_hover_link(cell);

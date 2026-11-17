@@ -1259,3 +1259,71 @@ fn a_cursor_on_a_decorated_cell_is_drawn_over_its_decorations(cx: &mut gpui::Tes
         "the cursor is drawn after the cell's decorations: {with:?}"
     );
 }
+
+/// A grid of text in one row of `columns` cells, every cell inked.
+struct TextProbe {
+    columns: u16,
+}
+
+impl gpui::Render for TextProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::{ParentElement, Styled};
+        let row: Vec<PositionedCell> = (0..self.columns)
+            .map(|column| PositionedCell {
+                column,
+                columns: 1,
+                text: "W".into(),
+                style: plain_style(SnapshotColor::Default, SnapshotColor::Default, false),
+                selected: false,
+                hovered_link: false,
+            })
+            .collect();
+        let paint = GridPaint::new(GridPaintSpec {
+            rows: Arc::from([Arc::new(row)]),
+            pass: RowPass::Whole,
+            cursor: None,
+            cursor_color: None,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x112233),
+            palette: None,
+            cell_width: px(8.4),
+            cell_height: px(18.0),
+            font_family: "monospace".into(),
+            font_size: px(14.0),
+            shapes: Default::default(),
+            focused: true,
+        });
+        gpui::div().size_full().child(paint)
+    }
+}
+
+/// GPUI decides draw order by searching a tree of every region drawn so far,
+/// and each region costs one search. The grid's cells share its layer's
+/// order, so a frame's ordering work must not grow with the glyphs on screen.
+/// Each glyph is painted through a line that opens a layer of its own; when
+/// that nested layer took its own place in the tree, a busy pane spent most of
+/// its CPU there (#152 fixed the grounds, not the glyphs).
+#[gpui::test]
+fn a_frame_orders_a_grid_once_however_many_glyphs_it_draws(cx: &mut gpui::TestAppContext) {
+    use gpui::DrawnKind;
+    gpui::ink_test_glyphs(true);
+    let mut regions = Vec::new();
+    for columns in [1, 40] {
+        let (_probe, cx) = cx.add_window_view(|_, _| TextProbe { columns });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let glyphs = cx
+            .drawn_primitives()
+            .iter()
+            .filter(|drawn| drawn.kind == DrawnKind::MonochromeSprite)
+            .count();
+        assert_eq!(glyphs, usize::from(columns), "every cell's glyph is drawn");
+        regions.push(cx.ordered_regions());
+    }
+    assert_eq!(
+        regions[0], regions[1],
+        "one glyph and forty cost the same ordering work: {regions:?}"
+    );
+}
