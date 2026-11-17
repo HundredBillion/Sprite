@@ -357,7 +357,7 @@ pub(crate) fn rows(body: &str, version: u64) -> Option<ListOp> {
     }
     let mut rows = Vec::with_capacity(wire.rows.0.len());
     for wire in wire.rows.0 {
-        rows.push(row(wire)?);
+        rows.push(Arc::new(row(wire)?));
     }
     let ids = id_index(&rows).ok()?;
     Some(ListOp::Rows {
