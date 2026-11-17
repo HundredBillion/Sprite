@@ -271,6 +271,34 @@ The native Linux before/after measurements and their limits are recorded in
 `docs/performance/linux-resource-release/`. X11 was exercised through Xwayland
 on Hyprland, rather than a separate native Xorg session.
 
+## Nested layer order
+
+`patches/gpui-0.2.2-nested-layer-order.patch` follows the Linux release-and-idle
+patch.
+
+- `scene.rs`: `Scene::push_layer` gives a layer lying wholly inside the open
+  layer that layer's draw order instead of inserting it into the draw-order
+  tree. The open layer is already in the tree with bounds covering the nested
+  one, so anything later that overlaps either is still ordered after both.
+  Without this, every `ShapedLine::paint` call opens a layer of its own
+  (`text_system/line.rs`), and a terminal grid paints one line per glyph: the
+  grid's own layer saved the backgrounds the search but not the glyphs, and a
+  busy pane spent most of its main-thread time in `BoundsTree`. A layer that
+  reaches outside the open one is inserted as before. `replay` goes through
+  `push_layer`, so a cached view's frame is ordered the same way.
+- What changes for drawing: primitives inside the nested layer share the outer
+  layer's order, and the renderer draws one order by kind (quads, then
+  underlines, then glyphs). Sprite's only layer is the terminal grid's, and the
+  lines nested in it hold glyphs only, so its drawing is unchanged; the cursor
+  and decorations are painted after the layer, as before.
+- `bounds_tree.rs` and `test_context.rs`, compiled only with `test` or
+  `test-support`: `BoundsTree::len` and `VisualTestContext::ordered_regions`,
+  how many regions the last frame put in the tree.
+
+Sprite uses it to test that a grid's ordering work does not grow with the
+glyphs it draws
+(`grid_paint::tests::a_frame_orders_a_grid_once_however_many_glyphs_it_draws`).
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.

@@ -321,6 +321,13 @@ tests = [
 ]
 
 [[capability]]
+id = "drawing.ordering-cost-independent-of-glyphs"
+area = "drawing"
+promise = "Working out what is drawn over what costs a grid the same however many glyphs it shows."
+status = "kept"
+tests = ["a_frame_orders_a_grid_once_however_many_glyphs_it_draws"]
+
+[[capability]]
 id = "command-line.launch-and-config"
 area = "command-line"
 promise = "`sprite -e` hands a program to a new window, and `--config` reaches it."

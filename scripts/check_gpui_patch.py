@@ -21,6 +21,7 @@ PATCHES = (
     "gpui-0.2.2-image-formats.patch",
     "gpui-0.2.2-test-drawn-primitives.patch",
     "gpui-0.2.2-linux-release-and-idle.patch",
+    "gpui-0.2.2-nested-layer-order.patch",
 )
 
 

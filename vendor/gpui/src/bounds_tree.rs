@@ -162,6 +162,15 @@ where
         max_ordering
     }
 
+    /// How many bounds have been inserted since the tree was last cleared.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn len(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|node| matches!(node, Node::Leaf { .. }))
+            .count()
+    }
+
     fn push_leaf(&mut self, bounds: Bounds<U>, order: u32) -> usize {
         self.nodes.push(Node::Leaf { bounds, order });
         self.nodes.len() - 1

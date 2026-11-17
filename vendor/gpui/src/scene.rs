@@ -24,7 +24,7 @@ pub(crate) type DrawOrder = u32;
 pub(crate) struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
-    layer_stack: Vec<DrawOrder>,
+    layer_stack: Vec<(DrawOrder, Bounds<ScaledPixels>)>,
     pub(crate) shadows: Vec<Shadow>,
     pub(crate) quads: Vec<Quad>,
     pub(crate) paths: Vec<Path<ScaledPixels>>,
@@ -53,8 +53,16 @@ impl Scene {
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
-        let order = self.primitive_bounds.insert(bounds);
-        self.layer_stack.push(order);
+        // A layer that lies wholly inside the open one draws at that layer's
+        // order. The open layer is already in the tree with bounds covering
+        // this one, so whatever overlaps either is ordered after both, and a
+        // second entry would only add a search per nested layer: a terminal
+        // grid nests one for every glyph it draws (`paint_line`).
+        let order = match self.layer_stack.last() {
+            Some((order, outer)) if bounds.is_contained_within(outer) => *order,
+            _ => self.primitive_bounds.insert(bounds),
+        };
+        self.layer_stack.push((order, bounds));
         self.paint_operations
             .push(PaintOperation::StartLayer(bounds));
     }
@@ -77,7 +85,7 @@ impl Scene {
         let order = self
             .layer_stack
             .last()
-            .copied()
+            .map(|(order, _)| *order)
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
         match &mut primitive {
             Primitive::Shadow(shadow) => {
@@ -458,6 +466,13 @@ pub struct DrawnPrimitive {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Scene {
+    /// How many regions the frame put in its draw-order tree: one for each
+    /// layer and each primitive drawn outside a layer. Each costs a search of
+    /// the tree, so a frame's ordering work grows with this count.
+    pub(crate) fn ordered_regions(&self) -> usize {
+        self.primitive_bounds.len()
+    }
+
     /// Every primitive in the order the renderer draws it, so a primitive is
     /// drawn over any earlier one it overlaps.
     pub(crate) fn drawn_primitives(&self) -> Vec<DrawnPrimitive> {
