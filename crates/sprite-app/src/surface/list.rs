@@ -853,11 +853,14 @@ fn finite(value: Option<&Value>, key: &str, minimum: f32, maximum: f32) -> Resul
     let number = value
         .and_then(Value::as_f64)
         .filter(|number| number.is_finite())
-        .ok_or_else(|| malformed(format!("{key} is a finite number")))? as f32;
-    if !number.is_finite() || !(minimum..=maximum).contains(&number) {
-        return Err(malformed(format!("{key} is from {minimum} to {maximum}")));
-    }
-    Ok(number)
+        .ok_or_else(|| malformed(format!("{key} is a finite number")))?;
+    narrowed(number, minimum, maximum)
+        .ok_or_else(|| malformed(format!("{key} is from {minimum} to {maximum}")))
+}
+/// `number` as the `f32` a row keeps, when that lies from `minimum` to `maximum`.
+fn narrowed(number: f64, minimum: f32, maximum: f32) -> Option<f32> {
+    let number = number as f32;
+    (number.is_finite() && (minimum..=maximum).contains(&number)).then_some(number)
 }
 fn validate_row_string(text: &str, key: &str) -> Result<(), Refusal> {
     (!text.is_empty() && text.len() <= MAX_STRING_BYTES)

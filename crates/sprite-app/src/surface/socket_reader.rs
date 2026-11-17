@@ -14,6 +14,8 @@ pub(super) const READ_BUFFER: usize = 64 * 1024;
 
 /// Asks for `RECEIVE_BUFFER` on `stream`. The system may grant less or
 /// refuse; the Surface works either way, only slower for large messages.
+/// Linux sizes a Unix socket's queue by the sender's buffer, so there it is
+/// the program's own send buffer that decides, and this changes nothing.
 pub(super) fn widen_receive_buffer(stream: &UnixStream) {
     use std::os::fd::AsRawFd;
     let size = RECEIVE_BUFFER as libc::c_int;

@@ -15,12 +15,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use super::{
     IndexedRows, ListGuide, ListOp, ListRow, MAX_GUIDES, MAX_OFFSET, MAX_ROW_ACTIONS,
     MAX_ROW_HEIGHT, MAX_ROWS, MAX_SAFE_INTEGER, MAX_STRING_BYTES, MIN_ROW_HEIGHT, RowAction,
-    RowBadge, RowExtra, RowKind, id_index,
+    RowBadge, RowExtra, RowKind, id_index, narrowed, validate_row_string,
 };
 use crate::config::Colors;
 
@@ -41,6 +41,35 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+/// A list of at most `MAX` items. Reading stops at the item past the limit,
+/// so a message cannot make this path hold more than the general path would
+/// ever accept.
+struct Bounded<T, const MAX: usize>(Vec<T>);
+
+impl<'de, T: Deserialize<'de>, const MAX: usize> Deserialize<'de> for Bounded<T, MAX> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BoundedVisitor<T, const MAX: usize>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>, const MAX: usize> Visitor<'de> for BoundedVisitor<T, MAX> {
+            type Value = Bounded<T, MAX>;
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                write!(formatter, "a list of at most {MAX} items")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX));
+                while let Some(item) = seq.next_element()? {
+                    if items.len() == MAX {
+                        return Err(A::Error::custom("a list past its limit"));
+                    }
+                    items.push(item);
+                }
+                Ok(Bounded(items))
+            }
+        }
+        deserializer.deserialize_seq(BoundedVisitor(std::marker::PhantomData))
+    }
 }
 
 /// Text read once into the shared string a row keeps.
@@ -69,7 +98,7 @@ struct WireRows {
     #[serde(default, deserialize_with = "present")]
     version: Option<u64>,
     revision: u64,
-    rows: Vec<WireRow>,
+    rows: Bounded<WireRow, MAX_ROWS>,
     #[serde(deserialize_with = "nullable")]
     selected: Option<String>,
 }
@@ -83,7 +112,7 @@ struct WireRow {
     icon: Option<String>,
     #[serde(default, deserialize_with = "present")]
     leading: Option<String>,
-    guides: Vec<WireGuide>,
+    guides: Bounded<WireGuide, MAX_GUIDES>,
     #[serde(default, deserialize_with = "present")]
     kind: Option<String>,
     #[serde(default, deserialize_with = "present")]
@@ -105,7 +134,7 @@ struct WireRow {
     #[serde(default, deserialize_with = "present")]
     trailing: Option<String>,
     #[serde(default, deserialize_with = "present")]
-    actions: Option<Vec<WireAction>>,
+    actions: Option<Bounded<WireAction, MAX_ROW_ACTIONS>>,
 }
 
 #[derive(Deserialize)]
@@ -177,17 +206,9 @@ impl<'de> Deserialize<'de> for WireGuide {
     }
 }
 
-/// `number` as the general path's `finite` keeps it, or nothing.
-fn finite(number: f64, minimum: f32, maximum: f32) -> Option<f32> {
-    if !number.is_finite() {
-        return None;
-    }
-    let number = number as f32;
-    (number.is_finite() && (minimum..=maximum).contains(&number)).then_some(number)
-}
-
+/// Whether `text` is a string a row may carry, by the general path's rule.
 fn row_string(text: &str) -> Option<()> {
-    (!text.is_empty() && text.len() <= MAX_STRING_BYTES).then_some(())
+    validate_row_string(text, "").ok()
 }
 
 fn label(text: Option<Text>) -> Option<Option<Arc<str>>> {
@@ -200,8 +221,9 @@ fn label(text: Option<Text>) -> Option<Option<Arc<str>>> {
     }
 }
 
-fn row(wire: WireRow) -> Option<ListRow> {
-    row_string(&wire.id)?;
+/// A row's decorations, taken out of `wire`: nothing inside when the row
+/// carries none, and nothing at all when this path is unsure of one.
+fn extra(wire: &mut WireRow) -> Option<Option<Box<RowExtra>>> {
     let decorated = wire.kind.is_some()
         || wire.height.is_some()
         || wire.description.is_some()
@@ -213,72 +235,75 @@ fn row(wire: WireRow) -> Option<ListRow> {
         || wire.cursor.is_some()
         || wire.trailing.is_some()
         || wire.actions.is_some();
-    let extra = if decorated {
-        let kind = match wire.kind.as_deref() {
-            None | Some("item") => RowKind::Item,
-            Some("input") => RowKind::Input,
-            Some("button") => RowKind::Button,
-            Some(_) => return None,
-        };
-        let height = match wire.height {
-            None => None,
-            Some(height) => Some(finite(height, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT)?),
-        };
-        let badge = match wire.badge {
-            None => None,
-            Some(badge) => {
-                row_string(&badge.text.0)?;
-                let color = match badge.color {
-                    None => None,
-                    Some(color) if color.starts_with('#') => Some(Colors::parse_hex(&color)?),
-                    Some(_) => return None,
-                };
-                Some(RowBadge {
-                    text: badge.text.0,
-                    color,
-                })
-            }
-        };
-        let cursor = match wire.cursor {
-            None => None,
-            Some(cursor) if cursor <= MAX_STRING_BYTES as u64 => Some(cursor as usize),
-            Some(_) => return None,
-        };
-        if let Some(trailing) = &wire.trailing {
-            row_string(trailing)?;
-        }
-        let actions = match wire.actions {
-            None => Vec::new(),
-            Some(actions) if actions.len() <= MAX_ROW_ACTIONS => {
-                let mut parsed = Vec::with_capacity(actions.len());
-                for action in actions {
-                    row_string(&action.id)?;
-                    row_string(&action.icon)?;
-                    parsed.push(RowAction {
-                        id: action.id,
-                        icon: action.icon,
-                    });
-                }
-                parsed
-            }
-            Some(_) => return None,
-        };
-        Some(Box::new(RowExtra {
-            kind,
-            height,
-            description: label(wire.description)?,
-            badge,
-            count: label(wire.count)?,
-            strikethrough: wire.strikethrough.unwrap_or(false),
-            bold: wire.bold.unwrap_or(false),
-            placeholder: label(wire.placeholder)?,
-            cursor,
-            trailing: wire.trailing,
-            actions,
-        }))
-    } else {
-        None
+    if !decorated {
+        return Some(None);
+    }
+    let kind = match wire.kind.as_deref() {
+        None | Some("item") => RowKind::Item,
+        Some("input") => RowKind::Input,
+        Some("button") => RowKind::Button,
+        Some(_) => return None,
     };
+    let height = match wire.height {
+        None => None,
+        Some(height) => Some(narrowed(height, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT)?),
+    };
+    let badge = match wire.badge.take() {
+        None => None,
+        Some(badge) => {
+            row_string(&badge.text.0)?;
+            let color = match badge.color {
+                None => None,
+                Some(color) if color.starts_with('#') => Some(Colors::parse_hex(&color)?),
+                Some(_) => return None,
+            };
+            Some(RowBadge {
+                text: badge.text.0,
+                color,
+            })
+        }
+    };
+    let cursor = match wire.cursor {
+        None => None,
+        Some(cursor) if cursor <= MAX_STRING_BYTES as u64 => Some(cursor as usize),
+        Some(_) => return None,
+    };
+    if let Some(trailing) = &wire.trailing {
+        row_string(trailing)?;
+    }
+    let actions = match wire.actions.take() {
+        None => Vec::new(),
+        Some(Bounded(actions)) => {
+            let mut parsed = Vec::with_capacity(actions.len());
+            for action in actions {
+                row_string(&action.id)?;
+                row_string(&action.icon)?;
+                parsed.push(RowAction {
+                    id: action.id,
+                    icon: action.icon,
+                });
+            }
+            parsed
+        }
+    };
+    Some(Some(Box::new(RowExtra {
+        kind,
+        height,
+        description: label(wire.description.take())?,
+        badge,
+        count: label(wire.count.take())?,
+        strikethrough: wire.strikethrough.unwrap_or(false),
+        bold: wire.bold.unwrap_or(false),
+        placeholder: label(wire.placeholder.take())?,
+        cursor,
+        trailing: wire.trailing.take(),
+        actions,
+    })))
+}
+
+fn row(mut wire: WireRow) -> Option<ListRow> {
+    row_string(&wire.id)?;
+    let extra = extra(&mut wire)?;
     // An input's text is what has been typed into it, which starts empty.
     let empty_input = wire.text.0.is_empty()
         && extra
@@ -287,23 +312,20 @@ fn row(wire: WireRow) -> Option<ListRow> {
     if !empty_input {
         row_string(&wire.text.0)?;
     }
-    let indent = finite(wire.indent, 0.0, MAX_OFFSET)?;
+    let indent = narrowed(wire.indent, 0.0, MAX_OFFSET)?;
     if let Some(icon) = &wire.icon {
         row_string(icon)?;
     }
     if let Some(leading) = &wire.leading {
         row_string(leading)?;
     }
-    if wire.guides.len() > MAX_GUIDES {
-        return None;
-    }
-    let mut guides = Vec::with_capacity(wire.guides.len());
-    for guide in wire.guides {
+    let mut guides = Vec::with_capacity(wire.guides.0.len());
+    for guide in wire.guides.0 {
         if let Some(id) = &guide.id {
             row_string(id)?;
         }
         guides.push(ListGuide {
-            offset: finite(guide.offset, 0.0, MAX_OFFSET)?,
+            offset: narrowed(guide.offset, 0.0, MAX_OFFSET)?,
             id: guide.id,
         });
     }
@@ -330,11 +352,11 @@ pub(crate) fn rows(body: &str, version: u64) -> Option<ListOp> {
     if wire.kind != "list_rows" || wire.version.is_some_and(|sent| sent != version) {
         return None;
     }
-    if !(1..=MAX_SAFE_INTEGER).contains(&wire.revision) || wire.rows.len() > MAX_ROWS {
+    if !(1..=MAX_SAFE_INTEGER).contains(&wire.revision) {
         return None;
     }
-    let mut rows = Vec::with_capacity(wire.rows.len());
-    for wire in wire.rows {
+    let mut rows = Vec::with_capacity(wire.rows.0.len());
+    for wire in wire.rows.0 {
         rows.push(row(wire)?);
     }
     let ids = id_index(&rows).ok()?;
@@ -472,6 +494,11 @@ mod tests {
                 "{body}"
             );
         }
+        // A list past its limit is given up on at the item past it.
+        let actions = [r#"{"id":"s","icon":"i"}"#; MAX_ROW_ACTIONS + 1].join(",");
+        let body = row(&format!(r#","actions":[{actions}]"#));
+        assert!(rows(&body, VERSION).is_none());
+        assert_eq!(stream_line(&body).err(), stream_line_general(&body).err());
         let long = "x".repeat(MAX_STRING_BYTES + 1);
         assert!(rows(&row(&format!(r#","description":"{long}""#)), VERSION).is_none());
         let guides = vec!["1"; MAX_GUIDES + 1].join(",");
