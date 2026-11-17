@@ -5,6 +5,33 @@ use std::os::unix::net::UnixStream;
 
 pub(super) struct SocketReader(pub(super) UnixStream);
 
+/// How much unread data the kernel holds for an open Surface, and how much
+/// of it one read takes. A Unix socket's default is a few kilobytes, so a
+/// megabyte of list rows arrived in over a hundred reads, the sender waking
+/// for each; with room for the whole message it arrives in a handful.
+pub(super) const RECEIVE_BUFFER: usize = 1024 * 1024;
+pub(super) const READ_BUFFER: usize = 64 * 1024;
+
+/// Asks for `RECEIVE_BUFFER` on `stream`. The system may grant less or
+/// refuse; the Surface works either way, only slower for large messages.
+/// Linux sizes a Unix socket's queue by the sender's buffer, so there it is
+/// the program's own send buffer that decides, and this changes nothing.
+pub(super) fn widen_receive_buffer(stream: &UnixStream) {
+    use std::os::fd::AsRawFd;
+    let size = RECEIVE_BUFFER as libc::c_int;
+    // SAFETY: `stream` owns an open descriptor for the length of this call,
+    // and the option value is a `c_int` that outlives it, passed with its size.
+    unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            std::ptr::from_ref(&size).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
 impl Read for SocketReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {

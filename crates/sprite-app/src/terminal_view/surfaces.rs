@@ -1123,10 +1123,13 @@ impl TerminalView {
         let operation = match &op {
             ListOp::Assets(_) => "assets",
             ListOp::Rows { .. } => "list_rows",
+            ListOp::Patch { .. } => "list_patch",
             ListOp::State { .. } => "list_state",
         };
         let revision = match &op {
-            ListOp::Rows { revision, .. } | ListOp::State { revision, .. } => Some(*revision),
+            ListOp::Rows { revision, .. }
+            | ListOp::Patch { revision, .. }
+            | ListOp::State { revision, .. } => Some(*revision),
             ListOp::Assets(_) => None,
         };
         match view.update(cx, |view, cx| view.apply(op, cx)) {

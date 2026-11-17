@@ -72,6 +72,16 @@ pub(crate) fn first_line(body: &str, window: &str) -> Result<FirstRequest, Refus
 }
 
 pub(crate) fn stream_line(body: &str) -> Result<Message, Refusal> {
+    // A long list is read straight into rows. Anything that path is not
+    // certain of comes back as nothing and is read the general way below.
+    if let Some(rows) = super::list::rows_from_line(body, VERSION) {
+        return Ok(Message::List(rows));
+    }
+    stream_line_general(body)
+}
+
+/// Reads any message on an open stream by way of a JSON tree.
+pub(crate) fn stream_line_general(body: &str) -> Result<Message, Refusal> {
     let message =
         serde_json::from_str(body).map_err(|error| Refusal::Malformed(error.to_string()))?;
     parse_message(&message)
@@ -181,7 +191,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "virtual-list-rows-v2", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"],
+        "features": ["owned-dock-v1", "virtual-list-v1", "virtual-list-rows-v2", "virtual-list-patch-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
