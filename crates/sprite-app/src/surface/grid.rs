@@ -711,17 +711,30 @@ impl GridSurface {
     /// batch of several, the refusal names the operation's index so a client
     /// can tell which ones stood.
     pub fn apply_all(&mut self, ops: Vec<Op>) -> Result<(), Refusal> {
+        self.apply_counting(ops).1
+    }
+
+    /// [`Self::apply_all`], also saying how many operations were applied
+    /// before it stopped.
+    pub fn apply_counting(&mut self, ops: Vec<Op>) -> (usize, Result<(), Refusal>) {
         let several = ops.len() > 1;
+        let mut applied = 0;
         for (index, op) in ops.into_iter().enumerate() {
-            self.apply(op).map_err(|refusal| match (several, refusal) {
-                (true, Refusal::Malformed(why)) => Refusal::Malformed(format!("op {index}: {why}")),
-                // Unreachable in practice: `apply` only ever refuses with
-                // `Malformed`. Kept so a future refusal kind passes through
-                // rather than needing this match widened.
-                (_, other) => other,
-            })?;
+            if let Err(refusal) = self.apply(op) {
+                let refusal = match (several, refusal) {
+                    (true, Refusal::Malformed(why)) => {
+                        Refusal::Malformed(format!("op {index}: {why}"))
+                    }
+                    // Unreachable in practice: `apply` only ever refuses with
+                    // `Malformed`. Kept so a future refusal kind passes through
+                    // rather than needing this match widened.
+                    (_, other) => other,
+                };
+                return (applied, Err(refusal));
+            }
+            applied += 1;
         }
-        Ok(())
+        (applied, Ok(()))
     }
 
     pub fn apply(&mut self, op: Op) -> Result<(), Refusal> {
@@ -1079,9 +1092,6 @@ impl GridSurface {
         }
     }
 
-    /// Whether this grid's cursor is asking the pane for a blink phase. A
-    /// grid that fills its pane hides the terminal, so the pane's phase has
-    /// to follow the grid's cursor or the grid's cursor never blinks.
     /// The grid's first `limit` rows as plain text, without the blanks that
     /// pad each row's end. The second half of a wide character holds no
     /// text, so a row reads as it looks.
@@ -1096,6 +1106,23 @@ impl GridSurface {
         })
     }
 
+    /// How many characters of row `row`'s text come before column `col`.
+    /// Less than `col` when a wide character comes first, because its
+    /// second cell holds no text; more when a cell holds a character with
+    /// combining marks.
+    pub fn text_index(&self, row: u16, col: u16) -> usize {
+        self.cells.get(usize::from(row)).map_or(0, |cells| {
+            cells
+                .iter()
+                .take(usize::from(col))
+                .map(|cell| self.texts.text(cell.text).as_str().chars().count())
+                .sum()
+        })
+    }
+
+    /// Whether this grid's cursor is asking the pane for a blink phase. A
+    /// grid that fills its pane hides the terminal, so the pane's phase has
+    /// to follow the grid's cursor or the grid's cursor never blinks.
     pub fn cursor_blinks(&self) -> bool {
         self.cursor.visible && self.cursor.blink
     }

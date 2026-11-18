@@ -494,6 +494,23 @@ pub(crate) fn bind_private(socket: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Moves what `bytes` holds of the line being read into `line`: up to and
+/// including its newline, if one is there. Returns how many bytes it took
+/// and whether the line is complete. A line longer than `max` bytes, its
+/// ending included, is refused.
+fn gather(bytes: &[u8], line: &mut Vec<u8>, max: usize) -> io::Result<(usize, bool)> {
+    let newline = bytes.iter().position(|byte| *byte == b'\n');
+    let count = newline.map_or(bytes.len(), |index| index + 1);
+    if count > max - line.len() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    line.extend_from_slice(bytes.get(..count).unwrap_or_default());
+    if newline.is_none() && line.len() == max {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok((count, newline.is_some()))
+}
+
 fn authenticate(
     stream: &UnixStream,
     key: Option<&SocketKey>,
@@ -517,18 +534,10 @@ fn authenticate(
         if bytes.is_empty() {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
-        let newline = bytes.iter().position(|byte| *byte == b'\n');
-        let count = newline.map_or(bytes.len(), |index| index + 1);
-        if count > policy.max_first_line - line.len() {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        line.extend_from_slice(&bytes[..count]);
+        let (count, ended) = gather(bytes, &mut line, policy.max_first_line)?;
         reader.consume(count);
-        if newline.is_some() {
+        if ended {
             break;
-        }
-        if line.len() == policy.max_first_line {
-            return Err(io::ErrorKind::InvalidData.into());
         }
     }
     let line = std::str::from_utf8(&line).map_err(|_| io::ErrorKind::InvalidData)?;
@@ -678,18 +687,10 @@ pub(crate) fn next_line(
             };
         }
         deadline.get_or_insert_with(|| Instant::now() + patience);
-        let newline = bytes.iter().position(|byte| *byte == b'\n');
-        let count = newline.map_or(bytes.len(), |index| index + 1);
-        if count > max - line.len() {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        line.extend_from_slice(&bytes[..count]);
+        let (count, ended) = gather(bytes, &mut line, max)?;
         reader.consume(count);
-        if newline.is_some() {
+        if ended {
             break;
-        }
-        if line.len() == max {
-            return Err(io::ErrorKind::InvalidData.into());
         }
     }
     let line = String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData)?;

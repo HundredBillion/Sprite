@@ -116,20 +116,29 @@ shows, as text, in `result.surfaces`. Every entry has the Surface's `id`,
 
 | Kind | Content |
 | --- | --- |
-| `grid` (an editor) | `size`, `cursor` (`row`, `column`, `visible`) and `rows`, each with its `text`, without the blanks at the end of a row. Editor tabs, if any, are in `tabs` with `id`, `label`, `modified` and `active`. |
+| `grid` (an editor) | `size`, `cursor` and `rows`, each with its `text`, without the blanks at the end of a row. `cursor` has `row`, `column`, `text_index` and `visible`. Editor tabs, if any, are in `tabs` with `id`, `label`, `modified` and `active`. |
 | `list` (a tree or a panel) | `revision`, `total`, `selected`, `status` and `rows`. A row has `id`, `text` and `indent`, plus whichever of `kind` (`input` or `button`), `icon`, `leading`, `description`, `badge`, `count`, `placeholder` and `selected` apply. |
 | `elements` | `nodes` in drawing order: each text and button label with its `kind` and `depth`, and each picture as `{"kind":"image","svg_bytes":N}`. |
 
+A cursor's `column` counts cells, and a wide character such as `界` fills two.
+`text_index` is the number of characters of the row's `text` before the cursor,
+so use it, not `column`, to find the cursor in the text. It can be past the end
+of the text when the cursor sits in the blanks after it.
+
 `read --surface ID` returns that one Surface and leaves the terminal out. An id
-the pane doesn't have returns `gone`. `--lines N` also limits how many rows of a
-Surface come back; `truncated` says whether any were left out. A read returns
+the pane doesn't have returns `gone`. `--lines N` also limits how many rows of
+each Surface come back. All the Surfaces in one read share 2 MiB of text, in the
+order `list` gives them. `truncated` on a Surface says that rows, tabs, or its
+`selected` or `status` text were left out; a Surface reached after the 2 MiB is
+used still appears, with no rows. A read returns
 text only: no colours and no pixels. Like terminal text, it is whatever a
 program chose to show, so treat it as untrusted.
 
 `list` marks a Surface `"content": "readable"`, gives a terminal pane the
 `surface_read` capability, and names what the window supports in
 `result.features`. An older Sprite reports `"content": "unavailable"` and has
-no `features`.
+no `features`. `sprite panes list` asks every window, so its `features` are the
+ones every running window supports: empty if any of them is an older Sprite.
 
 ## Watching for changes
 
@@ -150,11 +159,15 @@ The first line is the window's answer. Each later line is a notice:
 | In `changed` | Meaning |
 | --- | --- |
 | `terminal` | The terminal drew new content. `generation` is the one a read would now return. |
-| `surface:<id>` | That Surface opened, changed or closed. |
+| `surface:<id>` | That Surface opened, changed or closed. An operation Sprite refused changes nothing and sends no notice. |
 | `title` | The program set or cleared its title. |
 | `lifecycle` | The pane's session ended. |
-| `layout` | The pane moved, was resized, or gained or lost being the Current Pane. |
+| `layout` | The pane's `geometry`, `tab`, `visible` or `current` changed: it moved, it or the window was resized, its tab was shown or hidden, or it gained or lost being the Current Pane. |
+| `label` | The pane's `label` or its tab's `tab_name` changed. |
 | `created`, `closed` | The pane opened or closed. |
+
+Every pane `list` reports is watched, whatever kind it is. Watching a pane the
+window doesn't have, such as one that already closed, returns `gone`.
 
 A notice says where to look; `read` returns the content. Changes to one pane
 less than 16 ms apart arrive as one notice, so a pane printing fast sends at
@@ -187,7 +200,7 @@ outcome. The CLI never retries an operation.
 Limits per window: 16 connections at once, of which 8 may stay open (watching,
 or kept open for further requests); 16 queued operations, 8 KiB request lines,
 256-byte labels, 4 KiB input and 16 MiB responses. A read returns at most 5,000
-rows and 2 MiB of text from each Surface. `create` is refused at
+rows from each Surface and 2 MiB of text from all of a pane's Surfaces together. `create` is refused at
 128 open panes or 16 unfinished cleanups, and `close` at 16 unfinished cleanups.
 Reads return at most 5,000 lines of history.
 

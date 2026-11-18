@@ -44,8 +44,11 @@ pub(crate) enum Mark {
     Title,
     /// The pane's session ended.
     Lifecycle,
-    /// Where the pane sits, or whether it is the Current Pane.
+    /// Where the pane sits, how big it is, whether its tab is showing, or
+    /// whether it is the Current Pane.
     Layout,
+    /// The pane's label or its tab's name.
+    Label,
     Created,
     Closed,
 }
@@ -58,6 +61,7 @@ struct Change {
     title: bool,
     lifecycle: bool,
     layout: bool,
+    label: bool,
     created: bool,
     closed: bool,
 }
@@ -77,6 +81,7 @@ impl Change {
             Mark::Title => self.title = true,
             Mark::Lifecycle => self.lifecycle = true,
             Mark::Layout => self.layout = true,
+            Mark::Label => self.label = true,
             Mark::Created => self.created = true,
             Mark::Closed => self.closed = true,
         }
@@ -98,6 +103,7 @@ impl Change {
             (self.title, "title"),
             (self.lifecycle, "lifecycle"),
             (self.layout, "layout"),
+            (self.label, "label"),
             (self.closed, "closed"),
         ] {
             if set {
@@ -161,6 +167,8 @@ struct Inner {
     /// `watchers.len()`, readable without the lock.
     watching: AtomicUsize,
     kept: AtomicUsize,
+    /// Every pane the window has, as it last published them.
+    panes: Mutex<HashSet<u64>>,
 }
 
 /// One window's watchers. Cloning shares them.
@@ -176,6 +184,17 @@ impl Hub {
         for watcher in locked(&self.0.watchers).iter() {
             watcher.note(pane, mark);
         }
+    }
+
+    /// Records which panes the window has, so a watch can be refused for a
+    /// pane that is not there.
+    pub(crate) fn set_panes(&self, panes: impl Iterator<Item = u64>) {
+        *locked(&self.0.panes) = panes.collect();
+    }
+
+    /// Whether the window has this pane.
+    pub(crate) fn has_pane(&self, pane: u64) -> bool {
+        locked(&self.0.panes).contains(&pane)
     }
 
     /// How many connections are watching.
@@ -381,6 +400,20 @@ mod tests {
         assert!(watch.take("w").is_empty());
         hub.mark(2, Mark::Closed);
         assert_eq!(notices(&watch.take("w"))[0]["changed"], json!(["closed"]));
+    }
+
+    #[test]
+    fn a_label_is_told_apart_from_a_layout_and_known_panes_are_remembered() {
+        let hub = Hub::default();
+        let watch = hub.subscribe(None).unwrap();
+        hub.mark(1, Mark::Label);
+        hub.mark(2, Mark::Layout);
+        let sent = notices(&watch.take("w"));
+        assert_eq!(sent[0]["changed"], json!(["label"]));
+        assert_eq!(sent[1]["changed"], json!(["layout"]));
+        assert!(!hub.has_pane(1));
+        hub.set_panes([1, 4].into_iter());
+        assert!(hub.has_pane(4) && !hub.has_pane(2));
     }
 
     #[test]

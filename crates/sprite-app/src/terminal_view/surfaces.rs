@@ -138,11 +138,26 @@ pub(super) enum Body {
     },
 }
 
-/// The most text one Surface contributes to a read. With the row limit, it
-/// keeps a read of a pane and its Surfaces inside the response limit.
-const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
+/// What one entry of a Surface read adds besides its text: its keys,
+/// punctuation and numbers. A list row, the largest, adds under 170 bytes.
+const READ_ENTRY_BYTES: usize = 192;
 
-/// What is left of a Surface read's limits.
+/// How many bytes `text` takes as a JSON string: itself, its quotes, and
+/// the escapes for quotes, backslashes and control characters.
+fn sent_bytes(text: &str) -> usize {
+    2 + text
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' => 2,
+            c if c < ' ' => 6,
+            c => c.len_utf8(),
+        })
+        .sum::<usize>()
+}
+
+/// What is left of a read's limits. The bytes are shared by every Surface
+/// in the read, so the whole answer has one bound however many Surfaces a
+/// pane hosts; the rows are each Surface's own.
 struct ReadRoom {
     rows: usize,
     bytes: usize,
@@ -150,9 +165,11 @@ struct ReadRoom {
 }
 
 impl ReadRoom {
-    /// Whether one more entry carrying `bytes` of text fits. The first that
-    /// doesn't marks the read truncated.
-    fn admit(&mut self, bytes: usize) -> bool {
+    /// Whether one more entry carrying these texts fits. Every text the
+    /// entry sends must be named: what isn't counted isn't bounded. The
+    /// first entry that doesn't fit marks the Surface truncated.
+    fn admit<'a>(&mut self, texts: impl IntoIterator<Item = &'a str>) -> bool {
+        let bytes = READ_ENTRY_BYTES + texts.into_iter().map(sent_bytes).sum::<usize>();
         if self.rows == 0 || bytes > self.bytes {
             self.truncated = true;
             return false;
@@ -179,7 +196,7 @@ fn element_nodes(
         Element::Text { text, .. } => ("text", Some(text), &[]),
         Element::Button { text, .. } => ("button", Some(text), &[]),
         Element::Image { svg, .. } => {
-            if room.admit(0) {
+            if room.admit([]) {
                 nodes.push(json!({"kind": "image", "depth": depth, "svg_bytes": svg.len()}));
             }
             return;
@@ -188,7 +205,7 @@ fn element_nodes(
         Element::Grid { .. } | Element::VirtualList { .. } => return,
     };
     if let Some(text) = text {
-        if !room.admit(text.len()) {
+        if !room.admit([text]) {
             return;
         }
         nodes.push(json!({"kind": kind, "depth": depth, "text": text}));
@@ -331,26 +348,34 @@ impl HostedSurface {
     }
 
     /// What this Surface shows, as text: [`Self::control_info`] plus the
-    /// content, cut off at `rows` rows and [`MAX_READ_BYTES`] of text.
-    fn control_content(&self, rows: usize, cx: &gpui::App) -> serde_json::Value {
+    /// content, cut off at `rows` rows and at what is left of the read's
+    /// bytes in `room`.
+    fn control_content(
+        &self,
+        rows: usize,
+        room: &mut ReadRoom,
+        cx: &gpui::App,
+    ) -> serde_json::Value {
         use serde_json::json;
         let mut value = self.control_info();
         // A program wrote every word of it, as it writes a terminal's.
         value["content_trust"] = json!("untrusted_terminal_output");
-        let mut room = ReadRoom {
-            rows,
-            bytes: MAX_READ_BYTES,
-            truncated: false,
-        };
+        room.rows = rows;
+        room.truncated = false;
         match &self.body {
             Body::Grid { grid, .. } => {
                 let cursor = grid.cursor_snapshot();
                 value["size"] = json!({"columns": grid.cols(), "rows": grid.rows()});
-                value["cursor"] =
-                    json!({"row": cursor.row, "column": cursor.column, "visible": cursor.visible});
+                // `column` counts cells. A wide character fills two cells
+                // and is one character of the row's text, so `text_index`
+                // says how many characters of that text come before the
+                // cursor.
+                value["cursor"] = json!({"row": cursor.row, "column": cursor.column,
+                    "text_index": grid.text_index(cursor.row, cursor.column),
+                    "visible": cursor.visible});
                 let mut texts = Vec::new();
                 for text in grid.text_rows(usize::from(grid.rows())) {
-                    if !room.admit(text.len()) {
+                    if !room.admit([text.as_str()]) {
                         break;
                     }
                     texts.push(json!({"text": text}));
@@ -358,24 +383,52 @@ impl HostedSurface {
                 value["rows"] = json!(texts);
                 if !grid.tabs.items.is_empty() {
                     let active = grid.tabs.active.as_deref();
-                    value["tabs"] = grid
-                        .tabs
-                        .items
-                        .iter()
-                        .map(|tab| {
-                            json!({"id": tab.id, "label": tab.label, "modified": tab.modified,
-                                "active": active == Some(tab.id.as_str())})
-                        })
-                        .collect();
+                    // Tabs have the read's bytes to fit in, and no row limit.
+                    let cut = room.truncated;
+                    room.rows = usize::MAX;
+                    let mut tabs = Vec::new();
+                    for tab in &grid.tabs.items {
+                        if !room.admit([tab.id.as_str(), tab.label.as_str()]) {
+                            break;
+                        }
+                        tabs.push(json!({"id": tab.id, "label": tab.label,
+                            "modified": tab.modified,
+                            "active": active == Some(tab.id.as_str())}));
+                    }
+                    room.truncated |= cut;
+                    value["tabs"] = json!(tabs);
                 }
             }
             Body::List { view, .. } => {
                 let model = &view.read(cx).model;
+                // The selection and the status are sent whole or not at
+                // all, and come out of the same bytes as the rows.
+                for (key, text) in [
+                    ("selected", model.selected.as_deref()),
+                    ("status", model.status.as_deref()),
+                ] {
+                    value[key] = match text {
+                        Some(text) if room.admit([text]) => json!(text),
+                        Some(_) | None => serde_json::Value::Null,
+                    };
+                }
+                let cut = room.truncated;
+                room.rows = rows;
                 let mut listed = Vec::new();
                 for row in model.rows.iter() {
                     let extra = row.extra();
-                    let described = extra.description.as_deref().map_or(0, str::len);
-                    if !room.admit(row.id.len() + row.text.len() + described) {
+                    let optional = [
+                        ("icon", row.icon.as_deref()),
+                        ("leading", row.leading.as_deref()),
+                        ("description", extra.description.as_deref()),
+                        ("badge", extra.badge.as_ref().map(|badge| &*badge.text)),
+                        ("count", extra.count.as_deref()),
+                        ("placeholder", extra.placeholder.as_deref()),
+                    ];
+                    let texts = [&*row.id, &*row.text]
+                        .into_iter()
+                        .chain(optional.iter().filter_map(|(_, text)| *text));
+                    if !room.admit(texts) {
                         break;
                     }
                     let mut entry =
@@ -388,29 +441,21 @@ impl HostedSurface {
                         RowKind::Input => entry["kind"] = json!("input"),
                         RowKind::Button => entry["kind"] = json!("button"),
                     }
-                    for (key, text) in [
-                        ("icon", row.icon.as_deref()),
-                        ("leading", row.leading.as_deref()),
-                        ("description", extra.description.as_deref()),
-                        ("badge", extra.badge.as_ref().map(|badge| &*badge.text)),
-                        ("count", extra.count.as_deref()),
-                        ("placeholder", extra.placeholder.as_deref()),
-                    ] {
+                    for (key, text) in optional {
                         if let Some(text) = text {
                             entry[key] = json!(text);
                         }
                     }
                     listed.push(entry);
                 }
+                room.truncated |= cut;
                 value["revision"] = json!(model.revision);
                 value["total"] = json!(model.rows.len());
-                value["selected"] = json!(model.selected);
-                value["status"] = json!(model.status);
                 value["rows"] = json!(listed);
             }
             Body::Elements(body) => {
                 let mut nodes = Vec::new();
-                element_nodes(&body.description().root, 0, &mut room, &mut nodes);
+                element_nodes(&body.description().root, 0, room, &mut nodes);
                 value["nodes"] = json!(nodes);
             }
         }
@@ -580,11 +625,16 @@ impl TerminalView {
         cx: &gpui::App,
     ) -> Option<Vec<serde_json::Value>> {
         let rows = lines.unwrap_or(500).min(crate::control::MAX_READ_ROWS);
+        let mut room = ReadRoom {
+            rows,
+            bytes: crate::control::MAX_SURFACE_READ_BYTES,
+            truncated: false,
+        };
         let read: Vec<_> = self
             .surfaces
             .iter()
             .filter(|surface| only.is_none_or(|id| surface.id.0 == id))
-            .map(|surface| surface.control_content(rows, cx))
+            .map(|surface| surface.control_content(rows, &mut room, cx))
             .collect();
         (only.is_none() || !read.is_empty()).then_some(read)
     }
@@ -1276,10 +1326,15 @@ impl TerminalView {
             ));
             return;
         };
-        if let Err(refusal) = grid.apply_all(ops) {
+        let (applied, result) = grid.apply_counting(ops);
+        if let Err(refusal) = result {
             surface.connection.send(&event_refused(&refusal.reason()));
         }
-        self.mark_changed(Mark::Surface(id.0));
+        // A batch refused at its first operation changed nothing, so
+        // nobody watching is told to read it again.
+        if applied > 0 {
+            self.mark_changed(Mark::Surface(id.0));
+        }
         cx.notify();
     }
 
@@ -1305,11 +1360,15 @@ impl TerminalView {
             | ListOp::State { revision, .. } => Some(*revision),
             ListOp::Assets(_) => None,
         };
-        match view.update(cx, |view, cx| view.apply(op, cx)) {
+        let applied = view.update(cx, |view, cx| view.apply(op, cx));
+        match &applied {
             Ok(()) => surface.connection.send(&event_applied(operation, revision)),
             Err(refusal) => surface.connection.send(&event_refused(&refusal.reason())),
         };
-        self.mark_changed(Mark::Surface(id.0));
+        // A refused operation leaves the list as it was.
+        if applied.is_ok() {
+            self.mark_changed(Mark::Surface(id.0));
+        }
         cx.notify();
     }
 

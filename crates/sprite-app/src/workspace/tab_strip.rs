@@ -117,6 +117,7 @@ impl Workspace {
                 let name = (!text.is_empty()).then_some(text);
                 self.tabs.set_name(tab, name);
                 self.refresh_labels();
+                self.publish_standing();
                 self.mode = Mode::Idle;
             }
             RenameStep::Cancel => self.mode = Mode::Idle,

@@ -445,6 +445,7 @@ impl Workspace {
             self.panes.set_layout(&published);
             self.published = published;
         }
+        self.publish_standing();
     }
 
     fn cached_pane_area(&self) -> (f32, f32, f32) {

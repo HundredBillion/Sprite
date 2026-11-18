@@ -54,10 +54,28 @@ closed off here:
 A quiet connection is not closed for being quiet: an orchestrator is meant to
 hold one for as long as it runs. Its place comes back when the peer goes.
 
+## What a read is bounded by
+
+All of a pane's Surfaces share 2 MiB of text in one read, counted as it is sent,
+with the quotes and escapes JSON adds, and every text an entry sends is counted.
+The terminal's text gets what is left of the 16 MiB response after that is set
+aside. A program therefore cannot make its own pane unreadable by showing large
+rows or opening many Surfaces.
+
+## Where notices come from
+
+Content changes are marked by the pane's view. Everything `list` reports
+besides content (geometry, tab, visible, current, label, tab name, and which
+panes exist) is compared by the window whenever its layout is refreshed and
+after each Pane Control request, over the window's own panes. A pane that isn't
+a terminal, or whose program never started, is told of like any other. A watch
+of a pane the window doesn't have is refused with `gone`.
+
 ## Cost when unused
 
-With no watcher, marking a change is one atomic load. Nothing is timed and
-nothing is added to a frame.
+With no watcher, marking a content change is one atomic load. Nothing is timed
+and nothing is added to a frame. The comparison above runs only when the layout
+is refreshed or a request is served, never per frame.
 
 ## Considered and rejected
 

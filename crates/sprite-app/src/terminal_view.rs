@@ -118,6 +118,10 @@ pub struct TerminalView {
     /// the pane has begun shutting down, and in tests that build a view
     /// without a window's registry.
     observation: Option<crate::observation::panes::PaneLink>,
+    /// Who is told when this pane changes, and the pane's id. Kept apart
+    /// from `observation` because a pane whose session never started has
+    /// no observation and can still host a Surface.
+    watch: Option<(crate::control::watch::Hub, u64)>,
     /// What programs have asked this pane to draw beside or over its grid.
     surfaces: SurfaceHost<HostedSurface>,
     surface_window: gpui::AnyWindowHandle,
@@ -339,6 +343,9 @@ impl TerminalView {
     ) -> Self {
         #[cfg(any(test, feature = "startup-benchmark"))]
         crate::startup_benchmark::constructor_started(cx.entity_id(), cx);
+        let watch = observation
+            .as_ref()
+            .map(|link| (link.panes.watch.clone(), link.pane.0));
         let applied_settings = settings.clone();
         let surface_font = settings.effective_surface_font().clone();
         let defaults = theme::session_defaults(&settings);
@@ -396,7 +403,9 @@ impl TerminalView {
                     complaints.extend(refused);
                     config
                 }
-                Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
+                Err(error) => {
+                    return Self::failed_watched(error.to_string(), watch, font_family, window, cx);
+                }
             },
         };
         // Keep a valid fallback when layout bounds are not available yet.
@@ -409,7 +418,9 @@ impl TerminalView {
             "resize",
         ) {
             Ok(size) => size,
-            Err(error) => return Self::failed(error.to_string(), font_family, window, cx),
+            Err(error) => {
+                return Self::failed_watched(error.to_string(), watch, font_family, window, cx);
+            }
         };
         if let Some(size) = allocated.and_then(|area| {
             geometry::grid_size(
@@ -446,7 +457,7 @@ impl TerminalView {
             }
             Err(error) => {
                 tracing::error!(target: "sprite_app::session", tab = exit.identity.0.0, pane = exit.identity.1.0, kind = ?error.kind, operation = error.operation, "terminal session failed to start");
-                return Self::failed(error.to_string(), font_family, window, cx);
+                return Self::failed_watched(error.to_string(), watch, font_family, window, cx);
             }
         };
 
@@ -568,6 +579,7 @@ impl TerminalView {
             admission_notice: false,
             session: SessionState::Running(session),
             observation,
+            watch,
             surfaces: SurfaceHost::default(),
             surface_window: window.window_handle(),
             dock_drag: None,
@@ -629,14 +641,28 @@ impl TerminalView {
         view
     }
 
+    /// [`Self::failed_watched`] with nobody to tell.
+    #[cfg(test)]
+    fn failed(
+        message: String,
+        font_family: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::failed_watched(message, None, font_family, window, cx)
+    }
+
     /// A view that shows why it could not start.
     ///
     /// It owns no session at all, so there is nothing to pump and nothing to
     /// shut down: its event and snapshot tasks are already finished. Spawning
     /// a throwaway shell just to fill the field would fork a process on the
     /// one path where the person's own program has already failed to start.
-    fn failed(
+    ///
+    /// `watch` is who to tell when it changes: it can still host a Surface.
+    fn failed_watched(
         message: String,
+        watch: Option<(crate::control::watch::Hub, u64)>,
         font_family: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -668,6 +694,7 @@ impl TerminalView {
             session: SessionState::NeverStarted,
             // A view that never started a session has nothing to observe.
             observation: None,
+            watch,
             surfaces: SurfaceHost::default(),
             surface_window: window.window_handle(),
             dock_drag: None,
@@ -1010,8 +1037,8 @@ impl TerminalView {
 
     /// Tells whoever is watching this pane that something about it changed.
     pub(crate) fn mark_changed(&self, mark: crate::control::watch::Mark) {
-        if let Some(link) = &self.observation {
-            link.panes.watch.mark(link.pane.0, mark);
+        if let Some((hub, pane)) = &self.watch {
+            hub.mark(*pane, mark);
         }
     }
 

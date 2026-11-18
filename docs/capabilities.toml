@@ -299,6 +299,15 @@ tests = [
 ]
 
 [[capability]]
+id = "pane-control.surface-read-is-bounded"
+area = "pane-control"
+promise = "All of a pane's Surfaces share one bound on the text a read returns, counted as it is sent, so no program can make its pane unreadable; a Surface that was cut says so."
+status = "kept"
+tests = [
+    "a_read_of_large_surfaces_stays_inside_its_bound",
+]
+
+[[capability]]
 id = "pane-control.watch-reports-changes"
 area = "pane-control"
 promise = "A watcher is told when a pane it watches changes and what changed, hears nothing about other panes, and changes within a frame arrive as one notice."
@@ -307,6 +316,25 @@ tests = [
     "a_watch_tells_of_changes_in_the_panes_it_watches_and_no_others",
     "marks_for_one_pane_merge_into_one_notice",
     "the_cli_watch_prints_changes_until_the_window_closes",
+]
+
+[[capability]]
+id = "pane-control.watch-covers-what-list-reports"
+area = "pane-control"
+promise = "A watcher is told when a pane's label, tab name, visibility or place changes, is told of panes of every kind, hears nothing of an operation that was refused, and cannot watch a pane that is not there."
+status = "kept"
+tests = [
+    "a_watch_tells_of_every_listed_pane_and_of_what_list_reports",
+    "a_refused_surface_operation_tells_a_watcher_nothing",
+]
+
+[[capability]]
+id = "pane-control.cli-list-reports-features"
+area = "pane-control"
+promise = "`sprite panes list` reports the features every running window supports."
+status = "kept"
+tests = [
+    "the_cli_list_reports_what_the_window_supports",
 ]
 
 [[capability]]

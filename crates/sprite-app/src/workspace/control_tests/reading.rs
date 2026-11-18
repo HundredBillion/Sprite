@@ -186,7 +186,7 @@ fn a_read_returns_what_each_kind_of_surface_shows(cx: &mut gpui::TestAppContext)
     assert_eq!(editor["size"], json!({"columns": 12, "rows": 3}));
     assert_eq!(
         editor["cursor"],
-        json!({"row": 2, "column": 3, "visible": true})
+        json!({"row": 2, "column": 3, "text_index": 3, "visible": true})
     );
     assert_eq!(
         editor["rows"],
@@ -217,6 +217,23 @@ fn a_read_returns_what_each_kind_of_surface_shows(cx: &mut gpui::TestAppContext)
             {"kind": "image", "depth": 1, "svg_bytes": 41},
         ])
     );
+
+    // After a wide character the cursor's column, which counts cells, runs
+    // ahead of its place in the row's text, which counts characters.
+    grid(
+        &workspace,
+        1,
+        json!({"type": "cursor", "row": 0, "col": 5}),
+        cx,
+    );
+    let wide = read(&target, Some(1), cx);
+    let cursor = &surface(&wide, 1)["cursor"];
+    assert_eq!(
+        (&cursor["column"], &cursor["text_index"]),
+        (&json!(5), &json!(4))
+    );
+    let text = surface(&wide, 1)["rows"][0]["text"].as_str().unwrap();
+    assert_eq!(text.chars().nth(4), Some('!'));
 
     // Each program changes what it shows, and the next read shows that.
     grid(
@@ -682,5 +699,262 @@ fn the_cli_watch_prints_changes_until_the_window_closes(cx: &mut gpui::TestAppCo
                     .unwrap()
                     .contains(&json!("surface:1"))),
         "{out}"
+    );
+}
+
+/// However many Surfaces a pane hosts and however long their rows' texts,
+/// a read's Surfaces stay inside one bound, counted as the bytes are sent,
+/// and each Surface that was cut says so.
+#[gpui::test]
+fn a_read_of_large_surfaces_stays_inside_its_bound(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
+    let (workspace, cx) = test_support::test_workspace(cx);
+    let target = target(&workspace, cx);
+    // Every text a row can carry, long, and full of characters JSON escapes.
+    let long = "\"\\".repeat(500);
+    let rows: Vec<Value> = (0..400)
+        .map(|index| {
+            json!({"id": format!("r{index}"), "text": long, "indent": 0, "guides": [],
+                "description": long, "badge": {"text": long}, "count": long})
+        })
+        .collect();
+    let mut peers = Vec::new();
+    for id in 1..=2 {
+        peers.push(open(
+            &workspace,
+            id,
+            Placement::Overlay,
+            serde_json::from_str(LIST).unwrap(),
+            cx,
+        ));
+        list(
+            &workspace,
+            id,
+            json!({"type": "list_rows", "revision": 1, "selected": null, "rows": rows}),
+            cx,
+        );
+    }
+    let answer = ask(
+        &target,
+        Operation::Read {
+            pane: format!("{}:0", target.window),
+            lines: Some(5000),
+            surface: None,
+        },
+        cx,
+    );
+    assert_eq!(answer["outcome"], "ok", "{answer}");
+    let surfaces = &answer["result"]["surfaces"];
+    let sent = surfaces.to_string().len();
+    assert!(
+        sent <= control::MAX_SURFACE_READ_BYTES + 64 * 1024,
+        "{sent} bytes of Surfaces"
+    );
+    // The first Surface used the room; it and those after it say they
+    // were cut, and the last, which got none, still appears.
+    let listed = surfaces.as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(!listed[0]["rows"].as_array().unwrap().is_empty());
+    assert!(listed.iter().all(|surface| surface["truncated"] == true));
+    assert_eq!(listed[1]["rows"], json!([]));
+    assert_eq!(listed[1]["total"], 400);
+    assert!(
+        sent > control::MAX_SURFACE_READ_BYTES / 2,
+        "the room was used"
+    );
+}
+
+/// What `list` says of a pane, and no content, is told too: a label, a tab's
+/// name, which tab is showing. A pane that is not a terminal is told of
+/// like any other, and a pane that isn't there can't be watched.
+#[gpui::test]
+fn a_watch_tells_of_every_listed_pane_and_of_what_list_reports(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
+    let (workspace, cx) = test_support::test_workspace(cx);
+    let target = target(&workspace, cx);
+    let first = format!("{}:0", target.window);
+
+    // A pane that isn't there is refused, and its connection gives its
+    // place back.
+    let hub = workspace.read_with(cx, |workspace, _| workspace.panes.watch.clone());
+    let mut missing = Line::connect(&target);
+    missing.send(
+        &target,
+        "missing",
+        Operation::Watch {
+            panes: Some(vec![format!("{}:30", target.window)]),
+        },
+        false,
+    );
+    assert_eq!(missing.next(cx)["outcome"], "gone");
+    assert_eq!(missing.next(cx), Value::Null);
+    until(cx, "a refused watch kept its place", || hub.kept() == 0);
+
+    let mut watch = Line::connect(&target);
+    watch.send(&target, "w", Operation::Watch { panes: None }, false);
+    assert_eq!(watch.next(cx)["outcome"], "ok");
+
+    // A label.
+    let renamed = ask(
+        &target,
+        Operation::Rename {
+            pane: first.clone(),
+            label: Some("build".into()),
+        },
+        cx,
+    );
+    assert_eq!(renamed["outcome"], "ok", "{renamed}");
+    told(&mut watch, &first, "label", cx);
+
+    // A pane that is no terminal opens in a tab of its own: it is created,
+    // and the first pane's tab stops showing.
+    workspace.update(cx, |workspace, cx| {
+        workspace.tabs.open(|_, _| {
+            Rc::new(cx.new(|cx| test_support::BusyPane {
+                focus: cx.focus_handle(),
+            })) as Rc<dyn PaneHandle<Request = SurfaceRequest>>
+        });
+        workspace.refresh_layout(cx);
+    });
+    let other = format!("{}:1", target.window);
+    let mut seen = Vec::new();
+    while !(seen.contains(&(other.clone(), json!("created")))
+        && seen.contains(&(first.clone(), json!("layout"))))
+    {
+        let notice = watch.next(cx);
+        assert_ne!(notice, Value::Null);
+        let pane = notice["pane"].as_str().unwrap().to_owned();
+        for what in notice["changed"].as_array().unwrap() {
+            seen.push((pane.clone(), what.clone()));
+        }
+    }
+    let listed = ask(&target, Operation::List, cx);
+    assert_eq!(listed["result"]["panes"][0]["visible"], false, "{listed}");
+
+    // A tab's name.
+    workspace.update(cx, |workspace, _| {
+        workspace.tabs.set_name(TabId(0), Some("work".into()));
+        workspace.publish_standing();
+    });
+    told(&mut watch, &first, "label", cx);
+
+    // Closing the pane that is no terminal is told as well.
+    let closed = ask(
+        &target,
+        Operation::Close {
+            pane: other.clone(),
+        },
+        cx,
+    );
+    assert_eq!(closed["outcome"], "ok", "{closed}");
+    loop {
+        let notice = watch.next(cx);
+        assert_ne!(notice, Value::Null);
+        if notice["pane"] == other.as_str()
+            && notice["changed"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("closed"))
+        {
+            break;
+        }
+    }
+    // It can no longer be watched.
+    let mut late = Line::connect(&target);
+    late.send(
+        &target,
+        "late",
+        Operation::Watch {
+            panes: Some(vec![other]),
+        },
+        false,
+    );
+    assert_eq!(late.next(cx)["outcome"], "gone");
+}
+
+/// An operation the window refuses changes nothing, so a watcher is not
+/// told to read the Surface again.
+#[gpui::test]
+fn a_refused_surface_operation_tells_a_watcher_nothing(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
+    let (workspace, cx) = test_support::test_workspace(cx);
+    let target = target(&workspace, cx);
+    let pane = format!("{}:0", target.window);
+    let _grid = open(
+        &workspace,
+        1,
+        Placement::Fill { owner_pid: None },
+        json!({"version": 1, "root": {"kind": "grid", "cols": 4, "rows": 2}}),
+        cx,
+    );
+    let _list = open(
+        &workspace,
+        2,
+        Placement::Overlay,
+        serde_json::from_str(LIST).unwrap(),
+        cx,
+    );
+    list(
+        &workspace,
+        2,
+        json!({"type": "list_rows", "revision": 5, "selected": null, "rows": []}),
+        cx,
+    );
+    cx.run_until_parked();
+    let mut watch = Line::connect(&target);
+    watch.send(
+        &target,
+        "w",
+        Operation::Watch {
+            panes: Some(vec![pane.clone()]),
+        },
+        false,
+    );
+    assert_eq!(watch.next(cx)["outcome"], "ok");
+    while watch.within(Duration::from_millis(200), cx).is_some() {}
+
+    // A row outside the grid, and a list revision older than the list's.
+    grid(
+        &workspace,
+        1,
+        json!({"type": "rows", "rows": [{"row": 9, "cells": [["x"]]}]}),
+        cx,
+    );
+    list(
+        &workspace,
+        2,
+        json!({"type": "list_rows", "revision": 1, "selected": null, "rows": []}),
+        cx,
+    );
+    assert_eq!(watch.within(Duration::from_millis(300), cx), None);
+
+    // An operation that applies is still told.
+    grid(
+        &workspace,
+        1,
+        json!({"type": "rows", "rows": [{"row": 0, "cells": [["x"]]}]}),
+        cx,
+    );
+    told(&mut watch, &pane, "surface:1", cx);
+}
+
+/// `sprite panes list` passes on what the window supports.
+#[gpui::test]
+fn the_cli_list_reports_what_the_window_supports(cx: &mut gpui::TestAppContext) {
+    if !private_runtime(module_path!(), cx) {
+        return;
+    }
+    let (_workspace, cx) = test_support::test_workspace(cx);
+    let (code, listed, errors) = public_cli(&["panes", "list"], cx);
+    assert_eq!(code, 0, "{errors}");
+    assert_eq!(
+        listed["result"]["features"],
+        json!(["keep_open", "surface_read", "watch"])
     );
 }

@@ -22,7 +22,9 @@ fn private_runtime(module: &str, cx: &gpui::TestAppContext) -> bool {
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let directory = PrivateRuntime(std::env::temp_dir().join(format!(
-        "sc-{:x}-{:x}",
+        // Short, because the socket path that ends in it has 103 bytes to
+        // fit in on macOS and `$TMPDIR` there already takes 49.
+        "{:x}-{:x}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )));

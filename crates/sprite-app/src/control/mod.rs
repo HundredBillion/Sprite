@@ -24,6 +24,13 @@ pub(crate) const MAX_CLEANUPS: usize = 16;
 /// The most rows of one Surface a read returns: as many as it returns lines
 /// of a terminal's history.
 pub(crate) const MAX_READ_ROWS: usize = 5000;
+/// The most text the Surfaces of one pane contribute to a read, counted as
+/// it is sent: with the quotes and escapes JSON adds.
+pub(crate) const MAX_SURFACE_READ_BYTES: usize = 2 * 1024 * 1024;
+/// What a read sets aside for Surfaces: their text, and the few hundred
+/// bytes of position, size and counts each Surface adds. A window hosts at
+/// most 64 Surfaces, one per Surface Channel connection.
+const SURFACE_READ_RESERVE: usize = MAX_SURFACE_READ_BYTES + 64 * 1024;
 /// How many connections a window serves at once, and how many requests may
 /// wait for it.
 pub(crate) const MAX_CONNECTIONS: usize = 16;
@@ -330,79 +337,98 @@ fn answer(
     lanes: &Lanes,
     body: &str,
     connection: &ReplyConnection,
-    kept: Option<watch::Kept>,
+    mut kept: Option<watch::Kept>,
 ) -> (Value, Next) {
-    let (id, keep_open, watching) = match serde_json::from_str::<Request>(body) {
-        Ok(request) => (
-            request.id.clone(),
-            request.keep_open,
-            matches!(request.operation, Operation::Watch { .. }),
-        ),
-        Err(_) => (String::new(), false, false),
+    let request = match checked(window, body) {
+        Ok(request) => request,
+        Err(answer) => return (answer, Next::Close),
     };
     // A connection that stays open needs one of a limited number of places.
     // One that can't have a place is told so before anything is applied, so
     // it can ask again on a connection of the ordinary kind.
-    let kept = if keep_open || watching {
-        match kept.or_else(|| lanes.panes.watch.keep()) {
-            Some(kept) => Some(kept),
-            None => return (failure(&id, "busy"), Next::Close),
+    let stays = request.keep_open || matches!(request.operation, Operation::Watch { .. });
+    if stays && kept.is_none() {
+        kept = lanes.panes.watch.keep();
+        if kept.is_none() {
+            return (failure(&request.id, "busy"), Next::Close);
         }
-    } else {
-        None
-    };
-    if watching {
-        return match (watch(window, lanes, body), kept) {
-            (Ok((answer, subscription)), Some(kept)) => (answer, Next::Watch(subscription, kept)),
-            (Ok(_), None) => (failure(&id, "busy"), Next::Close),
-            (Err(answer), _) => (answer, Next::Close),
-        };
     }
-    let answer = answer_once(window, lanes, body, connection);
-    (answer, kept.map_or(Next::Close, Next::Keep))
+    match (stays, kept) {
+        (true, Some(kept)) => {
+            if let Operation::Watch { panes } = &request.operation {
+                return match watch(window, lanes, &request.id, panes.as_deref()) {
+                    Ok((answer, subscription)) => (answer, Next::Watch(subscription, kept)),
+                    Err(answer) => (answer, Next::Close),
+                };
+            }
+            (answer_once(lanes, request, connection), Next::Keep(kept))
+        }
+        // A request that doesn't ask to stay gives up any place it held.
+        (_, _) => (answer_once(lanes, request, connection), Next::Close),
+    }
 }
 
-/// Starts a watch, answering with the panes it covers.
-fn watch(window: &str, lanes: &Lanes, body: &str) -> Result<(Value, watch::Subscription), Value> {
-    let request =
-        serde_json::from_str::<Request>(body).map_err(|_| failure("", "invalid_request"))?;
-    let id = request.id.as_str();
+/// Parses a request line and checks what every request must satisfy: this
+/// protocol, this window, a bounded id and a well-formed operation. The
+/// error is the answer to send.
+fn checked(window: &str, body: &str) -> Result<Request, Value> {
+    let request = serde_json::from_str::<Request>(body).map_err(|_| {
+        // A caller speaking another version is told which one this is.
+        let spoken = serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|value| value["protocol"].as_str().map(str::to_owned));
+        match spoken {
+            Some(spoken) if spoken != PROTOCOL => {
+                response("", "invalid_request", json!({"supported": PROTOCOL}))
+            }
+            _ => failure("", "invalid_request"),
+        }
+    })?;
     if request.protocol != PROTOCOL {
         return Err(response(
-            id,
+            &request.id,
             "invalid_request",
             json!({"supported": PROTOCOL}),
         ));
     }
-    let Operation::Watch { panes } = &request.operation else {
-        return Err(failure(id, "invalid_request"));
-    };
-    if id.len() > 64 || !request.operation.valid() || request.window != window {
-        return Err(failure(id, "invalid_request"));
+    if request.id.len() > 64 || !request.operation.valid() || request.window != window {
+        return Err(failure(&request.id, "invalid_request"));
     }
+    Ok(request)
+}
+
+/// Starts a watch of `panes`, or of every pane, answering with what it
+/// covers. A pane the window doesn't have is `gone`: nothing would ever be
+/// said about it, and the watcher would wait for good.
+fn watch(
+    window: &str,
+    lanes: &Lanes,
+    id: &str,
+    panes: Option<&[String]>,
+) -> Result<(Value, watch::Subscription), Value> {
+    let hub = &lanes.panes.watch;
     let chosen = match panes {
         None => None,
-        Some(panes) => Some(
-            panes
-                .iter()
-                .map(|address| {
-                    address
-                        .split_once(':')
-                        .filter(|(named, _)| *named == window)
-                        .and_then(|(_, pane)| pane.parse::<u64>().ok())
-                })
-                .collect::<Option<std::collections::HashSet<u64>>>()
-                .ok_or_else(|| failure(id, "invalid_request"))?,
-        ),
+        Some(panes) => {
+            let mut chosen = std::collections::HashSet::new();
+            for address in panes {
+                let pane = address
+                    .split_once(':')
+                    .filter(|(named, _)| *named == window)
+                    .and_then(|(_, pane)| pane.parse::<u64>().ok())
+                    .ok_or_else(|| failure(id, "invalid_request"))?;
+                if !hub.has_pane(pane) {
+                    return Err(failure(id, "gone"));
+                }
+                chosen.insert(pane);
+            }
+            Some(chosen)
+        }
     };
     // Watching starts before the answer is sent, so a change made after the
     // caller reads the answer is never missed.
-    let subscription = lanes
-        .panes
-        .watch
-        .subscribe(chosen)
-        .map_err(|_| failure(id, "busy"))?;
-    let watching = panes.as_ref().map_or(json!("all"), |panes| json!(panes));
+    let subscription = hub.subscribe(chosen).map_err(|_| failure(id, "busy"))?;
+    let watching = panes.map_or(json!("all"), |panes| json!(panes));
     Ok((
         response(
             id,
@@ -414,30 +440,9 @@ fn watch(window: &str, lanes: &Lanes, body: &str) -> Result<(Value, watch::Subsc
     ))
 }
 
-/// Answers one request that is not a watch.
-fn answer_once(window: &str, lanes: &Lanes, body: &str, connection: &ReplyConnection) -> Value {
-    let request = match serde_json::from_str::<Request>(body) {
-        Ok(request) => request,
-        Err(_) => {
-            // A caller speaking another version is told which one this is.
-            let spoken = serde_json::from_str::<Value>(body)
-                .ok()
-                .and_then(|value| value["protocol"].as_str().map(str::to_owned));
-            return match spoken {
-                Some(spoken) if spoken != PROTOCOL => {
-                    response("", "invalid_request", json!({"supported": PROTOCOL}))
-                }
-                _ => failure("", "invalid_request"),
-            };
-        }
-    };
+/// Answers one checked request that is not a watch.
+fn answer_once(lanes: &Lanes, request: Request, connection: &ReplyConnection) -> Value {
     let id = request.id.clone();
-    if request.protocol != PROTOCOL {
-        return response(&id, "invalid_request", json!({"supported": PROTOCOL}));
-    }
-    if id.len() > 64 || !request.operation.valid() || request.window != window {
-        return failure(&id, "invalid_request");
-    }
     if request.operation == Operation::ConfigReload {
         return configure(lanes, &id, ConfigVerb::Reload);
     }
@@ -479,13 +484,12 @@ fn answer_once(window: &str, lanes: &Lanes, body: &str, connection: &ReplyConnec
         };
         match broker::collect(&query, lanes.panes.as_ref(), broker::DEADLINE) {
             Ok(report) => {
-                // The Surfaces already in the answer come out of the room
-                // the terminal's text may take, so the whole stays in bounds.
-                let taken = answer["result"]["surfaces"].to_string().len();
+                // The most the Surfaces already in the answer can take is
+                // set aside, so the whole stays in bounds.
                 let encoded = schema::render_limited(
                     &report,
                     false,
-                    (schema::MAX_RESPONSE_BYTES - 65536).saturating_sub(taken),
+                    schema::MAX_RESPONSE_BYTES - 65536 - SURFACE_READ_RESERVE,
                 );
                 answer["result"]["terminal"] =
                     serde_json::from_str(&encoded).unwrap_or(Value::Null);

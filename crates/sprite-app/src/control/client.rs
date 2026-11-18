@@ -252,25 +252,18 @@ fn run_watch(
             Some(pane) => window_of_address(pane)?.to_owned(),
             None => choose_window(&directory, window)?,
         };
-        let id = crate::local_socket::SocketKey::generate()
-            .map_err(|error| error.to_string())?
-            .to_hex();
-        let request = Request {
-            protocol: PROTOCOL.into(),
-            id,
-            window: window.clone(),
-            operation: Operation::Watch {
-                panes: panes.map(<[String]>::to_vec),
-            },
-            keep_open: false,
+        let operation = Operation::Watch {
+            panes: panes.map(<[String]>::to_vec),
         };
-        let mut stream = UnixStream::connect(super::socket_path(&directory, &window))
-            .map_err(|_| format!("window {window} is not running"))?;
-        stream
-            .set_write_timeout(Some(crate::timeouts::CLIENT_TIMEOUT))
-            .and_then(|()| writeln!(stream, "{}", json!(request)))
-            .map_err(|error| error.to_string())?;
-        Ok(stream)
+        request(&window, operation)
+            .and_then(|(_, line)| {
+                send(
+                    &super::socket_path(&directory, &window),
+                    &line,
+                    crate::timeouts::CLIENT_TIMEOUT,
+                )
+            })
+            .map_err(|error| named(error, &window).to_string())
     });
     let stream = match opened {
         Ok(stream) => stream,
@@ -308,10 +301,14 @@ fn run_watch(
     }
 }
 
-/// Every running window's panes, in one answer.
+/// Every running window's panes, in one answer. `features` names what every
+/// one of those windows supports, so a caller may rely on a feature listed
+/// whichever window it then talks to; a window that reports none (an older
+/// Sprite) leaves the list empty.
 fn list(directory: &Path) -> Value {
     let mut windows = Vec::new();
     let mut panes = Vec::new();
+    let mut features: Option<Vec<Value>> = None;
     for window in socket_windows(directory) {
         // A window that closed between the scan and the request has nothing
         // to list, so it is skipped rather than reported.
@@ -324,9 +321,24 @@ fn list(directory: &Path) -> Value {
         if let Some(found) = answer["result"]["panes"].as_array() {
             panes.extend(found.iter().cloned());
         }
+        let supported = answer["result"]["features"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        features = Some(match features {
+            None => supported,
+            Some(common) => common
+                .into_iter()
+                .filter(|feature| supported.contains(feature))
+                .collect(),
+        });
         windows.push(window);
     }
-    super::response("list", "ok", json!({"windows": windows, "panes": panes}))
+    super::response(
+        "list",
+        "ok",
+        json!({"windows": windows, "panes": panes, "features": features.unwrap_or_default()}),
+    )
 }
 
 fn window_of_address(address: &str) -> Result<&str, String> {
@@ -385,12 +397,8 @@ fn socket_windows(directory: &Path) -> Vec<String> {
     windows
 }
 
-/// Sends one operation to one window and returns its answer.
-pub(crate) fn ask(
-    directory: &Path,
-    window: &str,
-    operation: Operation,
-) -> Result<Value, ExchangeError> {
+/// A request for `window`, as its id and the line to send.
+fn request(window: &str, operation: Operation) -> Result<(String, String), ExchangeError> {
     let id = crate::local_socket::SocketKey::generate()
         .map_err(|e| ExchangeError::NotSent(e.to_string()))?
         .to_hex();
@@ -401,19 +409,34 @@ pub(crate) fn ask(
         operation,
         keep_open: false,
     };
-    let answer = exchange(
-        &super::socket_path(directory, window),
-        &json!(request).to_string(),
-        crate::timeouts::CLIENT_TIMEOUT,
-    )
-    .map_err(|error| match error {
+    Ok((id, json!(request).to_string()))
+}
+
+/// Says which window was not running.
+fn named(error: ExchangeError, window: &str) -> ExchangeError {
+    match error {
         ExchangeError::NotRunning(_) => {
             ExchangeError::NotRunning(format!("window {window} is not running"))
         }
         other @ (ExchangeError::NotSent(_)
         | ExchangeError::Invalid(_)
         | ExchangeError::OutcomeUnknown(_)) => other,
-    });
+    }
+}
+
+/// Sends one operation to one window and returns its answer.
+pub(crate) fn ask(
+    directory: &Path,
+    window: &str,
+    operation: Operation,
+) -> Result<Value, ExchangeError> {
+    let (id, line) = request(window, operation)?;
+    let answer = exchange(
+        &super::socket_path(directory, window),
+        &line,
+        crate::timeouts::CLIENT_TIMEOUT,
+    )
+    .map_err(|error| named(error, window));
     let answer = match answer {
         Ok(answer) => answer,
         Err(ExchangeError::Invalid(_)) => super::failure(&id, "invalid_request"),
@@ -426,11 +449,9 @@ pub(crate) fn ask(
     Ok(answer)
 }
 
-pub(crate) fn exchange(
-    socket: &Path,
-    line: &str,
-    timeout: Duration,
-) -> Result<Value, ExchangeError> {
+/// Connects to a window's socket and sends one request line, with `timeout`
+/// on every read and write that follows.
+fn send(socket: &Path, line: &str, timeout: Duration) -> Result<UnixStream, ExchangeError> {
     if line.len() + 1 > 8192 || line.contains('\n') {
         return Err(ExchangeError::Invalid(
             "request exceeds 8 KiB or contains an unencoded newline".into(),
@@ -451,6 +472,15 @@ pub(crate) fn exchange(
         .and_then(|_| stream.set_write_timeout(Some(timeout)))
         .map_err(|e| ExchangeError::NotSent(e.to_string()))?;
     writeln!(stream, "{line}").map_err(|e| ExchangeError::OutcomeUnknown(e.to_string()))?;
+    Ok(stream)
+}
+
+pub(crate) fn exchange(
+    socket: &Path,
+    line: &str,
+    timeout: Duration,
+) -> Result<Value, ExchangeError> {
+    let stream = send(socket, line, timeout)?;
     let mut answer = Vec::new();
     stream
         .take((crate::observation::schema::MAX_RESPONSE_BYTES + 1) as u64)
