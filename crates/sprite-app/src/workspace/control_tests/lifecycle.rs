@@ -40,6 +40,7 @@ fn public_move_keeps_a_pending_capture_and_publishes_current_membership(
                         beside: None,
                         side: None,
                     },
+                    keep_open: false,
                 },
                 reply: tx.into(),
                 connection: None,

@@ -475,6 +475,7 @@ impl TerminalView {
                         // An ended session answers nothing more, so a capture
                         // still waiting on it fails now, with the reason,
                         // rather than at the observation deadline.
+                        view.mark_changed(crate::control::watch::Mark::Lifecycle);
                         if let Some(link) = &view.observation {
                             link.panes.fail_all(
                                 link.pane,
@@ -537,6 +538,7 @@ impl TerminalView {
                             view.refresh_textures(&bundle);
                             view.bundle = Some(bundle);
                             view.follow_hover();
+                            view.mark_changed(crate::control::watch::Mark::Terminal(generation));
                             cx.notify();
                         }
                     })
@@ -731,6 +733,7 @@ impl TerminalView {
             }
             Effect::Title(title) => {
                 self.title = title.map(SharedString::from);
+                self.mark_changed(crate::control::watch::Mark::Title);
                 self.refresh_display_title(cx);
                 true
             }
@@ -1005,10 +1008,18 @@ impl TerminalView {
         }
     }
 
+    /// Tells whoever is watching this pane that something about it changed.
+    pub(crate) fn mark_changed(&self, mark: crate::control::watch::Mark) {
+        if let Some(link) = &self.observation {
+            link.panes.watch.mark(link.pane.0, mark);
+        }
+    }
+
     pub(crate) fn control_info(&self) -> serde_json::Value {
         serde_json::json!({"kind": "terminal", "terminal_read": true, "terminal_input": true,
             "lifecycle": match self.session { SessionState::Running(_) => "running", SessionState::Ended(_) => "ended", SessionState::NeverStarted => "failed" },
-            "surface_count": self.surfaces.iter().count(), "surfaces": self.surfaces.iter().map(|surface| surface.control_info()).collect::<Vec<_>>(), "native_content": "unavailable", "input_target": "terminal"})
+            "surface_count": self.surfaces.iter().count(), "surfaces": self.surfaces.iter().map(|surface| surface.control_info()).collect::<Vec<_>>(),
+            "native_content": if self.surfaces.is_empty() { "none" } else { "readable" }, "input_target": "terminal"})
     }
 
     pub fn foreground(&self) -> sprite_term::ForegroundState {

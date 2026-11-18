@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use sprite_term::{CommandSender, HistoryLines, HistoryRequest, HistorySnapshot, Ticket};
 
+use crate::control::watch::Mark;
 use crate::observation::broker::{PaneAddress, PaneSource, Pending, Withdraw};
 
 /// What a pane sends back when it answers.
@@ -85,6 +86,9 @@ pub struct WindowPanes {
     /// The next ticket to hand out. One counter for the whole window, so a
     /// ticket names one request whichever pane it went to.
     next_ticket: AtomicU64,
+    /// Who is to be told when a pane changes. Here because this is the one
+    /// thing a pane's view and the window's socket threads both hold.
+    pub(crate) watch: crate::control::watch::Hub,
     #[cfg(test)]
     layout_publications: std::sync::atomic::AtomicUsize,
 }
@@ -108,6 +112,8 @@ impl WindowPanes {
                 waiting: HashMap::new(),
             },
         );
+        drop(entries);
+        self.watch.mark(pane.0, Mark::Created);
     }
 
     pub(crate) fn set_tab(&self, pane: PaneId, tab: TabId) {
@@ -133,8 +139,11 @@ impl WindowPanes {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut entries = crate::locked::locked(&self.entries);
         for (pane, placement) in placements {
-            if let Some(entry) = entries.get_mut(pane) {
+            if let Some(entry) = entries.get_mut(pane)
+                && entry.placement != *placement
+            {
                 entry.placement = *placement;
+                self.watch.mark(pane.0, Mark::Layout);
             }
         }
     }
@@ -153,6 +162,8 @@ impl WindowPanes {
                     .send(Err("the pane closed before it answered".to_owned()))
                     .ok();
             }
+            drop(entries);
+            self.watch.mark(pane.0, Mark::Closed);
         }
     }
 

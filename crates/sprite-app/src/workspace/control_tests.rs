@@ -82,6 +82,7 @@ fn ask(target: &Target, operation: Operation, cx: &mut gpui::VisualTestContext) 
         id: "test".into(),
         window: target.window.clone(),
         operation,
+        keep_open: false,
     };
     send(&target.socket, json!(request).to_string(), cx)
 }
@@ -126,6 +127,7 @@ fn any_process_of_the_user_can_drive_a_window_without_a_key(cx: &mut gpui::TestA
         id: "keyed".into(),
         window: target.window.clone(),
         operation: Operation::List,
+        keep_open: false
     });
     let keyed = send(&target.socket, format!("{} {request}", "ab".repeat(32)), cx);
     assert_eq!(keyed["outcome"], "invalid_request", "{keyed}");
@@ -219,7 +221,8 @@ fn public_control_manages_background_panes_and_preserves_resize(cx: &mut gpui::T
             &descriptor,
             Operation::Read {
                 pane: human,
-                lines: Some(0)
+                lines: Some(0),
+                surface: None,
             },
             cx
         )["outcome"],
@@ -281,6 +284,7 @@ fn public_control_input_is_sent_unchecked(cx: &mut gpui::TestAppContext) {
             Operation::Read {
                 pane: pane.clone(),
                 lines: Some(0),
+                surface: None,
             },
             cx,
         );
@@ -402,7 +406,8 @@ fn public_close_of_a_busy_pane_removes_it_at_once(cx: &mut gpui::TestAppContext)
             &descriptor,
             Operation::Read {
                 pane: busy.clone(),
-                lines: None
+                lines: None,
+                surface: None,
             },
             cx
         )["outcome"],
@@ -805,6 +810,7 @@ fn a_full_control_lane_refuses_without_late_mutation(cx: &mut gpui::TestAppConte
                             pane: format!("{}:0", target.window),
                             label: Some("late".into()),
                         },
+                        keep_open: false,
                     },
                     reply,
                     connection: None,
@@ -817,6 +823,7 @@ fn a_full_control_lane_refuses_without_late_mutation(cx: &mut gpui::TestAppConte
         id: "overflow".into(),
         window: target.window.clone(),
         operation: Operation::List,
+        keep_open: false,
     };
     let socket = target.socket.clone();
     let line = json!(request).to_string();
@@ -842,3 +849,4 @@ fn a_full_control_lane_refuses_without_late_mutation(cx: &mut gpui::TestAppConte
         Value::Null
     );
 }
+mod reading;

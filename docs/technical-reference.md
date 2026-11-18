@@ -270,7 +270,8 @@ you would meet on the first day.
 
 ```sh
 sprite panes list                        # every pane in every window
-sprite panes read --pane "$pane"         # one pane's text and history
+sprite panes read --pane "$pane"         # one pane's text, history and Surfaces
+sprite panes watch                       # one line each time a pane changes
 sprite panes input --pane "$pane" --text 'make test'
 ```
 

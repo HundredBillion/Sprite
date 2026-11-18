@@ -16,10 +16,14 @@ use crate::local_socket::{LocalSocket, ReplyConnection, TransportPolicy};
 use crate::workspace::{Patience, RelayError, Relayed, ReloadRequest, relay};
 
 pub mod client;
+pub(crate) mod watch;
 
 pub const PROTOCOL: &str = "sprite-pane-control/2";
 pub(crate) const MAX_PANES: usize = 128;
 pub(crate) const MAX_CLEANUPS: usize = 16;
+/// The most rows of one Surface a read returns: as many as it returns lines
+/// of a terminal's history.
+pub(crate) const MAX_READ_ROWS: usize = 5000;
 /// How many connections a window serves at once, and how many requests may
 /// wait for it.
 pub(crate) const MAX_CONNECTIONS: usize = 16;
@@ -35,6 +39,10 @@ pub struct Request {
     pub id: String,
     pub window: String,
     pub operation: Operation,
+    /// Whether the connection stays open for a further request after this
+    /// one is answered. Left out, the window closes it, as it always has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_open: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -45,6 +53,14 @@ pub enum Operation {
         pane: String,
         #[serde(default)]
         lines: Option<usize>,
+        /// Read only this Surface of the pane, and not its terminal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface: Option<u64>,
+    },
+    /// Stay connected and be told when these panes, or every pane, change.
+    Watch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        panes: Option<Vec<String>>,
     },
     Create {
         #[serde(default)]
@@ -109,7 +125,11 @@ impl Side {
 impl Operation {
     pub(crate) fn pane(&self) -> Option<&str> {
         match self {
-            Self::List | Self::Create { .. } | Self::ConfigReload | Self::ConfigPrint => None,
+            Self::List
+            | Self::Create { .. }
+            | Self::Watch { .. }
+            | Self::ConfigReload
+            | Self::ConfigPrint => None,
             Self::Read { pane, .. }
             | Self::Rename { pane, .. }
             | Self::Move { pane, .. }
@@ -145,6 +165,9 @@ impl Operation {
                 ),
                 _ => false,
             },
+            Self::Watch { panes } => panes
+                .as_ref()
+                .is_none_or(|panes| !panes.is_empty() && panes.len() <= MAX_PANES),
             Self::List
             | Self::Read { .. }
             | Self::Focus { .. }
@@ -231,22 +254,168 @@ pub(crate) fn open_window_socket(
         |stream| {
             writeln!(stream, "{}", failure("", "invalid_request")).ok();
         },
-        move |mut connection| {
-            let started = std::time::Instant::now();
-            let answer = answer(
-                &window,
-                &lanes,
-                &connection.body,
-                &connection.reply_connection,
-            );
-            tracing::debug!(target: "sprite_app::control", elapsed_ms = started.elapsed().as_millis() as u64, "control request handled");
-            writeln!(connection.stream, "{answer}").ok();
-        },
+        move |connection| serve(&window, &lanes, connection),
     )
 }
 
-/// Answers one request line.
-fn answer(window: &str, lanes: &Lanes, body: &str, connection: &ReplyConnection) -> Value {
+/// What a connection does once its request is answered.
+enum Next {
+    Close,
+    /// Wait for a further request, holding a place among the kept.
+    Keep(watch::Kept),
+    /// Send change notices until the peer leaves.
+    Watch(watch::Subscription, watch::Kept),
+}
+
+/// Serves one connection: its first request, then whatever that asked the
+/// connection to become.
+///
+/// Every answer is written within a deadline its reader cannot stretch
+/// (issue #67), and a connection that stays open waits for its peer in a way
+/// that always notices the peer leaving (issue #79).
+fn serve(window: &str, lanes: &Lanes, mut connection: crate::local_socket::Authenticated) {
+    let mut body = std::mem::take(&mut connection.body);
+    let mut kept: Option<watch::Kept> = None;
+    loop {
+        let started = std::time::Instant::now();
+        let (answer, next) = answer(
+            window,
+            lanes,
+            &body,
+            &connection.reply_connection,
+            kept.take(),
+        );
+        tracing::debug!(target: "sprite_app::control", elapsed_ms = started.elapsed().as_millis() as u64, "control request handled");
+        let mut line = answer.to_string().into_bytes();
+        line.push(b'\n');
+        if crate::local_socket::write_within(
+            &connection.stream,
+            &line,
+            crate::timeouts::drain_deadline(line.len()),
+        )
+        .is_err()
+        {
+            return;
+        }
+        match next {
+            Next::Close => return,
+            Next::Watch(subscription, _kept) => {
+                subscription.serve(window, &connection.stream);
+                return;
+            }
+            Next::Keep(place) => {
+                kept = Some(place);
+                match crate::local_socket::next_line(
+                    &mut connection.reader,
+                    MAX_REQUEST_BYTES,
+                    crate::timeouts::HANDSHAKE_TIMEOUT,
+                ) {
+                    Ok(Some(line)) => body = line,
+                    Ok(None) => return,
+                    Err(_) => {
+                        writeln!(connection.stream, "{}", failure("", "invalid_request")).ok();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Answers one request line, and says what its connection does next. `kept`
+/// is the place the connection already holds, if an earlier request kept it
+/// open.
+fn answer(
+    window: &str,
+    lanes: &Lanes,
+    body: &str,
+    connection: &ReplyConnection,
+    kept: Option<watch::Kept>,
+) -> (Value, Next) {
+    let (id, keep_open, watching) = match serde_json::from_str::<Request>(body) {
+        Ok(request) => (
+            request.id.clone(),
+            request.keep_open,
+            matches!(request.operation, Operation::Watch { .. }),
+        ),
+        Err(_) => (String::new(), false, false),
+    };
+    // A connection that stays open needs one of a limited number of places.
+    // One that can't have a place is told so before anything is applied, so
+    // it can ask again on a connection of the ordinary kind.
+    let kept = if keep_open || watching {
+        match kept.or_else(|| lanes.panes.watch.keep()) {
+            Some(kept) => Some(kept),
+            None => return (failure(&id, "busy"), Next::Close),
+        }
+    } else {
+        None
+    };
+    if watching {
+        return match (watch(window, lanes, body), kept) {
+            (Ok((answer, subscription)), Some(kept)) => (answer, Next::Watch(subscription, kept)),
+            (Ok(_), None) => (failure(&id, "busy"), Next::Close),
+            (Err(answer), _) => (answer, Next::Close),
+        };
+    }
+    let answer = answer_once(window, lanes, body, connection);
+    (answer, kept.map_or(Next::Close, Next::Keep))
+}
+
+/// Starts a watch, answering with the panes it covers.
+fn watch(window: &str, lanes: &Lanes, body: &str) -> Result<(Value, watch::Subscription), Value> {
+    let request =
+        serde_json::from_str::<Request>(body).map_err(|_| failure("", "invalid_request"))?;
+    let id = request.id.as_str();
+    if request.protocol != PROTOCOL {
+        return Err(response(
+            id,
+            "invalid_request",
+            json!({"supported": PROTOCOL}),
+        ));
+    }
+    let Operation::Watch { panes } = &request.operation else {
+        return Err(failure(id, "invalid_request"));
+    };
+    if id.len() > 64 || !request.operation.valid() || request.window != window {
+        return Err(failure(id, "invalid_request"));
+    }
+    let chosen = match panes {
+        None => None,
+        Some(panes) => Some(
+            panes
+                .iter()
+                .map(|address| {
+                    address
+                        .split_once(':')
+                        .filter(|(named, _)| *named == window)
+                        .and_then(|(_, pane)| pane.parse::<u64>().ok())
+                })
+                .collect::<Option<std::collections::HashSet<u64>>>()
+                .ok_or_else(|| failure(id, "invalid_request"))?,
+        ),
+    };
+    // Watching starts before the answer is sent, so a change made after the
+    // caller reads the answer is never missed.
+    let subscription = lanes
+        .panes
+        .watch
+        .subscribe(chosen)
+        .map_err(|_| failure(id, "busy"))?;
+    let watching = panes.as_ref().map_or(json!("all"), |panes| json!(panes));
+    Ok((
+        response(
+            id,
+            "ok",
+            json!({"window": window, "watching": watching,
+                "min_interval_ms": watch::MIN_EVENT_INTERVAL.as_millis() as u64}),
+        ),
+        subscription,
+    ))
+}
+
+/// Answers one request that is not a watch.
+fn answer_once(window: &str, lanes: &Lanes, body: &str, connection: &ReplyConnection) -> Value {
     let request = match serde_json::from_str::<Request>(body) {
         Ok(request) => request,
         Err(_) => {
@@ -275,7 +444,13 @@ fn answer(window: &str, lanes: &Lanes, body: &str, connection: &ReplyConnection)
     if request.operation == Operation::ConfigPrint {
         return configure(lanes, &id, ConfigVerb::Print);
     }
-    let read = if let Operation::Read { pane, lines } = &request.operation {
+    // A read of one Surface leaves the terminal out.
+    let read = if let Operation::Read {
+        pane,
+        lines,
+        surface: None,
+    } = &request.operation
+    {
         pane.rsplit_once(':')
             .and_then(|(_, local)| local.parse::<u64>().ok())
             .map(|local| (local, *lines))
@@ -304,8 +479,14 @@ fn answer(window: &str, lanes: &Lanes, body: &str, connection: &ReplyConnection)
         };
         match broker::collect(&query, lanes.panes.as_ref(), broker::DEADLINE) {
             Ok(report) => {
-                let encoded =
-                    schema::render_limited(&report, false, schema::MAX_RESPONSE_BYTES - 65536);
+                // The Surfaces already in the answer come out of the room
+                // the terminal's text may take, so the whole stays in bounds.
+                let taken = answer["result"]["surfaces"].to_string().len();
+                let encoded = schema::render_limited(
+                    &report,
+                    false,
+                    (schema::MAX_RESPONSE_BYTES - 65536).saturating_sub(taken),
+                );
                 answer["result"]["terminal"] =
                     serde_json::from_str(&encoded).unwrap_or(Value::Null);
             }
@@ -346,7 +527,7 @@ mod tests {
             label in any::<String>(), pane in any::<u64>(),
         ) {
             let request = Request { protocol: PROTOCOL.into(), id: "round-trip".into(), window: "window".into(),
-                operation: Operation::Rename { pane: format!("window:{pane}"), label: Some(label) } };
+                operation: Operation::Rename { pane: format!("window:{pane}"), label: Some(label) }, keep_open: false };
             let encoded = serde_json::to_string(&request).unwrap();
             let decoded: Request = serde_json::from_str(&encoded).unwrap();
             prop_assert_eq!(decoded, request);

@@ -290,6 +290,48 @@ tests = [
 ]
 
 [[capability]]
+id = "pane-control.reads-surface-content"
+area = "pane-control"
+promise = "A read returns what each of a pane's Surfaces shows (a grid's rows and cursor, a list's rows, an element tree's text) and shows it again after the program changes it (ADR 0039)."
+status = "kept"
+tests = [
+    "a_read_returns_what_each_kind_of_surface_shows",
+]
+
+[[capability]]
+id = "pane-control.watch-reports-changes"
+area = "pane-control"
+promise = "A watcher is told when a pane it watches changes and what changed, hears nothing about other panes, and changes within a frame arrive as one notice."
+status = "kept"
+tests = [
+    "a_watch_tells_of_changes_in_the_panes_it_watches_and_no_others",
+    "marks_for_one_pane_merge_into_one_notice",
+    "the_cli_watch_prints_changes_until_the_window_closes",
+]
+
+[[capability]]
+id = "pane-control.one-connection-many-requests"
+area = "pane-control"
+promise = "A connection that asks to stay open answers request after request, and closes after one that doesn't ask."
+status = "kept"
+tests = [
+    "one_connection_answers_a_hundred_reads",
+]
+
+[[capability]]
+id = "pane-control.kept-connections-cannot-hang-or-crowd-out"
+area = "pane-control"
+promise = "A connection that stays open gives its place back when its peer closes, half-closes, stalls mid-request or stops reading, and the connections that stay open never take the places one-request clients use (issues #79, #67)."
+status = "kept"
+tests = [
+    "kept_connections_are_limited_and_their_places_come_back",
+    "a_watch_ends_when_its_peer_closes_while_nothing_changes",
+    "a_watch_ends_when_its_peer_stops_reading",
+    "next_line_notices_the_peer_leaving_while_it_waits",
+    "next_line_gives_up_on_a_line_that_stalls_or_grows_too_long",
+]
+
+[[capability]]
 id = "configuration.bad-config-degrades"
 area = "configuration"
 promise = "A broken configuration file leaves defaults in place and says so; valid fields are read."

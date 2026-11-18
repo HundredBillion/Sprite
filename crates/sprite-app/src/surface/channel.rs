@@ -19,7 +19,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use serde_json::Value;
 use sprite_term::Rgb;
@@ -28,6 +30,7 @@ pub use super::wire::*;
 use super::wire::{FirstRequest, Message, first_line, stream_line};
 use crate::local_socket::{
     Authenticated, ConnectionSlot, LocalSocket, SocketKey, TransportPolicy, runtime_directory,
+    write_within,
 };
 use crate::pane_tree::PaneId;
 use crate::surface::lanes::SurfaceLanes;
@@ -202,9 +205,6 @@ const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 /// The largest buffer a writer keeps between writes, so one burst does not
 /// pin its memory for the rest of the connection's life.
 const KEPT_WRITE_BUFFER_BYTES: usize = 64 * 1024;
-/// The most a writer hands the socket in one write, so it checks its drain
-/// deadline at least this often.
-const WRITE_CHUNK_BYTES: usize = 64 * 1024;
 
 /// What one connection's handles and its writer thread share. The lock is
 /// held to queue lines or to take them, never across a socket write.
@@ -572,51 +572,6 @@ fn hung_up(error: &std::io::Error) -> bool {
             | ErrorKind::ConnectionAborted
             | ErrorKind::NotConnected
     )
-}
-
-/// Writes `bytes` within `budget`, one chunk at a time. Before each chunk
-/// the socket's write timeout is set to the smaller of `WRITE_TIMEOUT` and
-/// the time left. A write that makes no progress still fails after
-/// `WRITE_TIMEOUT`, and a reader that makes a little progress on every
-/// write still runs out of time. Running out is a timeout like any other.
-///
-/// The timeout is a property of the socket, shared by every clone of it.
-/// Once a connection is opened only its writer writes to it, so narrowing
-/// the timeout here does not affect any other writer.
-fn write_within(mut stream: &UnixStream, bytes: &[u8], budget: Duration) -> std::io::Result<()> {
-    let started = Instant::now();
-    let mut rest = bytes;
-    while !rest.is_empty() {
-        let left = budget.saturating_sub(started.elapsed());
-        // Checked before the socket is told: it refuses a zero timeout.
-        if left.is_zero() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "the reader fell below the drain floor",
-            ));
-        }
-        // macOS refuses to set a timeout on a socket whose program has
-        // closed its end, with EINVAL rather than the broken pipe a write
-        // would report. The timeout here is never zero and never more than
-        // `WRITE_TIMEOUT`, so that refusal can only mean the program is gone.
-        stream
-            .set_write_timeout(Some(left.min(WRITE_TIMEOUT)))
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::InvalidInput {
-                    std::io::Error::new(std::io::ErrorKind::NotConnected, error)
-                } else {
-                    error
-                }
-            })?;
-        let (chunk, _) = rest.split_at(rest.len().min(WRITE_CHUNK_BYTES));
-        match stream.write(chunk) {
-            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-            Ok(written) => rest = rest.get(written..).unwrap_or_default(),
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-    }
-    stream.flush()
 }
 
 /// A test's handle on one connection's writer thread.

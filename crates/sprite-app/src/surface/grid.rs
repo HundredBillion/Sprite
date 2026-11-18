@@ -1082,6 +1082,20 @@ impl GridSurface {
     /// Whether this grid's cursor is asking the pane for a blink phase. A
     /// grid that fills its pane hides the terminal, so the pane's phase has
     /// to follow the grid's cursor or the grid's cursor never blinks.
+    /// The grid's first `limit` rows as plain text, without the blanks that
+    /// pad each row's end. The second half of a wide character holds no
+    /// text, so a row reads as it looks.
+    pub fn text_rows(&self, limit: usize) -> impl Iterator<Item = String> + '_ {
+        self.cells.iter().take(limit).map(|row| {
+            let mut text: String = row
+                .iter()
+                .map(|cell| self.texts.text(cell.text).as_str())
+                .collect();
+            text.truncate(text.trim_end().len());
+            text
+        })
+    }
+
     pub fn cursor_blinks(&self) -> bool {
         self.cursor.visible && self.cursor.blink
     }

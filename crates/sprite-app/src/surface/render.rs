@@ -232,12 +232,15 @@ impl ElementBody {
     }
 }
 
-#[cfg(test)]
 impl ElementBody {
+    /// What this body draws.
     pub(crate) fn description(&self) -> &Description {
         &self.description
     }
+}
 
+#[cfg(test)]
+impl ElementBody {
     pub(crate) fn images(&self) -> &ElementImageCache {
         &self.images
     }

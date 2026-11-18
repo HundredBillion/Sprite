@@ -51,7 +51,8 @@ pub(crate) fn parse(
     }
     let allowed: &[&str] = match verb {
         "list" => &[],
-        "read" => &["--pane", "--lines"],
+        "read" => &["--pane", "--lines", "--surface"],
+        "watch" => &["--window", "--panes"],
         "create" => &["--window", "--beside", "--side"],
         "rename" => &["--pane", "--label", "--clear"],
         "move" => &["--pane", "--beside", "--side"],
@@ -93,6 +94,18 @@ pub(crate) fn parse(
                         .map_err(|_| UsageError("--lines needs a number".into()))
                 })
                 .transpose()?,
+            surface: options
+                .get("--surface")
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| UsageError("--surface needs a Surface id".into()))
+                })
+                .transpose()?,
+        },
+        "watch" => Operation::Watch {
+            panes: options
+                .get("--panes")
+                .map(|panes| panes.split(',').map(str::to_owned).collect()),
         },
         "create" => Operation::Create {
             beside: options.get("--beside").cloned(),
@@ -137,12 +150,30 @@ pub(crate) fn parse(
             "invalid operation, side, label or input payload".into(),
         ));
     }
-    if let Some(pane) = operation.pane()
-        && pane.split_once(':').is_none()
+    let watched = if let Operation::Watch { panes } = &operation {
+        panes.as_deref().unwrap_or_default()
+    } else {
+        &[]
+    };
+    if let Some(pane) = operation
+        .pane()
+        .into_iter()
+        .chain(watched.iter().map(String::as_str))
+        .find(|pane| pane.split_once(':').is_none())
     {
         return Err(UsageError(format!(
             "{pane} is not a pane address; addresses look like <window>:<pane>"
         )));
+    }
+    if let [first, rest @ ..] = watched
+        && rest.iter().any(|pane| {
+            pane.split_once(':').map(|(window, _)| window)
+                != first.split_once(':').map(|(window, _)| window)
+        })
+    {
+        return Err(UsageError(
+            "watch takes panes of one window; watch each window separately".into(),
+        ));
     }
     Ok(Args {
         window: options.get("--window").cloned(),
@@ -171,6 +202,9 @@ impl std::fmt::Display for ExchangeError {
 }
 
 pub fn run(args: &Args, out: &mut dyn Write, errors: &mut dyn Write) -> u8 {
+    if let Operation::Watch { panes } = &args.operation {
+        return run_watch(args.window.as_deref(), panes.as_deref(), out, errors);
+    }
     match execute(args) {
         Ok(answer) => {
             let ok = answer.get("outcome").and_then(Value::as_str) == Some("ok");
@@ -203,6 +237,75 @@ fn execute(args: &Args) -> Result<Value, String> {
         _ => choose_window(&directory, args.window.as_deref())?,
     };
     ask(&directory, &window, args.operation.clone()).map_err(|error| error.to_string())
+}
+
+/// `sprite panes watch`: prints the window's answer, then one line for every
+/// change, until the window closes or nobody reads the output.
+fn run_watch(
+    window: Option<&str>,
+    panes: Option<&[String]>,
+    out: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> u8 {
+    let opened = directory().and_then(|directory| {
+        let window = match panes.and_then(<[String]>::first) {
+            Some(pane) => window_of_address(pane)?.to_owned(),
+            None => choose_window(&directory, window)?,
+        };
+        let id = crate::local_socket::SocketKey::generate()
+            .map_err(|error| error.to_string())?
+            .to_hex();
+        let request = Request {
+            protocol: PROTOCOL.into(),
+            id,
+            window: window.clone(),
+            operation: Operation::Watch {
+                panes: panes.map(<[String]>::to_vec),
+            },
+            keep_open: false,
+        };
+        let mut stream = UnixStream::connect(super::socket_path(&directory, &window))
+            .map_err(|_| format!("window {window} is not running"))?;
+        stream
+            .set_write_timeout(Some(crate::timeouts::CLIENT_TIMEOUT))
+            .and_then(|()| writeln!(stream, "{}", json!(request)))
+            .map_err(|error| error.to_string())?;
+        Ok(stream)
+    });
+    let stream = match opened {
+        Ok(stream) => stream,
+        Err(why) => {
+            writeln!(errors, "sprite: {why}").ok();
+            return 4;
+        }
+    };
+    let mut lines = std::io::BufReader::new(stream);
+    let mut first = true;
+    loop {
+        // The window may say nothing for hours. Waiting here, and reading only
+        // what has arrived, notices the window closing even where a sleeping
+        // read would miss it (issue #79).
+        let line = match crate::local_socket::next_line(
+            &mut lines,
+            crate::observation::schema::MAX_RESPONSE_BYTES,
+            crate::timeouts::CLIENT_TIMEOUT,
+        ) {
+            Ok(Some(line)) => line,
+            Ok(None) => return if first { 5 } else { 0 },
+            Err(error) => {
+                writeln!(errors, "sprite: the watch ended: {error}").ok();
+                return 5;
+            }
+        };
+        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+            return 0;
+        }
+        if std::mem::take(&mut first)
+            && serde_json::from_str::<Value>(&line).map_or(true, |answer| answer["outcome"] != "ok")
+        {
+            return 5;
+        }
+    }
 }
 
 /// Every running window's panes, in one answer.
@@ -296,6 +399,7 @@ pub(crate) fn ask(
         id: id.clone(),
         window: window.to_owned(),
         operation,
+        keep_open: false,
     };
     let answer = exchange(
         &super::socket_path(directory, window),

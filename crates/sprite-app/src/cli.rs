@@ -88,7 +88,7 @@ sprite — a terminal
     sprite                       open a window
     sprite -e <program> [args]   open a window running <program>
     sprite --config <path>       open a window reading settings from <path>
-    sprite panes <command>       list/read/create/rename/move/focus/resize/close/input
+    sprite panes <command>       list/read/watch/create/rename/move/focus/resize/close/input
     sprite config reload         re-read the configuration file in a window
     sprite config print          print the settings that are actually in effect
     sprite surface open …        draw native UI in this pane from a description on stdin
@@ -523,6 +523,42 @@ mod tests {
             "--lines needs a value"
         );
         assert!(rejected(&["panes", "read", "--pane", "7"]).contains("<window>:<pane>"));
+    }
+
+    #[test]
+    fn a_read_may_name_one_surface_and_a_watch_its_panes() {
+        use crate::control::Operation;
+        let operation = |arguments: &[&str]| {
+            let Invocation::PaneControl(args) = parsed(arguments) else {
+                panic!("not a panes command: {arguments:?}");
+            };
+            args.operation
+        };
+        assert_eq!(
+            operation(&["panes", "read", "--pane", "w:0", "--surface", "4"]),
+            Operation::Read {
+                pane: "w:0".into(),
+                lines: None,
+                surface: Some(4)
+            }
+        );
+        assert_eq!(
+            rejected(&["panes", "read", "--pane", "w:0", "--surface", "dock"]),
+            "--surface needs a Surface id"
+        );
+        assert_eq!(
+            operation(&["panes", "watch"]),
+            Operation::Watch { panes: None }
+        );
+        assert_eq!(
+            operation(&["panes", "watch", "--panes", "w:0,w:2"]),
+            Operation::Watch {
+                panes: Some(vec!["w:0".into(), "w:2".into()])
+            }
+        );
+        assert!(rejected(&["panes", "watch", "--panes", "w:0,3"]).contains("<window>:<pane>"));
+        assert!(rejected(&["panes", "watch", "--panes", "w:0,v:1"]).contains("one window"));
+        assert!(parse_arguments(["panes", "watch", "--window", "abc"]).is_ok());
     }
 
     #[test]

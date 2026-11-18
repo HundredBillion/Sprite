@@ -114,12 +114,24 @@ impl Workspace {
         let (_, rect, handle) = tree.layout().into_iter().find(|(id, _, _)| *id == pane)?;
         let (width, height, _) = self.cached_pane_area();
         let allocated = pane_allocation(self.viewport, self.tabs.len(), rect);
-        let info = match handle.view().downcast::<TerminalView>() {
-            Ok(terminal) => terminal.read(cx).control_info(),
-            Err(_) => {
-                json!({"kind": "hosted", "terminal_read": false, "terminal_input": false, "native_content": "unavailable"})
-            }
+        let (info, reads) = match handle.view().downcast::<TerminalView>() {
+            Ok(terminal) => (terminal.read(cx).control_info(), Some("surface_read")),
+            Err(_) => (
+                json!({"kind": "hosted", "terminal_read": false, "terminal_input": false, "native_content": "unavailable"}),
+                None,
+            ),
         };
+        let capabilities: Vec<&str> = [
+            "read_metadata",
+            "rename",
+            "move",
+            "focus",
+            "resize_divider",
+            "close",
+        ]
+        .into_iter()
+        .chain(reads)
+        .collect();
         Some(json!({
             "id": self.pane_address(pane), "tab": format!("{}:t{}", self.control.window, tab.0),
             "label": self.control.labels.get(&pane), "child_title": handle.title(cx).map(|s| s.to_string()),
@@ -127,7 +139,7 @@ impl Workspace {
             "visible": self.tabs.active_tab() == Some(tab),
             "geometry": {"x": rect.x * width, "y": rect.y * height, "width": f32::from(allocated.width), "height": f32::from(allocated.height)},
             "content": info,
-            "capabilities": ["read_metadata", "rename", "move", "focus", "resize_divider", "close"]
+            "capabilities": capabilities
         }))
     }
 
@@ -167,15 +179,25 @@ impl Workspace {
                     .into_iter()
                     .filter_map(|(_, pane, _)| self.control_metadata(pane, cx))
                     .collect();
-                Ok(json!({"window": self.control.window, "panes": panes}))
+                Ok(json!({"window": self.control.window, "panes": panes,
+                    "features": ["keep_open", "surface_read", "watch"]}))
             }
-            Operation::Read { .. } => {
-                let metadata = self
-                    .control_metadata(pane.ok_or("invalid_request")?, cx)
+            Operation::Read { lines, surface, .. } => {
+                let pane = pane.ok_or("invalid_request")?;
+                let mut metadata = self.control_metadata(pane, cx).ok_or("gone")?;
+                let view = self
+                    .tabs
+                    .get(pane)
+                    .ok_or("gone")?
+                    .view()
+                    .downcast::<TerminalView>()
+                    .map_err(|_| "unsupported")?;
+                // A Surface that has closed, or never was, is gone.
+                let surfaces = view
+                    .read(cx)
+                    .control_surfaces(*surface, *lines, cx)
                     .ok_or("gone")?;
-                if metadata["content"]["terminal_read"] != true {
-                    return Err("unsupported");
-                }
+                metadata["surfaces"] = json!(surfaces);
                 Ok(metadata)
             }
             Operation::Create { beside, side } => {
@@ -346,7 +368,9 @@ impl Workspace {
                 )
             }
             // Answered on the socket thread, through the reload lane.
-            Operation::ConfigReload | Operation::ConfigPrint => Err("invalid_request"),
+            Operation::ConfigReload | Operation::ConfigPrint | Operation::Watch { .. } => {
+                Err("invalid_request")
+            }
         })();
         cx.notify();
         match result {
