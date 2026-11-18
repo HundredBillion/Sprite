@@ -328,6 +328,7 @@ tests = [
     "a_watch_ends_when_its_peer_closes_while_nothing_changes",
     "a_watch_ends_when_its_peer_stops_reading",
     "next_line_notices_the_peer_leaving_while_it_waits",
+    "next_line_reads_a_closed_peer_as_the_end_of_the_stream",
     "next_line_gives_up_on_a_line_that_stalls_or_grows_too_long",
 ]
 

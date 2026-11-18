@@ -651,7 +651,10 @@ pub(crate) fn next_line(
             }
             // Readiness was reported, so this read returns at once; the
             // timeout only covers a report that turns out to be wrong.
-            reader.get_ref().set_read_timeout(Some(READ_RECHECK))?;
+            // macOS refuses to set a timeout on a socket whose peer has
+            // closed (EINVAL). The read below then reports the closing, so
+            // a refusal here is not an error of its own.
+            reader.get_ref().set_read_timeout(Some(READ_RECHECK)).ok();
         }
         let bytes = match reader.fill_buf() {
             Ok(bytes) => bytes,
@@ -834,6 +837,23 @@ mod tests {
         peer.shutdown(Shutdown::Write).unwrap();
         assert_eq!(finished.recv_timeout(watchdog()).unwrap(), None);
         thread.join().unwrap();
+    }
+
+    /// A peer that is gone altogether is the end of the stream, not an
+    /// error: macOS refuses socket options on such a socket, and that
+    /// refusal must not be reported in place of the closing.
+    #[test]
+    fn next_line_reads_a_closed_peer_as_the_end_of_the_stream() {
+        for _ in 0..200 {
+            let (mut reader, mut peer) = line_pair();
+            peer.write_all(b"last\n").unwrap();
+            drop(peer);
+            assert_eq!(
+                next_line(&mut reader, 64, watchdog()).unwrap().as_deref(),
+                Some("last")
+            );
+            assert_eq!(next_line(&mut reader, 64, watchdog()).unwrap(), None);
+        }
     }
 
     #[test]
