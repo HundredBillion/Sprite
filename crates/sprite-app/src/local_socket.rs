@@ -4,7 +4,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use crate::timeouts::WRITE_TIMEOUT;
 
 const KEY_BYTES: usize = 32;
 
@@ -492,6 +494,23 @@ pub(crate) fn bind_private(socket: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Moves what `bytes` holds of the line being read into `line`: up to and
+/// including its newline, if one is there. Returns how many bytes it took
+/// and whether the line is complete. A line longer than `max` bytes, its
+/// ending included, is refused.
+fn gather(bytes: &[u8], line: &mut Vec<u8>, max: usize) -> io::Result<(usize, bool)> {
+    let newline = bytes.iter().position(|byte| *byte == b'\n');
+    let count = newline.map_or(bytes.len(), |index| index + 1);
+    if count > max - line.len() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    line.extend_from_slice(bytes.get(..count).unwrap_or_default());
+    if newline.is_none() && line.len() == max {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok((count, newline.is_some()))
+}
+
 fn authenticate(
     stream: &UnixStream,
     key: Option<&SocketKey>,
@@ -515,18 +534,10 @@ fn authenticate(
         if bytes.is_empty() {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
-        let newline = bytes.iter().position(|byte| *byte == b'\n');
-        let count = newline.map_or(bytes.len(), |index| index + 1);
-        if count > policy.max_first_line - line.len() {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        line.extend_from_slice(&bytes[..count]);
+        let (count, ended) = gather(bytes, &mut line, policy.max_first_line)?;
         reader.consume(count);
-        if newline.is_some() {
+        if ended {
             break;
-        }
-        if line.len() == policy.max_first_line {
-            return Err(io::ErrorKind::InvalidData.into());
         }
     }
     let line = std::str::from_utf8(&line).map_err(|_| io::ErrorKind::InvalidData)?;
@@ -546,6 +557,144 @@ fn authenticate(
     }
     stream.set_read_timeout(None)?;
     Ok((reader, body.to_owned()))
+}
+
+/// The most a writer hands the socket in one write, so it checks its drain
+/// deadline at least this often.
+const WRITE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Writes `bytes` within `budget`, one chunk at a time. Before each chunk
+/// the socket's write timeout is set to the smaller of `WRITE_TIMEOUT` and
+/// the time left. A write that makes no progress still fails after
+/// `WRITE_TIMEOUT`, and a reader that makes a little progress on every
+/// write still runs out of time. Running out is a timeout like any other.
+///
+/// The timeout is a property of the socket, shared by every clone of it.
+/// Once a connection is opened only its writer writes to it, so narrowing
+/// the timeout here does not affect any other writer.
+pub(crate) fn write_within(
+    mut stream: &UnixStream,
+    bytes: &[u8],
+    budget: Duration,
+) -> io::Result<()> {
+    let started = Instant::now();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let left = budget.saturating_sub(started.elapsed());
+        // Checked before the socket is told: it refuses a zero timeout.
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the reader fell below the drain floor",
+            ));
+        }
+        // macOS refuses to set a timeout on a socket whose program has
+        // closed its end, with EINVAL rather than the broken pipe a write
+        // would report. The timeout here is never zero and never more than
+        // `WRITE_TIMEOUT`, so that refusal can only mean the program is gone.
+        stream
+            .set_write_timeout(Some(left.min(WRITE_TIMEOUT)))
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidInput {
+                    io::Error::new(io::ErrorKind::NotConnected, error)
+                } else {
+                    error
+                }
+            })?;
+        let (chunk, _) = rest.split_at(rest.len().min(WRITE_CHUNK_BYTES));
+        match stream.write(chunk) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => rest = rest.get(written..).unwrap_or_default(),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    stream.flush()
+}
+
+/// Waits up to `limit` for `stream` to have something to read: data, the
+/// peer's end-of-stream, or an error. Returns whether it has.
+///
+/// On macOS a thread asleep in `recv` can miss the peer closing its end and
+/// wait forever (issue #79). A reader that waits here first, for a bounded
+/// time, and reads only when told there is something, cannot.
+pub(crate) fn wait_readable(stream: &UnixStream, limit: Duration) -> io::Result<bool> {
+    let millis = u16::try_from(limit.as_millis()).unwrap_or(u16::MAX);
+    let mut descriptors = [PollFd::new(stream.as_fd(), PollFlags::POLLIN)];
+    match poll(&mut descriptors, PollTimeout::from(millis)) {
+        Ok(0) | Err(Errno::EINTR) => Ok(false),
+        Ok(_) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// How often a reader waiting for a quiet peer looks again.
+pub(crate) const READ_RECHECK: Duration = Duration::from_secs(1);
+
+/// Reads the next line a connection that stays open sends, without its line
+/// ending. `None` when the peer closed instead.
+///
+/// The peer may stay quiet for as long as it likes: a closed connection is
+/// noticed through [`wait_readable`], never by a read that could sleep
+/// through it. Once a line has started, the rest must arrive within
+/// `patience`, and the line may be at most `max` bytes.
+pub(crate) fn next_line(
+    reader: &mut BufReader<UnixStream>,
+    max: usize,
+    patience: Duration,
+) -> io::Result<Option<String>> {
+    let mut line = Vec::new();
+    let mut deadline: Option<Instant> = None;
+    loop {
+        if reader.buffer().is_empty() {
+            let limit = match deadline {
+                None => READ_RECHECK,
+                Some(deadline) => deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|left| !left.is_zero())
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "line deadline"))?
+                    .min(READ_RECHECK),
+            };
+            if !wait_readable(reader.get_ref(), limit)? {
+                continue;
+            }
+            // Readiness was reported, so this read returns at once; the
+            // timeout only covers a report that turns out to be wrong.
+            // macOS refuses to set a timeout on a socket whose peer has
+            // closed (EINVAL). The read below then reports the closing, so
+            // a refusal here is not an error of its own.
+            reader.get_ref().set_read_timeout(Some(READ_RECHECK)).ok();
+        }
+        let bytes = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if bytes.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Err(io::ErrorKind::UnexpectedEof.into())
+            };
+        }
+        deadline.get_or_insert_with(|| Instant::now() + patience);
+        let (count, ended) = gather(bytes, &mut line, max)?;
+        reader.consume(count);
+        if ended {
+            break;
+        }
+    }
+    let line = String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData)?;
+    Ok(Some(line.trim_end_matches(['\r', '\n']).to_owned()))
 }
 
 /// Removes abandoned socket files without entering a live listener's accept queue.
@@ -637,6 +786,97 @@ mod tests {
     use crate::test_blocking_wait::watchdog;
     use std::io::Write;
     use std::sync::mpsc;
+
+    /// A reader over one end of a pair, and the other end.
+    fn line_pair() -> (BufReader<UnixStream>, UnixStream) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        (BufReader::new(ours), theirs)
+    }
+
+    const LINE_PATIENCE: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn next_line_returns_each_line_and_then_the_peers_leaving() {
+        let (mut reader, mut peer) = line_pair();
+        peer.write_all(b"first\r\nsec").unwrap();
+        assert_eq!(
+            next_line(&mut reader, 64, watchdog()).unwrap().as_deref(),
+            Some("first")
+        );
+        peer.write_all(b"ond\n").unwrap();
+        assert_eq!(
+            next_line(&mut reader, 64, watchdog()).unwrap().as_deref(),
+            Some("second")
+        );
+        peer.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(next_line(&mut reader, 64, watchdog()).unwrap(), None);
+    }
+
+    /// A peer may say nothing for longer than a line is given to arrive in:
+    /// the limit runs from a line's first byte, not from the last line.
+    #[test]
+    fn next_line_waits_out_a_quiet_peer_and_reads_what_it_then_sends() {
+        let (mut reader, mut peer) = line_pair();
+        let thread = std::thread::spawn(move || next_line(&mut reader, 64, LINE_PATIENCE));
+        crate::test_blocking_wait::pause(LINE_PATIENCE * 3);
+        assert!(!thread.is_finished(), "a quiet peer was given up on");
+        peer.write_all(b"late\n").unwrap();
+        assert_eq!(thread.join().unwrap().unwrap().as_deref(), Some("late"));
+    }
+
+    /// The peer leaving while the reader waits is noticed by the wait, with
+    /// no read asleep to miss it (issue #79).
+    #[test]
+    fn next_line_notices_the_peer_leaving_while_it_waits() {
+        let (mut reader, peer) = line_pair();
+        let (done, finished) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            done.send(next_line(&mut reader, 64, LINE_PATIENCE).unwrap())
+                .unwrap();
+        });
+        crate::test_blocking_wait::pause(Duration::from_millis(50));
+        peer.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(finished.recv_timeout(watchdog()).unwrap(), None);
+        thread.join().unwrap();
+    }
+
+    /// A peer that is gone altogether is the end of the stream, not an
+    /// error: macOS refuses socket options on such a socket, and that
+    /// refusal must not be reported in place of the closing.
+    #[test]
+    fn next_line_reads_a_closed_peer_as_the_end_of_the_stream() {
+        for _ in 0..200 {
+            let (mut reader, mut peer) = line_pair();
+            peer.write_all(b"last\n").unwrap();
+            drop(peer);
+            assert_eq!(
+                next_line(&mut reader, 64, watchdog()).unwrap().as_deref(),
+                Some("last")
+            );
+            assert_eq!(next_line(&mut reader, 64, watchdog()).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn next_line_gives_up_on_a_line_that_stalls_or_grows_too_long() {
+        let (mut reader, mut peer) = line_pair();
+        peer.write_all(b"never finished").unwrap();
+        let started = Instant::now();
+        let stalled = next_line(&mut reader, 64, LINE_PATIENCE).unwrap_err();
+        assert_eq!(stalled.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= LINE_PATIENCE);
+
+        let (mut reader, mut peer) = line_pair();
+        peer.write_all(&[b'x'; 65]).unwrap();
+        let long = next_line(&mut reader, 64, watchdog()).unwrap_err();
+        assert_eq!(long.kind(), io::ErrorKind::InvalidData);
+
+        let (mut reader, mut peer) = line_pair();
+        peer.write_all(b"cut off").unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+        let cut = next_line(&mut reader, 64, watchdog()).unwrap_err();
+        assert_eq!(cut.kind(), io::ErrorKind::UnexpectedEof);
+    }
 
     const POLICY: TransportPolicy = TransportPolicy {
         name: "sprite-transport-test",

@@ -16,6 +16,7 @@ use gpui::{
 
 use super::list_view::VirtualListView;
 use crate::config::Highlights;
+use crate::control::watch::Mark;
 use crate::surface::channel::{
     FocusTarget, Open, Ownership, Placement, Position, ReturnTarget, Side, SurfaceConnection,
     SurfaceRequest, event_applied, event_blur, event_closed, event_dock_size, event_focus,
@@ -24,7 +25,7 @@ use crate::surface::channel::{
 };
 use crate::surface::description::{self, BodyKind, Description, Element};
 use crate::surface::grid::{GridSurface, Op};
-use crate::surface::list::ListOp;
+use crate::surface::list::{ListOp, RowKind};
 use crate::surface::render::ElementBody;
 use crate::surface::{Refusal, SurfaceId};
 use crate::tokens::TokenRegistry;
@@ -135,6 +136,86 @@ pub(super) enum Body {
         root: Element,
         view: Entity<VirtualListView>,
     },
+}
+
+/// What one entry of a Surface read adds besides its text: its keys,
+/// punctuation and numbers. A list row, the largest, adds under 170 bytes.
+const READ_ENTRY_BYTES: usize = 192;
+
+/// How many bytes `text` takes as a JSON string: itself, its quotes, and
+/// the escapes for quotes, backslashes and control characters.
+fn sent_bytes(text: &str) -> usize {
+    2 + text
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' => 2,
+            c if c < ' ' => 6,
+            c => c.len_utf8(),
+        })
+        .sum::<usize>()
+}
+
+/// What is left of a read's limits. The bytes are shared by every Surface
+/// in the read, so the whole answer has one bound however many Surfaces a
+/// pane hosts; the rows are each Surface's own.
+struct ReadRoom {
+    rows: usize,
+    bytes: usize,
+    truncated: bool,
+}
+
+impl ReadRoom {
+    /// Whether one more entry carrying these texts fits. Every text the
+    /// entry sends must be named: what isn't counted isn't bounded. The
+    /// first entry that doesn't fit marks the Surface truncated.
+    fn admit<'a>(&mut self, texts: impl IntoIterator<Item = &'a str>) -> bool {
+        let bytes = READ_ENTRY_BYTES + texts.into_iter().map(sent_bytes).sum::<usize>();
+        if self.rows == 0 || bytes > self.bytes {
+            self.truncated = true;
+            return false;
+        }
+        self.rows -= 1;
+        self.bytes -= bytes;
+        true
+    }
+}
+
+/// Lists the parts of an element tree that say something, in the order they
+/// are drawn: each text, each button's label, and where each picture sits.
+/// `depth` counts the boxes around a part.
+fn element_nodes(
+    element: &Element,
+    depth: usize,
+    room: &mut ReadRoom,
+    nodes: &mut Vec<serde_json::Value>,
+) {
+    use serde_json::json;
+    let (kind, text, children): (&str, Option<&str>, &[Element]) = match element {
+        Element::Box { text, children, .. } => ("box", text.as_deref(), children),
+        Element::List { text, children, .. } => ("list", text.as_deref(), children),
+        Element::Text { text, .. } => ("text", Some(text), &[]),
+        Element::Button { text, .. } => ("button", Some(text), &[]),
+        Element::Image { svg, .. } => {
+            if room.admit([]) {
+                nodes.push(json!({"kind": "image", "depth": depth, "svg_bytes": svg.len()}));
+            }
+            return;
+        }
+        // A grid or a list is a body of its own, never part of a tree.
+        Element::Grid { .. } | Element::VirtualList { .. } => return,
+    };
+    if let Some(text) = text {
+        if !room.admit([text]) {
+            return;
+        }
+        nodes.push(json!({"kind": kind, "depth": depth, "text": text}));
+    }
+    for child in children {
+        if room.truncated {
+            return;
+        }
+        element_nodes(child, depth + 1, room, nodes);
+    }
 }
 
 type ResizeDimensions = (u32, u32, Option<(u16, u16)>, Option<u16>);
@@ -263,7 +344,123 @@ impl HostedSurface {
             Body::Grid { .. } => "grid",
             Body::List { .. } => "list",
         };
-        serde_json::json!({"id": self.id.0, "position": position, "kind": kind, "content": "unavailable", "input": "unsupported"})
+        serde_json::json!({"id": self.id.0, "position": position, "kind": kind, "content": "readable", "input": "unsupported"})
+    }
+
+    /// What this Surface shows, as text: [`Self::control_info`] plus the
+    /// content, cut off at `rows` rows and at what is left of the read's
+    /// bytes in `room`.
+    fn control_content(
+        &self,
+        rows: usize,
+        room: &mut ReadRoom,
+        cx: &gpui::App,
+    ) -> serde_json::Value {
+        use serde_json::json;
+        let mut value = self.control_info();
+        // A program wrote every word of it, as it writes a terminal's.
+        value["content_trust"] = json!("untrusted_terminal_output");
+        room.rows = rows;
+        room.truncated = false;
+        match &self.body {
+            Body::Grid { grid, .. } => {
+                let cursor = grid.cursor_snapshot();
+                value["size"] = json!({"columns": grid.cols(), "rows": grid.rows()});
+                // `column` counts cells. A wide character fills two cells
+                // and is one character of the row's text, so `text_index`
+                // says how many characters of that text come before the
+                // cursor.
+                value["cursor"] = json!({"row": cursor.row, "column": cursor.column,
+                    "text_index": grid.text_index(cursor.row, cursor.column),
+                    "visible": cursor.visible});
+                let mut texts = Vec::new();
+                for text in grid.text_rows(usize::from(grid.rows())) {
+                    if !room.admit([text.as_str()]) {
+                        break;
+                    }
+                    texts.push(json!({"text": text}));
+                }
+                value["rows"] = json!(texts);
+                if !grid.tabs.items.is_empty() {
+                    let active = grid.tabs.active.as_deref();
+                    // Tabs have the read's bytes to fit in, and no row limit.
+                    let cut = room.truncated;
+                    room.rows = usize::MAX;
+                    let mut tabs = Vec::new();
+                    for tab in &grid.tabs.items {
+                        if !room.admit([tab.id.as_str(), tab.label.as_str()]) {
+                            break;
+                        }
+                        tabs.push(json!({"id": tab.id, "label": tab.label,
+                            "modified": tab.modified,
+                            "active": active == Some(tab.id.as_str())}));
+                    }
+                    room.truncated |= cut;
+                    value["tabs"] = json!(tabs);
+                }
+            }
+            Body::List { view, .. } => {
+                let model = &view.read(cx).model;
+                // The selection and the status are sent whole or not at
+                // all, and come out of the same bytes as the rows.
+                for (key, text) in [
+                    ("selected", model.selected.as_deref()),
+                    ("status", model.status.as_deref()),
+                ] {
+                    value[key] = match text {
+                        Some(text) if room.admit([text]) => json!(text),
+                        Some(_) | None => serde_json::Value::Null,
+                    };
+                }
+                let cut = room.truncated;
+                room.rows = rows;
+                let mut listed = Vec::new();
+                for row in model.rows.iter() {
+                    let extra = row.extra();
+                    let optional = [
+                        ("icon", row.icon.as_deref()),
+                        ("leading", row.leading.as_deref()),
+                        ("description", extra.description.as_deref()),
+                        ("badge", extra.badge.as_ref().map(|badge| &*badge.text)),
+                        ("count", extra.count.as_deref()),
+                        ("placeholder", extra.placeholder.as_deref()),
+                    ];
+                    let texts = [&*row.id, &*row.text]
+                        .into_iter()
+                        .chain(optional.iter().filter_map(|(_, text)| *text));
+                    if !room.admit(texts) {
+                        break;
+                    }
+                    let mut entry =
+                        json!({"id": &*row.id, "text": &*row.text, "indent": row.indent});
+                    if model.selected.as_deref() == Some(&*row.id) {
+                        entry["selected"] = json!(true);
+                    }
+                    match extra.kind {
+                        RowKind::Item => {}
+                        RowKind::Input => entry["kind"] = json!("input"),
+                        RowKind::Button => entry["kind"] = json!("button"),
+                    }
+                    for (key, text) in optional {
+                        if let Some(text) = text {
+                            entry[key] = json!(text);
+                        }
+                    }
+                    listed.push(entry);
+                }
+                room.truncated |= cut;
+                value["revision"] = json!(model.revision);
+                value["total"] = json!(model.rows.len());
+                value["rows"] = json!(listed);
+            }
+            Body::Elements(body) => {
+                let mut nodes = Vec::new();
+                element_nodes(&body.description().root, 0, room, &mut nodes);
+                value["nodes"] = json!(nodes);
+            }
+        }
+        value["truncated"] = json!(room.truncated);
+        value
     }
 
     fn definition_pointer_active(&self, metrics: &crate::surface::render::GridMetrics) -> bool {
@@ -419,6 +616,29 @@ fn eligible_owner_group(
 }
 
 impl TerminalView {
+    /// The content of this pane's Surfaces for a Pane Control read: all of
+    /// them, or just `only`. `None` when `only` names no Surface here.
+    pub(crate) fn control_surfaces(
+        &self,
+        only: Option<u64>,
+        lines: Option<usize>,
+        cx: &gpui::App,
+    ) -> Option<Vec<serde_json::Value>> {
+        let rows = lines.unwrap_or(500).min(crate::control::MAX_READ_ROWS);
+        let mut room = ReadRoom {
+            rows,
+            bytes: crate::control::MAX_SURFACE_READ_BYTES,
+            truncated: false,
+        };
+        let read: Vec<_> = self
+            .surfaces
+            .iter()
+            .filter(|surface| only.is_none_or(|id| surface.id.0 == id))
+            .map(|surface| surface.control_content(rows, &mut room, cx))
+            .collect();
+        (only.is_none() || !read.is_empty()).then_some(read)
+    }
+
     pub(super) fn serve_surface_request(
         &mut self,
         request: SurfaceRequest,
@@ -722,6 +942,7 @@ impl TerminalView {
         }
         // A dock changes the grid's room; the next frame re-measures it.
         self.size = None;
+        self.mark_changed(Mark::Surface(id.0));
         cx.notify();
         Ok(())
     }
@@ -934,6 +1155,7 @@ impl TerminalView {
                 if surface.owner().is_some() {
                     surface.connection.send(&event_applied("update", None));
                 }
+                self.mark_changed(Mark::Surface(id.0));
                 cx.notify();
             }
             Err(refusal) => {
@@ -1104,8 +1326,14 @@ impl TerminalView {
             ));
             return;
         };
-        if let Err(refusal) = grid.apply_all(ops) {
+        let (applied, result) = grid.apply_counting(ops);
+        if let Err(refusal) = result {
             surface.connection.send(&event_refused(&refusal.reason()));
+        }
+        // A batch refused at its first operation changed nothing, so
+        // nobody watching is told to read it again.
+        if applied > 0 {
+            self.mark_changed(Mark::Surface(id.0));
         }
         cx.notify();
     }
@@ -1132,10 +1360,15 @@ impl TerminalView {
             | ListOp::State { revision, .. } => Some(*revision),
             ListOp::Assets(_) => None,
         };
-        match view.update(cx, |view, cx| view.apply(op, cx)) {
+        let applied = view.update(cx, |view, cx| view.apply(op, cx));
+        match &applied {
             Ok(()) => surface.connection.send(&event_applied(operation, revision)),
             Err(refusal) => surface.connection.send(&event_refused(&refusal.reason())),
         };
+        // A refused operation leaves the list as it was.
+        if applied.is_ok() {
+            self.mark_changed(Mark::Surface(id.0));
+        }
         cx.notify();
     }
 
@@ -1217,6 +1450,7 @@ impl TerminalView {
             self.dock_drag = None;
         }
         surface.connection.send(&event_closed());
+        self.mark_changed(Mark::Surface(id.0));
         if surface.focus.is_focused(window) {
             // An overlay gives the keyboard back to whoever had it. Anything
             // else — or a previous holder that has since closed — falls back to

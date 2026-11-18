@@ -51,7 +51,8 @@ pub(crate) fn parse(
     }
     let allowed: &[&str] = match verb {
         "list" => &[],
-        "read" => &["--pane", "--lines"],
+        "read" => &["--pane", "--lines", "--surface"],
+        "watch" => &["--window", "--panes"],
         "create" => &["--window", "--beside", "--side"],
         "rename" => &["--pane", "--label", "--clear"],
         "move" => &["--pane", "--beside", "--side"],
@@ -93,6 +94,18 @@ pub(crate) fn parse(
                         .map_err(|_| UsageError("--lines needs a number".into()))
                 })
                 .transpose()?,
+            surface: options
+                .get("--surface")
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| UsageError("--surface needs a Surface id".into()))
+                })
+                .transpose()?,
+        },
+        "watch" => Operation::Watch {
+            panes: options
+                .get("--panes")
+                .map(|panes| panes.split(',').map(str::to_owned).collect()),
         },
         "create" => Operation::Create {
             beside: options.get("--beside").cloned(),
@@ -137,12 +150,30 @@ pub(crate) fn parse(
             "invalid operation, side, label or input payload".into(),
         ));
     }
-    if let Some(pane) = operation.pane()
-        && pane.split_once(':').is_none()
+    let watched = if let Operation::Watch { panes } = &operation {
+        panes.as_deref().unwrap_or_default()
+    } else {
+        &[]
+    };
+    if let Some(pane) = operation
+        .pane()
+        .into_iter()
+        .chain(watched.iter().map(String::as_str))
+        .find(|pane| pane.split_once(':').is_none())
     {
         return Err(UsageError(format!(
             "{pane} is not a pane address; addresses look like <window>:<pane>"
         )));
+    }
+    if let [first, rest @ ..] = watched
+        && rest.iter().any(|pane| {
+            pane.split_once(':').map(|(window, _)| window)
+                != first.split_once(':').map(|(window, _)| window)
+        })
+    {
+        return Err(UsageError(
+            "watch takes panes of one window; watch each window separately".into(),
+        ));
     }
     Ok(Args {
         window: options.get("--window").cloned(),
@@ -171,6 +202,9 @@ impl std::fmt::Display for ExchangeError {
 }
 
 pub fn run(args: &Args, out: &mut dyn Write, errors: &mut dyn Write) -> u8 {
+    if let Operation::Watch { panes } = &args.operation {
+        return run_watch(args.window.as_deref(), panes.as_deref(), out, errors);
+    }
     match execute(args) {
         Ok(answer) => {
             let ok = answer.get("outcome").and_then(Value::as_str) == Some("ok");
@@ -205,10 +239,76 @@ fn execute(args: &Args) -> Result<Value, String> {
     ask(&directory, &window, args.operation.clone()).map_err(|error| error.to_string())
 }
 
-/// Every running window's panes, in one answer.
+/// `sprite panes watch`: prints the window's answer, then one line for every
+/// change, until the window closes or nobody reads the output.
+fn run_watch(
+    window: Option<&str>,
+    panes: Option<&[String]>,
+    out: &mut dyn Write,
+    errors: &mut dyn Write,
+) -> u8 {
+    let opened = directory().and_then(|directory| {
+        let window = match panes.and_then(<[String]>::first) {
+            Some(pane) => window_of_address(pane)?.to_owned(),
+            None => choose_window(&directory, window)?,
+        };
+        let operation = Operation::Watch {
+            panes: panes.map(<[String]>::to_vec),
+        };
+        request(&window, operation)
+            .and_then(|(_, line)| {
+                send(
+                    &super::socket_path(&directory, &window),
+                    &line,
+                    crate::timeouts::CLIENT_TIMEOUT,
+                )
+            })
+            .map_err(|error| named(error, &window).to_string())
+    });
+    let stream = match opened {
+        Ok(stream) => stream,
+        Err(why) => {
+            writeln!(errors, "sprite: {why}").ok();
+            return 4;
+        }
+    };
+    let mut lines = std::io::BufReader::new(stream);
+    let mut first = true;
+    loop {
+        // The window may say nothing for hours. Waiting here, and reading only
+        // what has arrived, notices the window closing even where a sleeping
+        // read would miss it (issue #79).
+        let line = match crate::local_socket::next_line(
+            &mut lines,
+            crate::observation::schema::MAX_RESPONSE_BYTES,
+            crate::timeouts::CLIENT_TIMEOUT,
+        ) {
+            Ok(Some(line)) => line,
+            Ok(None) => return if first { 5 } else { 0 },
+            Err(error) => {
+                writeln!(errors, "sprite: the watch ended: {error}").ok();
+                return 5;
+            }
+        };
+        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+            return 0;
+        }
+        if std::mem::take(&mut first)
+            && serde_json::from_str::<Value>(&line).map_or(true, |answer| answer["outcome"] != "ok")
+        {
+            return 5;
+        }
+    }
+}
+
+/// Every running window's panes, in one answer. `features` names what every
+/// one of those windows supports, so a caller may rely on a feature listed
+/// whichever window it then talks to; a window that reports none (an older
+/// Sprite) leaves the list empty.
 fn list(directory: &Path) -> Value {
     let mut windows = Vec::new();
     let mut panes = Vec::new();
+    let mut features: Option<Vec<Value>> = None;
     for window in socket_windows(directory) {
         // A window that closed between the scan and the request has nothing
         // to list, so it is skipped rather than reported.
@@ -221,9 +321,24 @@ fn list(directory: &Path) -> Value {
         if let Some(found) = answer["result"]["panes"].as_array() {
             panes.extend(found.iter().cloned());
         }
+        let supported = answer["result"]["features"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        features = Some(match features {
+            None => supported,
+            Some(common) => common
+                .into_iter()
+                .filter(|feature| supported.contains(feature))
+                .collect(),
+        });
         windows.push(window);
     }
-    super::response("list", "ok", json!({"windows": windows, "panes": panes}))
+    super::response(
+        "list",
+        "ok",
+        json!({"windows": windows, "panes": panes, "features": features.unwrap_or_default()}),
+    )
 }
 
 fn window_of_address(address: &str) -> Result<&str, String> {
@@ -282,12 +397,8 @@ fn socket_windows(directory: &Path) -> Vec<String> {
     windows
 }
 
-/// Sends one operation to one window and returns its answer.
-pub(crate) fn ask(
-    directory: &Path,
-    window: &str,
-    operation: Operation,
-) -> Result<Value, ExchangeError> {
+/// A request for `window`, as its id and the line to send.
+fn request(window: &str, operation: Operation) -> Result<(String, String), ExchangeError> {
     let id = crate::local_socket::SocketKey::generate()
         .map_err(|e| ExchangeError::NotSent(e.to_string()))?
         .to_hex();
@@ -296,20 +407,36 @@ pub(crate) fn ask(
         id: id.clone(),
         window: window.to_owned(),
         operation,
+        keep_open: false,
     };
-    let answer = exchange(
-        &super::socket_path(directory, window),
-        &json!(request).to_string(),
-        crate::timeouts::CLIENT_TIMEOUT,
-    )
-    .map_err(|error| match error {
+    Ok((id, json!(request).to_string()))
+}
+
+/// Says which window was not running.
+fn named(error: ExchangeError, window: &str) -> ExchangeError {
+    match error {
         ExchangeError::NotRunning(_) => {
             ExchangeError::NotRunning(format!("window {window} is not running"))
         }
         other @ (ExchangeError::NotSent(_)
         | ExchangeError::Invalid(_)
         | ExchangeError::OutcomeUnknown(_)) => other,
-    });
+    }
+}
+
+/// Sends one operation to one window and returns its answer.
+pub(crate) fn ask(
+    directory: &Path,
+    window: &str,
+    operation: Operation,
+) -> Result<Value, ExchangeError> {
+    let (id, line) = request(window, operation)?;
+    let answer = exchange(
+        &super::socket_path(directory, window),
+        &line,
+        crate::timeouts::CLIENT_TIMEOUT,
+    )
+    .map_err(|error| named(error, window));
     let answer = match answer {
         Ok(answer) => answer,
         Err(ExchangeError::Invalid(_)) => super::failure(&id, "invalid_request"),
@@ -322,11 +449,9 @@ pub(crate) fn ask(
     Ok(answer)
 }
 
-pub(crate) fn exchange(
-    socket: &Path,
-    line: &str,
-    timeout: Duration,
-) -> Result<Value, ExchangeError> {
+/// Connects to a window's socket and sends one request line, with `timeout`
+/// on every read and write that follows.
+fn send(socket: &Path, line: &str, timeout: Duration) -> Result<UnixStream, ExchangeError> {
     if line.len() + 1 > 8192 || line.contains('\n') {
         return Err(ExchangeError::Invalid(
             "request exceeds 8 KiB or contains an unencoded newline".into(),
@@ -347,6 +472,15 @@ pub(crate) fn exchange(
         .and_then(|_| stream.set_write_timeout(Some(timeout)))
         .map_err(|e| ExchangeError::NotSent(e.to_string()))?;
     writeln!(stream, "{line}").map_err(|e| ExchangeError::OutcomeUnknown(e.to_string()))?;
+    Ok(stream)
+}
+
+pub(crate) fn exchange(
+    socket: &Path,
+    line: &str,
+    timeout: Duration,
+) -> Result<Value, ExchangeError> {
+    let stream = send(socket, line, timeout)?;
     let mut answer = Vec::new();
     stream
         .take((crate::observation::schema::MAX_RESPONSE_BYTES + 1) as u64)

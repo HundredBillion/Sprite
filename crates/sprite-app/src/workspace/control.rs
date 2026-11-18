@@ -6,12 +6,26 @@ use super::*;
 use crate::control::{self, Message, Operation, Request, failure, response};
 use crate::local_socket::{LocalSocket, ReplyConnection, SocketKey};
 
-/// What Pane Control keeps for one window: its id, its socket, and the labels
-/// callers gave its panes.
+/// What Pane Control keeps for one window: its id, its socket, the labels
+/// callers gave its panes, and what watchers were last told of each pane.
 pub(super) struct ControlState {
     window: String,
     socket: Option<LocalSocket>,
     labels: HashMap<PaneId, String>,
+    standing: HashMap<PaneId, Standing>,
+}
+
+/// What `list` says of a pane besides its content, kept so a change to any
+/// of it can be told to whoever is watching.
+#[derive(Debug, PartialEq)]
+struct Standing {
+    tab: TabId,
+    /// Left, top, width and height in logical pixels, as `list` reports.
+    geometry: [f32; 4],
+    visible: bool,
+    current: bool,
+    label: Option<String>,
+    tab_name: Option<String>,
 }
 
 /// Hex digits in a window id. Short enough that `window-<id>.sock` fits a
@@ -29,6 +43,7 @@ impl ControlState {
             window,
             socket: None,
             labels: HashMap::new(),
+            standing: HashMap::new(),
         }
     }
 
@@ -98,6 +113,74 @@ impl Workspace {
         reply.send(answer).ok();
     }
 
+    /// Tells watchers which panes opened, closed, moved or were renamed
+    /// since this was last called, and records which panes there are.
+    ///
+    /// Called whenever the layout is refreshed and after every Pane Control
+    /// request, which between them are every way the answer to `list` can
+    /// change. It looks at the window's own panes, not at the panes that
+    /// can be read, so a pane whose program never started is told of too.
+    pub(super) fn publish_standing(&mut self) {
+        use crate::control::watch::Mark;
+        let (width, height, _) = self.cached_pane_area();
+        let active = self.tabs.active_tab();
+        let mut now = HashMap::new();
+        for (tab, pane, _) in self.tabs.all_panes() {
+            let Some(tree) = self.tabs.tree(tab) else {
+                continue;
+            };
+            let Some((_, rect, _)) = tree.layout().into_iter().find(|(id, _, _)| *id == pane)
+            else {
+                continue;
+            };
+            let allocated = pane_allocation(self.viewport, self.tabs.len(), rect);
+            now.insert(
+                pane,
+                Standing {
+                    tab,
+                    geometry: [
+                        rect.x * width,
+                        rect.y * height,
+                        f32::from(allocated.width),
+                        f32::from(allocated.height),
+                    ],
+                    visible: active == Some(tab),
+                    current: tree.focus() == Some(pane),
+                    label: self.control.labels.get(&pane).cloned(),
+                    tab_name: self.tabs.name(tab).map(str::to_owned),
+                },
+            );
+        }
+        let hub = &self.panes.watch;
+        let before = &self.control.standing;
+        if now.len() != before.len() || now.keys().any(|pane| !before.contains_key(pane)) {
+            hub.set_panes(now.keys().map(|pane| pane.0));
+        }
+        for (pane, standing) in &now {
+            let Some(was) = before.get(pane) else {
+                hub.mark(pane.0, Mark::Created);
+                continue;
+            };
+            if (was.tab, was.geometry, was.visible, was.current)
+                != (
+                    standing.tab,
+                    standing.geometry,
+                    standing.visible,
+                    standing.current,
+                )
+            {
+                hub.mark(pane.0, Mark::Layout);
+            }
+            if (&was.label, &was.tab_name) != (&standing.label, &standing.tab_name) {
+                hub.mark(pane.0, Mark::Label);
+            }
+        }
+        for pane in before.keys().filter(|pane| !now.contains_key(pane)) {
+            hub.mark(pane.0, Mark::Closed);
+        }
+        self.control.standing = now;
+    }
+
     fn pane_address(&self, pane: PaneId) -> String {
         format!("{}:{}", self.control.window, pane.0)
     }
@@ -114,12 +197,24 @@ impl Workspace {
         let (_, rect, handle) = tree.layout().into_iter().find(|(id, _, _)| *id == pane)?;
         let (width, height, _) = self.cached_pane_area();
         let allocated = pane_allocation(self.viewport, self.tabs.len(), rect);
-        let info = match handle.view().downcast::<TerminalView>() {
-            Ok(terminal) => terminal.read(cx).control_info(),
-            Err(_) => {
-                json!({"kind": "hosted", "terminal_read": false, "terminal_input": false, "native_content": "unavailable"})
-            }
+        let (info, reads) = match handle.view().downcast::<TerminalView>() {
+            Ok(terminal) => (terminal.read(cx).control_info(), Some("surface_read")),
+            Err(_) => (
+                json!({"kind": "hosted", "terminal_read": false, "terminal_input": false, "native_content": "unavailable"}),
+                None,
+            ),
         };
+        let capabilities: Vec<&str> = [
+            "read_metadata",
+            "rename",
+            "move",
+            "focus",
+            "resize_divider",
+            "close",
+        ]
+        .into_iter()
+        .chain(reads)
+        .collect();
         Some(json!({
             "id": self.pane_address(pane), "tab": format!("{}:t{}", self.control.window, tab.0),
             "label": self.control.labels.get(&pane), "child_title": handle.title(cx).map(|s| s.to_string()),
@@ -127,7 +222,7 @@ impl Workspace {
             "visible": self.tabs.active_tab() == Some(tab),
             "geometry": {"x": rect.x * width, "y": rect.y * height, "width": f32::from(allocated.width), "height": f32::from(allocated.height)},
             "content": info,
-            "capabilities": ["read_metadata", "rename", "move", "focus", "resize_divider", "close"]
+            "capabilities": capabilities
         }))
     }
 
@@ -167,15 +262,25 @@ impl Workspace {
                     .into_iter()
                     .filter_map(|(_, pane, _)| self.control_metadata(pane, cx))
                     .collect();
-                Ok(json!({"window": self.control.window, "panes": panes}))
+                Ok(json!({"window": self.control.window, "panes": panes,
+                    "features": ["keep_open", "surface_read", "watch"]}))
             }
-            Operation::Read { .. } => {
-                let metadata = self
-                    .control_metadata(pane.ok_or("invalid_request")?, cx)
+            Operation::Read { lines, surface, .. } => {
+                let pane = pane.ok_or("invalid_request")?;
+                let mut metadata = self.control_metadata(pane, cx).ok_or("gone")?;
+                let view = self
+                    .tabs
+                    .get(pane)
+                    .ok_or("gone")?
+                    .view()
+                    .downcast::<TerminalView>()
+                    .map_err(|_| "unsupported")?;
+                // A Surface that has closed, or never was, is gone.
+                let surfaces = view
+                    .read(cx)
+                    .control_surfaces(*surface, *lines, cx)
                     .ok_or("gone")?;
-                if metadata["content"]["terminal_read"] != true {
-                    return Err("unsupported");
-                }
+                metadata["surfaces"] = json!(surfaces);
                 Ok(metadata)
             }
             Operation::Create { beside, side } => {
@@ -346,8 +451,12 @@ impl Workspace {
                 )
             }
             // Answered on the socket thread, through the reload lane.
-            Operation::ConfigReload | Operation::ConfigPrint => Err("invalid_request"),
+            Operation::ConfigReload | Operation::ConfigPrint | Operation::Watch { .. } => {
+                Err("invalid_request")
+            }
         })();
+        // A rename changes no layout, so nothing else would tell of it.
+        self.publish_standing();
         cx.notify();
         match result {
             Ok(value) => response(id, "ok", value),

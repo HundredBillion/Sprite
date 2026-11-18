@@ -85,6 +85,9 @@ pub struct WindowPanes {
     /// The next ticket to hand out. One counter for the whole window, so a
     /// ticket names one request whichever pane it went to.
     next_ticket: AtomicU64,
+    /// Who is to be told when a pane changes. Here because this is the one
+    /// thing a pane's view and the window's socket threads both hold.
+    pub(crate) watch: crate::control::watch::Hub,
     #[cfg(test)]
     layout_publications: std::sync::atomic::AtomicUsize,
 }
