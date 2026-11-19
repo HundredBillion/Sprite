@@ -32,8 +32,6 @@ makedepends=('git' 'ncurses' 'python' 'rustup' 'zig')
 source=("git+$url.git#tag=v$pkgver")
 sha256sums=('SKIP')
 
-_root="$srcdir/Sprite"
-
 prepare() {
     cd "$srcdir/Sprite"
     git submodule update --init --recursive
@@ -42,7 +40,6 @@ prepare() {
     # with the compiler the project is tested against.
     rustup toolchain install --profile minimal "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
 
-    cd "$_root"
     export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
     export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
     cargo fetch --locked
@@ -51,7 +48,7 @@ prepare() {
 }
 
 build() {
-    cd "$_root"
+    cd "$srcdir/Sprite"
     export GHOSTTY_SOURCE_DIR="$PWD/vendor/ghostty"
     export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
     export ZIG_LOCAL_CACHE_DIR="$PWD/target/zig-local-cache"
@@ -73,11 +70,11 @@ build() {
 }
 
 check() {
-    cd "$_root"
+    cd "$srcdir/Sprite"
     cargo test --workspace --locked --offline
 }
 
 package() {
-    cd "$_root"
+    cd "$srcdir/Sprite"
     DESTDIR="$pkgdir" PREFIX=/usr packaging/install.sh
 }
