@@ -325,6 +325,11 @@ pub(super) struct HostedSurface {
     /// a resize the client's new footer arrives a little later than the
     /// resize itself.
     footer_under_dock: bool,
+    /// For a grid: how tall its rows were last drawn. A filling grid's rows
+    /// share out the part-row its box leaves over, so they can be a little
+    /// taller than the font's; a click and an input method's panel are
+    /// measured in the rows as drawn. `None` until the first frame.
+    row_height: Option<Pixels>,
 }
 
 enum HostedPlacement {
@@ -472,7 +477,23 @@ impl HostedSurface {
         value
     }
 
+    /// `base` with this Surface's rows as tall as it last drew them, which is
+    /// what a position over it must be measured against.
+    pub(super) fn drawn_metrics(
+        &self,
+        base: &crate::surface::render::GridMetrics,
+    ) -> crate::surface::render::GridMetrics {
+        match self.row_height {
+            Some(height) => crate::surface::render::GridMetrics {
+                cells: base.cells.with_height(height),
+                ..base.clone()
+            },
+            None => base.clone(),
+        }
+    }
+
     fn definition_pointer_active(&self, metrics: &crate::surface::render::GridMetrics) -> bool {
+        let metrics = &self.drawn_metrics(metrics);
         match (&self.body, self.origin, self.definition_pointer) {
             (Body::Grid { grid, .. }, Some(origin), Some((position, true))) => {
                 let inside = position.x >= origin.x
@@ -562,19 +583,58 @@ fn footer_columns(
     cols.min(crate::surface::grid::MAX_COLS)
 }
 
-/// Where `row` of a filling grid starts in a box `height` tall: under the
-/// tab strip and the slack whole rows leave, since a filling grid is drawn
-/// against the bottom of its box.
+/// How a filling grid's rows sit in a box `height` pixels tall when each is
+/// `natural` pixels in its own font: where the first row starts, and how
+/// tall each row is drawn.
+///
+/// Whole rows rarely divide a box exactly, and the part-row left over is
+/// shared out among the rows, so the first row starts at the top and the
+/// last ends at the bottom whatever the font, line spacing, or box. What one
+/// row grows by is less than a row shared among all of them: under a pixel
+/// once a box holds more rows than a row has pixels. The painter puts every
+/// row edge on a whole device pixel.
+///
+/// Between a resize and the program's answer to it, the grid may have rows
+/// that do not fit the box, and they keep the height they were last drawn
+/// at (`previous`), so nothing on screen moves until the answer comes: rows
+/// from a box that was taller overrun this one at its bottom, and rows from
+/// one that was shorter keep to the bottom edge, where the status line
+/// stays. A previous height from another font is not kept.
+pub(super) fn fill_rows(rows: u16, height: f32, natural: f32, previous: Option<f32>) -> (f32, f32) {
+    if rows == 0 || natural <= 0.0 {
+        return (0.0, natural);
+    }
+    let leftover = height - f32::from(rows) * natural;
+    if leftover >= 0.0 && leftover < natural {
+        return (0.0, height / f32::from(rows));
+    }
+    let row = previous
+        .filter(|row| *row >= natural && *row < natural * 2.0)
+        .unwrap_or(natural);
+    ((height - f32::from(rows) * row).max(0.0), row)
+}
+
+/// Where `row` of a filling grid starts in a box `height` tall, and how tall
+/// it is: under the tab strip, in rows as tall as `fill_rows` draws them.
 fn grid_row_top(
     grid: &GridSurface,
     height: Pixels,
     metrics: &crate::surface::render::GridMetrics,
+    previous: Option<Pixels>,
     row: u16,
-) -> Pixels {
+) -> (Pixels, Pixels) {
     let tab_height = grid_tab_height(grid);
     let grid_height = (f32::from(height) - tab_height).max(0.0);
-    let slack = (grid_height - f32::from(grid.rows()) * f32::from(metrics.cells.height())).max(0.0);
-    px(tab_height + slack) + metrics.cells.height() * f32::from(row)
+    let (top, row_height) = fill_rows(
+        grid.rows(),
+        grid_height,
+        f32::from(metrics.cells.height()),
+        previous.map(f32::from),
+    );
+    (
+        px(tab_height + top + row_height * f32::from(row)),
+        px(row_height),
+    )
 }
 
 /// A dock's size after its edge moved `delta` pixels. `grows` says whether a
@@ -584,6 +644,55 @@ fn grid_row_top(
 fn dragged_size(start: f32, delta: f32, grows: bool, limit: f32) -> f32 {
     let wanted = start + if grows { delta } else { -delta };
     wanted.clamp(64.0_f32.min(limit), limit.clamp(0.0, 4096.0))
+}
+
+#[cfg(test)]
+mod fill_rows_tests {
+    use super::fill_rows;
+
+    /// For every font size and line spacing a person can choose and every
+    /// box from a few rows to a 4K screen, the rows a program is told fit
+    /// start at the top and end at the bottom, and no row grows by as much
+    /// as a fifth of itself.
+    #[test]
+    fn rows_that_fit_fill_the_box_exactly() {
+        for tenths in 60..=400 {
+            for line in [1.0_f32, 1.2, 1.25, 1.5, 1.65, 1.7, 2.0] {
+                let natural = crate::config::Font::cell_height(tenths as f32 / 10.0, line);
+                for height in (40..=2200).step_by(7) {
+                    let height = height as f32 + 0.5 * (height % 2) as f32;
+                    let rows = (height / natural).floor() as u16;
+                    if rows < 5 {
+                        continue;
+                    }
+                    let (top, row) = fill_rows(rows, height, natural, None);
+                    let case = format!("{rows} rows of {natural} in {height}");
+                    assert_eq!(top, 0.0, "{case}");
+                    assert!((row * f32::from(rows) - height).abs() < 0.001, "{case}");
+                    assert!(row >= natural && row < natural * 1.2, "{case}: {row}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rows_waiting_for_a_resize_keep_their_height() {
+        // Rows from a taller box overrun this one at its bottom.
+        assert_eq!(fill_rows(40, 600.0, 18.0, None), (0.0, 18.0));
+        assert_eq!(fill_rows(40, 600.0, 18.0, Some(18.4)), (0.0, 18.4));
+        // Rows from a shorter box keep to the bottom edge, in the rows they
+        // were drawn in, until the program answers with more of them.
+        assert_eq!(fill_rows(20, 600.0, 18.0, None), (240.0, 18.0));
+        assert_eq!(fill_rows(20, 600.0, 18.0, Some(18.5)), (230.0, 18.5));
+        // A height drawn in another font is not kept.
+        assert_eq!(fill_rows(20, 600.0, 18.0, Some(16.2)), (240.0, 18.0));
+        assert_eq!(fill_rows(20, 600.0, 18.0, Some(40.0)), (240.0, 18.0));
+        // Rows that fit are shared out whatever was drawn before.
+        assert_eq!(fill_rows(33, 600.0, 18.0, Some(19.0)), (0.0, 600.0 / 33.0));
+        // Nothing to place, or nothing to measure with.
+        assert_eq!(fill_rows(0, 600.0, 18.0, None), (0.0, 18.0));
+        assert_eq!(fill_rows(10, 600.0, 0.0, None), (0.0, 0.0));
+    }
 }
 
 #[cfg(test)]
@@ -1049,6 +1158,7 @@ impl TerminalView {
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
             footer_under_dock: false,
+            row_height: None,
         };
         self.surfaces
             .place(open.placement.position(), open.placement.side(), hosted)?;
@@ -1114,7 +1224,7 @@ impl TerminalView {
         let Some((row, col)) = crate::surface::render::grid_cell_under(
             position,
             origin,
-            &metrics,
+            &surface.drawn_metrics(&metrics),
             grid.cols(),
             grid.rows(),
         ) else {
@@ -1233,7 +1343,7 @@ impl TerminalView {
         let Some((row, col)) = crate::surface::render::grid_cell_under(
             event.position,
             origin,
-            &metrics,
+            &surface.drawn_metrics(&metrics),
             grid.cols(),
             grid.rows(),
         ) else {
@@ -1718,11 +1828,16 @@ impl TerminalView {
                 return None;
             }
             let last_row = grid.rows().saturating_sub(1);
-            let row_top = grid_row_top(grid, fill_size.height, metrics, last_row);
+            let (row_top, row_height) = grid_row_top(
+                grid,
+                fill_size.height,
+                metrics,
+                surface.row_height,
+                last_row,
+            );
             // The footer ends where the pane does, and the dock ends where
             // the footer starts, whatever is left over above.
-            let footer_top =
-                (row_top + px(docks.bottom)).min(allocated.height - metrics.cells.height());
+            let footer_top = (row_top + px(docks.bottom)).min(allocated.height - row_height);
             Some(footer_top - px(docks.bottom))
         });
         // The side docks keep the pane's full height. The bottom dock sits
@@ -1863,17 +1978,24 @@ impl TerminalView {
             .collect();
         let footer = self.surfaces.fill.as_mut().and_then(|surface| {
             let id = surface.id;
+            let previous = surface.row_height;
             let Body::Grid { grid, shapes, .. } = &mut surface.body else {
                 return None;
             };
             // The footer covers a row of the fill's grid, so it is placed
-            // from the fill's height, not the pane's.
+            // from the fill's height, not the pane's, and is as tall as the
+            // row it covers.
             let footer_row = grid.footer_row(footer_columns)?;
-            let row_top = grid_row_top(grid, fill_size.height, metrics, footer_row);
+            let (row_top, row_height) =
+                grid_row_top(grid, fill_size.height, metrics, previous, footer_row);
             let footer = grid
                 .footer
                 .as_mut()
                 .filter(|footer| footer.row == footer_row)?;
+            let metrics = &crate::surface::render::GridMetrics {
+                cells: metrics.cells.with_height(row_height),
+                ..metrics.clone()
+            };
             let (_, background) = footer.grid.default_colors(metrics.defaults);
             let follow = footer.follow.as_ref().map(|state| {
                 let color = if state.enabled { 0x5c8fd6 } else { 0x8e939a };
@@ -2000,11 +2122,13 @@ impl TerminalView {
             width: px((f32::from(size.width) - minimap_width).max(0.0)),
             height: px((f32::from(size.height) - tab_height).max(0.0)),
         };
-        let grid_slack = match &surface.body {
-            Body::Grid { grid, .. } if fills => (f32::from(grid_size.height)
-                - f32::from(grid.rows()) * f32::from(metrics.cells.height()))
-            .max(0.0),
-            Body::Grid { .. } | Body::Elements(_) | Body::List { .. } => 0.0,
+        let natural = f32::from(metrics.cells.height());
+        let (grid_slack, row_height) = match &surface.body {
+            Body::Grid { grid, .. } if fills => {
+                let previous = surface.row_height.map(f32::from);
+                fill_rows(grid.rows(), f32::from(grid_size.height), natural, previous)
+            }
+            Body::Grid { .. } | Body::Elements(_) | Body::List { .. } => (0.0, natural),
         };
         let grid_top = tab_height + grid_slack;
         let told = (
@@ -2023,6 +2147,14 @@ impl TerminalView {
             surface.connection.send(&event);
             surface.told = Some(told);
         }
+        // The program is told how many rows fit in its own font, above; from
+        // here on everything is drawn, and measured, in the rows as drawn.
+        let drawn = crate::surface::render::GridMetrics {
+            cells: metrics.cells.with_height(px(row_height)),
+            ..metrics.clone()
+        };
+        let metrics = &drawn;
+        surface.row_height = Some(px(row_height));
         let body = match &mut surface.body {
             Body::Elements(elements) => {
                 let body = elements.render(registry, &surface.connection, Some(cx.entity()));
@@ -3438,14 +3570,19 @@ mod tests {
             )
         });
         let drawn_height = host.read_with(cx, |host, _| {
-            let Body::Grid { grid, .. } = &host.surfaces.fill.as_ref().unwrap().body else {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let Body::Grid { grid, .. } = &surface.body else {
                 panic!("grid")
             };
-            f32::from(grid.rows()) * f32::from(host.metrics.height())
+            f32::from(grid.rows()) * f32::from(surface.row_height.unwrap())
         });
         assert_eq!(
-            origin.y + px(drawn_height),
-            px(baseline.1.1 as f32),
+            origin.y,
+            px(35.0),
+            "native editor grid must start under the tabs"
+        );
+        assert!(
+            (f32::from(origin.y) + drawn_height - baseline.1.1 as f32).abs() < 0.01,
             "native editor grid must touch the bottom of its allocation"
         );
         assert_eq!(told.1, baseline.1.1 - 35);
@@ -3564,10 +3701,11 @@ mod tests {
             let Body::Grid { grid, .. } = &surface.body else {
                 panic!("grid")
             };
-            assert_eq!(
-                surface.origin.unwrap().y + host.metrics.height() * f32::from(grid.rows()),
-                px(baseline.1.1 as f32),
-                "hidden tabs must keep the status line at the bottom"
+            let bottom = f32::from(surface.origin.unwrap().y)
+                + f32::from(surface.row_height.unwrap()) * f32::from(grid.rows());
+            assert!(
+                (bottom - baseline.1.1 as f32).abs() < 0.01,
+                "hidden tabs must keep the status line at the bottom: {bottom}"
             );
             assert_eq!(surface.told.unwrap(), baseline.1);
         });
@@ -3826,11 +3964,10 @@ mod tests {
         let position = host.update_in(cx, |host, window, cx| {
             let surface = host.surfaces.fill.as_ref().unwrap();
             let origin = surface.origin.unwrap();
-            let cells = host.grid_metrics().cells;
-            assert!(
-                origin.y >= px(35.0),
-                "tabs and alignment slack precede grid content"
-            );
+            // The rows are as tall as the grid drew them, sharing out the
+            // part-row its box leaves over.
+            let cells = surface.drawn_metrics(&host.grid_metrics()).cells;
+            assert_eq!(origin.y, px(35.0), "the grid starts under the tabs");
             let expected = Bounds {
                 origin: origin + point(cells.width() * 3.0, cells.height() * 2.0),
                 size: gpui::size(cells.width(), cells.height()),
@@ -3890,6 +4027,167 @@ mod tests {
         assert_eq!(resized.len(), 1, "{resized:?}");
         assert!(resized[0]["rows"].as_u64().unwrap() < u64::from(rows));
         assert_eq!(host.read_with(cx, |host, _| host.size), terminal_size);
+        cx.update(|window, _| window.remove_window());
+    }
+
+    /// A native editor grid fills its box from the tab strip to the bottom
+    /// edge, whatever the font, line spacing, and pane height: whole rows
+    /// rarely divide the height, and the part-row left over is shared out
+    /// among the rows instead of shown as a band above the first one. What
+    /// the rows are drawn at is what a click, the cursor, and an input
+    /// method's panel are measured against.
+    #[gpui::test]
+    fn a_native_editor_grid_fills_its_box_at_any_font_and_height(cx: &mut gpui::TestAppContext) {
+        use gpui::{Bounds, EntityInputHandler};
+        const TABS: f32 = 35.0;
+        let parsed = |size: f32, line_height: f32| {
+            crate::config::Settings::parse_candidate(&format!(
+                "[surface_font]\nsize = {size}\nline_height = {line_height}\n"
+            ))
+            .unwrap()
+            .0
+        };
+        let settings = parsed(12.0, 1.5);
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let mut host = TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx);
+            host.apply_settings(&settings, window, cx);
+            host
+        });
+        let id = SurfaceId(994);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update_in(cx, |host, window, cx| {
+            host.focus_target(FocusTarget::Surface(id), window, cx)
+                .unwrap();
+            host.grid_operations(id, crate::surface::grid::parse_ops(&serde_json::json!(
+                {"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"}]}
+            )).unwrap(), cx);
+        });
+        let mut leftovers = 0;
+        for (size, line_height) in [
+            (12.0, 1.5),
+            (12.0, 1.65),
+            (14.0, 1.2),
+            (24.0, 1.5),
+            (13.0, 1.7),
+        ] {
+            let settings = parsed(size, line_height);
+            host.update_in(cx, |host, window, cx| {
+                host.apply_settings(&settings, window, cx)
+            });
+            for height in [600.0, 613.0, 701.0] {
+                let case = format!("{size}px at {line_height} in a {height}px pane");
+                cx.simulate_resize(gpui::size(px(800.0), px(height)));
+                draw_test_window(cx);
+                // The program answers the size it was told, as Neovim does.
+                let (cols, rows) = host.read_with(cx, |host, _| {
+                    host.surfaces
+                        .fill
+                        .as_ref()
+                        .unwrap()
+                        .told
+                        .unwrap()
+                        .2
+                        .unwrap()
+                });
+                host.update(cx, |host, cx| {
+                    host.grid_operations(id, vec![Op::Resize { cols, rows }], cx);
+                });
+                draw_test_window(cx);
+                events(&mut peer);
+                let (origin, box_height, natural) = host.read_with(cx, |host, _| {
+                    let surface = host.surfaces.fill.as_ref().unwrap();
+                    (
+                        surface.origin.unwrap(),
+                        surface.told.unwrap().1 as f32,
+                        f32::from(host.grid_metrics().cells.height()),
+                    )
+                });
+                if box_height - f32::from(rows) * natural >= 1.0 {
+                    leftovers += 1;
+                }
+                let bottom = TABS + box_height;
+                assert_eq!(
+                    origin.y,
+                    px(TABS),
+                    "{case}: the first row starts under the tabs"
+                );
+
+                // The cursor's cell, which an input method's panel is put
+                // beside, is the row as drawn: the first touches the tabs and
+                // the last touches the bottom edge.
+                let cursor_cell = |row: u16, cx: &mut gpui::VisualTestContext| {
+                    host.update_in(cx, |host, window, cx| {
+                        host.grid_operations(
+                            id,
+                            crate::surface::grid::parse_ops(
+                                &serde_json::json!({"type":"cursor","row":row,"col":0}),
+                            )
+                            .unwrap(),
+                            cx,
+                        );
+                        host.bounds_for_range(
+                            0..0,
+                            Bounds {
+                                origin,
+                                size: gpui::size(px(800.0), px(bottom)),
+                            },
+                            window,
+                            cx,
+                        )
+                        .unwrap()
+                    })
+                };
+                let first = cursor_cell(0, cx);
+                let last = cursor_cell(rows - 1, cx);
+                assert_eq!(first.top(), px(TABS), "{case}");
+                assert!(
+                    (f32::from(last.bottom()) - bottom).abs() < 0.01,
+                    "{case}: the last row ends at {:?}, the box at {bottom}",
+                    last.bottom()
+                );
+                assert!(
+                    (f32::from(first.size.height) * f32::from(rows) - box_height).abs() < 0.01,
+                    "{case}: the rows share the whole height"
+                );
+
+                // A click on the first pixel under the tabs is on the first
+                // row, and one on the last pixel of the pane on the last row.
+                for (y, row) in [(TABS + 0.5, 0), (bottom - 0.5, rows - 1)] {
+                    let position = point(px(4.0), px(y));
+                    cx.simulate_event(MouseDownEvent {
+                        position,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    });
+                    cx.simulate_event(MouseUpEvent {
+                        position,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    });
+                    let mouse: Vec<_> = events(&mut peer)
+                        .into_iter()
+                        .filter(|event| event["type"] == "mouse")
+                        .collect();
+                    assert_eq!(mouse.len(), 2, "{case}: {mouse:?}");
+                    for event in &mouse {
+                        assert_eq!(event["row"], row, "{case}: a click at y={y}");
+                    }
+                }
+            }
+        }
+        assert!(leftovers > 0, "some case leaves a part-row over");
         cx.update(|window, _| window.remove_window());
     }
 
@@ -5195,11 +5493,15 @@ mod tests {
             let map = minimap.bounds().unwrap();
             assert_eq!(map.bottom(), dock.top(), "the minimap ends above the dock");
             let origin = surface.origin.unwrap();
-            let cell = gpui::size(host.surface_metrics.width(), host.surface_metrics.height());
-            assert_eq!(
-                dock.top(),
-                origin.y + cell.height * f32::from(rows - 1),
-                "the dock starts where the footer's row does"
+            // The rows are as tall as the fill drew them.
+            let cell = surface.drawn_metrics(&host.grid_metrics()).cells;
+            let cell = gpui::size(cell.width(), cell.height());
+            // Laid out on whole device pixels, so within half of one.
+            let row_top = origin.y + cell.height * f32::from(rows - 1);
+            assert!(
+                (f32::from(dock.top()) - f32::from(row_top)).abs() <= 0.25,
+                "the dock starts where the footer's row does: {:?} and {row_top:?}",
+                dock.top()
             );
             (origin, cell)
         });

@@ -57,6 +57,15 @@ impl CellMetrics {
     pub(crate) fn height(&self) -> Pixels {
         self.height
     }
+    /// The same font in rows `height` tall: a filling grid shares the
+    /// part-row its box leaves over among its rows, and is then drawn,
+    /// clicked, and measured in rows this tall.
+    pub(crate) fn with_height(&self, height: Pixels) -> Self {
+        Self {
+            height,
+            ..self.clone()
+        }
+    }
 
     #[cfg(test)]
     pub(crate) fn fixture(width: f32, height: f32) -> Self {

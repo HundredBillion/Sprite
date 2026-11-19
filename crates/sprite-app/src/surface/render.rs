@@ -335,6 +335,7 @@ thread_local! {
 
 /// What a grid borrows from the pane it lives in, so it is drawn with the same
 /// font, cell, colours, and blink phase as the terminal beside it.
+#[derive(Clone)]
 pub(crate) struct GridMetrics {
     pub cells: crate::terminal_view::CellMetrics,
     /// The pane's default foreground and background, for a grid that set none.

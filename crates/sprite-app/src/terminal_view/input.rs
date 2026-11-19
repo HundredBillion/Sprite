@@ -448,10 +448,14 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let focused_surface = self.focused_surface(window);
-        let metrics = if focused_surface.is_some() {
-            &self.surface_metrics
-        } else {
-            &self.metrics
+        // A grid Surface's rows are measured as it last drew them.
+        let drawn;
+        let metrics = match focused_surface {
+            Some(surface) => {
+                drawn = surface.drawn_metrics(&self.grid_metrics()).cells;
+                &drawn
+            }
+            None => &self.metrics,
         };
         let (row, column) = match focused_surface {
             Some(surface) => match &surface.body {
