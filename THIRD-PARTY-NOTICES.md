@@ -463,7 +463,7 @@ Permission to use, copy, modify, and/or distribute this software for any purpose
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## Rust packages (753)
+## Rust packages (719)
 
 | Package | Version | Licence | Source |
 |---|---|---|---|
@@ -472,16 +472,11 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `aes` | 0.8.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
 | `ahash` | 0.8.12 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
 | `aho-corasick` | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
-| `aligned` | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-embedded-community/aligned |
-| `aligned-vec` | 0.6.4 | MIT | https://github.com/sarah-ek/aligned-vec/ |
 | `anyhow` | 1.0.104 | MIT OR Apache-2.0 | https://github.com/dtolnay/anyhow |
 | `ar_archive_writer` | 0.5.3 | Apache-2.0 WITH LLVM-exception | https://github.com/rust-lang/ar_archive_writer |
-| `arbitrary` | 1.4.2 | MIT OR Apache-2.0 | https://github.com/rust-fuzz/arbitrary/ |
-| `arg_enum_proc_macro` | 0.3.4 | MIT | https://github.com/lu-zero/arg_enum_proc_macro |
 | `arrayref` | 0.3.9 | BSD-2-Clause | https://github.com/droundy/arrayref |
 | `arrayvec` | 0.7.8 | MIT OR Apache-2.0 | https://github.com/bluss/arrayvec |
 | `as-raw-xcb-connection` | 1.0.1 | MIT OR Apache-2.0 | https://github.com/psychon/as-raw-xcb-connection |
-| `as-slice` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/japaric/as-slice |
 | `ash` | 0.38.0+1.3.281 | MIT OR Apache-2.0 | https://github.com/ash-rs/ash |
 | `ash-window` | 0.13.0 | MIT OR Apache-2.0 | https://github.com/ash-rs/ash |
 | `ashpd` | 0.11.1 | MIT | https://github.com/bilelmoussaoui/ashpd |
@@ -506,19 +501,14 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `atomic` | 0.5.3 | Apache-2.0/MIT | https://github.com/Amanieu/atomic-rs |
 | `atomic-waker` | 1.1.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/atomic-waker |
 | `autocfg` | 1.5.1 | Apache-2.0 OR MIT | https://github.com/cuviper/autocfg |
-| `av-scenechange` | 0.14.1 | MIT | https://github.com/rust-av/av-scenechange |
-| `av1-grain` | 0.2.5 | BSD-2-Clause | https://github.com/rust-av/av1-grain |
-| `avif-serialize` | 0.8.9 | BSD-3-Clause | https://github.com/kornelski/avif-serialize |
 | `backtrace` | 0.3.76 | MIT OR Apache-2.0 | https://github.com/rust-lang/backtrace-rs |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
 | `bincode` | 1.3.3 | MIT | https://github.com/servo/bincode |
 | `bindgen` | 0.71.1 | BSD-3-Clause | https://github.com/rust-lang/rust-bindgen |
 | `bit-set` | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-set |
 | `bit-vec` | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
-| `bit_field` | 0.10.3 | Apache-2.0/MIT | https://github.com/phil-opp/rust-bit-field |
 | `bitflags` | 1.3.2 | MIT/Apache-2.0 | https://github.com/bitflags/bitflags |
 | `bitflags` | 2.13.1 | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags |
-| `bitstream-io` | 4.10.0 | MIT/Apache-2.0 | https://github.com/tuffy/bitstream-io |
 | `blade-graphics` | 0.7.1 | MIT | https://github.com/kvark/blade |
 | `blade-macros` | 0.3.0 | MIT | https://github.com/kvark/blade |
 | `blade-util` | 0.3.0 | MIT | https://github.com/kvark/blade |
@@ -529,7 +519,6 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `block2` | 0.6.2 | MIT | https://github.com/madsmtm/objc2 |
 | `blocking` | 1.6.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/blocking |
 | `bstr` | 1.13.1 | MIT OR Apache-2.0 | https://github.com/BurntSushi/bstr |
-| `built` | 0.8.1 | MIT | https://github.com/lukaslueg/built |
 | `bumpalo` | 3.20.3 | MIT OR Apache-2.0 | https://github.com/fitzgen/bumpalo |
 | `bytemuck` | 1.25.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/bytemuck |
 | `bytemuck_derive` | 1.12.0 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/bytemuck |
@@ -620,8 +609,6 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `endi` | 1.1.1 | MIT | https://github.com/zeenix/endi |
 | `enumflags2` | 0.7.12 | MIT OR Apache-2.0 | https://github.com/meithecatte/enumflags2 |
 | `enumflags2_derive` | 0.7.12 | MIT OR Apache-2.0 | https://github.com/meithecatte/enumflags2 |
-| `equator` | 0.4.2 | MIT | https://github.com/sarah-ek/equator/ |
-| `equator-macro` | 0.4.2 | MIT | https://github.com/sarah-ek/equator/ |
 | `equivalent` | 1.0.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/equivalent |
 | `erased-serde` | 0.4.10 | MIT OR Apache-2.0 | https://github.com/dtolnay/erased-serde |
 | `errno` | 0.3.14 | MIT OR Apache-2.0 | https://github.com/lambda-fairy/rust-errno |
@@ -630,11 +617,9 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `event-listener` | 2.5.3 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener |
 | `event-listener` | 5.4.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener |
 | `event-listener-strategy` | 0.5.4 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener-strategy |
-| `exr` | 1.74.2 | BSD-3-Clause | https://github.com/johannesvollmer/exrs |
 | `fancy-regex` | 0.16.2 | MIT | https://github.com/fancy-regex/fancy-regex |
 | `fastrand` | 1.9.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
-| `fax` | 0.2.7 | MIT | https://github.com/pdf-rs/fax |
 | `fdeflate` | 0.3.7 | MIT OR Apache-2.0 | https://github.com/image-rs/fdeflate |
 | `filedescriptor` | 0.8.3 | MIT | https://github.com/wezterm/wezterm |
 | `filetime` | 0.2.29 | MIT/Apache-2.0 | https://github.com/alexcrichton/filetime |
@@ -731,12 +716,10 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `image` | 0.25.10 | MIT OR Apache-2.0 | https://github.com/image-rs/image |
 | `image-webp` | 0.2.4 | MIT OR Apache-2.0 | https://github.com/image-rs/image-webp |
 | `imagesize` | 0.13.0 | MIT | https://github.com/Roughsketch/imagesize |
-| `imgref` | 1.12.2 | CC0-1.0 OR Apache-2.0 | https://github.com/kornelski/imgref |
 | `indexmap` | 2.14.0 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
 | `inout` | 0.1.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | `instant` | 0.1.13 | BSD-3-Clause | https://github.com/sebcrozet/instant |
 | `int-enum` | 1.2.0 | MIT OR Apache-2.0 | https://github.com/Juici/int-enum-rs |
-| `interpolate_name` | 0.2.4 | MIT | https://github.com/lu-zero/interpolate_name |
 | `inventory` | 0.3.24 | MIT OR Apache-2.0 | https://github.com/dtolnay/inventory |
 | `io-surface` | 0.16.1 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | `ipnet` | 2.12.1 | MIT OR Apache-2.0 | https://github.com/krisprice/ipnet |
@@ -753,9 +736,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `lazy_static` | 1.5.0 | MIT OR Apache-2.0 | https://github.com/rust-lang-nursery/lazy-static.rs |
 | `leak` | 0.1.2 | Apache-2.0 OR MIT | https://github.com/jmesmon/leak.git |
 | `leaky-cow` | 0.1.1 | MIT / Apache-2.0 | https://github.com/notriddle/rust-leaky-cow |
-| `lebe` | 0.5.3 | BSD-3-Clause | https://github.com/johannesvollmer/lebe |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
-| `libfuzzer-sys` | 0.4.13 | (MIT OR Apache-2.0) AND NCSA | https://github.com/rust-fuzz/libfuzzer |
 | `libghostty-vt` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/uzaaft/libghostty-rs |
 | `libghostty-vt-sys` | 0.2.1 | MIT OR Apache-2.0 | https://github.com/uzaaft/libghostty-rs |
 | `libgit2-sys` | 0.18.8+1.9.7 | MIT OR Apache-2.0 | https://github.com/rust-lang/git2-rs |
@@ -768,7 +749,6 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `litemap` | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | `lock_api` | 0.4.14 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | `log` | 0.4.33 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
-| `loop9` | 0.1.5 | MIT | https://gitlab.com/kornelski/loop9.git |
 | `lru-slab` | 0.1.2 | MIT OR Apache-2.0 OR Zlib | https://github.com/Ralith/lru-slab |
 | `lyon` | 1.0.19 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
 | `lyon_algorithms` | 1.0.20 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
@@ -779,7 +759,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `malloc_buf` | 0.0.6 | MIT | https://github.com/SSheldon/malloc_buf |
 | `markup5ever` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | `match_token` | 0.35.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
-| `maybe-rayon` | 0.1.1 | MIT | https://github.com/shssoichiro/maybe-rayon |
+| `matchers` | 0.2.0 | MIT | https://github.com/hawkw/matchers |
 | `md-5` | 0.10.6 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `memchr` | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | `memmap2` | 0.9.11 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/memmap2-rs |
@@ -798,16 +778,12 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `nix` | 0.28.0 | MIT | https://github.com/nix-rust/nix |
 | `nix` | 0.29.0 | MIT | https://github.com/nix-rust/nix |
 | `nix` | 0.31.3 | MIT | https://github.com/nix-rust/nix |
-| `no_std_io2` | 0.9.4 | Apache-2.0 OR MIT | https://github.com/wcampbell0x2a/no-std-io2 |
 | `nom` | 7.1.3 | MIT | https://github.com/Geal/nom |
-| `nom` | 8.0.0 | MIT | https://github.com/rust-bakery/nom |
-| `noop_proc_macro` | 0.3.0 | MIT | https://github.com/lu-zero/noop_proc_macro |
 | `ntapi` | 0.4.3 | Apache-2.0 OR MIT | https://github.com/MSxDOS/ntapi |
 | `num` | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-num/num |
 | `num-bigint` | 0.4.8 | MIT OR Apache-2.0 | https://github.com/rust-num/num-bigint |
 | `num-bigint-dig` | 0.8.6 | MIT/Apache-2.0 | https://github.com/dignifiedquire/num-bigint |
 | `num-complex` | 0.4.6 | MIT OR Apache-2.0 | https://github.com/rust-num/num-complex |
-| `num-derive` | 0.4.2 | MIT OR Apache-2.0 | https://github.com/rust-num/num-derive |
 | `num-integer` | 0.1.47 | MIT OR Apache-2.0 | https://github.com/rust-num/num-integer |
 | `num-iter` | 0.1.46 | MIT OR Apache-2.0 | https://github.com/rust-num/num-iter |
 | `num-rational` | 0.4.2 | MIT OR Apache-2.0 | https://github.com/rust-num/num-rational |
@@ -837,7 +813,6 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `parking_lot` | 0.12.5 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | `parking_lot_core` | 0.9.12 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | `paste` | 1.0.15 | MIT OR Apache-2.0 | https://github.com/dtolnay/paste |
-| `pastey` | 0.1.1 | MIT OR Apache-2.0 | https://github.com/as1100k/pastey |
 | `pathfinder_geometry` | 0.5.1 | MIT/Apache-2.0 | https://github.com/servo/pathfinder |
 | `pathfinder_simd` | 0.5.6 | MIT OR Apache-2.0 | https://github.com/servo/pathfinder |
 | `pbkdf2` | 0.12.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/password-hashes/tree/master/pbkdf2 |
@@ -873,10 +848,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `profiling-procmacros` | 1.0.18 | MIT OR Apache-2.0 | https://github.com/aclysma/profiling |
 | `psm` | 0.1.32 | MIT OR Apache-2.0 | https://github.com/rust-lang/stacker/ |
 | `pulldown-cmark` | 0.13.0 | MIT | https://github.com/raphlinus/pulldown-cmark |
-| `pulp` | 0.22.3 | MIT | https://github.com/sarah-quinones/pulp/ |
-| `pulp-wasm-simd-flag` | 0.1.1 | MIT | https://github.com/sarah-quinones/pulp/ |
 | `pxfm` | 0.1.30 | BSD-3-Clause OR Apache-2.0 | https://github.com/awxkee/pxfm |
-| `qoi` | 0.4.1 | MIT/Apache-2.0 | https://github.com/aldanor/qoi-rust |
 | `quick-error` | 2.0.1 | MIT/Apache-2.0 | http://github.com/tailhook/quick-error |
 | `quick-xml` | 0.41.0 | MIT | https://github.com/tafia/quick-xml |
 | `quinn` | 0.11.11 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
@@ -895,15 +867,11 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `rand_core` | 0.9.5 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | `rand_pcg` | 0.10.2 | MIT OR Apache-2.0 | https://github.com/rust-random/rngs |
 | `rangemap` | 1.8.0 | MIT/Apache-2.0 | https://github.com/jeffparsons/rangemap |
-| `rav1e` | 0.8.1 | BSD-2-Clause | https://github.com/xiph/rav1e/ |
-| `ravif` | 0.13.0 | BSD-3-Clause | https://github.com/kornelski/cavif-rs |
-| `raw-cpuid` | 11.6.0 | MIT | https://github.com/gz/rust-cpuid |
 | `raw-window-handle` | 0.6.2 | MIT OR Apache-2.0 OR Zlib | https://github.com/rust-windowing/raw-window-handle |
 | `raw-window-metal` | 0.4.0 | MIT OR Apache-2.0 | https://github.com/norse-rs/raw-window-metal |
 | `rayon` | 1.12.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/rayon |
 | `rayon-core` | 1.13.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/rayon |
 | `read-fonts` | 0.41.0 | MIT OR Apache-2.0 | https://github.com/googlefonts/fontations |
-| `reborrow` | 0.5.5 | MIT | https://github.com/sarah-ek/reborrow/ |
 | `redox_syscall` | 0.2.16 | MIT | https://gitlab.redox-os.org/redox-os/syscall |
 | `redox_syscall` | 0.5.18 | MIT | https://gitlab.redox-os.org/redox-os/syscall |
 | `redox_users` | 0.4.6 | MIT | https://gitlab.redox-os.org/redox-os/users |
@@ -966,13 +934,13 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `sha1_smol` | 1.0.1 | BSD-3-Clause | https://github.com/mitsuhiko/sha1-smol |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | `sha2` | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
+| `sharded-slab` | 0.1.7 | MIT | https://github.com/hawkw/sharded-slab |
 | `shared_library` | 0.1.9 | Apache-2.0/MIT | https://github.com/tomaka/shared_library/ |
 | `shell-words` | 1.1.1 | MIT/Apache-2.0 | https://github.com/tmiasko/shell-words |
 | `shlex` | 1.3.0 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
 | `shlex` | 2.0.1 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
 | `signal-hook-registry` | 1.4.8 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
 | `simd-adler32` | 0.3.10 | MIT | https://github.com/mcountryman/simd-adler32 |
-| `simd_helpers` | 0.1.0 | MIT | https://github.com/lu-zero/simd_helpers |
 | `simplecss` | 0.2.2 | Apache-2.0 OR MIT | https://github.com/linebender/simplecss |
 | `siphasher` | 1.0.3 | MIT/Apache-2.0 | https://github.com/jedisct1/rust-siphash |
 | `skrifa` | 0.44.0 | MIT OR Apache-2.0 | https://github.com/googlefonts/fontations |
@@ -984,7 +952,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `socket2` | 0.6.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/socket2 |
 | `spin` | 0.9.9 | MIT | https://github.com/mvdnes/spin-rs.git |
 | `spirv` | 0.3.0+sdk-1.3.268.0 | Apache-2.0 | https://github.com/gfx-rs/rspirv |
-| `sprite-pane` | 0.2.8 | MIT OR Apache-2.0 |  |
+| `sprite-pane` | 0.8.0 | MIT OR Apache-2.0 |  |
 | `stable_deref_trait` | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
 | `stacker` | 0.1.25 | MIT OR Apache-2.0 | https://github.com/rust-lang/stacker |
 | `stacksafe` | 0.1.4 | Apache-2.0 | https://github.com/fast/stacksafe |
@@ -1029,7 +997,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `thiserror` | 2.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | `thiserror-impl` | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | `thiserror-impl` | 2.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
-| `tiff` | 0.11.3 | MIT | https://github.com/image-rs/image-tiff |
+| `thread_local` | 1.1.10 | MIT OR Apache-2.0 | https://github.com/Amanieu/thread_local-rs |
 | `tiny-keccak` | 2.0.2 | CC0-1.0 |  |
 | `tiny-skia` | 0.11.4 | BSD-3-Clause | https://github.com/RazrFalcon/tiny-skia |
 | `tiny-skia-path` | 0.11.4 | BSD-3-Clause | https://github.com/RazrFalcon/tiny-skia/tree/master/path |
@@ -1055,6 +1023,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `tracing` | 0.1.44 | MIT | https://github.com/tokio-rs/tracing |
 | `tracing-attributes` | 0.1.31 | MIT | https://github.com/tokio-rs/tracing |
 | `tracing-core` | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
+| `tracing-subscriber` | 0.3.20 | MIT | https://github.com/tokio-rs/tracing |
 | `try-lock` | 0.2.5 | MIT | https://github.com/seanmonstar/try-lock |
 | `ttf-parser` | 0.20.0 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/ttf-parser |
 | `ttf-parser` | 0.21.1 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/ttf-parser |
@@ -1082,7 +1051,6 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `utf-8` | 0.7.6 | MIT OR Apache-2.0 | https://github.com/SimonSapin/rust-utf8 |
 | `utf8_iter` | 1.0.4 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf8_iter |
 | `uuid` | 1.24.1 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
-| `v_frame` | 0.3.9 | BSD-2-Clause | https://github.com/rust-av/v_frame |
 | `value-bag` | 1.13.2 | Apache-2.0 OR MIT | https://github.com/sval-rs/value-bag |
 | `value-bag-serde1` | 1.13.2 | Apache-2.0 OR MIT |  |
 | `value-bag-sval2` | 1.13.2 | Apache-2.0 OR MIT |  |
@@ -1189,7 +1157,6 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `xkbcommon` | 0.8.0 | MIT | https://github.com/rust-x-bindings/xkbcommon-rs |
 | `xkeysym` | 0.2.1 | MIT OR Apache-2.0 OR Zlib | https://github.com/notgull/xkeysym |
 | `xmlwriter` | 0.1.0 | MIT | https://github.com/RazrFalcon/xmlwriter |
-| `y4m` | 0.8.0 | MIT | https://github.com/image-rs/y4m.git |
 | `yazi` | 0.2.1 | Apache-2.0 OR MIT | https://github.com/dfrg/yazi |
 | `yeslogic-fontconfig-sys` | 6.0.1 | MIT | https://github.com/yeslogic/fontconfig-rs |
 | `yoke` | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
@@ -1215,7 +1182,6 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `zerovec-derive` | 0.11.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | `zmij` | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | `zune-core` | 0.5.3 | MIT OR Apache-2.0 OR Zlib | https://github.com/etemesi254/zune-image |
-| `zune-inflate` | 0.2.54 | MIT OR Apache-2.0 OR Zlib |  |
 | `zune-jpeg` | 0.5.15 | MIT OR Apache-2.0 OR Zlib | https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg |
 | `zvariant` | 5.15.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | `zvariant_derive` | 5.15.0 | MIT | https://github.com/z-galaxy/zbus/ |
