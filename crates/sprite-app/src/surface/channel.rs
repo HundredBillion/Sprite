@@ -85,11 +85,14 @@ impl Position {
     }
 }
 
-/// Which edge a dock takes. Top and bottom wait for a plugin that wants one.
+/// Which edge a dock takes. A side dock is a strip beside the grid whose size
+/// is its width; a bottom dock is a strip under the grid whose size is its
+/// height. Top waits for a plugin that wants one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Side {
     Left,
     Right,
+    Bottom,
 }
 
 impl Side {
@@ -97,6 +100,7 @@ impl Side {
         Some(match name {
             "left" => Side::Left,
             "right" => Side::Right,
+            "bottom" => Side::Bottom,
             _ => return None,
         })
     }
@@ -105,6 +109,7 @@ impl Side {
         match self {
             Side::Left => "left",
             Side::Right => "right",
+            Side::Bottom => "bottom",
         }
     }
 }

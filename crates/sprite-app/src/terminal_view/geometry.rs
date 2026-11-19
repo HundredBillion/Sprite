@@ -1,5 +1,5 @@
 //! Where the grid sits in its pane: how many cells fit, where the first one
-//! goes, and how docks narrow the room. A child of `terminal_view` because it
+//! goes, and how docks narrow and shorten the room. A child of `terminal_view` because it
 //! reads and writes the view's own size fields; the pure functions here take
 //! sizes rather than the view, and are the ones with tests.
 
@@ -10,17 +10,29 @@ use sprite_term::{TerminalCommand, TerminalSize, ValidTerminalSize};
 
 use crate::grid::{content_area, grid_origin};
 
+/// The strips the docks take from a pane, in pixels. The side docks keep the
+/// pane's full height; the bottom dock sits under the grid only, between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct DockStrips {
+    pub(super) left: f32,
+    pub(super) right: f32,
+    pub(super) bottom: f32,
+}
+
 /// The grid's room once docks have taken their strips, and how far right the
-/// grid moves to clear the left one.
-pub(super) fn grid_room(allocated: Size<Pixels>, left: f32, right: f32) -> (Size<Pixels>, Pixels) {
-    let width = allocated.width - px(left + right);
-    let width = if width < px(0.0) { px(0.0) } else { width };
+/// grid moves to clear the left one. The room starts at the pane's top, so a
+/// bottom dock shortens it without moving it.
+pub(super) fn grid_room(allocated: Size<Pixels>, docks: DockStrips) -> (Size<Pixels>, Pixels) {
+    let room = |extent: Pixels, taken: f32| {
+        let left = extent - px(taken);
+        if left < px(0.0) { px(0.0) } else { left }
+    };
     (
         Size {
-            width,
-            height: allocated.height,
+            width: room(allocated.width, docks.left + docks.right),
+            height: room(allocated.height, docks.bottom),
         },
-        px(left),
+        px(docks.left),
     )
 }
 
@@ -106,9 +118,9 @@ impl TerminalView {
     pub(super) fn synchronise_size(&mut self, window: &Window) {
         let allocated = self.allocated.unwrap_or_else(|| window.viewport_size());
         // Docks take their strips first; the grid gets what is left, and the
-        // PTY learns the narrower size exactly as it would on a window resize.
-        let (left, right) = self.dock_widths(allocated);
-        let (available, shift) = grid_room(allocated, left, right);
+        // PTY learns the narrower or shorter size exactly as it would on a
+        // window resize.
+        let (available, shift) = grid_room(allocated, self.dock_strips(allocated));
         let Some(size) = grid_size(
             content_area(available, self.padding),
             self.metrics.width(),
@@ -148,12 +160,24 @@ impl TerminalView {
         }
     }
 
-    /// The docks' widths at this pane size: what each asked for, but never more
-    /// than half the pane, so two docks always leave a grid between them.
-    pub(super) fn dock_widths(&self, allocated: Size<Pixels>) -> (f32, f32) {
-        let half = f32::from(allocated.width) / 2.0;
-        self.surfaces
-            .dock_widths(|surface| surface.size().min(half))
+    /// The docks' strips at this pane size: what each asked for, but a side
+    /// dock never more than half the pane's width and the bottom dock never
+    /// more than half its height, so docks always leave a grid between and
+    /// above them. The limit is applied here and never stored, so a pane that
+    /// grows again gives a dock back what it asked for.
+    pub(super) fn dock_strips(&self, allocated: Size<Pixels>) -> DockStrips {
+        let half_width = f32::from(allocated.width) / 2.0;
+        let half_height = f32::from(allocated.height) / 2.0;
+        let (left, right) = self
+            .surfaces
+            .dock_widths(|surface| surface.size().min(half_width));
+        DockStrips {
+            left,
+            right,
+            bottom: self
+                .surfaces
+                .dock_height(|surface| surface.size().min(half_height)),
+        }
     }
 }
 
@@ -164,6 +188,14 @@ mod tests {
 
     fn content(width: f32, height: f32) -> Size<Pixels> {
         size(px(width), px(height))
+    }
+
+    fn sides(left: f32, right: f32) -> DockStrips {
+        DockStrips {
+            left,
+            right,
+            bottom: 0.0,
+        }
     }
 
     #[gpui::test]
@@ -280,16 +312,16 @@ mod tests {
 
     #[test]
     fn docks_take_their_strips_and_the_grid_moves_right() {
-        let (room, shift) = grid_room(gpui::size(px(800.0), px(600.0)), 240.0, 0.0);
+        let (room, shift) = grid_room(gpui::size(px(800.0), px(600.0)), sides(240.0, 0.0));
         assert_eq!(room, gpui::size(px(560.0), px(600.0)));
         assert_eq!(shift, px(240.0));
 
-        let (room, shift) = grid_room(gpui::size(px(800.0), px(600.0)), 100.0, 300.0);
+        let (room, shift) = grid_room(gpui::size(px(800.0), px(600.0)), sides(100.0, 300.0));
         assert_eq!(room, gpui::size(px(400.0), px(600.0)));
         assert_eq!(shift, px(100.0));
 
         // Two absurd docks cannot push the grid below nothing.
-        let (room, _) = grid_room(gpui::size(px(800.0), px(600.0)), 500.0, 500.0);
+        let (room, _) = grid_room(gpui::size(px(800.0), px(600.0)), sides(500.0, 500.0));
         assert_eq!(room.width, px(0.0));
     }
 
@@ -308,8 +340,56 @@ mod tests {
     }
 
     #[test]
+    fn a_bottom_dock_shortens_the_grid_without_moving_it() {
+        let docks = DockStrips {
+            left: 0.0,
+            right: 0.0,
+            bottom: 120.0,
+        };
+        let (room, shift) = grid_room(content(800.0, 600.0), docks);
+        assert_eq!(room, content(800.0, 480.0));
+        assert_eq!(shift, px(0.0));
+        // 600/16 = 37 rows without the dock; 480/16 = 30 with it.
+        assert_eq!(grid_size(room, px(8.0), px(16.0), 1.0).unwrap().rows(), 30);
+
+        // With side docks too, it takes height only: the width is theirs.
+        let docks = DockStrips {
+            left: 300.0,
+            right: 190.0,
+            bottom: 120.0,
+        };
+        let (room, shift) = grid_room(content(940.0, 600.0), docks);
+        assert_eq!(room, content(450.0, 480.0));
+        assert_eq!(shift, px(300.0));
+
+        // An absurd one cannot push the grid below nothing.
+        let docks = DockStrips {
+            left: 0.0,
+            right: 0.0,
+            bottom: 900.0,
+        };
+        assert_eq!(grid_room(content(800.0, 600.0), docks).0.height, px(0.0));
+    }
+
+    #[test]
+    fn a_short_pane_does_not_replace_a_bottom_docks_requested_height() {
+        use crate::surface::channel::{Position, Side};
+        use crate::surface::host::SurfaceHost;
+
+        let mut docks = SurfaceHost::default();
+        docks
+            .place(Position::Dock, Side::Bottom, 200.0_f32)
+            .unwrap();
+        let allocated =
+            |pane_height: f32| docks.dock_height(|preferred| preferred.min(pane_height / 2.0));
+        assert_eq!(allocated(600.0), 200.0);
+        assert_eq!(allocated(300.0), 150.0);
+        assert_eq!(allocated(600.0), 200.0);
+    }
+
+    #[test]
     fn a_fill_grid_uses_the_center_between_two_docks() {
-        let (room, shift) = grid_room(content(940.0, 600.0), 300.0, 190.0);
+        let (room, shift) = grid_room(content(940.0, 600.0), sides(300.0, 190.0));
         assert_eq!(shift, px(300.0));
         assert_eq!(room, content(450.0, 600.0));
         assert_eq!(grid_size(room, px(8.0), px(16.0), 1.0).unwrap().cols(), 56);

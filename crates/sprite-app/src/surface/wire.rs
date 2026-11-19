@@ -191,7 +191,7 @@ pub(crate) fn capabilities(eligible: bool) -> Value {
     json!({
         "type": "capabilities",
         "version": VERSION,
-        "features": ["owned-dock-v1", "virtual-list-v1", "virtual-list-rows-v2", "virtual-list-patch-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1"],
+        "features": ["owned-dock-v1", "virtual-list-v1", "virtual-list-rows-v2", "virtual-list-patch-v1", "svg-assets-v1", "dock-resize-v1", "grid-tabs-v1", "grid-minimap-v1", "grid-minimap-ack-v1", "grid-footer-v1", "grid-follow-v1", "grid-markdown-v1", "dock-bottom-v1"],
         "limits": {
             "message_bytes": MAX_MESSAGE_BYTES,
             "list_rows": 100_000,
@@ -230,7 +230,7 @@ fn parse_open(message: &Value, window: &str) -> Result<(PaneId, Open), Refusal> 
     let side = match message.get("side").and_then(Value::as_str) {
         None => Side::Left,
         Some(name) => Side::parse(name)
-            .ok_or_else(|| Refusal::Malformed("side is left or right".to_owned()))?,
+            .ok_or_else(|| Refusal::Malformed("side is left, right, or bottom".to_owned()))?,
     };
     let size = match message.get("size") {
         None => DockSize::default(),
@@ -391,8 +391,14 @@ pub fn event_list_scroll(revision: u64, top: &str, offset: f32, visible_rows: u3
     json!({ "type": "list_scroll", "revision": revision, "top": top, "offset": offset, "visible_rows": visible_rows }).to_string()
 }
 
-pub fn event_dock_size(width: u32) -> String {
-    json!({ "type": "dock_size", "width": width }).to_string()
+/// A dragged dock's new size, named for the axis it measures: a side dock's
+/// `width`, a bottom dock's `height`.
+pub fn event_dock_size(side: Side, pixels: u32) -> String {
+    match side {
+        Side::Left | Side::Right => json!({ "type": "dock_size", "width": pixels }),
+        Side::Bottom => json!({ "type": "dock_size", "height": pixels }),
+    }
+    .to_string()
 }
 
 pub fn event_registered() -> String {
@@ -659,12 +665,73 @@ mod tests {
             event_list_click(1, "r2", 1, "left", ""),
             event_list_action(1, "root-toggle"),
             event_list_scroll(1, "r2", 3.0, 24),
-            event_dock_size(300),
+            event_dock_size(Side::Left, 300),
+            event_dock_size(Side::Bottom, 120),
         ];
         assert_eq!(emitted.len(), events.len());
         for (actual, expected) in emitted.iter().zip(events) {
             assert_eq!(&serde_json::from_str::<Value>(actual).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn a_bottom_dock_opens_with_its_height_and_the_same_ownership_rules() {
+        let mut message = open_message(3);
+        message["side"] = json!("bottom");
+        message["size"] = json!(120);
+        assert_eq!(
+            parse_open(&message, WINDOW).unwrap().1.placement,
+            Placement::Dock {
+                side: Side::Bottom,
+                size: DockSize::try_from(120.0).unwrap(),
+                ownership: Ownership::Unowned,
+            }
+        );
+        message["owner_pid"] = json!(41);
+        message["return_target"] = json!("terminal");
+        message["resizable"] = json!(true);
+        assert_eq!(
+            parse_open(&message, WINDOW).unwrap().1.placement,
+            Placement::Dock {
+                side: Side::Bottom,
+                size: DockSize::try_from(120.0).unwrap(),
+                ownership: Ownership::Owned {
+                    pid: 41,
+                    return_target: ReturnTarget::Terminal,
+                },
+            }
+        );
+        // The height is held to the bounds a width is.
+        message["size"] = json!(63);
+        assert!(parse_open(&message, WINDOW).is_err());
+        let mut top = open_message(3);
+        top["side"] = json!("top");
+        assert_eq!(
+            parse_open(&top, WINDOW).unwrap_err(),
+            Refusal::Malformed("side is left, right, or bottom".to_owned())
+        );
+        assert_eq!(
+            crate::cli::parse_arguments(["surface", "open", "--dock", "bottom", "--size", "120"])
+                .ok(),
+            Some(crate::cli::Invocation::SurfaceOpen(
+                crate::cli::SurfaceOpenArgs {
+                    position: Position::Dock,
+                    side: Side::Bottom,
+                    size: 120,
+                    focus: true,
+                }
+            ))
+        );
+        assert!(
+            capabilities(true)["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|feature| feature == "dock-bottom-v1")
+        );
+        // A grid's `opened` lists what a grid can do, and a dock side is not
+        // one of those things.
+        assert!(!event_opened(SurfaceId(1)).contains("dock-bottom-v1"));
     }
 
     #[test]

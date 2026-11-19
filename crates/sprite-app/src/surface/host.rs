@@ -1,5 +1,6 @@
 //! Where Surfaces sit in a pane, and how many fit: at most one fill, one dock
-//! per side, and any number of overlays, the last opened on top.
+//! per side (left, right and bottom), and any number of overlays, the last
+//! opened on top.
 //!
 //! Generic over what a Surface is, so the bookkeeping is tested with plain
 //! values while the view stores its own hosted type.
@@ -12,6 +13,7 @@ pub(crate) struct SurfaceHost<S> {
     pub fill: Option<S>,
     pub left: Option<S>,
     pub right: Option<S>,
+    pub bottom: Option<S>,
     pub overlays: Vec<S>,
 }
 
@@ -21,6 +23,7 @@ impl<S> Default for SurfaceHost<S> {
             fill: None,
             left: None,
             right: None,
+            bottom: None,
             overlays: Vec::new(),
         }
     }
@@ -39,6 +42,7 @@ impl<S> SurfaceHost<S> {
             Position::Dock => match side {
                 Side::Left => &mut self.left,
                 Side::Right => &mut self.right,
+                Side::Bottom => &mut self.bottom,
             },
         };
         if slot.is_some() {
@@ -59,6 +63,9 @@ impl<S> SurfaceHost<S> {
         if self.right.as_ref().is_some_and(&matches) {
             return self.right.take().map(|surface| (surface, Position::Dock));
         }
+        if self.bottom.as_ref().is_some_and(&matches) {
+            return self.bottom.take().map(|surface| (surface, Position::Dock));
+        }
         let index = self.overlays.iter().position(matches)?;
         Some((self.overlays.remove(index), Position::Overlay))
     }
@@ -67,13 +74,14 @@ impl<S> SurfaceHost<S> {
         self.iter_mut().find(|surface| matches(surface))
     }
 
-    /// Fill, left dock, right dock, then overlays in opening order — the
-    /// order focus cycles through them.
+    /// Fill, left dock, right dock, bottom dock, then overlays in opening
+    /// order — the order focus cycles through them.
     pub fn iter(&self) -> impl Iterator<Item = &S> {
         self.fill
             .iter()
             .chain(self.left.iter())
             .chain(self.right.iter())
+            .chain(self.bottom.iter())
             .chain(self.overlays.iter())
     }
 
@@ -82,6 +90,7 @@ impl<S> SurfaceHost<S> {
             .iter_mut()
             .chain(self.left.iter_mut())
             .chain(self.right.iter_mut())
+            .chain(self.bottom.iter_mut())
             .chain(self.overlays.iter_mut())
     }
 
@@ -95,6 +104,11 @@ impl<S> SurfaceHost<S> {
             self.left.as_ref().map(&width).unwrap_or(0.0),
             self.right.as_ref().map(&width).unwrap_or(0.0),
         )
+    }
+
+    /// The strip the bottom dock takes, as `height` measures it.
+    pub fn dock_height(&self, height: impl Fn(&S) -> f32) -> f32 {
+        self.bottom.as_ref().map(height).unwrap_or(0.0)
     }
 }
 
@@ -170,6 +184,49 @@ mod tests {
         assert_eq!(
             host.get_mut(|(name, _)| *name == "r").map(|(_, w)| *w),
             Some(100.0)
+        );
+    }
+
+    #[test]
+    fn the_bottom_dock_is_a_third_side_with_its_own_slot_and_height() {
+        let mut host: SurfaceHost<(&str, f32)> = SurfaceHost::default();
+        host.place(Position::Dock, Side::Left, ("l", 240.0))
+            .expect("place");
+        host.place(Position::Overlay, Side::Left, ("o", 999.0))
+            .expect("place");
+        assert_eq!(host.dock_height(|(_, size)| *size), 0.0);
+        assert_eq!(
+            host.place(Position::Dock, Side::Bottom, ("b", 120.0)),
+            Ok(())
+        );
+        assert_eq!(
+            host.place(Position::Dock, Side::Bottom, ("again", 80.0)),
+            Err(Refusal::PositionOccupied)
+        );
+        host.place(Position::Dock, Side::Right, ("r", 100.0))
+            .expect("place");
+        host.place(Position::Fill, Side::Left, ("f", 0.0))
+            .expect("place");
+        // A bottom dock's size is a height: it never counts as a width.
+        assert_eq!(host.dock_widths(|(_, size)| *size), (240.0, 100.0));
+        assert_eq!(host.dock_height(|(_, size)| *size), 120.0);
+        // Focus reaches it after the side docks and before the overlays.
+        assert_eq!(
+            host.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            vec!["f", "l", "r", "b", "o"]
+        );
+        assert_eq!(
+            host.iter_mut().map(|(name, _)| *name).collect::<Vec<_>>(),
+            vec!["f", "l", "r", "b", "o"]
+        );
+        assert_eq!(
+            host.take(|(name, _)| *name == "b"),
+            Some((("b", 120.0), Position::Dock))
+        );
+        assert_eq!(host.dock_height(|(_, size)| *size), 0.0);
+        assert_eq!(
+            host.place(Position::Dock, Side::Bottom, ("b2", 64.0)),
+            Ok(())
         );
     }
 }
