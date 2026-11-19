@@ -98,17 +98,21 @@ impl<S> SurfaceHost<S> {
         self.iter().next().is_none()
     }
 
-    /// The strips the docks take, left and right, as `width` measures them.
-    pub fn dock_widths(&self, width: impl Fn(&S) -> f32) -> (f32, f32) {
-        (
-            self.left.as_ref().map(&width).unwrap_or(0.0),
-            self.right.as_ref().map(&width).unwrap_or(0.0),
-        )
+    /// The dock on `side`, if one is open there.
+    pub fn dock(&self, side: Side) -> Option<&S> {
+        match side {
+            Side::Left => self.left.as_ref(),
+            Side::Right => self.right.as_ref(),
+            Side::Bottom => self.bottom.as_ref(),
+        }
     }
 
-    /// The strip the bottom dock takes, as `height` measures it.
-    pub fn dock_height(&self, height: impl Fn(&S) -> f32) -> f32 {
-        self.bottom.as_ref().map(height).unwrap_or(0.0)
+    pub fn dock_mut(&mut self, side: Side) -> Option<&mut S> {
+        match side {
+            Side::Left => self.left.as_mut(),
+            Side::Right => self.right.as_mut(),
+            Side::Bottom => self.bottom.as_mut(),
+        }
     }
 }
 
@@ -171,16 +175,18 @@ mod tests {
     }
 
     #[test]
-    fn dock_widths_come_from_the_docks_alone() {
+    fn each_dock_is_found_by_its_side_alone() {
         let mut host: SurfaceHost<(&str, f32)> = SurfaceHost::default();
         host.place(Position::Dock, Side::Left, ("l", 240.0))
             .expect("place");
         host.place(Position::Overlay, Side::Left, ("o", 999.0))
             .expect("place");
-        assert_eq!(host.dock_widths(|(_, width)| *width), (240.0, 0.0));
+        assert_eq!(host.dock(Side::Left), Some(&("l", 240.0)));
+        assert_eq!(host.dock(Side::Right), None);
         host.place(Position::Dock, Side::Right, ("r", 100.0))
             .expect("place");
-        assert_eq!(host.dock_widths(|(_, width)| *width), (240.0, 100.0));
+        assert_eq!(host.dock(Side::Right), Some(&("r", 100.0)));
+        assert_eq!(host.dock_mut(Side::Right).map(|(name, _)| *name), Some("r"));
         assert_eq!(
             host.get_mut(|(name, _)| *name == "r").map(|(_, w)| *w),
             Some(100.0)
@@ -194,7 +200,7 @@ mod tests {
             .expect("place");
         host.place(Position::Overlay, Side::Left, ("o", 999.0))
             .expect("place");
-        assert_eq!(host.dock_height(|(_, size)| *size), 0.0);
+        assert_eq!(host.dock(Side::Bottom), None);
         assert_eq!(
             host.place(Position::Dock, Side::Bottom, ("b", 120.0)),
             Ok(())
@@ -207,9 +213,10 @@ mod tests {
             .expect("place");
         host.place(Position::Fill, Side::Left, ("f", 0.0))
             .expect("place");
-        // A bottom dock's size is a height: it never counts as a width.
-        assert_eq!(host.dock_widths(|(_, size)| *size), (240.0, 100.0));
-        assert_eq!(host.dock_height(|(_, size)| *size), 120.0);
+        // Each side keeps its own dock: the bottom one is neither side's.
+        assert_eq!(host.dock(Side::Left), Some(&("l", 240.0)));
+        assert_eq!(host.dock(Side::Right), Some(&("r", 100.0)));
+        assert_eq!(host.dock(Side::Bottom), Some(&("b", 120.0)));
         // Focus reaches it after the side docks and before the overlays.
         assert_eq!(
             host.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
@@ -223,7 +230,7 @@ mod tests {
             host.take(|(name, _)| *name == "b"),
             Some((("b", 120.0), Position::Dock))
         );
-        assert_eq!(host.dock_height(|(_, size)| *size), 0.0);
+        assert_eq!(host.dock(Side::Bottom), None);
         assert_eq!(
             host.place(Position::Dock, Side::Bottom, ("b2", 64.0)),
             Ok(())

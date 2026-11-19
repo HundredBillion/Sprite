@@ -9,6 +9,7 @@ use gpui::{Pixels, Size, Window, px};
 use sprite_term::{TerminalCommand, TerminalSize, ValidTerminalSize};
 
 use crate::grid::{content_area, grid_origin};
+use crate::surface::channel::Side;
 
 /// The strips the docks take from a pane, in pixels. The side docks keep the
 /// pane's full height; the bottom dock sits under the grid only, between them.
@@ -160,24 +161,31 @@ impl TerminalView {
         }
     }
 
-    /// The docks' strips at this pane size: what each asked for, but a side
-    /// dock never more than half the pane's width and the bottom dock never
-    /// more than half its height, so docks always leave a grid between and
-    /// above them. The limit is applied here and never stored, so a pane that
-    /// grows again gives a dock back what it asked for.
+    /// The docks' strips at this pane size: what each asked for, but never
+    /// more than `dock_limit` allows. The limit is applied here and never
+    /// stored, so a pane that grows again gives a dock back what it asked for.
     pub(super) fn dock_strips(&self, allocated: Size<Pixels>) -> DockStrips {
-        let half_width = f32::from(allocated.width) / 2.0;
-        let half_height = f32::from(allocated.height) / 2.0;
-        let (left, right) = self
-            .surfaces
-            .dock_widths(|surface| surface.size().min(half_width));
+        let strip = |side| {
+            self.surfaces.dock(side).map_or(0.0, |surface| {
+                surface.size().min(dock_limit(side, allocated))
+            })
+        };
         DockStrips {
-            left,
-            right,
-            bottom: self
-                .surfaces
-                .dock_height(|surface| surface.size().min(half_height)),
+            left: strip(Side::Left),
+            right: strip(Side::Right),
+            bottom: strip(Side::Bottom),
         }
+    }
+}
+
+/// The most a dock on `side` may take of a pane this size: half its width for
+/// a side dock and half its height for the bottom one, so docks always leave
+/// a grid between and above them. Laying a dock out and dragging its edge
+/// both stop here.
+pub(super) fn dock_limit(side: Side, allocated: Size<Pixels>) -> f32 {
+    match side {
+        Side::Left | Side::Right => f32::from(allocated.width) / 2.0,
+        Side::Bottom => f32::from(allocated.height) / 2.0,
     }
 }
 
@@ -332,11 +340,13 @@ mod tests {
 
         let mut docks = SurfaceHost::default();
         docks.place(Position::Dock, Side::Left, 300.0_f32).unwrap();
-        let allocated =
-            |pane_width: f32| docks.dock_widths(|preferred| preferred.min(pane_width / 2.0));
-        assert_eq!(allocated(800.0).0, 300.0);
-        assert_eq!(allocated(400.0).0, 200.0);
-        assert_eq!(allocated(800.0).0, 300.0);
+        let allocated = |pane_width: f32| {
+            let limit = dock_limit(Side::Left, content(pane_width, 600.0));
+            docks.dock(Side::Left).map(|preferred| preferred.min(limit))
+        };
+        assert_eq!(allocated(800.0), Some(300.0));
+        assert_eq!(allocated(400.0), Some(200.0));
+        assert_eq!(allocated(800.0), Some(300.0));
     }
 
     #[test]
@@ -380,11 +390,15 @@ mod tests {
         docks
             .place(Position::Dock, Side::Bottom, 200.0_f32)
             .unwrap();
-        let allocated =
-            |pane_height: f32| docks.dock_height(|preferred| preferred.min(pane_height / 2.0));
-        assert_eq!(allocated(600.0), 200.0);
-        assert_eq!(allocated(300.0), 150.0);
-        assert_eq!(allocated(600.0), 200.0);
+        let allocated = |pane_height: f32| {
+            let limit = dock_limit(Side::Bottom, content(800.0, pane_height));
+            docks
+                .dock(Side::Bottom)
+                .map(|preferred| preferred.min(limit))
+        };
+        assert_eq!(allocated(600.0), Some(200.0));
+        assert_eq!(allocated(300.0), Some(150.0));
+        assert_eq!(allocated(600.0), Some(200.0));
     }
 
     #[test]
