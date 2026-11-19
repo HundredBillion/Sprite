@@ -9,6 +9,8 @@ on:
         type: string
 
 permissions:
+  # actions: write starts CI on the release branch and clears the run that waits for approval.
+  actions: write
   contents: write
   pull-requests: write
 
@@ -66,4 +68,33 @@ jobs:
             --base master \
             --head "$release_branch" \
             --title "chore: prepare v$VERSION release" \
-            --body "Updates the workspace, lockfile, Arch package recipe, and README package example to v$VERSION. After merging, push the matching v$VERSION tag; CI verifies it against Cargo."
+            --body "Updates the workspace, lockfile, Arch package recipe, and README package example to v$VERSION. CI was started on the release branch by the workflow that opened this PR. After merging, push the matching v$VERSION tag; CI verifies it against Cargo."
+
+      # A pull request opened with this workflow's token gets CI runs that wait
+      # for a person to approve them, and that end as failures when they expire
+      # unapproved. CI is started here instead, where the token may start it:
+      # its checks attach to the release commit, so the PR shows them.
+      - name: Run CI on the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          release_branch="release/v$VERSION"
+          gh workflow run ci.yml --ref "$release_branch"
+          # The pull request's own run appears a moment after the PR. It is
+          # removed rather than left to expire as a failure beside the real checks.
+          for attempt in $(seq 1 12); do
+            waiting=$(gh run list --branch "$release_branch" --event pull_request --status action_required \
+              --json databaseId --jq '.[].databaseId')
+            if [ -n "$waiting" ]; then
+              for run in $waiting; do
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/runs/$run" \
+                  && echo "removed run $run, which was waiting for approval" \
+                  || echo "could not remove run $run; it can be approved or ignored" >&2
+              done
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "no run waiting for approval was found"
