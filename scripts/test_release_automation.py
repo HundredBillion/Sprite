@@ -30,6 +30,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
 
 
+    def test_release_pull_request_gets_ci_without_waiting_for_approval(self):
+        workflow = RELEASE_WORKFLOW.read_text()
+
+        # A PR opened with the workflow's token gets CI runs that wait for
+        # approval; the workflow starts CI itself, which needs actions: write.
+        self.assertIn("actions: write", workflow)
+        self.assertIn('gh workflow run ci.yml --ref "$release_branch"', workflow)
+
+
 class PrepareReleaseTests(unittest.TestCase):
     def test_updates_workspace_package_recipe_and_readme(self):
         with tempfile.TemporaryDirectory() as temp_dir:
