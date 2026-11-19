@@ -44,7 +44,8 @@ pub struct ConfigPrintArgs {
 pub struct SurfaceOpenArgs {
     pub position: SurfacePosition,
     pub side: SurfaceSide,
-    /// A dock's width in logical pixels.
+    /// A dock's size in logical pixels: a side dock's width, a bottom dock's
+    /// height.
     pub size: u32,
     pub focus: bool,
 }
@@ -106,9 +107,10 @@ commands ask the window they run in, or the only one running, or --window.
 
 Options for `surface open` (one position is required):
     --fill                       in place of the grid
-    --dock left|right            in a strip beside the grid
+    --dock left|right|bottom     in a strip beside or under the grid
     --overlay                    floating over the grid
-    --size <px>                  a dock's width (64-4096, default 240)
+    --size <px>                  a dock's width, or a bottom dock's height
+                                 (64-4096, default 240)
     --no-focus                   open without taking the keyboard
 
 For `surface open`, standard input carries the description as JSON, then any
@@ -303,9 +305,12 @@ fn surface_open(
                 let name = arguments
                     .next()
                     .and_then(|value| text(&value))
-                    .ok_or_else(|| UsageError("--dock needs a side: left or right".to_owned()))?;
-                side = SurfaceSide::parse(&name)
-                    .ok_or_else(|| UsageError(format!("--dock takes left or right, not {name}")))?;
+                    .ok_or_else(|| {
+                        UsageError("--dock needs a side: left, right, or bottom".to_owned())
+                    })?;
+                side = SurfaceSide::parse(&name).ok_or_else(|| {
+                    UsageError(format!("--dock takes left, right, or bottom, not {name}"))
+                })?;
             }
             Some("--size") => {
                 let pixels = number(&mut arguments, "--size")?;
@@ -324,7 +329,8 @@ fn surface_open(
     }
     let position = position.ok_or_else(|| {
         UsageError(
-            "surface open needs a position: --fill, --dock left|right, or --overlay".to_owned(),
+            "surface open needs a position: --fill, --dock left|right|bottom, or --overlay"
+                .to_owned(),
         )
     })?;
     Ok(SurfaceOpenArgs {
@@ -589,6 +595,15 @@ mod tests {
             })
         );
         assert_eq!(
+            parsed(&["surface", "open", "--dock", "bottom", "--size", "96"]),
+            Invocation::SurfaceOpen(SurfaceOpenArgs {
+                position: SurfacePosition::Dock,
+                side: SurfaceSide::Bottom,
+                size: 96,
+                focus: true,
+            })
+        );
+        assert_eq!(
             parsed(&["surface", "open", "--fill"]),
             Invocation::SurfaceOpen(SurfaceOpenArgs {
                 position: SurfacePosition::Fill,
@@ -612,8 +627,8 @@ mod tests {
     fn a_surface_open_needs_exactly_one_position_and_a_sane_size() {
         assert!(rejected(&["surface", "open"]).contains("position"));
         assert!(rejected(&["surface", "open", "--fill", "--overlay"]).contains("one position"));
-        assert!(rejected(&["surface", "open", "--dock"]).contains("left or right"));
-        assert!(rejected(&["surface", "open", "--dock", "top"]).contains("left or right"));
+        assert!(rejected(&["surface", "open", "--dock"]).contains("left, right, or bottom"));
+        assert!(rejected(&["surface", "open", "--dock", "top"]).contains("left, right, or bottom"));
         assert!(rejected(&["surface", "open", "--fill", "--size", "10"]).contains("64"));
         assert!(rejected(&["surface", "open", "--fill", "--sparkle"]).contains("unknown option"));
         assert!(rejected(&["surface", "focus", "now"]).contains("Surface id"));

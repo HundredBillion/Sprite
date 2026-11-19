@@ -670,14 +670,22 @@ impl GridSurface {
         self.rows
     }
 
+    /// Whether the footer was sent for this grid's size and a footer
+    /// `columns` wide. One that was not is from before a resize, and the
+    /// client has a new one on the way.
+    pub fn footer_is_current(&self, columns: u16) -> bool {
+        self.footer.as_ref().is_some_and(|footer| {
+            footer.grid_cols == self.cols
+                && footer.grid_rows == self.rows
+                && footer.grid.cols() == columns
+        })
+    }
+
     pub fn footer_row(&self, columns: u16) -> Option<u16> {
-        let footer = self.footer.as_ref()?;
-        if footer.grid_cols != self.cols
-            || footer.grid_rows != self.rows
-            || footer.grid.cols() != columns
-        {
+        if !self.footer_is_current(columns) {
             return None;
         }
+        let footer = self.footer.as_ref()?;
         self.cells[usize::from(footer.row)]
             .iter()
             .flat_map(|cell| self.texts.text(cell.text).as_str().bytes())
@@ -1230,6 +1238,8 @@ mod tests {
         assert_eq!(grid.cols(), 80);
         assert_eq!(grid.footer_row(100), Some(23));
         assert_eq!(grid.footer_row(120), None, "stale width is hidden");
+        assert!(grid.footer_is_current(100));
+        assert!(!grid.footer_is_current(120));
         let footer = grid.footer.as_mut().unwrap();
         assert_eq!(footer.row, 23);
         assert_eq!(footer.grid.cols(), 100);

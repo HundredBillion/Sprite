@@ -9,8 +9,8 @@ use super::*;
 use gpui::prelude::*;
 
 use gpui::{
-    AnyElement, Context, CursorStyle, ElementInputHandler, Entity, FocusHandle, KeyDownEvent,
-    KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    AnyElement, Bounds, Context, CursorStyle, ElementInputHandler, Entity, FocusHandle,
+    KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     ScrollWheelEvent, SharedString, Size, Window, canvas, div, px, rgb,
 };
 
@@ -319,6 +319,12 @@ pub(super) struct HostedSurface {
     /// become whole cells exactly as they do for the terminal.
     wheel_rows: crate::grid::ScrollAccumulator,
     wheel_cols: crate::grid::ScrollAccumulator,
+    /// For a grid fill: whether its footer stands on its last row, so a
+    /// bottom dock trades places with it. Kept between frames because it can
+    /// only be read from a footer sent for the grid's current size, and after
+    /// a resize the client's new footer arrives a little later than the
+    /// resize itself.
+    footer_under_dock: bool,
 }
 
 enum HostedPlacement {
@@ -326,7 +332,10 @@ enum HostedPlacement {
         registered_owner: Option<(u32, i32)>,
     },
     Dock {
-        width: f32,
+        side: Side,
+        /// What the program asked for, or a drag left: a side dock's width,
+        /// the bottom dock's height.
+        size: f32,
         owner: Option<Owner>,
     },
     Overlay,
@@ -486,7 +495,7 @@ impl HostedSurface {
 
     pub(super) fn size(&self) -> f32 {
         match self.placement {
-            HostedPlacement::Dock { width, .. } => width,
+            HostedPlacement::Dock { size, .. } => size,
             HostedPlacement::Fill { .. } | HostedPlacement::Overlay => 0.0,
         }
     }
@@ -511,31 +520,101 @@ impl HostedSurface {
 pub(super) struct DockDrag {
     id: SurfaceId,
     side: Side,
-    start_x: f32,
-    start_width: f32,
+    /// Where the pointer was when the drag began, along the axis the dock
+    /// resizes on: x for a side dock, y for the bottom dock.
+    start: f32,
+    start_size: f32,
 }
 
-fn dragged_width(start: f32, delta: f32, left: bool, limit: f32) -> f32 {
-    let wanted = start + if left { delta } else { -delta };
+/// The pointer's position along the axis a dock on `side` resizes on.
+fn drag_axis(side: Side, position: gpui::Point<Pixels>) -> f32 {
+    match side {
+        Side::Left | Side::Right => f32::from(position.x),
+        Side::Bottom => f32::from(position.y),
+    }
+}
+
+fn resize_cursor(side: Side) -> CursorStyle {
+    match side {
+        Side::Left | Side::Right => CursorStyle::ResizeLeftRight,
+        Side::Bottom => CursorStyle::ResizeUpDown,
+    }
+}
+
+/// How much of a grid Surface's box its tab strip takes. A markdown view
+/// keeps the strip's full height even with no tabs showing.
+fn grid_tab_height(grid: &GridSurface) -> f32 {
+    if grid.markdown.active().is_some() {
+        grid.tabs.visible_height().max(35.0)
+    } else {
+        grid.tabs.visible_height()
+    }
+}
+
+/// How many columns a grid's footer spans: the whole pane's width, capped as
+/// a grid's own width is.
+fn footer_columns(
+    width: Pixels,
+    height: Pixels,
+    metrics: &crate::surface::render::GridMetrics,
+) -> u16 {
+    let (cols, _) = crate::surface::render::cells_that_fit(gpui::size(width, height), metrics);
+    cols.min(crate::surface::grid::MAX_COLS)
+}
+
+/// Where `row` of a filling grid starts in a box `height` tall: under the
+/// tab strip and the slack whole rows leave, since a filling grid is drawn
+/// against the bottom of its box.
+fn grid_row_top(
+    grid: &GridSurface,
+    height: Pixels,
+    metrics: &crate::surface::render::GridMetrics,
+    row: u16,
+) -> Pixels {
+    let tab_height = grid_tab_height(grid);
+    let grid_height = (f32::from(height) - tab_height).max(0.0);
+    let slack = (grid_height - f32::from(grid.rows()) * f32::from(metrics.cells.height())).max(0.0);
+    px(tab_height + slack) + metrics.cells.height() * f32::from(row)
+}
+
+/// A dock's size after its edge moved `delta` pixels. `grows` says whether a
+/// positive delta makes it larger: true for the left dock, whose edge is on
+/// its right, and false for the right and bottom docks, whose edges move
+/// towards the pane's origin to grow.
+fn dragged_size(start: f32, delta: f32, grows: bool, limit: f32) -> f32 {
+    let wanted = start + if grows { delta } else { -delta };
     wanted.clamp(64.0_f32.min(limit), limit.clamp(0.0, 4096.0))
 }
 
 #[cfg(test)]
 mod dock_drag_tests {
-    use super::dragged_width;
+    use super::{Side, drag_axis, dragged_size};
+    use gpui::{point, px};
 
     #[test]
     fn either_edge_changes_width_in_its_own_direction() {
-        assert_eq!(dragged_width(300.0, 45.0, true, 800.0), 345.0);
-        assert_eq!(dragged_width(300.0, 45.0, false, 800.0), 255.0);
+        assert_eq!(dragged_size(300.0, 45.0, true, 800.0), 345.0);
+        assert_eq!(dragged_size(300.0, 45.0, false, 800.0), 255.0);
     }
 
     #[test]
     fn dragged_width_respects_request_and_pane_bounds() {
-        assert_eq!(dragged_width(300.0, -500.0, true, 800.0), 64.0);
-        assert_eq!(dragged_width(300.0, 5000.0, true, 800.0), 800.0);
-        assert_eq!(dragged_width(300.0, 5000.0, true, 5000.0), 4096.0);
-        assert_eq!(dragged_width(300.0, -500.0, true, 40.0), 40.0);
+        assert_eq!(dragged_size(300.0, -500.0, true, 800.0), 64.0);
+        assert_eq!(dragged_size(300.0, 5000.0, true, 800.0), 800.0);
+        assert_eq!(dragged_size(300.0, 5000.0, true, 5000.0), 4096.0);
+        assert_eq!(dragged_size(300.0, -500.0, true, 40.0), 40.0);
+    }
+
+    #[test]
+    fn the_bottom_dock_is_dragged_along_y_and_grows_upwards() {
+        let position = point(px(10.0), px(400.0));
+        assert_eq!(drag_axis(Side::Left, position), 10.0);
+        assert_eq!(drag_axis(Side::Right, position), 10.0);
+        assert_eq!(drag_axis(Side::Bottom, position), 400.0);
+        // Its top edge moved 45 pixels up the pane.
+        assert_eq!(dragged_size(120.0, -45.0, false, 300.0), 165.0);
+        assert_eq!(dragged_size(120.0, 45.0, false, 300.0), 75.0);
+        assert_eq!(dragged_size(120.0, -500.0, false, 300.0), 300.0);
     }
 }
 
@@ -588,6 +667,7 @@ pub(super) struct SurfaceLayers {
     pub(super) fill: Option<AnyElement>,
     pub(super) left: Option<AnyElement>,
     pub(super) right: Option<AnyElement>,
+    pub(super) bottom: Option<AnyElement>,
     pub(super) footer: Option<AnyElement>,
     pub(super) overlays: Vec<AnyElement>,
     pub(super) dock_edges: Vec<AnyElement>,
@@ -690,29 +770,40 @@ impl TerminalView {
         }
     }
 
-    fn resize_dock(&mut self, id: SurfaceId, width: f32, cx: &mut Context<Self>) {
+    fn resize_dock(&mut self, id: SurfaceId, size: f32, cx: &mut Context<Self>) {
         let Some(surface) = self
             .surfaces
             .get_mut(|surface| surface.id == id && surface.resizable())
         else {
             return;
         };
-        if surface.size() == width {
+        if surface.size() == size {
             return;
         }
         let old_reported = surface.size().round() as u32;
-        if let HostedPlacement::Dock { width: current, .. } = &mut surface.placement {
-            *current = width;
-        }
-        let reported = width.round() as u32;
+        let HostedPlacement::Dock {
+            side,
+            size: current,
+            ..
+        } = &mut surface.placement
+        else {
+            return;
+        };
+        *current = size;
+        let reported = size.round() as u32;
         if reported != old_reported {
-            surface.connection.send(&event_dock_size(reported));
+            surface.connection.send(&event_dock_size(*side, reported));
         }
         self.size = None;
         cx.notify();
     }
 
-    fn move_dock_drag(&mut self, x: f32, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_dock_drag(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(drag) = self.dock_drag else {
             return;
         };
@@ -720,36 +811,59 @@ impl TerminalView {
             return;
         }
         let allocated = self.allocated.unwrap_or_else(|| window.viewport_size());
-        let limit = f32::from(allocated.width) / 2.0;
-        let width = dragged_width(
-            drag.start_width,
-            x - drag.start_x,
+        let size = dragged_size(
+            drag.start_size,
+            drag_axis(drag.side, position) - drag.start,
             drag.side == Side::Left,
-            limit,
+            super::geometry::dock_limit(drag.side, allocated),
         );
-        self.resize_dock(drag.id, width, cx);
+        self.resize_dock(drag.id, size, cx);
     }
 
+    /// The four-pixel handle on a resizable dock's grid-facing edge. `dock`
+    /// is the box the dock is drawn in this frame, so the handle is always
+    /// on the edge that can be seen, and its size along the axis it resizes
+    /// on is where a drag starts from.
     fn dock_edge(
         &self,
         id: SurfaceId,
         side: Side,
-        width: f32,
-        allocated: Size<Pixels>,
+        dock: Bounds<Pixels>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let x = if side == Side::Left {
-            width
-        } else {
-            f32::from(allocated.width) - width - 4.0
+        const EDGE: f32 = 4.0;
+        let (handle, size) = match side {
+            Side::Left => (
+                div()
+                    .left(dock.right())
+                    .top(dock.top())
+                    .w(px(EDGE))
+                    .h(dock.size.height),
+                dock.size.width,
+            ),
+            Side::Right => (
+                div()
+                    .left(dock.left() - px(EDGE))
+                    .top(dock.top())
+                    .w(px(EDGE))
+                    .h(dock.size.height),
+                dock.size.width,
+            ),
+            // Along the bottom dock's top edge, and only as wide as it is.
+            Side::Bottom => (
+                div()
+                    .left(dock.left())
+                    .top(px((f32::from(dock.top()) - EDGE).max(0.0)))
+                    .w(dock.size.width)
+                    .h(px(EDGE)),
+                dock.size.height,
+            ),
         };
-        div()
+        let size = f32::from(size);
+        handle
+            .debug_selector(|| format!("dock-edge-{}-{}", side.name(), id.0))
             .absolute()
-            .left(px(x))
-            .top(px(0.0))
-            .w(px(4.0))
-            .h_full()
-            .cursor(CursorStyle::ResizeLeftRight)
+            .cursor(resize_cursor(side))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
@@ -760,8 +874,8 @@ impl TerminalView {
                     view.dock_drag = Some(DockDrag {
                         id,
                         side,
-                        start_x: f32::from(event.position.x),
-                        start_width: width,
+                        start: drag_axis(side, event.position),
+                        start_size: size,
                     });
                     cx.notify();
                     cx.stop_propagation();
@@ -882,9 +996,12 @@ impl TerminalView {
                     .transpose()?,
             },
             Placement::Dock {
-                size, ownership, ..
+                side,
+                size,
+                ownership,
             } => HostedPlacement::Dock {
-                width: size.pixels(),
+                side,
+                size: size.pixels(),
                 owner: match ownership {
                     Ownership::Unowned => None,
                     Ownership::Owned { pid, return_target } => Some(Owner {
@@ -931,6 +1048,7 @@ impl TerminalView {
             definition_pointer: None,
             wheel_rows: crate::grid::ScrollAccumulator::default(),
             wheel_cols: crate::grid::ScrollAccumulator::default(),
+            footer_under_dock: false,
         };
         self.surfaces
             .place(open.placement.position(), open.placement.side(), hosted)?;
@@ -1567,33 +1685,84 @@ impl TerminalView {
         preedit: Option<&str>,
         cx: &mut Context<Self>,
     ) -> SurfaceLayers {
-        let (left_width, right_width) = self.dock_widths(allocated);
-        let mut dock_edges = Vec::new();
-        if let Some(surface) = self
-            .surfaces
-            .left
-            .as_ref()
-            .filter(|surface| surface.resizable())
-        {
-            dock_edges.push(self.dock_edge(surface.id, Side::Left, left_width, allocated, cx));
-        }
-        if let Some(surface) = self
-            .surfaces
-            .right
-            .as_ref()
-            .filter(|surface| surface.resizable())
-        {
-            dock_edges.push(self.dock_edge(surface.id, Side::Right, right_width, allocated, cx));
-        }
-        let dock_capture = self.dock_drag.map(|_| {
+        let docks = self.dock_strips(allocated);
+        // The fill's box is the grid's room exactly, so everything a fill
+        // measures from its own height — its rows, minimap, previews, cursor
+        // and the cells the mouse is over — ends above the bottom dock.
+        let (fill_size, fill_shift) = super::geometry::grid_room(allocated, docks);
+        let footer_columns = footer_columns(allocated.width, fill_size.height, metrics);
+        // A status line stays the last thing in the pane. When the fill's
+        // grid ends in a painted footer and a bottom dock is open, the two
+        // trade places: the dock is drawn over the grid row the footer
+        // stands for, and the footer below the dock. This is where the dock
+        // then starts, or `None` when nothing trades.
+        let has_bottom_dock = self.surfaces.bottom.is_some();
+        let footer_swap = self.surfaces.fill.as_mut().and_then(|surface| {
+            let Body::Grid { grid, .. } = &surface.body else {
+                return None;
+            };
+            // Decided only from a footer sent for the grid as it is now, and
+            // otherwise left as it was: between a resize and the footer that
+            // follows it the old footer fits nothing, and deciding from it
+            // would drop the dock a row for a frame or two and lift it back.
+            // Only a footer on the grid's last row trades: one further up has
+            // rows under it that the dock must not cover.
+            if grid.footer.is_none() {
+                surface.footer_under_dock = false;
+            } else if grid.footer_is_current(footer_columns) {
+                surface.footer_under_dock = grid
+                    .footer_row(footer_columns)
+                    .is_some_and(|row| row.checked_add(1) == Some(grid.rows()));
+            }
+            if !(has_bottom_dock && surface.footer_under_dock) {
+                return None;
+            }
+            let last_row = grid.rows().saturating_sub(1);
+            let row_top = grid_row_top(grid, fill_size.height, metrics, last_row);
+            // The footer ends where the pane does, and the dock ends where
+            // the footer starts, whatever is left over above.
+            let footer_top =
+                (row_top + px(docks.bottom)).min(allocated.height - metrics.cells.height());
+            Some(footer_top - px(docks.bottom))
+        });
+        // The side docks keep the pane's full height. The bottom dock sits
+        // under the grid only, between them, and where the footer was when
+        // the two trade places. Each dock's handle is drawn from this same
+        // box, so it is on the edge that can be seen.
+        let dock_bounds = |side| match side {
+            Side::Left => Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: gpui::size(px(docks.left), allocated.height),
+            },
+            Side::Right => Bounds {
+                origin: point(allocated.width - px(docks.right), px(0.0)),
+                size: gpui::size(px(docks.right), allocated.height),
+            },
+            Side::Bottom => Bounds {
+                origin: point(fill_shift, footer_swap.unwrap_or(fill_size.height)),
+                size: gpui::size(fill_size.width, px(docks.bottom)),
+            },
+        };
+        const SIDES: [Side; 3] = [Side::Left, Side::Right, Side::Bottom];
+        let dock_edges = SIDES
+            .into_iter()
+            .filter_map(|side| {
+                let surface = self
+                    .surfaces
+                    .dock(side)
+                    .filter(|surface| surface.resizable())?;
+                Some(self.dock_edge(surface.id, side, dock_bounds(side), cx))
+            })
+            .collect();
+        let dock_capture = self.dock_drag.map(|drag| {
             div()
                 .absolute()
                 .inset_0()
                 .occlude()
-                .cursor(CursorStyle::ResizeLeftRight)
+                .cursor(resize_cursor(drag.side))
                 .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
                     if event.dragging() {
-                        view.move_dock_drag(f32::from(event.position.x), window, cx);
+                        view.move_dock_drag(event.position, window, cx);
                     } else if view.dock_drag.take().is_some() {
                         cx.notify();
                     }
@@ -1617,15 +1786,13 @@ impl TerminalView {
                 )
                 .into_any_element()
         });
-        let (fill_size, fill_shift) =
-            super::geometry::grid_room(allocated, left_width, right_width);
         let fill = self.surfaces.fill.as_mut().map(|surface| {
             div()
                 .absolute()
                 .top(px(0.0))
                 .left(fill_shift)
                 .w(fill_size.width)
-                .h_full()
+                .h(fill_size.height)
                 .child(Self::surface_element(
                     surface,
                     fill_size,
@@ -1640,55 +1807,31 @@ impl TerminalView {
                 ))
                 .into_any_element()
         });
-        let left = self.surfaces.left.as_mut().map(|surface| {
-            let strip = Size {
-                width: px(left_width),
-                height: allocated.height,
-            };
-            div()
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .w(strip.width)
-                .h_full()
-                .child(Self::surface_element(
-                    surface,
-                    strip,
-                    strip.width,
-                    registry,
-                    metrics,
-                    highlights,
-                    focused,
-                    preedit,
-                    cx,
-                    true,
-                ))
-                .into_any_element()
-        });
-        let right = self.surfaces.right.as_mut().map(|surface| {
-            let strip = Size {
-                width: px(right_width),
-                height: allocated.height,
-            };
-            div()
-                .absolute()
-                .top(px(0.0))
-                .right(px(0.0))
-                .w(strip.width)
-                .h_full()
-                .child(Self::surface_element(
-                    surface,
-                    strip,
-                    strip.width,
-                    registry,
-                    metrics,
-                    highlights,
-                    focused,
-                    preedit,
-                    cx,
-                    true,
-                ))
-                .into_any_element()
+        let [left, right, bottom] = SIDES.map(|side| {
+            let bounds = dock_bounds(side);
+            self.surfaces.dock_mut(side).map(|surface| {
+                let id = surface.id;
+                div()
+                    .debug_selector(|| format!("dock-{}-{}", side.name(), id.0))
+                    .absolute()
+                    .left(bounds.origin.x)
+                    .top(bounds.origin.y)
+                    .w(bounds.size.width)
+                    .h(bounds.size.height)
+                    .child(Self::surface_element(
+                        surface,
+                        bounds.size,
+                        bounds.size.width,
+                        registry,
+                        metrics,
+                        highlights,
+                        focused,
+                        preedit,
+                        cx,
+                        true,
+                    ))
+                    .into_any_element()
+            })
         });
         // Each overlay is centred in its own full-pane layer, so later ones
         // paint over earlier ones instead of sitting beside them.
@@ -1723,19 +1866,10 @@ impl TerminalView {
             let Body::Grid { grid, shapes, .. } = &mut surface.body else {
                 return None;
             };
-            let (footer_cols, _) = crate::surface::render::cells_that_fit(
-                gpui::size(allocated.width, allocated.height),
-                metrics,
-            );
-            let footer_row = grid.footer_row(footer_cols.min(crate::surface::grid::MAX_COLS))?;
-            let tab_height = if grid.markdown.active().is_some() {
-                grid.tabs.visible_height().max(35.0)
-            } else {
-                grid.tabs.visible_height()
-            };
-            let grid_height = (f32::from(allocated.height) - tab_height).max(0.0);
-            let slack =
-                (grid_height - f32::from(grid.rows()) * f32::from(metrics.cells.height())).max(0.0);
+            // The footer covers a row of the fill's grid, so it is placed
+            // from the fill's height, not the pane's.
+            let footer_row = grid.footer_row(footer_columns)?;
+            let row_top = grid_row_top(grid, fill_size.height, metrics, footer_row);
             let footer = grid
                 .footer
                 .as_mut()
@@ -1769,7 +1903,11 @@ impl TerminalView {
                     .debug_selector(|| format!("grid-footer-{}", id.0))
                     .absolute()
                     .left_0()
-                    .top(px(tab_height + slack) + metrics.cells.height() * f32::from(footer.row))
+                    .top(match footer_swap {
+                        // Under the bottom dock, which took this row's place.
+                        Some(dock_top) => dock_top + px(docks.bottom),
+                        None => row_top,
+                    })
                     .w(allocated.width)
                     .h(metrics.cells.height())
                     .bg(rgb(crate::grid_paint::pack(background)))
@@ -1787,7 +1925,7 @@ impl TerminalView {
                             view.report_footer_mouse(
                                 id,
                                 event.position,
-                                left_width,
+                                docks.left,
                                 "press",
                                 &event.modifiers,
                             );
@@ -1800,7 +1938,7 @@ impl TerminalView {
                             view.report_footer_mouse(
                                 id,
                                 event.position,
-                                left_width,
+                                docks.left,
                                 "release",
                                 &event.modifiers,
                             );
@@ -1814,6 +1952,7 @@ impl TerminalView {
             fill,
             left,
             right,
+            bottom,
             footer,
             overlays,
             dock_edges,
@@ -1822,8 +1961,8 @@ impl TerminalView {
     }
 
     /// One Surface as an element: its drawing, wrapped in the box that owns
-    /// its keyboard and mouse. `fills` is true for the fill position and both
-    /// docks, which are meant to fill the space they are given; an overlay
+    /// its keyboard and mouse. `fills` is true for the fill position and every
+    /// dock, which are meant to fill the space they are given; an overlay
     /// passes `false` so its wrapper is exactly its body's size, rather than
     /// filling — and so capturing every click and scroll over — the whole
     /// centring layer around it.
@@ -1844,13 +1983,7 @@ impl TerminalView {
         fills: bool,
     ) -> AnyElement {
         let tab_height = match &surface.body {
-            Body::Grid { grid, .. } => {
-                if grid.markdown.active().is_some() {
-                    grid.tabs.visible_height().max(35.0)
-                } else {
-                    grid.tabs.visible_height()
-                }
-            }
+            Body::Grid { grid, .. } => grid_tab_height(grid),
             Body::Elements(_) | Body::List { .. } => 0.0,
         };
         let minimap_width = match &surface.body {
@@ -1878,11 +2011,7 @@ impl TerminalView {
             f32::from(grid_size.width).round() as u32,
             f32::from(grid_size.height).round() as u32,
         );
-        let (footer_cols, _) = crate::surface::render::cells_that_fit(
-            gpui::size(footer_width, grid_size.height),
-            metrics,
-        );
-        let footer_cols = footer_cols.min(crate::surface::grid::MAX_COLS);
+        let footer_cols = footer_columns(footer_width, grid_size.height, metrics);
         let cells = matches!(surface.body, Body::Grid { .. })
             .then(|| crate::surface::render::cells_that_fit(grid_size, metrics));
         let told = (told.0, told.1, cells, cells.map(|_| footer_cols));
@@ -2418,6 +2547,7 @@ impl TerminalView {
 
 #[cfg(test)]
 mod tests {
+    use super::super::geometry::DockStrips;
     use super::*;
 
     fn group(pid: u32) -> Option<i32> {
@@ -2945,7 +3075,7 @@ mod tests {
                     .focus
                     .is_focused(window)
             );
-            assert!(host.dock_widths(allocated).0 > 0.0);
+            assert!(host.dock_strips(allocated).left > 0.0);
         });
         let line = "x".repeat(1023);
         assert!(!connection.send_batch(std::iter::repeat_n(line.as_str(), 8192)));
@@ -2962,7 +3092,7 @@ mod tests {
                 host.focus.is_focused(window),
                 "cleanup must return focus to the terminal"
             );
-            assert_eq!(host.dock_widths(allocated), (0.0, 0.0));
+            assert_eq!(host.dock_strips(allocated), DockStrips::default());
         });
     }
 
@@ -4920,6 +5050,516 @@ mod tests {
             assert_eq!(grid.cols(), cols);
             assert!(grid.footer.is_none());
             assert_eq!(minimap.bounds().unwrap().bottom(), footer.bottom());
+        });
+    }
+
+    /// The bottom dock sits under the grid: the fill loses its height and is
+    /// told fewer rows, everything the fill places from its own height ends
+    /// above the dock, the mouse still finds the cell it is over, and closing
+    /// the dock gives the rows back.
+    #[gpui::test]
+    fn a_bottom_dock_shortens_the_fill_and_closing_it_returns_the_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(640.0), px(480.0)));
+        let id = SurfaceId(970);
+        let dock_id = SurfaceId(971);
+        let pane = crate::pane_tree::PaneId(1);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
+        for message in &fixture["valid"].as_array().unwrap()[..4] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(message).unwrap(),
+                },
+            );
+        }
+        draw_test_window(cx);
+        let last_resize = |peer: &mut Peer| {
+            let resize = events(peer)
+                .into_iter()
+                .rfind(|e| e["type"] == "resize")
+                .expect("a resize");
+            (
+                resize["cols"].as_u64().unwrap() as u16,
+                resize["rows"].as_u64().unwrap() as u16,
+                resize["footer_cols"].as_u64().unwrap() as u16,
+                resize["height"].as_u64().unwrap(),
+            )
+        };
+        let (cols, tall_rows, full_cols, tall_height) = last_resize(&mut peer);
+        assert_eq!(tall_height, 480);
+
+        let bottom_dock = |text: &str| {
+            let mut open = open_description(serde_json::json!({
+                "version":1,"root":{"kind":"box","children":[{"kind":"text","text":text}]}
+            }));
+            open.placement = Placement::Dock {
+                side: Side::Bottom,
+                size: crate::surface::DockSize::try_from(120.0).unwrap(),
+                ownership: Ownership::Unowned,
+            };
+            open
+        };
+        let (answer, mut dock_peer) = open_request(&host, cx, dock_id, bottom_dock("GRAPH"));
+        assert_eq!(answer, Ok(()));
+        let (answer, _refused) = open_request(&host, cx, SurfaceId(972), bottom_dock("TWICE"));
+        assert_eq!(answer, Err(Refusal::PositionOccupied));
+
+        // The dock was told its own box when it opened: the pane's width and
+        // the height it asked for. `open_request` already read that event.
+        host.read_with(cx, |host, _| {
+            assert_eq!(
+                host.surfaces.bottom.as_ref().unwrap().told,
+                Some((640, 120, None, None))
+            );
+        });
+        // The fill hears the usual resize: same columns, fewer rows.
+        let (short_cols, rows, short_full_cols, height) = last_resize(&mut peer);
+        assert_eq!((short_cols, short_full_cols), (cols, full_cols));
+        assert_eq!(height, 360);
+        assert!(rows < tall_rows, "{rows} rows under {tall_rows}");
+        host.read_with(cx, |host, _| {
+            assert_eq!(
+                rows,
+                (360.0 / f32::from(host.surface_metrics.height())).floor() as u16
+            );
+            // Focus cycles fill, docks, overlays; the bottom dock is a dock.
+            let order: Vec<_> = host.surfaces.iter().map(|surface| surface.id).collect();
+            assert_eq!(order, vec![id, dock_id]);
+            assert_eq!(
+                host.surfaces.bottom.as_ref().unwrap().control_info()["position"],
+                "dock"
+            );
+        });
+
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![crate::surface::grid::Op::Resize { cols, rows }],
+            },
+        );
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(&serde_json::json!({
+                    "type":"footer", "cols":full_cols, "row":rows-1,
+                    "grid_cols":cols, "grid_rows":rows,"source":" ".repeat(cols as usize),
+                    "cells":[[" ",1,full_cols]], "define":{"1":{"bg":"#303030"}}
+                }))
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        let dock = cx
+            .debug_bounds("dock-bottom-971")
+            .expect("the dock is painted");
+        assert_eq!(dock.left(), px(0.0));
+        assert_eq!(dock.size, gpui::size(px(640.0), px(120.0)));
+        let footer = cx
+            .debug_bounds("grid-footer-970")
+            .expect("footer is painted");
+        // The status line stays last in the pane: the dock is drawn over
+        // the grid row the footer stands for, and the footer under the dock.
+        assert_eq!(footer.top(), dock.bottom(), "the footer is under the dock");
+        let (origin, cell) = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let Body::Grid { minimap, .. } = &surface.body else {
+                panic!("grid")
+            };
+            let map = minimap.bounds().unwrap();
+            assert_eq!(map.bottom(), dock.top(), "the minimap ends above the dock");
+            let origin = surface.origin.unwrap();
+            let cell = gpui::size(host.surface_metrics.width(), host.surface_metrics.height());
+            assert_eq!(
+                dock.top(),
+                origin.y + cell.height * f32::from(rows - 1),
+                "the dock starts where the footer's row does"
+            );
+            (origin, cell)
+        });
+
+        // A click in the shortened grid still lands on the cell under it,
+        // down to the last row above the footer.
+        events(&mut peer);
+        for (row, col) in [(2_u16, 5_u16), (rows - 2, 7)] {
+            let position = point(
+                origin.x + cell.width * (f32::from(col) + 0.5),
+                origin.y + cell.height * (f32::from(row) + 0.5),
+            );
+            cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+            cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+            let mouse = events(&mut peer);
+            assert!(
+                mouse.iter().any(|e| e["type"] == "mouse"
+                    && e["action"] == "press"
+                    && e["row"] == row
+                    && e["col"] == col),
+                "a click at {row},{col}: {mouse:?}"
+            );
+        }
+        // A click on the dock belongs to the dock, not to the grid above it.
+        let position = point(dock.left() + px(40.0), dock.top() + px(60.0));
+        cx.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        let heard = events(&mut peer);
+        assert!(
+            !heard.iter().any(|e| e["type"] == "mouse"),
+            "the grid heard a click on the dock: {heard:?}"
+        );
+
+        dispatch(&host, cx, SurfaceRequest::Close { id: dock_id, pane });
+        draw_test_window(cx);
+        assert!(events(&mut dock_peer).iter().any(|e| e["type"] == "closed"));
+        let (wide_cols, restored_rows, _, restored_height) = last_resize(&mut peer);
+        assert_eq!(
+            (wide_cols, restored_rows, restored_height),
+            (cols, tall_rows, tall_height)
+        );
+        host.read_with(cx, |host, _| {
+            assert!(host.surfaces.bottom.is_none());
+            assert_eq!(
+                host.dock_strips(gpui::size(px(640.0), px(480.0))),
+                DockStrips::default()
+            );
+        });
+    }
+
+    /// A resizable bottom dock that has traded places with the grid's footer
+    /// is drawn a row up from the pane's bottom, and its handle goes with it:
+    /// on the top edge that can be seen, not a row further down inside the
+    /// dock. The trade also outlasts the moment between the client's resize
+    /// and the footer it sends for the new size, so the dock does not drop a
+    /// row and come back up while the grid changes height.
+    #[gpui::test]
+    fn a_resizable_bottom_dock_keeps_its_handle_and_row_beside_a_footer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        // A dock is resizable only while the program that owns it holds the
+        // terminal, so a real one does: a shell that names itself by its pid
+        // and then waits.
+        let (sender, _exits) = async_channel::unbounded();
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::new(
+                Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"printf '\033]0;%s\007' "$$"; exec /bin/cat"#.into(),
+                ]),
+                settings,
+                Vec::new(),
+                None,
+                super::super::PaneExit {
+                    sender,
+                    identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                },
+                window,
+                cx,
+            )
+        });
+        let executor = cx.executor();
+        executor.allow_parking();
+        executor.block_test(crate::test_blocking_wait::condition(
+            &host,
+            cx,
+            |host, _| {
+                host.bundle
+                    .as_ref()
+                    .is_some_and(|bundle| bundle.pane.title.is_some())
+            },
+        ));
+        let owner_pid = host.read_with(cx, |host, _| {
+            host.bundle
+                .as_ref()
+                .and_then(|bundle| bundle.pane.title.as_ref())
+                .and_then(|title| title.parse::<u32>().ok())
+                .expect("the owner's pid is the title")
+        });
+        cx.simulate_resize(gpui::size(px(640.0), px(480.0)));
+        let id = SurfaceId(980);
+        let dock_id = SurfaceId(981);
+        let pane = crate::pane_tree::PaneId(1);
+        let mut fill = open_description(
+            serde_json::json!({"version":1,"root":{"kind":"grid","cols":80,"rows":24}}),
+        );
+        fill.placement = Placement::Fill {
+            owner_pid: Some(owner_pid),
+        };
+        let (answer, mut peer) = open_request(&host, cx, id, fill);
+        assert_eq!(answer, Ok(()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimap-v1.json")).unwrap();
+        for message in &fixture["valid"].as_array().unwrap()[..4] {
+            dispatch(
+                &host,
+                cx,
+                SurfaceRequest::Grid {
+                    id,
+                    pane,
+                    ops: crate::surface::grid::parse_ops(message).unwrap(),
+                },
+            );
+        }
+        let mut open = open_description(serde_json::json!({
+            "version":1,"root":{"kind":"box","children":[{"kind":"text","text":"GRAPH"}]}
+        }));
+        open.placement = Placement::Dock {
+            side: Side::Bottom,
+            size: crate::surface::DockSize::try_from(120.0).unwrap(),
+            ownership: Ownership::Owned {
+                pid: owner_pid,
+                return_target: ReturnTarget::Surface(id),
+            },
+        };
+        let (answer, _dock_peer) = open_request(&host, cx, dock_id, open);
+        assert_eq!(answer, Ok(()));
+        assert!(host.read_with(cx, |host, _| {
+            host.surfaces
+                .bottom
+                .as_ref()
+                .is_some_and(|dock| dock.resizable())
+        }));
+        draw_test_window(cx);
+        draw_test_window(cx);
+        let resize = events(&mut peer)
+            .into_iter()
+            .rfind(|e| e["type"] == "resize")
+            .expect("a resize");
+        let cols = resize["cols"].as_u64().unwrap() as u16;
+        let rows = resize["rows"].as_u64().unwrap() as u16;
+        let full_cols = resize["footer_cols"].as_u64().unwrap() as u16;
+        let footer_for = |rows: u16| {
+            crate::surface::grid::parse_ops(&serde_json::json!({
+                "type":"footer", "cols":full_cols, "row":rows-1,
+                "grid_cols":cols, "grid_rows":rows,"source":" ".repeat(cols as usize),
+                "cells":[[" ",1,full_cols]], "define":{"1":{"bg":"#303030"}}
+            }))
+            .unwrap()
+        };
+        let mut ops = vec![crate::surface::grid::Op::Resize { cols, rows }];
+        ops.extend(footer_for(rows));
+        dispatch(&host, cx, SurfaceRequest::Grid { id, pane, ops });
+        draw_test_window(cx);
+        let dock = cx
+            .debug_bounds("dock-bottom-981")
+            .expect("the dock is painted");
+        let footer = cx
+            .debug_bounds("grid-footer-980")
+            .expect("footer is painted");
+        assert_eq!(footer.top(), dock.bottom(), "the footer is under the dock");
+        assert!(dock.bottom() < px(480.0), "the dock is a row up: {dock:?}");
+        let edge = cx
+            .debug_bounds("dock-edge-bottom-981")
+            .expect("a resizable dock has a handle");
+        assert_eq!(
+            edge.bottom(),
+            dock.top(),
+            "the handle sits on the dock's top"
+        );
+        assert_eq!(
+            (edge.left(), edge.size.width),
+            (dock.left(), dock.size.width)
+        );
+        assert_eq!(edge.size.height, px(4.0));
+
+        // The client shortens its grid by a row, and its footer for the new
+        // size has not arrived yet: the dock stays where it is.
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: vec![crate::surface::grid::Op::Resize {
+                    cols,
+                    rows: rows - 1,
+                }],
+            },
+        );
+        draw_test_window(cx);
+        let waiting = cx
+            .debug_bounds("dock-bottom-981")
+            .expect("the dock is painted");
+        assert_eq!(waiting, dock, "the dock holds its row until the footer");
+        let edge = cx
+            .debug_bounds("dock-edge-bottom-981")
+            .expect("a resizable dock has a handle");
+        assert_eq!(edge.bottom(), dock.top());
+
+        // The footer for the new size arrives, and the two still trade.
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: footer_for(rows - 1),
+            },
+        );
+        draw_test_window(cx);
+        let settled = cx
+            .debug_bounds("dock-bottom-981")
+            .expect("the dock is painted");
+        assert_eq!(settled, dock);
+        let footer = cx
+            .debug_bounds("grid-footer-980")
+            .expect("footer is painted");
+        assert_eq!(footer.top(), settled.bottom());
+
+        // A footer the client moves off the last row ends the trade, and
+        // the dock goes back under the grid.
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Grid {
+                id,
+                pane,
+                ops: crate::surface::grid::parse_ops(
+                    &serde_json::json!({"type":"footer", "visible":false}),
+                )
+                .unwrap(),
+            },
+        );
+        draw_test_window(cx);
+        let lowered = cx
+            .debug_bounds("dock-bottom-981")
+            .expect("the dock is painted");
+        assert_eq!(lowered.bottom(), px(480.0));
+        let edge = cx
+            .debug_bounds("dock-edge-bottom-981")
+            .expect("a resizable dock has a handle");
+        assert_eq!(edge.bottom(), lowered.top());
+        if let Some(cleanup) = host.update(cx, |host, _| host.begin_shutdown()) {
+            cleanup.wait().ok();
+        }
+    }
+
+    /// The limit a side dock has on width, a bottom dock has on height: what
+    /// it asked for, at most half the pane, and the request survives a pane
+    /// that was briefly too short for it.
+    #[gpui::test]
+    fn a_bottom_dock_is_given_at_most_half_the_panes_height(cx: &mut gpui::TestAppContext) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
+        });
+        let mut open = open_description(serde_json::json!({
+            "version":1,"root":{"kind":"text","text":"GRAPH"}
+        }));
+        open.placement = Placement::Dock {
+            side: Side::Bottom,
+            size: crate::surface::DockSize::try_from(200.0).unwrap(),
+            ownership: Ownership::Unowned,
+        };
+        let (answer, _peer) = open_request(&host, cx, SurfaceId(973), open);
+        assert_eq!(answer, Ok(()));
+        host.read_with(cx, |host, _| {
+            let strips = |height: f32| host.dock_strips(gpui::size(px(800.0), px(height)));
+            assert_eq!(strips(600.0).bottom, 200.0);
+            assert_eq!(strips(300.0).bottom, 150.0);
+            assert_eq!(strips(600.0).bottom, 200.0);
+            assert_eq!((strips(300.0).left, strips(300.0).right), (0.0, 0.0));
+        });
+    }
+
+    /// With no fill, the terminal's own grid is what the bottom dock shortens:
+    /// its session is resized to fewer rows, and gets them back on close.
+    #[gpui::test]
+    fn a_bottom_dock_takes_rows_from_the_terminal_grid_and_returns_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings = crate::config::Settings::default();
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let allocated = gpui::size(px(800.0), px(600.0));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let (sender, _receiver) = async_channel::unbounded();
+            TerminalView::new_allocated(
+                Some(vec!["/bin/sh".into(), "-c".into(), "read release".into()]),
+                crate::config::Settings::default(),
+                Vec::new(),
+                None,
+                PaneExit {
+                    sender,
+                    identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+                },
+                Some(allocated),
+                window,
+                cx,
+            )
+        });
+        draw_test_window(cx);
+        let rows_of = |host: &TerminalView| host.size.expect("a grid").rows();
+        let tall = host.read_with(cx, |host, _| rows_of(host));
+        let mut open = open_description(serde_json::json!({
+            "version":1,"root":{"kind":"text","text":"GRAPH"}
+        }));
+        open.placement = Placement::Dock {
+            side: Side::Bottom,
+            size: crate::surface::DockSize::try_from(120.0).unwrap(),
+            ownership: Ownership::Unowned,
+        };
+        let (answer, _peer) = open_request(&host, cx, SurfaceId(974), open);
+        assert_eq!(answer, Ok(()));
+        draw_test_window(cx);
+        host.read_with(cx, |host, _| {
+            let rows = rows_of(host);
+            assert!(rows < tall, "{rows} rows under {tall}");
+            // The last row ends above the dock, and a position on that row
+            // maps to it rather than to a row the dock now covers.
+            let bottom = host.origin.y + host.metrics.height() * f32::from(rows);
+            assert!(bottom <= px(480.0), "the grid ends at {bottom:?}");
+            let origin = host.content_origin.unwrap_or(host.origin);
+            let cell = host
+                .cell_under(point(
+                    origin.x + host.metrics.width() * 3.5,
+                    origin.y + host.metrics.height() * (f32::from(rows) - 0.5),
+                ))
+                .expect("a cell");
+            assert_eq!((cell.row, cell.column), (rows - 1, 3));
+        });
+        dispatch(
+            &host,
+            cx,
+            SurfaceRequest::Close {
+                id: SurfaceId(974),
+                pane: crate::pane_tree::PaneId(1),
+            },
+        );
+        draw_test_window(cx);
+        host.update(cx, |host, _| {
+            assert_eq!(rows_of(host), tall);
+            host.begin_shutdown().unwrap().wait().unwrap();
         });
     }
 

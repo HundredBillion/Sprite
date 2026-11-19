@@ -283,6 +283,7 @@ print. [Pane control](pane-control.md) has every command.
 
 ```sh
 sprite surface open --dock left < tree.json   # a strip beside the grid
+sprite surface open --dock bottom --size 120 < graph.json # a strip under it
 sprite surface open --fill      < editor.json # in place of the grid
 sprite surface open --overlay   < picker.json # floating over it
 sprite token register scm.added '#40a02b' 'Added lines'
@@ -317,7 +318,7 @@ so an editor behind it can place its cursor and scroll. A selection dragged
 across it from the terminal began on the terminal and is not reported.
 
 The native minimap uses at most 120 pixels and at most one quarter of the
-editor surface after side docks. It stays visible down to a 192-pixel editor
+editor surface after side docks, and ends above a bottom dock. It stays visible down to a 192-pixel editor
 surface, where it takes 48 pixels. This lets an explorer, file, and minimap
 share a half-width terminal pane. Smaller surfaces hide it to keep the file usable.
 
@@ -381,6 +382,22 @@ An `image` element's SVG is rendered from the bytes given, with no resource
 directory, so an `href` that points at a file resolves to nothing; embed
 what the picture needs.
 
+A dock is a strip on one side of the pane: `"side":"left"`, `"right"`, or,
+when `capabilities` lists `"dock-bottom-v1"`, `"bottom"`. A pane holds at most
+one dock per side; a second one on a side is refused as occupied. `size` is the
+strip's width in pixels for a side dock and its height for a bottom dock, 64 to
+4096 with a default of 240, and a dock is given at most half the pane in that
+direction. The side docks keep the pane's full height. The bottom dock sits
+under the grid only, between them, so the grid or fill Surface above it loses
+that height: the terminal's rows shrink as they would on a window resize, a
+grid Surface hears a `resize` with fewer `rows`, and its minimap and previews
+end above the dock. A footer on the grid's last row stays the last thing in
+the pane: the dock is drawn over the row the footer stands for, and the footer
+under the dock. Native file tabs stay at the top. The dock itself
+hears the usual `resize` with its pixel `width` and `height`, and closing it
+gives the rows back. Ctrl+Shift+Space reaches a bottom dock after the side
+docks and before any overlay.
+
 Programs that want a native dock first send an authenticated `capabilities`
 request with the pane address, their PID, and a `return_target` of `"terminal"` or
 the id of a live fill Surface in that pane. The answer lists supported feature
@@ -391,6 +408,9 @@ again when opening and before delivering input or focus. A dock whose owner
 leaves that group closes; focus returns to its still-live target or the terminal.
 
 An owned dock opens with `owner_pid`, `return_target`, and `resizable:true`.
+Its grid-facing edge can be dragged: a side dock reports
+`{"type":"dock_size","width":300}` and a bottom dock, whose top edge is the one
+that moves, reports `{"type":"dock_size","height":120}`.
 Closing it while focused returns focus to that target. Closing its fill Surface
 also closes dependent docks; closing after focus has moved elsewhere leaves
 focus where it is. Connection EOF closes a Surface. A client should close its
