@@ -1,0 +1,2346 @@
+[
+ {
+  "label": "base",
+  "binary": "sprite-baseline-7496b77",
+  "round": 0,
+  "pid": 336397,
+  "size": [
+   900,
+   701
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 67.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 67.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 67.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 67.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 77.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 77.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.928862939442816,
+    "C": 77.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9639944359850334,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.927301225578684,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.928702820771447,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.930313354708488,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.919865533324336,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.962152457899996,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.965763122752145,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.9338714355346704,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9632117720769235,
+    "C": 71.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9576700122198805,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9688979219364646,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9584840213113144,
+    "C": 71.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9706275684678003,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9653811283322193,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.907051158665197,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.956370507036669,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.969800079407245,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9595659263651637,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9569975820469483,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9666309865632114,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9553011105276297,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9558128113398685,
+    "C": 65.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 63.0
+   }
+  ],
+  "cells": [
+   122,
+   48
+  ],
+  "means": {
+   "quiet_full": 0.0,
+   "full_40hz": 6.34,
+   "full_5hz": 1.08,
+   "sparse_40hz": 3.96,
+   "quiet_sparse": 0.0
+  }
+ },
+ {
+  "label": "alacritty",
+  "binary": "alacritty-wrap.sh",
+  "round": 0,
+  "pid": 337338,
+  "size": [
+   900,
+   701
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.926258780606774,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.970153718337818,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9602464756070086,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9599428652741824,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.965418772497507,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.964057557148581,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.971917400053957,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.95632725861675,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9647736836309915,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9691181335112558,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.962426920714529,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9582498373426502,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 71.0
+   }
+  ],
+  "cells": [
+   128,
+   42
+  ],
+  "means": {
+   "quiet_full": 0.0,
+   "full_40hz": 2.52,
+   "full_5hz": 0.36,
+   "sparse_40hz": 1.8,
+   "quiet_sparse": 0.0
+  }
+ },
+ {
+  "label": "alacritty",
+  "binary": "alacritty-wrap.sh",
+  "round": 1,
+  "pid": 338339,
+  "size": [
+   900,
+   700
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 3.9636803843666946,
+    "C": 65.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 69.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 69.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 69.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 69.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 72.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 72.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 72.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 72.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9709662957705842,
+    "C": 67.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 67.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9714717902170555,
+    "C": 67.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.960621928360172,
+    "C": 68.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 68.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.953708072286442,
+    "C": 68.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 68.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9640900848675003,
+    "C": 69.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 69.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.960433150052183,
+    "C": 69.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.957984850894411,
+    "C": 69.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 69.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9648307459385896,
+    "C": 69.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 69.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 65.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.965232508313963,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.965885138790777,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9632206308635607,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 81.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 81.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 81.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.966955073806674,
+    "C": 81.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 75.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 75.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 75.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 64.0
+   }
+  ],
+  "cells": [
+   128,
+   42
+  ],
+  "means": {
+   "quiet_full": 0.4,
+   "full_40hz": 2.52,
+   "full_5hz": 0.36,
+   "sparse_40hz": 1.44,
+   "quiet_sparse": 0.0
+  }
+ },
+ {
+  "label": "base",
+  "binary": "sprite-baseline-7496b77",
+  "round": 1,
+  "pid": 339318,
+  "size": [
+   900,
+   700
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 66.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9581211779934935,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.915190036872799,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.970662048754973,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.938110804821098,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.925865009495968,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9647653837625465,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.915090862847735,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.961719175328239,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.969524405084969,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.92347360240161,
+    "C": 65.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.933342973332369,
+    "C": 65.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9603655957283523,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9556973604766044,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.937971862323438,
+    "C": 63.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9582917490298217,
+    "C": 63.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9677756308413468,
+    "C": 63.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.915063328819524,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.958668539324627,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.930207638306316,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.972575515618039,
+    "C": 63.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.957302275542554,
+    "C": 63.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.967520244658044,
+    "C": 63.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 3.955206808292706,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   }
+  ],
+  "cells": [
+   122,
+   48
+  ],
+  "means": {
+   "quiet_full": 0.0,
+   "full_40hz": 6.13,
+   "full_5hz": 0.72,
+   "sparse_40hz": 4.32,
+   "quiet_sparse": 0.36
+  }
+ },
+ {
+  "label": "base",
+  "binary": "sprite-baseline-7496b77",
+  "round": 2,
+  "pid": 340374,
+  "size": [
+   900,
+   700
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 86.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 86.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 86.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 86.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 3.9599133693320643,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9586040540676284,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9423563788675073,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.918954003706838,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.920091943093954,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.9305148275537185,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.9386006399039815,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9569796382029656,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.921717680991407,
+    "C": 64.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9565271984553534,
+    "C": 62.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.916675219952751,
+    "C": 62.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.9363211809992995,
+    "C": 62.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9639564260307285,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 88.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.960452207475817,
+    "C": 88.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 88.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.961171127034762,
+    "C": 88.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9632806329844494,
+    "C": 61.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9649160753402892,
+    "C": 61.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.961341960989594,
+    "C": 61.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.925629538172398,
+    "C": 61.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.962530156328714,
+    "C": 62.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9546738536546573,
+    "C": 62.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9660522112392003,
+    "C": 62.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9614010116995892,
+    "C": 62.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9617622435353175,
+    "C": 62.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9667832833434185,
+    "C": 62.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.9182277963797905,
+    "C": 62.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 3.9670763448235515,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 74.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 74.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 74.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 74.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 61.0
+   }
+  ],
+  "cells": [
+   122,
+   48
+  ],
+  "means": {
+   "quiet_full": 0.4,
+   "full_40hz": 6.48,
+   "full_5hz": 1.08,
+   "sparse_40hz": 4.68,
+   "quiet_sparse": 0.36
+  }
+ },
+ {
+  "label": "alacritty",
+  "binary": "alacritty-wrap.sh",
+  "round": 2,
+  "pid": 341460,
+  "size": [
+   900,
+   700
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 71.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 63.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9602203313250475,
+    "C": 61.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9566810216776673,
+    "C": 61.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.965929650196233,
+    "C": 60.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.922057474895228,
+    "C": 60.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.915784068328,
+    "C": 60.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 61.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.9100053693716905,
+    "C": 60.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 60.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9613170575905388,
+    "C": 60.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.953198040938335,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.972163349357213,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9631828712829726,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 59.0
+   }
+  ],
+  "cells": [
+   128,
+   42
+  ],
+  "means": {
+   "quiet_full": 0.0,
+   "full_40hz": 2.77,
+   "full_5hz": 0.0,
+   "sparse_40hz": 2.16,
+   "quiet_sparse": 0.0
+  }
+ },
+ {
+  "label": "alacritty",
+  "binary": "alacritty-wrap.sh",
+  "round": 3,
+  "pid": 342853,
+  "size": [
+   900,
+   700
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 83.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9644510056831295,
+    "C": 83.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 83.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9552967456823684,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9391005910064423,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9602872218489464,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9561365887798408,
+    "C": 59.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.957553810661587,
+    "C": 70.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 70.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.969303565507068,
+    "C": 70.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.963506458225454,
+    "C": 70.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9646548168471125,
+    "C": 57.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.970442643261112,
+    "C": 57.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.964622201290774,
+    "C": 58.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 56.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 56.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 56.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 3.9656288321057658,
+    "C": 56.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 58.0
+   }
+  ],
+  "cells": [
+   128,
+   42
+  ],
+  "means": {
+   "quiet_full": 0.0,
+   "full_40hz": 1.98,
+   "full_5hz": 0.0,
+   "sparse_40hz": 2.16,
+   "quiet_sparse": 0.36
+  }
+ },
+ {
+  "label": "base",
+  "binary": "sprite-baseline-7496b77",
+  "round": 3,
+  "pid": 343727,
+  "size": [
+   900,
+   700
+  ],
+  "samples": [
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 58.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 55.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 55.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 55.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 55.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "quiet_full",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.958499706594068,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.932440420323354,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9547373977455282,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.918522928469542,
+    "C": 58.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.962638657648955,
+    "C": 56.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.928876613022714,
+    "C": 56.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.924617393986574,
+    "C": 56.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9569927907362774,
+    "C": 56.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 7.915393060193753,
+    "C": 55.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9674778697733983,
+    "C": 55.0
+   },
+   {
+    "phase": "full_40hz",
+    "cpu": 3.9717714919940392,
+    "C": 55.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 56.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9634628494036597,
+    "C": 56.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 56.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 56.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.962823484756747,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 3.9559674398475195,
+    "C": 57.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "full_5hz",
+    "cpu": 0.0,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9555432068552894,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.963208614989126,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.972931653790221,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.960421119690399,
+    "C": 59.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.971219003270096,
+    "C": 68.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.972475132911309,
+    "C": 68.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 7.923351871017,
+    "C": 68.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.972141623050573,
+    "C": 68.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9665483525130374,
+    "C": 87.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.9556597910208215,
+    "C": 87.0
+   },
+   {
+    "phase": "sparse_40hz",
+    "cpu": 3.968830236120163,
+    "C": 87.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 85.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 3.9551410746631506,
+    "C": 85.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 85.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 85.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 80.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 80.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 80.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 80.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 76.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 76.0
+   },
+   {
+    "phase": "quiet_sparse",
+    "cpu": 0.0,
+    "C": 76.0
+   }
+  ],
+  "cells": [
+   122,
+   48
+  ],
+  "means": {
+   "quiet_full": 0.0,
+   "full_40hz": 5.76,
+   "full_5hz": 1.08,
+   "sparse_40hz": 4.33,
+   "quiet_sparse": 0.36
+  }
+ }
+]

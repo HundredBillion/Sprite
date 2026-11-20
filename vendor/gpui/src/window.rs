@@ -55,6 +55,7 @@ use uuid::Uuid;
 
 mod prompts;
 
+use crate::scene::PaintOperation;
 use crate::util::atomic_incr_if_not_zero;
 pub use prompts::*;
 
@@ -736,6 +737,29 @@ pub(crate) struct PrepaintStateIndex {
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
     line_layout_index: LineLayoutIndex,
+}
+
+/// What one call painted, kept by [`Window::record_paint`] to be painted again
+/// in a later frame by [`Window::replay_paint`].
+#[derive(Clone, Default)]
+pub struct PaintRecording {
+    operations: Vec<PaintOperation>,
+    /// The window it was painted in: sprites refer to that window's atlas.
+    window: Option<AnyWindowHandle>,
+    /// The element opacity it was painted under, which is in every colour.
+    opacity: f32,
+}
+
+impl PaintRecording {
+    /// How many primitives and layer boundaries the recording holds.
+    pub fn len(&self) -> usize {
+        self.operations.len()
+    }
+
+    /// Whether the recording painted nothing.
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -2396,6 +2420,59 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
         );
+    }
+
+    /// Calls `f`, and returns with its result what it painted, kept so that a
+    /// later frame can paint the same thing again with [`Self::replay_paint`]
+    /// instead of calling `f`.
+    ///
+    /// Only scene primitives and layers are kept. `f` must register nothing
+    /// else — no mouse listener, input handler, cursor style or tab stop —
+    /// because none of that would be replayed.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn record_paint<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (R, PaintRecording) {
+        self.invalidator.debug_assert_paint();
+        let start = self.paint_index();
+        let result = f(self);
+        let end = self.paint_index();
+        debug_assert!(
+            start.mouse_listeners_index == end.mouse_listeners_index
+                && start.input_handlers_index == end.input_handlers_index
+                && start.cursor_styles_index == end.cursor_styles_index
+                && start.tab_handle_index == end.tab_handle_index,
+            "record_paint keeps only scene primitives"
+        );
+        let operations =
+            self.next_frame.scene.paint_operations[start.scene_index..end.scene_index].to_vec();
+        let recording = PaintRecording {
+            operations,
+            window: Some(self.handle),
+            opacity: self.element_opacity(),
+        };
+        (result, recording)
+    }
+
+    /// Paints what [`Self::record_paint`] recorded, in this frame, and
+    /// returns whether it did.
+    ///
+    /// Primitives keep the positions, content masks and colours they were
+    /// recorded with, so a recording is only right to replay while those are
+    /// unchanged; draw order is decided afresh, as for anything painted now.
+    /// A recording made in another window (whose atlas its glyphs are in) or
+    /// under a different element opacity paints nothing and returns `false`,
+    /// and the caller paints afresh.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn replay_paint(&mut self, recording: &PaintRecording) -> bool {
+        self.invalidator.debug_assert_paint();
+        if recording.window != Some(self.handle) || recording.opacity != self.element_opacity() {
+            return false;
+        }
+        self.next_frame
+            .scene
+            .replay_operations(&recording.operations);
+        true
     }
 
     /// Push a text style onto the stack, and call a function with that style active.

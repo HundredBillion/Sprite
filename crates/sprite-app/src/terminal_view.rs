@@ -153,6 +153,8 @@ pub struct TerminalView {
     layout_cache: crate::grid::LayoutCache,
     /// Shaped glyphs kept between frames, beside the layout they belong to.
     shape_cache: std::rc::Rc<std::cell::RefCell<crate::grid_paint::ShapeCache>>,
+    /// Rows the grid painted in earlier frames, replayed while unchanged.
+    row_paints: std::rc::Rc<std::cell::RefCell<crate::grid_paint::RowPaints>>,
     hovered_link: Option<(u64, sprite_term::HyperlinkSpan)>,
     hover_request: Option<(u64, sprite_term::CellPosition)>,
     /// The cell the current hover answer was asked about, and that cell's row
@@ -613,6 +615,7 @@ impl TerminalView {
             hovered_link: None,
             layout_cache: Default::default(),
             shape_cache: Default::default(),
+            row_paints: Default::default(),
             hover_request: None,
             hover_basis: None,
             next_link_request: 1,
@@ -723,6 +726,7 @@ impl TerminalView {
             hovered_link: None,
             layout_cache: Default::default(),
             shape_cache: Default::default(),
+            row_paints: Default::default(),
             hover_request: None,
             hover_basis: None,
             next_link_request: 1,

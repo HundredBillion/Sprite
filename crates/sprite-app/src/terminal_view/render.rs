@@ -436,8 +436,14 @@ impl Render for TerminalView {
         #[cfg(not(test))]
         let tiles = (!tiles.is_empty()).then(|| placeholder_tiles(tiles, cell_width, cell_height));
 
-        let (background_grid, text_grid) =
-            GridPaint::prepare(snapshot, rows, &metrics, split, &self.shape_cache);
+        let (background_grid, text_grid) = GridPaint::prepare(
+            snapshot,
+            rows,
+            &metrics,
+            split,
+            &self.shape_cache,
+            &self.row_paints,
+        );
 
         // With nothing hosted, the frame must cost what it cost before
         // Surfaces existed: no registry clone, no layer construction.

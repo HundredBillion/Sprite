@@ -123,7 +123,13 @@ impl Scene {
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
-        for operation in &prev_scene.paint_operations[range] {
+        self.replay_operations(&prev_scene.paint_operations[range]);
+    }
+
+    /// Paints `operations` again, as `replay` does for a range of the last
+    /// frame. Each primitive is ordered afresh against what is open now.
+    pub(crate) fn replay_operations(&mut self, operations: &[PaintOperation]) {
+        for operation in operations {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
@@ -197,6 +203,7 @@ pub(crate) enum PrimitiveKind {
     Surface,
 }
 
+#[derive(Clone)]
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),

@@ -443,6 +443,7 @@ pub(crate) fn render_grid(
         font_family: metrics.cells.family().clone(),
         font_size: metrics.cells.font_size(),
         shapes: Rc::clone(shapes),
+        row_paints: None,
         focused: metrics.focused,
     });
     let width = px(f32::from(metrics.cells.width()) * f32::from(grid.cols()));

@@ -7,6 +7,7 @@ struct ShapeProbe {
     snapshot: RenderSnapshot,
     layout: crate::grid::LayoutCache,
     shapes: Rc<RefCell<ShapeCache>>,
+    row_paints: Option<Rc<RefCell<RowPaints>>>,
     blink_on: bool,
     font_size: Pixels,
 }
@@ -32,6 +33,7 @@ impl gpui::Render for ShapeProbe {
                 font_size: self.font_size,
                 focused: true,
                 shapes: Rc::clone(&self.shapes),
+                row_paints: self.row_paints.clone(),
             },
             false,
         );
@@ -330,6 +332,7 @@ fn painter(pass: RowPass) -> GridPaint {
         font_size: px(14.0),
         focused: true,
         shapes: Default::default(),
+        row_paints: None,
     })
 }
 
@@ -519,6 +522,7 @@ fn drawing_prepares_decorations_for_whitespace_without_glyph_ink() {
         font_family: ".SystemUIFont".into(),
         font_size: px(14.0),
         shapes: Default::default(),
+        row_paints: None,
         focused: true,
     });
     for text in ["", " ", "\t", "\u{3000}", "\u{10eeee}"] {
@@ -589,6 +593,7 @@ fn an_unfocused_pane_outlines_a_block_cursor_and_keeps_other_shapes() {
         font_family: ".SystemUIFont".into(),
         font_size: px(14.0),
         shapes: Default::default(),
+        row_paints: None,
         focused,
     };
     let block = CursorSnapshot {
@@ -727,6 +732,7 @@ fn shaping_happens_only_for_cells_whose_drawn_text_changed(cx: &mut gpui::TestAp
         snapshot: crate::paint_benchmark::fixture(),
         layout: Default::default(),
         shapes: Default::default(),
+        row_paints: None,
         blink_on: true,
         font_size: px(14.0),
     });
@@ -824,6 +830,7 @@ fn a_frame_of_hidden_text_shapes_nothing(cx: &mut gpui::TestAppContext) {
         snapshot,
         layout: Default::default(),
         shapes: Default::default(),
+        row_paints: None,
         blink_on: true,
         font_size: px(14.0),
     });
@@ -1111,6 +1118,7 @@ impl gpui::Render for OverlayProbe {
             font_family: "monospace".into(),
             font_size: px(14.0),
             shapes: Default::default(),
+            row_paints: None,
             focused: true,
         });
         gpui::div().size_full().child(paint)
@@ -1297,6 +1305,7 @@ impl gpui::Render for TextProbe {
             font_family: "monospace".into(),
             font_size: px(14.0),
             shapes: Default::default(),
+            row_paints: None,
             focused: true,
         });
         gpui::div().size_full().child(paint)
@@ -1365,6 +1374,7 @@ impl gpui::Render for RowsProbe {
             font_family: "monospace".into(),
             font_size: px(14.0),
             shapes: Default::default(),
+            row_paints: None,
             focused: true,
         });
         gpui::div().size_full().child(paint)
@@ -1444,4 +1454,175 @@ fn a_line_is_as_thick_however_tall_its_row_is_drawn(cx: &mut gpui::TestAppContex
     // 24.5 / 16 rounds to two pixels, where the font's 18 / 16 rounds to one.
     assert_eq!(thickness(24.5), fitting);
     assert_eq!(thickness(18.4), fitting);
+}
+
+/// #159: a status line redrawn forty times a second over a screen of text
+/// cost several times what the line alone did, because every frame painted
+/// every row cell by cell again. A frame paints only the rows that changed
+/// and replays the rest, and what it draws is what painting every row draws.
+#[gpui::test]
+fn a_small_update_paints_only_its_rows_and_draws_what_a_full_paint_draws(
+    cx: &mut gpui::TestAppContext,
+) {
+    gpui::ink_test_glyphs(true);
+    let kept: Rc<RefCell<RowPaints>> = Rc::default();
+    let (probe, cx) = cx.add_window_view(|_, _| ShapeProbe {
+        snapshot: crate::paint_benchmark::fixture(),
+        layout: Default::default(),
+        shapes: Default::default(),
+        // Opening the window paints a frame; kept rows start with the first
+        // frame below.
+        row_paints: None,
+        blink_on: true,
+        font_size: px(14.0),
+    });
+    let rows = probe.update(cx, |probe, _| probe.snapshot.rows.len());
+    let step = |cx: &mut gpui::VisualTestContext,
+                name: &str,
+                painted: usize,
+                change: fn(&mut ShapeProbe)| {
+        probe.update(cx, |probe, _| change(probe));
+        let (fresh, replayed) = row_paint_frame(&probe, cx, Some(&kept));
+        // The same snapshot painted in full, with nothing kept from earlier
+        // frames, is what the frame must look like.
+        let (all, full) = row_paint_frame(&probe, cx, None);
+        assert_eq!(all, rows, "{name}: the reference paints every row");
+        assert_eq!(fresh, painted, "{name}: rows painted cell by cell");
+        assert!(
+            replayed == full,
+            "{name}: a frame with rows replayed draws what a full paint draws"
+        );
+    };
+
+    // A row is kept only from a frame where most of the screen stayed put:
+    // the first frame changes every row, so it keeps nothing, and the next
+    // paints them all once more to keep them.
+    step(cx, "first frame", rows, |_| {});
+    step(cx, "the screen held still: rows are kept", rows, |_| {});
+    step(cx, "unchanged frame", 0, |_| {});
+    step(cx, "one changed row", 1, |probe| {
+        probe.snapshot.generation += 1;
+        Arc::make_mut(&mut probe.snapshot.rows[30]).cells[10].text = "Z".into();
+    });
+    step(
+        cx,
+        "the cursor moved: the row it left and the one it entered",
+        2,
+        |probe| {
+            probe.snapshot.cursor.row = 40;
+        },
+    );
+    step(cx, "the cursor blinked off: its row", 1, |probe| {
+        probe.blink_on = false;
+    });
+    step(cx, "the cursor blinked on: its row", 1, |probe| {
+        probe.blink_on = true;
+    });
+    step(
+        cx,
+        "the whole screen scrolled: nothing kept",
+        rows,
+        |probe| {
+            probe.snapshot.generation += 1;
+            probe.snapshot.rows.rotate_left(1);
+        },
+    );
+    step(cx, "the frame after a scroll keeps its rows", rows, |_| {});
+    step(cx, "and replays them", 0, |_| {});
+    step(cx, "a font change", rows, |probe| {
+        probe.font_size = px(15.0)
+    });
+    step(cx, "a theme change", rows, |probe| {
+        probe.snapshot.default_foreground.r ^= 0xff;
+    });
+}
+
+/// Draws one frame of `probe`, keeping rows in `kept` or painting every row
+/// afresh without it, and returns how many rows were painted cell by cell and
+/// the frame the renderer was given.
+fn row_paint_frame(
+    probe: &gpui::Entity<ShapeProbe>,
+    cx: &mut gpui::VisualTestContext,
+    kept: Option<&Rc<RefCell<RowPaints>>>,
+) -> (usize, Vec<gpui::DrawnPrimitive>) {
+    probe.update(cx, |probe, _| probe.row_paints = kept.cloned());
+    PAINTED_ROWS.with(|count| count.set(0));
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    (
+        PAINTED_ROWS.with(|count| count.get()),
+        cx.drawn_primitives(),
+    )
+}
+
+/// Paints one quad under `opacity`, recording it on the first frame and
+/// replaying the recording on every later one.
+struct ReplayProbe {
+    opacity: f32,
+    recording: Rc<RefCell<Option<gpui::PaintRecording>>>,
+    replayed: Rc<std::cell::Cell<Option<bool>>>,
+}
+
+impl gpui::Render for ReplayProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::{ParentElement, Styled};
+        let recording = Rc::clone(&self.recording);
+        let replayed = Rc::clone(&self.replayed);
+        gpui::div().size_full().opacity(self.opacity).child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, (), window, _| {
+                    let mut kept = recording.borrow_mut();
+                    match kept.as_ref() {
+                        Some(recording) => replayed.set(Some(window.replay_paint(recording))),
+                        None => {
+                            let ((), recording) = window.record_paint(|window| {
+                                window.paint_quad(fill(bounds, rgb(0xff0000)))
+                            });
+                            *kept = Some(recording);
+                        }
+                    }
+                },
+            )
+            .size_full(),
+        )
+    }
+}
+
+/// A kept row holds primitives in the colours and atlas of the frame that
+/// painted them. Replayed under another element opacity, or in another
+/// window whose atlas does not hold its glyphs, it would draw wrongly, so
+/// the replay refuses and the row is painted afresh.
+#[gpui::test]
+fn a_recording_replays_only_in_its_own_window_and_opacity(cx: &mut gpui::TestAppContext) {
+    let recording: Rc<RefCell<Option<gpui::PaintRecording>>> = Rc::default();
+    let replayed: Rc<std::cell::Cell<Option<bool>>> = Rc::default();
+    let probe = |opacity: f32| ReplayProbe {
+        opacity,
+        recording: Rc::clone(&recording),
+        replayed: Rc::clone(&replayed),
+    };
+    let frame = |cx: &mut gpui::VisualTestContext| {
+        replayed.set(None);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        replayed.get()
+    };
+
+    let first = probe(1.0);
+    let (view, cx) = cx.add_window_view(|_, _| first);
+    assert!(recording.borrow().is_some(), "the first frame records");
+    assert_eq!(frame(cx), Some(true), "the same window and opacity replay");
+    view.update(cx, |view, _| view.opacity = 0.5);
+    assert_eq!(frame(cx), Some(false), "another opacity does not");
+    view.update(cx, |view, _| view.opacity = 1.0);
+    assert_eq!(frame(cx), Some(true));
+
+    let second = probe(1.0);
+    let (_other, cx) = cx.add_window_view(|_, _| second);
+    assert_eq!(frame(cx), Some(false), "another window does not");
 }
