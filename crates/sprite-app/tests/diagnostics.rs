@@ -51,8 +51,39 @@ fn diagnostics_are_persisted_to_the_selected_directory() {
     panic!("the diagnostic event was not persisted");
 }
 
+/// Set in the child process `a_resource_sample_reads_this_process` runs
+/// itself in.
+const SAMPLE_ALONE: &str = "SPRITE_TEST_RESOURCE_SAMPLE_ALONE";
+
 #[test]
 fn a_resource_sample_reads_this_process() {
+    // Open files are counted for the whole process (`/dev/fd`), and the other
+    // tests here run alongside this one, spawning `sprite` and closing its
+    // pipes and sockets whenever they finish: one closing between the two
+    // samples took the difference below ten, about one run in seventy. So the
+    // sample is taken in a child process running this test and nothing else.
+    if std::env::var_os(SAMPLE_ALONE).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_resource_sample_reads_this_process",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(SAMPLE_ALONE, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // A filter that matched nothing would pass with nothing tested.
+        assert!(stdout.contains("1 passed"), "{stdout}");
+        return;
+    }
+
     let before = sprite_app::diagnostics::ResourceSample::read();
     assert!(before.resident_bytes.is_some_and(|bytes| bytes > 0));
     assert!(before.threads.is_some_and(|threads| threads >= 1));
