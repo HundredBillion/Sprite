@@ -137,6 +137,7 @@ impl PaintBenchmark {
                 font_family: "monospace".into(),
                 font_size: px(14.0),
                 shapes: std::rc::Rc::clone(&self.shapes),
+                row_paints: None,
                 focused: true,
             },
             split,

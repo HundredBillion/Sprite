@@ -82,6 +82,9 @@ thread_local! {
     /// beside the one grid `shape_line` call, so a test can see what a frame
     /// actually cost.
     pub(crate) static SHAPED_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many rows this thread has painted cell by cell rather than
+    /// replayed from an earlier frame.
+    pub(crate) static PAINTED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The most distinct shapes a pane's shared pool keeps for reuse.
@@ -226,6 +229,105 @@ impl ShapeCache {
         };
         slots.cells[column] = Some((color, Arc::clone(&line)));
         line
+    }
+}
+
+/// What every kept row was painted under, besides the row itself.
+///
+/// A recorded row holds its primitives where they were drawn, clipped as they
+/// were clipped and in the colours they were drawn in. A change to any of this
+/// moves or recolours every row, so every row is painted again.
+#[derive(Clone, PartialEq)]
+struct RowFrame {
+    bounds: Bounds<Pixels>,
+    mask: ContentMask<Pixels>,
+    /// Font, size, scale, default colours and palette.
+    shapes: ShapeContext,
+    cell_width: Pixels,
+    cell_height: Pixels,
+    stroke_height: Pixels,
+    cursor_color: Option<Rgb>,
+    pass: RowPass,
+}
+
+/// One row as an earlier frame painted it.
+struct KeptRow {
+    /// The laid-out row. The layout cache hands back the same allocation
+    /// while a row is unchanged — selection and link hover included — so
+    /// the same allocation means the same cells. Holding it also keeps the
+    /// allocation from being reused for a different row.
+    cells: Arc<Vec<PositionedCell>>,
+    /// The cursor drawn on this row, which colours the cell under a block.
+    cursor: Option<CursorSnapshot>,
+    paint: gpui::PaintRecording,
+    /// What the row adds over the grid: decorations, and the cursor if it is
+    /// here.
+    overlay: Overlay,
+}
+
+/// Rows painted in earlier frames, kept so an unchanged row is replayed
+/// rather than painted cell by cell again.
+///
+/// One per pane, holding at most the rows on screen.
+///
+/// Keeping a row costs a copy of what it painted, which only pays if the row
+/// is still there next frame. While most of the screen changes from one frame
+/// to the next — output scrolling, a full-screen program redrawing — nothing
+/// is kept; rows are kept again from the first frame where most stay put.
+#[derive(Default)]
+pub(crate) struct RowPaints {
+    frame: Option<RowFrame>,
+    rows: Vec<Option<KeptRow>>,
+    /// The rows the last frame drew, to tell how much of the screen changed.
+    last: Vec<Arc<Vec<PositionedCell>>>,
+    /// Whether this frame keeps the rows it paints.
+    keeping: bool,
+}
+
+impl RowPaints {
+    /// Starts a frame of `rows` painted under `frame`, dropping every kept
+    /// row if anything they were all painted under changed, and deciding
+    /// whether rows painted this frame are kept.
+    fn begin_frame(&mut self, frame: RowFrame, rows: &[Arc<Vec<PositionedCell>>]) {
+        if self.frame.as_ref() != Some(&frame) {
+            self.frame = Some(frame);
+            self.rows.clear();
+        }
+        self.rows.truncate(rows.len());
+        self.rows.resize_with(rows.len(), || None);
+        let changed = rows
+            .iter()
+            .enumerate()
+            .filter(|(index, row)| {
+                self.last
+                    .get(*index)
+                    .is_none_or(|last| !Arc::ptr_eq(last, row))
+            })
+            .count();
+        self.keeping = changed * 2 <= rows.len();
+        self.last.clear();
+        self.last.extend(rows.iter().cloned());
+    }
+
+    /// Row `index` as last painted, if it held `cells` under `cursor` then.
+    fn unchanged(
+        &self,
+        index: usize,
+        cells: &Arc<Vec<PositionedCell>>,
+        cursor: Option<CursorSnapshot>,
+    ) -> Option<&KeptRow> {
+        self.rows[index]
+            .as_ref()
+            .filter(|row| Arc::ptr_eq(&row.cells, cells) && row.cursor == cursor)
+    }
+
+    fn keep(&mut self, index: usize, row: KeptRow) {
+        self.rows[index] = Some(row);
+    }
+
+    /// Forgets row `index`, which this frame painted without keeping.
+    fn forget(&mut self, index: usize) {
+        self.rows[index] = None;
     }
 }
 
@@ -396,6 +498,7 @@ pub(crate) struct GridPaint {
     font_family: SharedString,
     font_size: Pixels,
     shapes: Rc<RefCell<ShapeCache>>,
+    row_paints: Option<Rc<RefCell<RowPaints>>>,
 }
 
 /// Everything one row pass needs to paint itself.
@@ -420,6 +523,9 @@ pub(crate) struct GridPaintSpec {
     pub font_family: SharedString,
     pub font_size: Pixels,
     pub shapes: Rc<RefCell<ShapeCache>>,
+    /// Where rows painted in earlier frames are kept, so a frame paints cell
+    /// by cell only the rows that changed. `None` paints every row afresh.
+    pub row_paints: Option<Rc<RefCell<RowPaints>>>,
     /// Whether the pane has Pane Focus. Without it a block cursor is drawn as
     /// its outline.
     pub focused: bool,
@@ -432,6 +538,7 @@ impl GridPaint {
         metrics: &crate::surface::render::GridMetrics,
         split: bool,
         shapes: &Rc<RefCell<ShapeCache>>,
+        row_paints: &Rc<RefCell<RowPaints>>,
     ) -> (Self, Option<Self>) {
         let cursor = snapshot
             .map(|snapshot| snapshot.cursor)
@@ -453,6 +560,7 @@ impl GridPaint {
                 font_family: metrics.cells.family(),
                 font_size: metrics.cells.font_size(),
                 shapes: Rc::clone(shapes),
+                row_paints: Some(Rc::clone(row_paints)),
                 focused: metrics.focused,
             },
             split,
@@ -467,9 +575,11 @@ impl GridPaint {
                 palette: spec.palette.clone(),
                 font_family: spec.font_family.clone(),
                 shapes: Rc::clone(&spec.shapes),
+                row_paints: None,
                 ..spec
             });
             spec.pass = RowPass::Text;
+            spec.row_paints = None;
             (background, Some(Self::new(spec)))
         } else {
             (Self::new(spec), None)
@@ -560,6 +670,7 @@ impl GridPaint {
             font_family: spec.font_family,
             font_size: spec.font_size,
             shapes: spec.shapes,
+            row_paints: spec.row_paints,
         }
     }
 
@@ -593,10 +704,20 @@ fn decoration_slot(bold: bool, italic: bool, enlarged: bool) -> usize {
 
 /// What a pass draws over its grounds and glyphs: the shapes that must sit on
 /// top of a glyph, which a layer would put beneath it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Overlay {
     decorations: Vec<(PositionedCell, Drawn, CellBounds)>,
     cursor: Option<(Drawn, CellBounds)>,
+}
+
+impl Overlay {
+    /// Adds this row's share of what is drawn over the grid to the frame's.
+    fn add_to(&self, frame: &mut Overlay) {
+        frame.decorations.extend(self.decorations.iter().cloned());
+        if self.cursor.is_some() {
+            frame.cursor.clone_from(&self.cursor);
+        }
+    }
 }
 
 /// What one cell contributes to the frame, resolved once and used by both
@@ -885,6 +1006,11 @@ impl Element for GridPaint {
 impl GridPaint {
     /// Paints the pass's grounds and glyphs, and returns what is drawn over
     /// them for the caller to paint once they are done.
+    ///
+    /// A row painted in an earlier frame under the same conditions, and
+    /// unchanged since, is replayed from what it painted then instead of
+    /// being painted cell by cell: a status line redrawn forty times a second
+    /// over a screen of text would otherwise paint the whole screen each time.
     fn paint_rows(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> Overlay {
         let scale = window.scale_factor();
         let width = f32::from(self.cell_width);
@@ -893,94 +1019,190 @@ impl GridPaint {
             return Overlay::default();
         }
 
-        let edge = |column: Col| column_edge(bounds.origin.x, self.cell_width, column, scale);
-        let row_edge = |row: Row| row_edge(bounds.origin.y, self.cell_height, row, scale);
-
         let rows = Arc::clone(&self.rows);
         let shapes = Rc::clone(&self.shapes);
         let mut shapes = shapes.borrow_mut();
         if self.pass != RowPass::Background {
             shapes.begin_frame(self.shape_context(scale), rows.len());
         }
+        let kept = self.row_paints.clone();
+        let mut kept = kept.as_ref().map(|kept| kept.borrow_mut());
+        if let Some(kept) = kept.as_deref_mut() {
+            kept.begin_frame(
+                RowFrame {
+                    bounds,
+                    mask: window.content_mask(),
+                    shapes: self.shape_context(scale),
+                    cell_width: self.cell_width,
+                    cell_height: self.cell_height,
+                    stroke_height: self.stroke_height,
+                    cursor_color: self.cursor_color,
+                    pass: self.pass,
+                },
+                &rows,
+            );
+        }
         let mut overlay = Overlay::default();
-        // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
         for (index, cells) in rows.iter().enumerate() {
-            let top = row_edge(Row(index));
-            let bottom = row_edge(Row(index + 1));
-
-            let resolved = self.resolve_row(index, cells);
-
-            // The ground first, for the whole row, so that a glyph is never
-            // covered by the cell painted after it.
-            let mut run: Option<Run> = None;
-            let flush = |run: Option<Run>, window: &mut Window| {
-                let Some(run) = run else { return };
-                window.paint_quad(fill(
-                    Bounds::from_corners(
-                        point(edge(Col(run.start)).pixels(), top.pixels()),
-                        point(edge(Col(run.end)).pixels(), bottom.pixels()),
-                    ),
-                    run.color,
-                ));
+            let Some(kept) = kept.as_deref_mut() else {
+                self.paint_row(
+                    index,
+                    cells,
+                    bounds,
+                    scale,
+                    &mut shapes,
+                    &mut overlay,
+                    window,
+                    cx,
+                );
+                continue;
             };
-            for (cell, drawn) in cells.iter().zip(resolved.clone()) {
-                let span = cell.span();
-                let (start, end) = (span.start, span.end);
-                match drawn.background {
-                    Some(color) => match run.take() {
-                        // Neighbours in the same colour become one quad, which
-                        // is both fewer quads and one less edge to get wrong:
-                        // the seam this element exists to remove cannot happen
-                        // where there is no boundary.
-                        Some(open) if open.end == start && open.color == color => {
-                            run = Some(Run {
-                                start: open.start,
-                                end,
-                                color,
-                            });
-                        }
-                        other => {
-                            flush(other, window);
-                            run = Some(Run { start, end, color });
-                        }
-                    },
-                    None => {
-                        flush(run.take(), window);
-                    }
-                }
-            }
-            flush(run.take(), window);
-
-            if self.pass == RowPass::Background {
+            let cursor = self.row_cursor(index);
+            if let Some(row) = kept.unchanged(index, cells, cursor) {
+                window.replay_paint(&row.paint);
+                row.overlay.add_to(&mut overlay);
                 continue;
             }
-
-            for (column, (cell, drawn)) in cells.iter().zip(resolved.clone()).enumerate() {
-                let span = cell.span();
-                let bounds = CellBounds {
-                    left: edge(Col(span.start)),
-                    right: edge(Col(span.end)),
-                    top,
-                    bottom,
-                };
-                let target = GlyphTarget {
-                    row: index,
+            if !kept.keeping {
+                kept.forget(index);
+                self.paint_row(
+                    index,
                     cells,
-                    column,
-                    shapes: &mut shapes,
-                };
-                self.paint_glyph(target, &drawn, bounds, scale, window, cx);
-                if drawn.underline.is_some() || drawn.strikethrough.is_some() {
-                    overlay
-                        .decorations
-                        .push((cell.clone(), drawn.clone(), bounds));
-                }
-                if drawn.cursor.is_some() {
-                    overlay.cursor = Some((drawn, bounds));
+                    bounds,
+                    scale,
+                    &mut shapes,
+                    &mut overlay,
+                    window,
+                    cx,
+                );
+                continue;
+            }
+            let mut row_overlay = Overlay::default();
+            let ((), paint) = window.record_paint(|window| {
+                self.paint_row(
+                    index,
+                    cells,
+                    bounds,
+                    scale,
+                    &mut shapes,
+                    &mut row_overlay,
+                    window,
+                    cx,
+                );
+            });
+            row_overlay.add_to(&mut overlay);
+            kept.keep(
+                index,
+                KeptRow {
+                    cells: Arc::clone(cells),
+                    cursor,
+                    paint,
+                    overlay: row_overlay,
+                },
+            );
+        }
+        overlay
+    }
+
+    /// The cursor on row `index`, if it is drawn there.
+    fn row_cursor(&self, index: usize) -> Option<CursorSnapshot> {
+        self.cursor
+            .filter(|cursor| cursor.visible && usize::from(cursor.row) == index)
+    }
+
+    /// Paints one row's grounds and glyphs, adding what is drawn over them to
+    /// `overlay`.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_row(
+        &self,
+        index: usize,
+        cells: &Arc<Vec<PositionedCell>>,
+        bounds: Bounds<Pixels>,
+        scale: f32,
+        shapes: &mut ShapeCache,
+        overlay: &mut Overlay,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        #[cfg(test)]
+        PAINTED_ROWS.with(|count| count.set(count.get() + 1));
+        let edge = |column: Col| column_edge(bounds.origin.x, self.cell_width, column, scale);
+        let row_edge = |row: Row| row_edge(bounds.origin.y, self.cell_height, row, scale);
+        let top = row_edge(Row(index));
+        let bottom = row_edge(Row(index + 1));
+
+        // Resolving colors twice avoids allocating scratch storage for every ephemeral element.
+        let resolved = self.resolve_row(index, cells);
+
+        // The ground first, for the whole row, so that a glyph is never
+        // covered by the cell painted after it.
+        let mut run: Option<Run> = None;
+        let flush = |run: Option<Run>, window: &mut Window| {
+            let Some(run) = run else { return };
+            window.paint_quad(fill(
+                Bounds::from_corners(
+                    point(edge(Col(run.start)).pixels(), top.pixels()),
+                    point(edge(Col(run.end)).pixels(), bottom.pixels()),
+                ),
+                run.color,
+            ));
+        };
+        for (cell, drawn) in cells.iter().zip(resolved.clone()) {
+            let span = cell.span();
+            let (start, end) = (span.start, span.end);
+            match drawn.background {
+                Some(color) => match run.take() {
+                    // Neighbours in the same colour become one quad, which
+                    // is both fewer quads and one less edge to get wrong:
+                    // the seam this element exists to remove cannot happen
+                    // where there is no boundary.
+                    Some(open) if open.end == start && open.color == color => {
+                        run = Some(Run {
+                            start: open.start,
+                            end,
+                            color,
+                        });
+                    }
+                    other => {
+                        flush(other, window);
+                        run = Some(Run { start, end, color });
+                    }
+                },
+                None => {
+                    flush(run.take(), window);
                 }
             }
         }
-        overlay
+        flush(run.take(), window);
+
+        if self.pass == RowPass::Background {
+            return;
+        }
+
+        for (column, (cell, drawn)) in cells.iter().zip(resolved).enumerate() {
+            let span = cell.span();
+            let bounds = CellBounds {
+                left: edge(Col(span.start)),
+                right: edge(Col(span.end)),
+                top,
+                bottom,
+            };
+            let target = GlyphTarget {
+                row: index,
+                cells,
+                column,
+                shapes: &mut *shapes,
+            };
+            self.paint_glyph(target, &drawn, bounds, scale, window, cx);
+            if drawn.underline.is_some() || drawn.strikethrough.is_some() {
+                overlay
+                    .decorations
+                    .push((cell.clone(), drawn.clone(), bounds));
+            }
+            if drawn.cursor.is_some() {
+                overlay.cursor = Some((drawn, bounds));
+            }
+        }
     }
 }
 

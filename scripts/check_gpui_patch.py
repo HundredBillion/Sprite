@@ -23,6 +23,7 @@ PATCHES = (
     "gpui-0.2.2-linux-release-and-idle.patch",
     "gpui-0.2.2-nested-layer-order.patch",
     "gpui-0.2.2-test-drawn-clip.patch",
+    "gpui-0.2.2-recorded-paint.patch",
 )
 
 

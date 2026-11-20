@@ -406,6 +406,13 @@ status = "kept"
 tests = ["a_frame_orders_a_grid_once_however_many_glyphs_it_draws"]
 
 [[capability]]
+id = "drawing.unchanged-rows-replayed"
+area = "drawing"
+promise = "A pane that changes a few rows paints only those rows again, and draws the same frame as painting every row."
+status = "kept"
+tests = ["a_small_update_paints_only_its_rows_and_draws_what_a_full_paint_draws"]
+
+[[capability]]
 id = "command-line.launch-and-config"
 area = "command-line"
 promise = "`sprite -e` hands a program to a new window, and `--config` reaches it."

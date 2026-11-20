@@ -312,6 +312,32 @@ is clipped to, in device pixels.
 Sprite uses it to test that ink is clipped to its own row as drawn
 (`grid_paint::tests::ink_is_clipped_to_its_own_row_as_drawn`).
 
+## Recorded paint
+
+`patches/gpui-0.2.2-recorded-paint.patch` follows the drawn-clip patch.
+
+- `window.rs`: `Window::record_paint` calls a closure and returns, with its
+  result, a `PaintRecording` of the scene operations it painted (primitives and
+  layer boundaries). `Window::replay_paint` paints a recording in the current
+  frame. In debug builds `record_paint` asserts the closure registered no mouse
+  listener, input handler, cursor style or tab stop, since only scene
+  operations are kept.
+- `scene.rs`: `PaintOperation` is `Clone`, and `Scene::replay`'s loop is
+  `Scene::replay_operations`, which both `replay` and `replay_paint` use.
+- Why not `reuse_paint`: that replays a range of the *previous* frame's scene,
+  so it is only right if the element was painted in that frame. A pane is a
+  cached view, and a frame drawn for another pane replays it from the view
+  cache, after which a range recorded earlier points at other primitives. A
+  recording is owned, so it stays right whichever frames come between.
+- What a replay draws: primitives keep the positions, content masks, colours
+  and opacity they were recorded with; their draw order is decided afresh by
+  `insert_primitive` and `push_layer`, exactly as for primitives painted now.
+  Glyph and path atlas tiles are never evicted (only `drop_image` removes a
+  tile, and only an image's), so a recorded sprite's tile stays valid.
+
+Sprite uses it to replay unchanged grid rows (#159)
+(`grid_paint::tests::a_small_update_paints_only_its_rows_and_draws_what_a_full_paint_draws`).
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.

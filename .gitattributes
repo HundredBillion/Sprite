@@ -9,3 +9,4 @@ patches/gpui-0.2.2-test-drawn-primitives.patch -whitespace
 patches/gpui-0.2.2-linux-release-and-idle.patch -whitespace
 docs/performance/linux-resource-release/instrumentation.patch -whitespace
 patches/gpui-0.2.2-test-drawn-clip.patch -whitespace
+patches/gpui-0.2.2-recorded-paint.patch -whitespace
