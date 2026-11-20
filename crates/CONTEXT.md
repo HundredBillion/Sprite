@@ -131,6 +131,8 @@ Protected, local access by a process launched inside Sprite to open and
 update Surfaces in its own Pane and to receive their input and events. It is
 the one line that controls what a Pane shows natively, keyed per window and
 given only to the window's own sessions; Pane Control never draws Surfaces.
+It uses a Unix-domain socket on Unix and a same-user named pipe on Windows;
+neither transport opens a network listener.
 _Avoid_: the window socket, the socket (unqualified), IPC, the API
 
 **Surface Description**:
@@ -174,8 +176,8 @@ _Avoid_: Croft dependency, Croft fork, required Croft gate
 Local access, by any process running as the same user, to list, read, create,
 label, move, focus, resize, close and type into the Panes of every Sprite
 Window, including human Panes and Panes in background tabs, and to reload or
-print a window's configuration. Each Sprite Window serves it on its own socket
-in a directory only that user can enter; there is no key and no prompt.
+print a window's configuration. Each Sprite Window serves it through a private
+local endpoint restricted to that user; there is no key and no prompt.
 _Avoid_: observation, grant, access request, remote control
 
 **Pane Address**:
