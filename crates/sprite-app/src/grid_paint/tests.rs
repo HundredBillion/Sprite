@@ -1556,3 +1556,73 @@ fn row_paint_frame(
         cx.drawn_primitives(),
     )
 }
+
+/// Paints one quad under `opacity`, recording it on the first frame and
+/// replaying the recording on every later one.
+struct ReplayProbe {
+    opacity: f32,
+    recording: Rc<RefCell<Option<gpui::PaintRecording>>>,
+    replayed: Rc<std::cell::Cell<Option<bool>>>,
+}
+
+impl gpui::Render for ReplayProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::{ParentElement, Styled};
+        let recording = Rc::clone(&self.recording);
+        let replayed = Rc::clone(&self.replayed);
+        gpui::div().size_full().opacity(self.opacity).child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, (), window, _| {
+                    let mut kept = recording.borrow_mut();
+                    match kept.as_ref() {
+                        Some(recording) => replayed.set(Some(window.replay_paint(recording))),
+                        None => {
+                            let ((), recording) = window.record_paint(|window| {
+                                window.paint_quad(fill(bounds, rgb(0xff0000)))
+                            });
+                            *kept = Some(recording);
+                        }
+                    }
+                },
+            )
+            .size_full(),
+        )
+    }
+}
+
+/// A kept row holds primitives in the colours and atlas of the frame that
+/// painted them. Replayed under another element opacity, or in another
+/// window whose atlas does not hold its glyphs, it would draw wrongly, so
+/// the replay refuses and the row is painted afresh.
+#[gpui::test]
+fn a_recording_replays_only_in_its_own_window_and_opacity(cx: &mut gpui::TestAppContext) {
+    let recording: Rc<RefCell<Option<gpui::PaintRecording>>> = Rc::default();
+    let replayed: Rc<std::cell::Cell<Option<bool>>> = Rc::default();
+    let probe = |opacity: f32| ReplayProbe {
+        opacity,
+        recording: Rc::clone(&recording),
+        replayed: Rc::clone(&replayed),
+    };
+    let frame = |cx: &mut gpui::VisualTestContext| {
+        replayed.set(None);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        replayed.get()
+    };
+
+    let first = probe(1.0);
+    let (view, cx) = cx.add_window_view(|_, _| first);
+    assert!(recording.borrow().is_some(), "the first frame records");
+    assert_eq!(frame(cx), Some(true), "the same window and opacity replay");
+    view.update(cx, |view, _| view.opacity = 0.5);
+    assert_eq!(frame(cx), Some(false), "another opacity does not");
+    view.update(cx, |view, _| view.opacity = 1.0);
+    assert_eq!(frame(cx), Some(true));
+
+    let second = probe(1.0);
+    let (_other, cx) = cx.add_window_view(|_, _| second);
+    assert_eq!(frame(cx), Some(false), "another window does not");
+}

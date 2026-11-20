@@ -319,9 +319,11 @@ Sprite uses it to test that ink is clipped to its own row as drawn
 - `window.rs`: `Window::record_paint` calls a closure and returns, with its
   result, a `PaintRecording` of the scene operations it painted (primitives and
   layer boundaries). `Window::replay_paint` paints a recording in the current
-  frame. In debug builds `record_paint` asserts the closure registered no mouse
-  listener, input handler, cursor style or tab stop, since only scene
-  operations are kept.
+  frame and returns `true`; a recording made in another window, whose atlas
+  its sprites refer to, or under a different element opacity, which is in
+  every recorded colour, paints nothing and returns `false`. In debug builds
+  `record_paint` asserts the closure registered no mouse listener, input
+  handler, cursor style or tab stop, since only scene operations are kept.
 - `scene.rs`: `PaintOperation` is `Clone`, and `Scene::replay`'s loop is
   `Scene::replay_operations`, which both `replay` and `replay_paint` use.
 - Why not `reuse_paint`: that replays a range of the *previous* frame's scene,
@@ -336,7 +338,8 @@ Sprite uses it to test that ink is clipped to its own row as drawn
   tile, and only an image's), so a recorded sprite's tile stays valid.
 
 Sprite uses it to replay unchanged grid rows (#159)
-(`grid_paint::tests::a_small_update_paints_only_its_rows_and_draws_what_a_full_paint_draws`).
+(`grid_paint::tests::a_small_update_paints_only_its_rows_and_draws_what_a_full_paint_draws`,
+`grid_paint::tests::a_recording_replays_only_in_its_own_window_and_opacity`).
 
 ## Execution limits
 

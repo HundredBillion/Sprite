@@ -1058,8 +1058,9 @@ impl GridPaint {
                 continue;
             };
             let cursor = self.row_cursor(index);
-            if let Some(row) = kept.unchanged(index, cells, cursor) {
-                window.replay_paint(&row.paint);
+            if let Some(row) = kept.unchanged(index, cells, cursor)
+                && window.replay_paint(&row.paint)
+            {
                 row.overlay.add_to(&mut overlay);
                 continue;
             }

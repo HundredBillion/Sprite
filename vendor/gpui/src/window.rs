@@ -744,6 +744,10 @@ pub(crate) struct PrepaintStateIndex {
 #[derive(Clone, Default)]
 pub struct PaintRecording {
     operations: Vec<PaintOperation>,
+    /// The window it was painted in: sprites refer to that window's atlas.
+    window: Option<AnyWindowHandle>,
+    /// The element opacity it was painted under, which is in every colour.
+    opacity: f32,
 }
 
 impl PaintRecording {
@@ -2441,22 +2445,34 @@ impl Window {
         );
         let operations =
             self.next_frame.scene.paint_operations[start.scene_index..end.scene_index].to_vec();
-        (result, PaintRecording { operations })
+        let recording = PaintRecording {
+            operations,
+            window: Some(self.handle),
+            opacity: self.element_opacity(),
+        };
+        (result, recording)
     }
 
-    /// Paints what [`Self::record_paint`] recorded, in this frame.
+    /// Paints what [`Self::record_paint`] recorded, in this frame, and
+    /// returns whether it did.
     ///
-    /// Primitives keep the positions, content masks, colours and opacity they
-    /// were recorded with, so a recording is only right to replay while those
-    /// are unchanged; draw order is decided afresh, as for anything painted
-    /// now.
+    /// Primitives keep the positions, content masks and colours they were
+    /// recorded with, so a recording is only right to replay while those are
+    /// unchanged; draw order is decided afresh, as for anything painted now.
+    /// A recording made in another window (whose atlas its glyphs are in) or
+    /// under a different element opacity paints nothing and returns `false`,
+    /// and the caller paints afresh.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    pub fn replay_paint(&mut self, recording: &PaintRecording) {
+    pub fn replay_paint(&mut self, recording: &PaintRecording) -> bool {
         self.invalidator.debug_assert_paint();
+        if recording.window != Some(self.handle) || recording.opacity != self.element_opacity() {
+            return false;
+        }
         self.next_frame
             .scene
             .replay_operations(&recording.operations);
+        true
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
