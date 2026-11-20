@@ -27,6 +27,7 @@ impl gpui::Render for ShapeProbe {
                 palette: Some(Arc::clone(&self.snapshot.palette)),
                 cell_width: px(8.4),
                 cell_height: px(18.0),
+                stroke_height: px(18.0),
                 font_family: "monospace".into(),
                 font_size: self.font_size,
                 focused: true,
@@ -324,6 +325,7 @@ fn painter(pass: RowPass) -> GridPaint {
         palette: None,
         cell_width: px(8.4),
         cell_height: px(16.8),
+        stroke_height: px(16.8),
         font_family: ".SystemUIFont".into(),
         font_size: px(14.0),
         focused: true,
@@ -513,6 +515,7 @@ fn drawing_prepares_decorations_for_whitespace_without_glyph_ink() {
         palette: None,
         cell_width: px(8.4),
         cell_height: px(16.8),
+        stroke_height: px(16.8),
         font_family: ".SystemUIFont".into(),
         font_size: px(14.0),
         shapes: Default::default(),
@@ -582,6 +585,7 @@ fn an_unfocused_pane_outlines_a_block_cursor_and_keeps_other_shapes() {
         palette: None,
         cell_width: px(8.4),
         cell_height: px(16.8),
+        stroke_height: px(16.8),
         font_family: ".SystemUIFont".into(),
         font_size: px(14.0),
         shapes: Default::default(),
@@ -1103,6 +1107,7 @@ impl gpui::Render for OverlayProbe {
             palette: None,
             cell_width: px(8.4),
             cell_height: px(18.0),
+            stroke_height: px(18.0),
             font_family: "monospace".into(),
             font_size: px(14.0),
             shapes: Default::default(),
@@ -1288,6 +1293,7 @@ impl gpui::Render for TextProbe {
             palette: None,
             cell_width: px(8.4),
             cell_height: px(18.0),
+            stroke_height: px(18.0),
             font_family: "monospace".into(),
             font_size: px(14.0),
             shapes: Default::default(),
@@ -1326,4 +1332,116 @@ fn a_frame_orders_a_grid_once_however_many_glyphs_it_draws(cx: &mut gpui::TestAp
         regions[0], regions[1],
         "one glyph and forty cost the same ordering work: {regions:?}"
     );
+}
+
+/// Paints three rows, each one decorated "g" on its own background, in rows
+/// `cell_height` tall with strokes measured against `stroke_height`.
+struct RowsProbe {
+    cell_height: Pixels,
+    stroke_height: Pixels,
+}
+
+impl gpui::Render for RowsProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::{ParentElement, Styled};
+        let row = |background: u32| {
+            one_cell_row(|cell| {
+                cell.text = "g".into();
+                cell.style = decorated(UnderlineStyle::Single, false);
+                cell.style.background = SnapshotColor::Rgb(unpack(background));
+            })
+        };
+        let paint = GridPaint::new(GridPaintSpec {
+            rows: Arc::from([row(0x203040), row(0x402030), row(0x304020)]),
+            pass: RowPass::Whole,
+            cursor: None,
+            cursor_color: None,
+            default_fg: unpack(0xffffff),
+            default_bg: unpack(0x112233),
+            palette: None,
+            cell_width: px(8.4),
+            cell_height: self.cell_height,
+            stroke_height: self.stroke_height,
+            font_family: "monospace".into(),
+            font_size: px(14.0),
+            shapes: Default::default(),
+            focused: true,
+        });
+        gpui::div().size_full().child(paint)
+    }
+}
+
+/// A filling grid's rows can be a fractional height, and their edges land on
+/// whole device pixels. Each glyph and each line is clipped to its own row as
+/// drawn, so ink near a row's bottom neither spills into the next row nor
+/// loses a sliver of its own.
+#[gpui::test]
+fn ink_is_clipped_to_its_own_row_as_drawn(cx: &mut gpui::TestAppContext) {
+    use gpui::DrawnKind;
+    gpui::ink_test_glyphs(true);
+    let (_probe, cx) = cx.add_window_view(|_, _| RowsProbe {
+        cell_height: px(18.4),
+        stroke_height: px(18.0),
+    });
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let drawn = cx.drawn_primitives();
+    let rows: Vec<_> = drawn
+        .iter()
+        .filter(|p| p.kind == DrawnKind::Quad)
+        .map(|p| p.bounds)
+        .collect();
+    assert_eq!(rows.len(), 3, "one ground per row: {drawn:?}");
+    let ink: Vec<_> = drawn
+        .iter()
+        .filter(|p| matches!(p.kind, DrawnKind::MonochromeSprite | DrawnKind::Underline))
+        .collect();
+    assert_eq!(ink.len(), 6, "a glyph and an underline per row: {drawn:?}");
+    for p in ink {
+        // The row the glyph or line itself starts in.
+        let row = rows
+            .iter()
+            .find(|row| row.top() <= p.bounds.top() && p.bounds.top() < row.bottom())
+            .unwrap_or_else(|| panic!("{p:?} is in no row of {rows:?}"));
+        assert_eq!(
+            (p.clip.top(), p.clip.bottom()),
+            (row.top(), row.bottom()),
+            "{:?} is clipped to its row {row:?}",
+            p.kind
+        );
+    }
+}
+
+/// Lines keep to the font's measure, not to how tall the rows are drawn, so
+/// an underline is as thick in a pane whose rows share out a part-row as in
+/// one whose rows fit exactly.
+#[gpui::test]
+fn a_line_is_as_thick_however_tall_its_row_is_drawn(cx: &mut gpui::TestAppContext) {
+    use gpui::DrawnKind;
+    gpui::ink_test_glyphs(true);
+    let (probe, cx) = cx.add_window_view(|_, _| RowsProbe {
+        cell_height: px(18.0),
+        stroke_height: px(18.0),
+    });
+    let mut thickness = |cell_height: f32| {
+        probe.update(cx, |probe, _| probe.cell_height = px(cell_height));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let lines: Vec<_> = cx
+            .drawn_primitives()
+            .into_iter()
+            .filter(|p| p.kind == DrawnKind::Underline)
+            .map(|p| p.bounds.size.height)
+            .collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        lines[0]
+    };
+    let fitting = thickness(18.0);
+    // 24.5 / 16 rounds to two pixels, where the font's 18 / 16 rounds to one.
+    assert_eq!(thickness(24.5), fitting);
+    assert_eq!(thickness(18.4), fitting);
 }

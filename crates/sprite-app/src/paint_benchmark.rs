@@ -133,6 +133,7 @@ impl PaintBenchmark {
                 default_bg: snapshot.default_background,
                 cell_width: px(8.4),
                 cell_height: px(18.0),
+                stroke_height: px(18.0),
                 font_family: "monospace".into(),
                 font_size: px(14.0),
                 shapes: std::rc::Rc::clone(&self.shapes),
