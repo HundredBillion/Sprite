@@ -309,3 +309,96 @@ fn a_change_in_one_pane_redraws_only_that_pane(cx: &mut gpui::TestAppContext) {
         "either pane can be the only one redrawn: {rendered:?}"
     );
 }
+
+/// Counts how often it is rendered, and draws nothing.
+struct CountedRow {
+    renders: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl gpui::Render for CountedRow {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        gpui::div().size_full()
+    }
+}
+
+/// A cached view standing in for a pane, holding one cached child view
+/// standing in for a row of its grid.
+struct CountedPane {
+    row: gpui::Entity<CountedRow>,
+}
+
+impl gpui::Render for CountedPane {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        gpui::div().size_full().child(
+            gpui::AnyView::from(self.row.clone())
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+
+/// The window around the pane, as the workspace holds each pane.
+struct CountedWindow {
+    pane: gpui::Entity<CountedPane>,
+}
+
+impl gpui::Render for CountedWindow {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        gpui::div().size_full().child(
+            gpui::AnyView::from(self.pane.clone())
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+
+/// Why a grid's rows are not cached views (#160). The handoff for #159
+/// proposed one cached GPUI view per row, so a frame would redraw only the
+/// rows that changed. But a pane is itself a cached view, and when GPUI
+/// renders a cached view again it renders everything inside it again too
+/// (`AnyView::prepaint` sets `window.refreshing` for its subtree): every
+/// frame in which a pane's output changes would render every row view anyway.
+/// Rows are replayed inside the pane's own paint instead (#159).
+#[gpui::test]
+fn a_cached_view_inside_a_pane_that_renders_again_is_rendered_again(cx: &mut gpui::TestAppContext) {
+    let renders = std::rc::Rc::new(std::cell::Cell::new(0));
+    let row_renders = std::rc::Rc::clone(&renders);
+    let (window, cx) = cx.add_window_view(move |_, cx| {
+        let row = cx.new(|_| CountedRow {
+            renders: row_renders,
+        });
+        CountedWindow {
+            pane: cx.new(|_| CountedPane { row }),
+        }
+    });
+    let (pane, row) = window.read_with(cx, |window, cx| {
+        (window.pane.clone(), window.pane.read(cx).row.clone())
+    });
+    // A refreshed frame renders everything, which is where caching starts.
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let frame_after = |notify: &dyn Fn(&mut gpui::VisualTestContext),
+                       cx: &mut gpui::VisualTestContext| {
+        renders.set(0);
+        notify(cx);
+        cx.update(|window, cx| window.draw(cx).clear());
+        renders.get()
+    };
+
+    assert_eq!(
+        frame_after(&|cx| row.update(cx, |_, cx| cx.notify()), cx),
+        1,
+        "a row that changed renders"
+    );
+    assert_eq!(
+        frame_after(&|_| {}, cx),
+        0,
+        "nothing changed: the row's drawing is reused"
+    );
+    assert_eq!(
+        frame_after(&|cx| pane.update(cx, |_, cx| cx.notify()), cx),
+        1,
+        "the pane rendered and the row, which did not change, rendered with it"
+    );
+}
