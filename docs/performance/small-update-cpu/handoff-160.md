@@ -9,7 +9,7 @@ visible row. This records what became of each of its next steps, worked on
 
 The fix for #159 is #180, which replays unchanged rows inside the pane's
 own paint. Its method, raw runs and profiles are in `README.md` beside this
-file, which #180 adds.
+file, which #180 added.
 
 ## The per-row cached view design
 
