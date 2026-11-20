@@ -301,6 +301,17 @@ Sprite uses it to test that a grid's ordering work does not grow with the
 glyphs it draws
 (`grid_paint::tests::a_frame_orders_a_grid_once_however_many_glyphs_it_draws`).
 
+## Clip in drawn primitives
+
+`patches/gpui-0.2.2-test-drawn-clip.patch` follows the nested-layer-order patch.
+It records the change #179 made to `scene.rs` without a patch, which left the
+exact-source check failing on `master`. Compiled only with `test` or
+`test-support`: `DrawnPrimitive::clip`, the content mask each listed primitive
+is clipped to, in device pixels.
+
+Sprite uses it to test that ink is clipped to its own row as drawn
+(`grid_paint::tests::ink_is_clipped_to_its_own_row_as_drawn`).
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.
