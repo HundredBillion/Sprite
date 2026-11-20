@@ -392,6 +392,7 @@ pub(crate) struct GridPaint {
     palette: Option<Arc<[Rgb; 256]>>,
     cell_width: Pixels,
     cell_height: Pixels,
+    stroke_height: Pixels,
     font_family: SharedString,
     font_size: Pixels,
     shapes: Rc<RefCell<ShapeCache>>,
@@ -412,6 +413,10 @@ pub(crate) struct GridPaintSpec {
     pub palette: Option<Arc<[Rgb; 256]>>,
     pub cell_width: Pixels,
     pub cell_height: Pixels,
+    /// The font's own row height. A filling grid's rows can be drawn a
+    /// little taller (`cell_height`); strokes keep to the font, so an
+    /// underline or a rule is as thick in every pane.
+    pub stroke_height: Pixels,
     pub font_family: SharedString,
     pub font_size: Pixels,
     pub shapes: Rc<RefCell<ShapeCache>>,
@@ -444,6 +449,7 @@ impl GridPaint {
                 palette,
                 cell_width: metrics.cells.width(),
                 cell_height: metrics.cells.height(),
+                stroke_height: metrics.cells.natural_height(),
                 font_family: metrics.cells.family(),
                 font_size: metrics.cells.font_size(),
                 shapes: Rc::clone(shapes),
@@ -550,6 +556,7 @@ impl GridPaint {
             palette: spec.palette,
             cell_width: spec.cell_width,
             cell_height: spec.cell_height,
+            stroke_height: spec.stroke_height,
             font_family: spec.font_family,
             font_size: spec.font_size,
             shapes: spec.shapes,
@@ -692,7 +699,7 @@ impl GridPaint {
                 foreground,
                 self.default_fg,
                 self.palette.as_deref(),
-                self.cell_height,
+                self.stroke_height,
             )
         };
         Drawn {
@@ -1105,10 +1112,7 @@ impl GridPaint {
         let mask = ContentMask {
             bounds: Bounds::from_corners(
                 point(bounds.left.pixels(), bounds.top.pixels()),
-                point(
-                    bounds.right.pixels(),
-                    px(f32::from(bounds.top.pixels()) + f32::from(self.cell_height)),
-                ),
+                point(bounds.right.pixels(), bounds.bottom.pixels()),
             ),
         };
         window.with_content_mask(Some(mask), |window| {
@@ -1150,7 +1154,7 @@ impl GridPaint {
         let mask = ContentMask {
             bounds: Bounds::from_corners(
                 point(left, top),
-                point(bounds.right.pixels(), top + self.cell_height),
+                point(bounds.right.pixels(), bounds.bottom.pixels()),
             ),
         };
         window.with_content_mask(Some(mask), |window| {
@@ -1208,7 +1212,7 @@ impl GridPaint {
         window: &mut Window,
     ) {
         let area = box_drawing::Cell::new(bounds.left, bounds.top, bounds.right, bounds.bottom);
-        let strokes = stroke_widths(self.cell_width, self.cell_height, scale);
+        let strokes = stroke_widths(self.cell_width, self.stroke_height, scale);
         let color = drawn.foreground;
 
         box_rects(&glyph, area, strokes, |(left, top, right, bottom)| {
@@ -1278,7 +1282,7 @@ impl GridPaint {
                     point(
                         left,
                         snap(
-                            px(f32::from(bottom) - f32::from(stroke(self.cell_height))),
+                            px(f32::from(bottom) - f32::from(stroke(self.stroke_height))),
                             scale,
                         ),
                     ),

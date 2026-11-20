@@ -325,11 +325,12 @@ pub(super) struct HostedSurface {
     /// a resize the client's new footer arrives a little later than the
     /// resize itself.
     footer_under_dock: bool,
-    /// For a grid: how tall its rows were last drawn. A filling grid's rows
-    /// share out the part-row its box leaves over, so they can be a little
-    /// taller than the font's; a click and an input method's panel are
-    /// measured in the rows as drawn. `None` until the first frame.
-    row_height: Option<Pixels>,
+    /// For a grid: how tall its rows were last drawn, and the font's own
+    /// row height they were drawn for. A filling grid's rows share out the
+    /// part-row its box leaves over, so they can be a little taller than the
+    /// font's; a click and an input method's panel are measured in the rows
+    /// as drawn. `None` until the first frame.
+    row_height: Option<(Pixels, Pixels)>,
 }
 
 enum HostedPlacement {
@@ -483,13 +484,22 @@ impl HostedSurface {
         &self,
         base: &crate::surface::render::GridMetrics,
     ) -> crate::surface::render::GridMetrics {
-        match self.row_height {
+        match self.drawn_row_height(base.cells.natural_height()) {
             Some(height) => crate::surface::render::GridMetrics {
                 cells: base.cells.with_height(height),
                 ..base.clone()
             },
             None => base.clone(),
         }
+    }
+
+    /// How tall this Surface's rows were last drawn, if they were drawn for
+    /// a font whose own rows are `natural` tall: a height drawn for another
+    /// font says nothing about this one.
+    pub(super) fn drawn_row_height(&self, natural: Pixels) -> Option<Pixels> {
+        self.row_height
+            .filter(|(_, drawn_for)| *drawn_for == natural)
+            .map(|(height, _)| height)
     }
 
     fn definition_pointer_active(&self, metrics: &crate::surface::render::GridMetrics) -> bool {
@@ -599,7 +609,7 @@ fn footer_columns(
 /// at (`previous`), so nothing on screen moves until the answer comes: rows
 /// from a box that was taller overrun this one at its bottom, and rows from
 /// one that was shorter keep to the bottom edge, where the status line
-/// stays. A previous height from another font is not kept.
+/// stays. The caller gives a previous height only for the same font.
 pub(super) fn fill_rows(rows: u16, height: f32, natural: f32, previous: Option<f32>) -> (f32, f32) {
     if rows == 0 || natural <= 0.0 {
         return (0.0, natural);
@@ -608,9 +618,7 @@ pub(super) fn fill_rows(rows: u16, height: f32, natural: f32, previous: Option<f
     if leftover >= 0.0 && leftover < natural {
         return (0.0, height / f32::from(rows));
     }
-    let row = previous
-        .filter(|row| *row >= natural && *row < natural * 2.0)
-        .unwrap_or(natural);
+    let row = previous.unwrap_or(natural);
     ((height - f32::from(rows) * row).max(0.0), row)
 }
 
@@ -684,9 +692,6 @@ mod fill_rows_tests {
         // were drawn in, until the program answers with more of them.
         assert_eq!(fill_rows(20, 600.0, 18.0, None), (240.0, 18.0));
         assert_eq!(fill_rows(20, 600.0, 18.0, Some(18.5)), (230.0, 18.5));
-        // A height drawn in another font is not kept.
-        assert_eq!(fill_rows(20, 600.0, 18.0, Some(16.2)), (240.0, 18.0));
-        assert_eq!(fill_rows(20, 600.0, 18.0, Some(40.0)), (240.0, 18.0));
         // Rows that fit are shared out whatever was drawn before.
         assert_eq!(fill_rows(33, 600.0, 18.0, Some(19.0)), (0.0, 600.0 / 33.0));
         // Nothing to place, or nothing to measure with.
@@ -1324,6 +1329,9 @@ impl TerminalView {
         if !matches!(surface.body, Body::Grid { .. }) {
             return;
         }
+        // A pixel gesture moves the rows as drawn, so content keeps pace
+        // with the finger in a grid whose rows share out a part-row.
+        let metrics = surface.drawn_metrics(&metrics);
         let (dx, dy) = match event.delta {
             gpui::ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
             gpui::ScrollDelta::Lines(delta) => (
@@ -1343,7 +1351,7 @@ impl TerminalView {
         let Some((row, col)) = crate::surface::render::grid_cell_under(
             event.position,
             origin,
-            &surface.drawn_metrics(&metrics),
+            &metrics,
             grid.cols(),
             grid.rows(),
         ) else {
@@ -1832,7 +1840,7 @@ impl TerminalView {
                 grid,
                 fill_size.height,
                 metrics,
-                surface.row_height,
+                surface.drawn_row_height(metrics.cells.natural_height()),
                 last_row,
             );
             // The footer ends where the pane does, and the dock ends where
@@ -1978,7 +1986,7 @@ impl TerminalView {
             .collect();
         let footer = self.surfaces.fill.as_mut().and_then(|surface| {
             let id = surface.id;
-            let previous = surface.row_height;
+            let previous = surface.drawn_row_height(metrics.cells.natural_height());
             let Body::Grid { grid, shapes, .. } = &mut surface.body else {
                 return None;
             };
@@ -2125,7 +2133,9 @@ impl TerminalView {
         let natural = f32::from(metrics.cells.height());
         let (grid_slack, row_height) = match &surface.body {
             Body::Grid { grid, .. } if fills => {
-                let previous = surface.row_height.map(f32::from);
+                let previous = surface
+                    .drawn_row_height(metrics.cells.natural_height())
+                    .map(f32::from);
                 fill_rows(grid.rows(), f32::from(grid_size.height), natural, previous)
             }
             Body::Grid { .. } | Body::Elements(_) | Body::List { .. } => (0.0, natural),
@@ -2154,7 +2164,7 @@ impl TerminalView {
             ..metrics.clone()
         };
         let metrics = &drawn;
-        surface.row_height = Some(px(row_height));
+        surface.row_height = Some((px(row_height), metrics.cells.natural_height()));
         let body = match &mut surface.body {
             Body::Elements(elements) => {
                 let body = elements.render(registry, &surface.connection, Some(cx.entity()));
@@ -3574,7 +3584,7 @@ mod tests {
             let Body::Grid { grid, .. } = &surface.body else {
                 panic!("grid")
             };
-            f32::from(grid.rows()) * f32::from(surface.row_height.unwrap())
+            f32::from(grid.rows()) * f32::from(surface.row_height.unwrap().0)
         });
         assert_eq!(
             origin.y,
@@ -3702,7 +3712,7 @@ mod tests {
                 panic!("grid")
             };
             let bottom = f32::from(surface.origin.unwrap().y)
-                + f32::from(surface.row_height.unwrap()) * f32::from(grid.rows());
+                + f32::from(surface.row_height.unwrap().0) * f32::from(grid.rows());
             assert!(
                 (bottom - baseline.1.1 as f32).abs() < 0.01,
                 "hidden tabs must keep the status line at the bottom: {bottom}"
@@ -3961,7 +3971,7 @@ mod tests {
         });
         draw_test_window(cx);
         events(&mut peer);
-        let position = host.update_in(cx, |host, window, cx| {
+        let (position, row) = host.update_in(cx, |host, window, cx| {
             let surface = host.surfaces.fill.as_ref().unwrap();
             let origin = surface.origin.unwrap();
             // The rows are as tall as the grid drew them, sharing out the
@@ -3984,7 +3994,10 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(bounds, expected);
-            origin + point(cells.width() * 3.5, cells.height() * 2.5)
+            (
+                origin + point(cells.width() * 3.5, cells.height() * 2.5),
+                cells.height(),
+            )
         });
         cx.simulate_event(MouseDownEvent {
             position,
@@ -3998,9 +4011,10 @@ mod tests {
             click_count: 1,
             ..Default::default()
         });
+        // One drawn row of a trackpad's travel is one row of scrolling.
         cx.simulate_event(ScrollWheelEvent {
             position,
-            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), row)),
             ..Default::default()
         });
         let mouse: Vec<_> = events(&mut peer)
@@ -4027,6 +4041,84 @@ mod tests {
         assert_eq!(resized.len(), 1, "{resized:?}");
         assert!(resized[0]["rows"].as_u64().unwrap() < u64::from(rows));
         assert_eq!(host.read_with(cx, |host, _| host.size), terminal_size);
+        cx.update(|window, _| window.remove_window());
+    }
+
+    /// While a grid waits for its program to answer a resize, its rows keep
+    /// the height they were drawn at, but only for the font they were drawn
+    /// in: after the font changes, rows are drawn at the new font's height,
+    /// not stretched to the old one's.
+    #[gpui::test]
+    fn a_new_font_draws_rows_at_its_own_height_before_the_resize_is_answered(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut settings = crate::config::Settings::parse_candidate(
+            "[surface_font]\nsize = 24\nline_height = 1.5\n",
+        )
+        .unwrap()
+        .0;
+        cx.set_global(crate::config::ActiveSettings(settings.clone()));
+        cx.set_global(TokenRegistry::new(&settings.colors));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let mut host = TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx);
+            host.apply_settings(&settings, window, cx);
+            host
+        });
+        let id = SurfaceId(995);
+        let (answer, mut peer) = open_request(
+            &host,
+            cx,
+            id,
+            open_description(
+                serde_json::json!({"version":1,"root":{"kind":"grid","cols":20,"rows":10}}),
+            ),
+        );
+        assert_eq!(answer, Ok(()));
+        host.update(cx, |host, cx| {
+            host.grid_operations(id, crate::surface::grid::parse_ops(&serde_json::json!(
+                {"type":"tabs","revision":1,"active":"a","items":[{"id":"a","label":"alpha.rs"}]}
+            )).unwrap(), cx);
+        });
+        cx.simulate_resize(gpui::size(px(800.0), px(613.0)));
+        draw_test_window(cx);
+        let (cols, rows) = host.read_with(cx, |host, _| {
+            host.surfaces
+                .fill
+                .as_ref()
+                .unwrap()
+                .told
+                .unwrap()
+                .2
+                .unwrap()
+        });
+        host.update(cx, |host, cx| {
+            host.grid_operations(id, vec![Op::Resize { cols, rows }], cx);
+        });
+        draw_test_window(cx);
+        let old = host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let (drawn, natural) = surface.row_height.unwrap();
+            assert!(drawn > natural, "the rows share out a part-row");
+            drawn
+        });
+
+        settings.surface_font.as_mut().unwrap().size = crate::config::FontSize::new(12.0);
+        host.update_in(cx, |host, window, cx| {
+            host.apply_settings(&settings, window, cx)
+        });
+        draw_test_window(cx);
+        events(&mut peer);
+        host.read_with(cx, |host, _| {
+            let surface = host.surfaces.fill.as_ref().unwrap();
+            let natural = host.grid_metrics().cells.height();
+            let (drawn, drawn_for) = surface.row_height.unwrap();
+            assert_eq!(drawn_for, natural);
+            assert_eq!(drawn, natural, "not the old font's {old:?}");
+            assert_eq!(
+                surface.drawn_metrics(&host.grid_metrics()).cells.height(),
+                natural
+            );
+        });
         cx.update(|window, _| window.remove_window());
     }
 

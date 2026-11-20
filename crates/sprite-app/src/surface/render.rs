@@ -439,6 +439,7 @@ pub(crate) fn render_grid(
         palette: None,
         cell_width: metrics.cells.width(),
         cell_height: metrics.cells.height(),
+        stroke_height: metrics.cells.natural_height(),
         font_family: metrics.cells.family().clone(),
         font_size: metrics.cells.font_size(),
         shapes: Rc::clone(shapes),

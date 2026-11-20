@@ -23,6 +23,10 @@ pub(crate) struct CellMetrics {
     font_size: Pixels,
     width: Pixels,
     height: Pixels,
+    /// The row height the font and line spacing give, which `height` is
+    /// until a filling grid shares out a part-row (`with_height`). What is
+    /// drawn to the font's measure, such as a stroke, keeps to this.
+    natural_height: Pixels,
     line_height: f32,
 }
 
@@ -37,11 +41,13 @@ impl CellMetrics {
         CELL_MEASUREMENTS.set(CELL_MEASUREMENTS.get() + 1);
         let font_size = px(size);
         let width = measure_cell_width(window, &family, font_size);
+        let height = px(crate::config::Font::cell_height(size, line_height));
         Self {
             family,
             font_size,
             width,
-            height: px(crate::config::Font::cell_height(size, line_height)),
+            height,
+            natural_height: height,
             line_height,
         }
     }
@@ -56,6 +62,10 @@ impl CellMetrics {
     }
     pub(crate) fn height(&self) -> Pixels {
         self.height
+    }
+    /// The font's own row height, whatever `with_height` drew the rows at.
+    pub(crate) fn natural_height(&self) -> Pixels {
+        self.natural_height
     }
     /// The same font in rows `height` tall: a filling grid shares the
     /// part-row its box leaves over among its rows, and is then drawn,
@@ -74,6 +84,7 @@ impl CellMetrics {
             font_size: px(14.0),
             width: px(width),
             height: px(height),
+            natural_height: px(height),
             line_height: 1.0,
         }
     }
