@@ -40,9 +40,17 @@ fn resolve_event(
 
 /// Asks about another cell of a screen `resolve_event` has already waited for.
 fn ask(session: &mut TerminalSession, events: &EventPump, column: u16) -> TerminalEvent {
+    ask_at(session, events, CellPosition { row: 0, column })
+}
+
+fn ask_at(
+    session: &mut TerminalSession,
+    events: &EventPump,
+    position: CellPosition,
+) -> TerminalEvent {
     session
         .send(TerminalCommand::ResolveHyperlink {
-            position: CellPosition { row: 0, column },
+            position,
             request_id: 1,
         })
         .expect("resolve a hyperlink");
@@ -103,13 +111,9 @@ fn a_titled_link_with_no_visible_address_resolves_to_its_target() {
         resolve_event(&mut session, &events, &snapshots, 2),
         TerminalEvent::Hyperlink {
             uri: Some(uri),
-            span: Some(sprite_term::HyperlinkSpan {
-                row: 0,
-                start_column: 0,
-                end_column: 8,
-            }),
+            span: Some(span),
             ..
-        } if uri == "https://example.com/page"
+        } if uri == "https://example.com/page" && span == sprite_term::HyperlinkSpan::single(0, 0, 8)
     ));
 }
 
@@ -201,23 +205,15 @@ fn an_osc8_wrapped_visible_url_resolves_to_its_visible_span() {
     assert!(matches!(
         resolve_event(&mut session, &events, &snapshots, 2),
         TerminalEvent::Hyperlink {
-            span: Some(sprite_term::HyperlinkSpan {
-                row: 0,
-                start_column: 0,
-                end_column: 24
-            }),
+            span: Some(span),
             ..
-        }
+        } if span == sprite_term::HyperlinkSpan::single(0, 0, 24)
     ));
 }
 
 #[test]
 fn a_visible_link_span_contains_only_its_cells_on_its_row() {
-    let span = sprite_term::HyperlinkSpan {
-        row: 2,
-        start_column: 4,
-        end_column: 9,
-    };
+    let span = sprite_term::HyperlinkSpan::single(2, 4, 9);
 
     assert!(span.contains(CellPosition { row: 2, column: 4 }));
     assert!(span.contains(CellPosition { row: 2, column: 8 }));
@@ -340,12 +336,49 @@ fn a_visible_url_resolution_includes_its_cell_span() {
         resolve_event(&mut session, &events, &snapshots, 15),
         TerminalEvent::Hyperlink {
             uri: Some(uri),
-            span: Some(sprite_term::HyperlinkSpan {
-                row: 0,
-                start_column: 6,
-                end_column: 30,
-            }),
+            span: Some(span),
             ..
-        } if uri == "https://example.com/page"
+        } if uri == "https://example.com/page" && span == sprite_term::HyperlinkSpan::single(0, 6, 30)
     ));
+}
+
+/// A URL longer than the row wraps onto the next one. Clicking either row
+/// opens the whole address, and the span covers both rows' parts of it.
+#[test]
+fn a_url_the_terminal_wrapped_opens_whole_from_its_second_row() {
+    let tail = "a".repeat(70);
+    let uri = format!("https://example.com/{tail}");
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = session(&format!(
+        "printf 'go {uri} now\\n'; printf 'DONE\\n'; sleep 30"
+    ));
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("the link", |bundle| pane_text(bundle).contains("DONE"));
+
+    for position in [
+        CellPosition { row: 0, column: 10 },
+        CellPosition { row: 1, column: 5 },
+    ] {
+        let TerminalEvent::Hyperlink {
+            uri: Some(found),
+            span: Some(span),
+            ..
+        } = ask_at(&mut session, &events, position)
+        else {
+            panic!("no link at {position:?}");
+        };
+        assert_eq!(found, uri);
+        assert_eq!(span.rows, 2);
+        assert!(span.contains(CellPosition { row: 0, column: 79 }));
+        assert!(span.contains(CellPosition { row: 1, column: 0 }));
+        assert!(
+            !span.contains(CellPosition { row: 1, column: 14 }),
+            "\" now\" is not the link"
+        );
+    }
 }

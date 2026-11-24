@@ -135,7 +135,7 @@ pub(crate) fn prepare_rows(
         .filter(|(generation, _)| *generation == snapshot.generation)
         .map(|(_, span)| span);
     let row_hover = |span: Option<HyperlinkSpan>, index: usize| {
-        span.filter(|span| usize::from(span.row) == index)
+        span.filter(|span| u16::try_from(index).is_ok_and(|row| span.columns_on(row).is_some()))
     };
     let unchanged = |index: usize, source: &Arc<RenderRow>| {
         cache
@@ -162,8 +162,10 @@ pub(crate) fn prepare_rows(
                 return Arc::clone(&cache.rows[index]);
             }
             let mut row = lay_out_row(source);
-            if let Some(span) = row_hover(hovered, index) {
-                style_hyperlink_row(&mut row, span);
+            if let Some(columns) = row_hover(hovered, index)
+                .and_then(|span| span.columns_on(u16::try_from(index).ok()?))
+            {
+                style_hyperlink_row(&mut row, columns);
             }
             Arc::new(row)
         })
@@ -175,17 +177,21 @@ pub(crate) fn prepare_rows(
 
 #[cfg(test)]
 fn style_hyperlink_span(rows: &mut [Vec<PositionedCell>], span: HyperlinkSpan) {
-    if let Some(row) = rows.get_mut(usize::from(span.row)) {
-        style_hyperlink_row(row, span);
+    for (index, row) in rows.iter_mut().enumerate() {
+        if let Some(columns) = u16::try_from(index)
+            .ok()
+            .and_then(|index| span.columns_on(index))
+        {
+            style_hyperlink_row(row, columns);
+        }
     }
 }
 
-fn style_hyperlink_row(row: &mut [PositionedCell], span: HyperlinkSpan) {
+/// Draws the cells of one row's part of a hovered link, `(start, end)`.
+fn style_hyperlink_row(row: &mut [PositionedCell], (start, end): (u16, u16)) {
     for cell in row {
         let cell_span = cell.span();
-        if cell_span.start < u32::from(span.end_column)
-            && cell_span.end > u32::from(span.start_column)
-        {
+        if cell_span.start < u32::from(end) && cell_span.end > u32::from(start) {
             cell.style.bold = true;
             cell.style.foreground = SnapshotColor::Palette(12);
             cell.style.underline_color = SnapshotColor::Palette(12);
@@ -228,14 +234,7 @@ mod tests {
             hovered_link: false,
         };
         let mut rows = vec![vec![cell(0), cell(1), cell(2), cell(3)]];
-        style_hyperlink_span(
-            &mut rows,
-            HyperlinkSpan {
-                row: 0,
-                start_column: 1,
-                end_column: 3,
-            },
-        );
+        style_hyperlink_span(&mut rows, HyperlinkSpan::single(0, 1, 3));
 
         assert!(!rows[0][0].style.bold);
         assert!(rows[0][1].style.bold);
@@ -247,6 +246,37 @@ mod tests {
         assert!(rows[0][2].hovered_link);
         assert!(!rows[0][3].style.bold);
         assert!(!rows[0][3].hovered_link);
+    }
+
+    #[test]
+    fn a_hovered_link_that_wraps_styles_its_part_of_each_row() {
+        let cell = |column| PositionedCell {
+            column,
+            columns: 1,
+            text: "x".into(),
+            style: style(),
+            selected: false,
+            hovered_link: false,
+        };
+        let row = || (0..4).map(cell).collect::<Vec<_>>();
+        let mut rows = vec![row(), row(), row()];
+        style_hyperlink_span(
+            &mut rows,
+            HyperlinkSpan {
+                row: 0,
+                start_column: 2,
+                end_column: 2,
+                rows: 2,
+                left_column: 1,
+                right_column: 4,
+            },
+        );
+
+        let linked =
+            |row: &[PositionedCell]| row.iter().map(|cell| cell.hovered_link).collect::<Vec<_>>();
+        assert_eq!(linked(&rows[0]), [false, false, true, true]);
+        assert_eq!(linked(&rows[1]), [false, true, false, false]);
+        assert_eq!(linked(&rows[2]), [false, false, false, false]);
     }
 
     fn cell(text: &str, width: CellWidth) -> RenderCell {
@@ -782,11 +812,7 @@ mod cache_tests {
         let mut snapshot = crate::paint_benchmark::fixture();
         let mut cache = LayoutCache::default();
         let original = prepare_rows(&mut cache, Some(&snapshot), None);
-        let span = HyperlinkSpan {
-            row: 1,
-            start_column: 2,
-            end_column: 5,
-        };
+        let span = HyperlinkSpan::single(1, 2, 5);
         let stale = prepare_rows(&mut cache, Some(&snapshot), Some((0, span)));
         assert!(Arc::ptr_eq(&original, &stale));
         let hovered = prepare_rows(&mut cache, Some(&snapshot), Some((1, span)));
