@@ -1032,12 +1032,17 @@ fn main() {
                 }
                 #[cfg(unix)]
                 {
-                    let ok = Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .stdout(Stdio::null())
+                    // `kill -0` succeeds on a zombie, and a killed descendant
+                    // reparented to a container's PID 1 may never be reaped.
+                    // Read the state instead: empty is gone, `Z` has exited,
+                    // and macOS shows a fatally signalled process as `E`.
+                    let state = Command::new("ps")
+                        .args(["-o", "state=", "-p", &pid.to_string()])
                         .stderr(Stdio::null())
-                        .status()
-                        .is_ok_and(|s| s.success());
+                        .output()
+                        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+                        .unwrap_or_default();
+                    let ok = !state.is_empty() && !state.starts_with('Z') && !state.contains('E');
                     process::exit(if ok { 0 } else { 1 });
                 }
             }

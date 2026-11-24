@@ -14,11 +14,15 @@ use std::process::Command;
 const TEST_CHILD_SOURCE: &str = include_str!("../tests/support/test_child_bin.rs");
 
 /// Executable filename of the compiled test child helper.
+///
+/// Kept within 15 bytes: Linux reports a process's name from `comm`, which it
+/// truncates to `TASK_COMM_LEN - 1`, and foreground tests compare that name
+/// against this one.
 pub fn test_child_program_name() -> &'static str {
     if cfg!(windows) {
-        "sprite-test-child.exe"
+        "sprite-tchild.exe"
     } else {
-        "sprite-test-child"
+        "sprite-tchild"
     }
 }
 
