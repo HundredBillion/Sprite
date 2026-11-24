@@ -24,6 +24,8 @@ mod win {
     const STD_INPUT_HANDLE: u32 = (-10_i32) as u32;
     const STD_OUTPUT_HANDLE: u32 = (-11_i32) as u32;
     const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+    const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
     const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
     const INPUT_CLEAR_MASK: u32 = 0x001F;
     const CP_UTF8: u32 = 65001;
@@ -97,6 +99,17 @@ mod win {
         unsafe {
             let _ = SetConsoleCP(CP_UTF8);
             let _ = SetConsoleOutputCP(CP_UTF8);
+            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if handle.is_null() || handle == (-1_isize) as *mut c_void {
+                return;
+            }
+            let mut mode = 0_u32;
+            if GetConsoleMode(handle, &mut mode) != 0 {
+                let _ = SetConsoleMode(
+                    handle,
+                    mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                );
+            }
         }
     }
 
@@ -506,10 +519,7 @@ fn run_mouse_reporter() {
     let mut pending = Vec::new();
     let mut opened = 0_usize;
     let mut chunk = [0_u8; 1024];
-    loop {
-        let Ok(n) = stdin.read(&mut chunk) else {
-            break;
-        };
+    while let Ok(n) = stdin.read(&mut chunk) {
         if n == 0 {
             break;
         }
