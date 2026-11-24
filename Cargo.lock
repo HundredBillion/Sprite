@@ -5052,6 +5052,7 @@ name = "sprite-app"
 version = "0.9.1"
 dependencies = [
  "async-channel 2.5.0",
+ "embed-resource",
  "gpui",
  "image",
  "libc",
@@ -5069,6 +5070,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -5088,6 +5090,7 @@ dependencies = [
  "nix 0.28.0",
  "png 0.18.1",
  "portable-pty",
+ "windows 0.61.3",
 ]
 
 [[package]]

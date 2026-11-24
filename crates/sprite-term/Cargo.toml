@@ -17,6 +17,17 @@ portable-pty = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [features]
 # Lets sprite-app's tests observe a worker stalled by event pressure.
 test-support = []

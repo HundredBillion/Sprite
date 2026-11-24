@@ -82,15 +82,19 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
     let path = directory.join("image.esc");
     std::fs::write(&path, &sequence).expect("write the fixture");
 
+    let exe = sprite_term::test_child_support::ensure_test_child_exe()
+        .expect("compile sprite-test-child helper binary");
     let sprite_term::Spawned {
         mut session,
         mut events,
         snapshots: _snapshots,
     } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
+        exe.as_os_str(),
         vec![
-            "-c".into(),
-            format!("cat {}; sleep 300", path.display()).into(),
+            "--cat-file".into(),
+            path.into_os_string(),
+            "--sleep".into(),
+            "300".into(),
         ],
     ))
     .expect("spawn session");

@@ -1,9 +1,10 @@
 //! Reads from a Surface's sole socket reader while another clone writes events.
 
 use std::io::{self, Read};
-use std::os::unix::net::UnixStream;
 
-pub(super) struct SocketReader(pub(super) UnixStream);
+use crate::local_socket::LocalStream;
+
+pub(super) struct SocketReader(pub(super) LocalStream);
 
 /// How much unread data the kernel holds for an open Surface, and how much
 /// of it one read takes. A Unix socket's default is a few kilobytes, so a
@@ -16,19 +17,27 @@ pub(super) const READ_BUFFER: usize = 64 * 1024;
 /// refuse; the Surface works either way, only slower for large messages.
 /// Linux sizes a Unix socket's queue by the sender's buffer, so there it is
 /// the program's own send buffer that decides, and this changes nothing.
-pub(super) fn widen_receive_buffer(stream: &UnixStream) {
-    use std::os::fd::AsRawFd;
-    let size = RECEIVE_BUFFER as libc::c_int;
-    // SAFETY: `stream` owns an open descriptor for the length of this call,
-    // and the option value is a `c_int` that outlives it, passed with its size.
-    unsafe {
-        libc::setsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            std::ptr::from_ref(&size).cast(),
-            size_of::<libc::c_int>() as libc::socklen_t,
-        );
+/// On Windows the Named Pipe buffer is sized when created.
+pub(super) fn widen_receive_buffer(stream: &LocalStream) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let size = RECEIVE_BUFFER as libc::c_int;
+        // SAFETY: `stream` owns an open descriptor for the length of this call,
+        // and the option value is a `c_int` that outlives it, passed with its size.
+        unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                std::ptr::from_ref(&size).cast(),
+                size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = stream;
     }
 }
 
@@ -61,13 +70,17 @@ impl Read for SocketReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::io::{BufRead, BufReader};
+    #[cfg(unix)]
     use std::net::Shutdown;
     use std::sync::mpsc;
 
+    #[cfg(unix)]
     #[test]
     fn a_half_close_drains_buffered_lines_and_keeps_the_reply_direction_open() {
-        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let (socket, mut peer) = LocalStream::pair().unwrap();
         let mut writer = socket.try_clone().unwrap();
         let (done, finished) = mpsc::channel();
         let thread = std::thread::spawn(move || {
@@ -94,7 +107,7 @@ mod tests {
 
     #[test]
     fn an_idle_surface_can_receive_data_after_a_poll_interval() {
-        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let (socket, mut peer) = LocalStream::pair().unwrap();
         let (started, ready) = mpsc::channel();
         let (done, finished) = mpsc::channel();
         let thread = std::thread::spawn(move || {
@@ -112,7 +125,7 @@ mod tests {
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
         peer.write_all(b"still open").unwrap();
-        peer.shutdown(Shutdown::Write).unwrap();
+        drop(peer);
         let (result, bytes) = finished
             .recv_timeout(crate::test_blocking_wait::watchdog())
             .unwrap();
@@ -123,7 +136,7 @@ mod tests {
 
     #[test]
     fn an_empty_read_does_not_wait_for_the_peer() {
-        let (socket, _peer) = UnixStream::pair().unwrap();
+        let (socket, _peer) = LocalStream::pair().unwrap();
         assert_eq!(SocketReader(socket).read(&mut []).unwrap(), 0);
     }
 }

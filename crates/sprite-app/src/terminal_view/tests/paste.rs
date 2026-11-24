@@ -5,17 +5,24 @@ use super::*;
 #[gpui::test]
 fn a_multi_line_paste_reaches_the_program_as_typed(cx: &mut gpui::TestAppContext) {
     let expected = "one\rtwo";
-    let script = format!(
-        "stty raw -echo; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
-        expected.len()
-    );
+    let count = expected.len().to_string();
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--raw-noecho",
+                "--emit",
+                "READY\\r\\n",
+                "--hex-read-compact",
+                &count,
+                "--emit",
+                "\\r\\nDONE\\r\\n",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,

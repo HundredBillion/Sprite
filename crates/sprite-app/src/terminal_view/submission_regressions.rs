@@ -24,16 +24,12 @@ fn rejected_link_requests_recover_after_event_pressure(cx: &mut gpui::TestAppCon
         session,
         mut events,
         mut snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec![
-            "-c".into(),
-            crate::test_event_pressure::pressure_script(
-                "printf '\\033[H\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007'; sleep 30",
-            )
-            .into(),
-        ],
-    ))
+    } = TerminalSession::spawn(crate::test_event_pressure::pressure_session_config(&[
+        "--emit",
+        "\\033[H\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007",
+        "--sleep",
+        "30",
+    ]))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
@@ -163,13 +159,9 @@ fn partially_refused_reload_reverts_actual_local_state(cx: &mut gpui::TestAppCon
         session,
         events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec![
-            "-c".into(),
-            crate::test_event_pressure::pressure_script("sleep 30").into(),
-        ],
-    ))
+    } = TerminalSession::spawn(crate::test_event_pressure::pressure_session_config(&[
+        "--sleep", "30",
+    ]))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
@@ -250,7 +242,13 @@ fn a_refused_reload_is_kept_whole_and_reverted_whole(cx: &mut gpui::TestAppConte
             cx,
         )
     });
-    let mut config = SessionConfig::command("/bin/sh", vec!["-c".into(), crate::test_event_pressure::pressure_script("printf 'INPUT_READY\\n'; while read line; do printf 'RESULT:%s\\n\\033]2;RESTORED_READY\\007' \"$line\"; done").into()]);
+    let mut config = crate::test_event_pressure::pressure_session_config(&[
+        "--emit",
+        "INPUT_READY\\n",
+        "--echo-line-title",
+        "RESULT:",
+        "RESTORED_READY",
+    ]);
     let defaults = theme::session_defaults(&settings);
     config.colors = defaults.colors;
     config.cursor = defaults.cursor;
@@ -404,18 +402,16 @@ fn refused_resize_and_font_reload_retry_the_identical_layout(cx: &mut gpui::Test
             cx,
         )
     });
-    let burst = crate::test_event_pressure::CLIPBOARD_WRITE.repeat(100);
-    let script = format!(
-        "stty -echo; read _; printf '%s' '{burst}'; head -c 1048576 /dev/zero; printf 'INPUT_READY\\n'; while read line; do printf '\\nPTY:%s\\n' \"$(stty size)\"; done"
-    );
     let sprite_term::Spawned {
         session,
         mut events,
         mut snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec!["-c".into(), script.into()],
-    ))
+    } = TerminalSession::spawn(crate::test_event_pressure::pressure_session_config(&[
+        "--emit",
+        "INPUT_READY\\n",
+        "--pty-size-loop-prefixed",
+        "PTY:",
+    ]))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());
@@ -516,7 +512,9 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sleep".into(), "30".into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--sleep", "30",
+            ])),
             settings.clone(),
             Vec::new(),
             None,
@@ -532,13 +530,9 @@ fn saturated_ui_submission_and_reload_are_visible_refusals(cx: &mut gpui::TestAp
         session,
         events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec![
-            "-c".into(),
-            crate::test_event_pressure::pressure_script("sleep 30").into(),
-        ],
-    ))
+    } = TerminalSession::spawn(crate::test_event_pressure::pressure_session_config(&[
+        "--sleep", "30",
+    ]))
     .unwrap();
     crate::test_event_pressure::focus_and_release(&session.commands());
     crate::test_event_pressure::saturate_control(&session.commands(), &events.stall_probe());

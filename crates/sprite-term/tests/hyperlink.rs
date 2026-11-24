@@ -8,24 +8,20 @@
 
 mod support;
 
-use std::ffi::OsString;
-
-use sprite_term::{CellPosition, SessionConfig, TerminalCommand, TerminalEvent, TerminalSession};
+use sprite_term::{CellPosition, TerminalCommand, TerminalEvent, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
-fn session(script: &str) -> sprite_term::Spawned {
-    TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session")
+fn session(emit: &str) -> sprite_term::Spawned {
+    TerminalSession::spawn(support::test_child_config(&[
+        "--emit", emit, "--sleep", "30",
+    ]))
+    .expect("spawn session")
 }
 
 /// Emits an OSC 8 link whose visible label is `label` and whose target is `uri`.
 fn link_script(uri: &str, label: &str) -> String {
-    format!("printf '\\033]8;;{uri}\\007{label}\\033]8;;\\007\\n'; printf 'DONE\\n'; sleep 30")
+    format!("\\033[H\\033]8;;{uri}\\007{label}\\033]8;;\\007\\nDONE\\n")
 }
 
 fn resolve_event(
@@ -123,7 +119,7 @@ fn a_label_printed_beside_its_address_stays_plain_text() {
         events,
         snapshots,
     } = session(&format!(
-        "printf '\\033]8;;{URL}\\007Sprite PR\\033]8;;\\007 ({URL})\\n'; printf 'DONE\\n'; sleep 30"
+        "\\033[H\\033]8;;{URL}\\007Sprite PR\\033]8;;\\007 ({URL})\\nDONE\\n"
     ));
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
@@ -294,7 +290,7 @@ fn ordinary_plain_text_is_not_a_link() {
         mut session,
         events,
         snapshots,
-    } = session("printf 'just ordinary text\\n'; printf 'DONE\\n'; sleep 30");
+    } = session("\\033[Hjust ordinary text\\nDONE\\n");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -314,7 +310,7 @@ fn a_visible_url_resolves_without_osc8_metadata() {
         mut session,
         events,
         snapshots,
-    } = session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
+    } = session("\\033[Hvisit https://example.com/page now\\nDONE\\n");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -331,7 +327,7 @@ fn a_visible_url_resolution_includes_its_cell_span() {
         mut session,
         events,
         snapshots,
-    } = session("printf 'visit https://example.com/page now\\n'; printf 'DONE\\n'; sleep 30");
+    } = session("\\033[Hvisit https://example.com/page now\\nDONE\\n");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

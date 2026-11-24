@@ -70,11 +70,13 @@ fn exercise_launch_sizes(cx: &mut gpui::TestAppContext, font_size: f32, padding:
         settings.font.size = crate::config::FontSize::new(font_size);
         settings.grid.padding = crate::config::Padding::new(padding);
         Workspace::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "stty -echo; stty size; printf 'SIZE_END'; read release".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--pty-size",
+                "--emit",
+                "SIZE_END",
+                "--wait-line",
+            ])),
             settings,
             None,
             window,

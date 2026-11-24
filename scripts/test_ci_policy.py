@@ -71,7 +71,7 @@ class CiPolicyTests(unittest.TestCase):
         # without anything being stuck; macOS ran without this and flaked.
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         jobs = workflow.split("\njobs:\n", 1)[1]
-        for job in ["arch", "macos"]:
+        for job in ["arch", "macos", "windows"]:
             with self.subTest(job=job):
                 body = re.split(r"(?m)^  [a-z][a-z0-9-]*:$", jobs.split(f"\n  {job}:\n", 1)[1], 1)[0]
                 header = body.split("\n    steps:\n", 1)[0]

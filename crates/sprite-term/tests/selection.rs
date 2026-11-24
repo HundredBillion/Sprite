@@ -8,8 +8,6 @@
 
 mod support;
 
-use std::ffi::OsString;
-
 use sprite_term::{
     CellPosition, SelectionDragToken, SelectionMode, SessionConfig, SnapshotBundle,
     TerminalCommand, TerminalEvent, TerminalSession,
@@ -17,13 +15,8 @@ use sprite_term::{
 
 use support::{EventPump, SnapshotPump, pane_text};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
-fn session(script: &str) -> sprite_term::Spawned {
-    TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session")
+fn session(args: &[&str]) -> sprite_term::Spawned {
+    TerminalSession::spawn(support::test_child_config(args)).expect("spawn session")
 }
 
 fn at(row: u16, column: u16) -> CellPosition {
@@ -38,7 +31,13 @@ fn selected_cells_are_marked_in_the_render_projection() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; printf 'hello world\\n'; sleep 30");
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "\\033[Hhello world\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -99,7 +98,7 @@ fn scrolling_a_drag_selects_the_newly_revealed_edge_in_one_command() {
         mut session,
         events,
         snapshots,
-    } = session("seq 1 100; sleep 30");
+    } = session(&["--seq", "1", "100", "--sleep", "30"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -135,7 +134,7 @@ fn a_cancelled_drag_cannot_scroll_after_release() {
         mut session,
         events,
         snapshots,
-    } = session("seq 1 100; sleep 30");
+    } = session(&["--seq", "1", "100", "--sleep", "30"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -176,7 +175,13 @@ fn word_selection_expands_to_the_whole_word() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; printf 'alpha beta gamma\\n'; sleep 30");
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "\\033[Halpha beta gamma\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -220,7 +225,13 @@ fn copying_returns_the_selected_text() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; printf 'copy-me-please\\n'; sleep 30");
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "\\033[Hcopy-me-please\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -270,7 +281,7 @@ fn copying_without_a_selection_yields_nothing() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; printf 'untouched\\n'; sleep 30");
+    } = session(&["--noecho", "--emit", "\\033[Huntouched\\n", "--sleep", "30"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -323,9 +334,13 @@ fn either_half_of_a_wide_character_selects_its_whole_word() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -echo; printf '\\346\\227\\245\\346\\234\\254 \\344\\270\\255\\345\\233\\275\\n'; sleep 30",
-    );
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "\\033[H\\346\\227\\245\\346\\234\\254 \\344\\270\\255\\345\\233\\275\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -369,7 +384,13 @@ fn word_selection_keeps_combining_marks_with_their_base() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; printf 'caf\\145\\314\\201 next\\n'; sleep 30");
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "\\033[Hcaf\\145\\314\\201 next\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -410,7 +431,13 @@ fn a_space_is_not_part_of_a_word() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; printf 'alpha beta\\n'; sleep 30");
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "\\033[Halpha beta\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -482,10 +509,19 @@ fn a_gesture_anchor_follows_its_content_while_output_scrolls() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -echo; seq 1 100; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-         printf '\\nafter-1\\nafter-2\\nafter-3'; sleep 30",
-    );
+    } = session(&[
+        "--noecho",
+        "--seq",
+        "1",
+        "100",
+        "--emit",
+        "ANCHOR-TEXT\\nREADY",
+        "--wait-line",
+        "--emit",
+        "\\nafter-1\\nafter-2\\nafter-3",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -527,18 +563,26 @@ fn a_gesture_anchor_follows_its_content_while_output_scrolls() {
 /// selects nothing rather than re-anchoring on whatever replaced it.
 #[test]
 fn a_gesture_whose_anchor_was_evicted_selects_nothing() {
-    // The shell outlives the test, which ends it: a debug build of the
+    // The child outlives the test, which ends it: a debug build of the
     // terminal can take longer than 30 s to take in twenty thousand lines on
-    // a loaded runner, and a shell that exited first would end the session
+    // a loaded runner, and a child that exited first would end the session
     // before the test saw the end of the stream.
-    let mut config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; seq 1 100; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-             seq 1 20000; printf 'STREAM-DONE'; sleep 300",
-        ]),
-    );
+    let mut config = support::test_child_config(&[
+        "--noecho",
+        "--seq",
+        "1",
+        "100",
+        "--emit",
+        "ANCHOR-TEXT\\nREADY",
+        "--wait-line",
+        "--seq",
+        "1",
+        "20000",
+        "--emit",
+        "STREAM-DONE",
+        "--sleep",
+        "300",
+    ]);
     // The smallest nonzero budget: libghostty keeps scrollback in whole pages
     // and prunes the oldest, which is what evicts the anchored line. A zero
     // budget rotates rows in place instead; the rotation tests below cover it.
@@ -659,14 +703,19 @@ fn press_then_stream_keeping_anchor(
 /// still selects nothing rather than extending from whatever rotated in.
 #[test]
 fn a_gesture_whose_anchor_was_rotated_out_with_zero_scrollback_selects_nothing() {
-    let mut config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-             seq 1 100; printf 'STREAM-DONE'; sleep 30",
-        ]),
-    );
+    let mut config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "ANCHOR-TEXT\\nREADY",
+        "--wait-line",
+        "--seq",
+        "1",
+        "100",
+        "--emit",
+        "STREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     config.scrollback_bytes = 0;
     let (_, text) = press_then_stream(config, "READY", at(0, 3));
     assert_eq!(text, "", "a rotated-out anchor selects nothing");
@@ -677,14 +726,19 @@ fn a_gesture_whose_anchor_was_rotated_out_with_zero_scrollback_selects_nothing()
 /// without scrollback does.
 #[test]
 fn a_gesture_whose_anchor_was_rotated_out_on_the_alternate_screen_selects_nothing() {
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf '\\033[?1049h\\033[HANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-             seq 1 100; printf 'STREAM-DONE'; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "\\033[?1049h\\033[HANCHOR-TEXT\\nREADY",
+        "--wait-line",
+        "--seq",
+        "1",
+        "100",
+        "--emit",
+        "STREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     let (_, text) = press_then_stream(config, "READY", at(0, 3));
     assert_eq!(text, "", "a rotated-out anchor selects nothing");
 }
@@ -695,14 +749,24 @@ fn a_gesture_whose_anchor_was_rotated_out_on_the_alternate_screen_selects_nothin
 /// gesture extend from a reused row.
 #[test]
 fn a_gesture_anchored_on_the_last_row_is_cleared_before_it_drifts() {
-    let mut config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; seq 1 30; printf 'ANCHOR-TEXT'; IFS= read -r go; \
-             echo; seq 1 100; printf 'STREAM-DONE'; sleep 30",
-        ]),
-    );
+    let mut config = support::test_child_config(&[
+        "--noecho",
+        "--seq",
+        "1",
+        "30",
+        "--emit",
+        "ANCHOR-TEXT",
+        "--wait-line",
+        "--emit",
+        "\\n",
+        "--seq",
+        "1",
+        "100",
+        "--emit",
+        "STREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     config.scrollback_bytes = 0;
     let (pressed, text) = press_then_stream(config, "ANCHOR-TEXT", at(0, 3));
     assert_eq!(
@@ -726,19 +790,28 @@ fn a_gesture_anchored_mid_way_down_a_wrapped_line_is_cleared_when_its_row_rotate
         "x".repeat(80),
         " ".repeat(69)
     );
-    // 30 numbers push the line to rows 20-22 with READY on row 23. `echo`
+    let emit = format!("{line}\\nREADY");
+    // 30 numbers push the line to rows 20-22 with READY on row 23. `\\n`
     // plus `seq 1 21` is 22 line feeds: 21 bring the anchor's row to row 0,
     // the 22nd rotates it out and leaves the line's last row there.
-    let mut config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            &format!(
-                "stty -echo; seq 1 30; printf '{line}\\nREADY'; IFS= read -r go; \
-                 echo; seq 1 21; printf 'STREAM-DONE'; sleep 30"
-            ),
-        ]),
-    );
+    let mut config = support::test_child_config(&[
+        "--noecho",
+        "--seq",
+        "1",
+        "30",
+        "--emit",
+        &emit,
+        "--wait-line",
+        "--emit",
+        "\\n",
+        "--seq",
+        "1",
+        "21",
+        "--emit",
+        "STREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     config.scrollback_bytes = 0;
     let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
     assert_eq!(pressed, 21, "the press landed on the line's middle row");
@@ -753,15 +826,17 @@ fn a_gesture_inside_a_scroll_region_is_cleared_when_its_row_rotates_out() {
     // Rows 0-1 stay outside the region; the region is rows 2-19 (DECSTBM
     // 3;20). The cursor waits on the region's bottom row, so the one line
     // feed after `go` scrolls the region once and erases ANCHOR-TEXT's row.
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf '\\033[1;1HHEADER\\033[2;1HABOVE-REGION\\033[3;1HANCHOR-TEXT\
-             \\033[4;1HREADY\\033[3;20r\\033[20;1H'; IFS= read -r go; \
-             printf '\\nSTREAM-DONE'; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "\\033[1;1HHEADER\\033[2;1HABOVE-REGION\\033[3;1HANCHOR-TEXT\
+         \\033[4;1HREADY\\033[3;20r\\033[20;1H",
+        "--wait-line",
+        "--emit",
+        "\\nSTREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     let (pressed, text) = press_then_stream(config, "READY", at(1, 11));
     assert_eq!(pressed, 2, "the press landed on the region's top row");
     assert_eq!(text, "", "a rotated-out anchor selects nothing");
@@ -771,14 +846,16 @@ fn a_gesture_inside_a_scroll_region_is_cleared_when_its_row_rotates_out() {
 /// pin, so the pin silently names the text that took its place.
 #[test]
 fn a_gesture_whose_anchor_row_was_deleted_selects_nothing() {
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf '\\033[2J\\033[1;1HANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-             printf '\\033[1;1H\\033[M\\033[6;1HSTREAM-DONE'; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "\\033[2J\\033[1;1HANCHOR-TEXT\\nREADY",
+        "--wait-line",
+        "--emit",
+        "\\033[1;1H\\033[M\\033[6;1HSTREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
     assert_eq!(pressed, 0, "the press landed on the top row");
     assert_eq!(text, "", "a deleted anchor row selects nothing");
@@ -788,14 +865,16 @@ fn a_gesture_whose_anchor_row_was_deleted_selects_nothing() {
 /// any pin, so the anchor's row now holds the line that was above it.
 #[test]
 fn a_gesture_whose_anchor_row_was_pushed_down_by_an_inserted_line_selects_nothing() {
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[999;1HANCHOR-TEXT'; \
-             IFS= read -r go; printf '\\033[1;1H\\033[LSTREAM-DONE'; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "\\033[2J\\033[1;1HREADY\\033[999;1HANCHOR-TEXT",
+        "--wait-line",
+        "--emit",
+        "\\033[1;1H\\033[LSTREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
     assert_eq!(
         pressed,
@@ -811,14 +890,16 @@ fn a_gesture_whose_anchor_row_was_pushed_down_by_an_inserted_line_selects_nothin
 fn a_gesture_whose_anchor_row_was_scrolled_by_reverse_index_selects_nothing() {
     // The region is rows 2-19 (DECSTBM 3;20) and the anchor sits on its last
     // row, which reverse index at the region's top pushes out.
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[20;1HANCHOR-TEXT\\033[3;20r'; \
-             IFS= read -r go; printf '\\033[3;1H\\033MSTREAM-DONE'; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "\\033[2J\\033[1;1HREADY\\033[20;1HANCHOR-TEXT\\033[3;20r",
+        "--wait-line",
+        "--emit",
+        "\\033[3;1H\\033MSTREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
     assert_eq!(pressed, 19, "the press landed on the region's last row");
     assert_eq!(text, "", "a scrolled-down anchor row selects nothing");
@@ -828,14 +909,16 @@ fn a_gesture_whose_anchor_row_was_scrolled_by_reverse_index_selects_nothing() {
 /// which moves no pin, so the pin stays on a row that holds other text.
 #[test]
 fn a_gesture_whose_anchor_row_was_scrolled_by_scroll_up_in_a_region_selects_nothing() {
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[3;1HANCHOR-TEXT\\033[3;20r'; \
-             IFS= read -r go; printf '\\033[3;1H\\033[S\\033[6;1HSTREAM-DONE'; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "\\033[2J\\033[1;1HREADY\\033[3;1HANCHOR-TEXT\\033[3;20r",
+        "--wait-line",
+        "--emit",
+        "\\033[3;1H\\033[S\\033[6;1HSTREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     let (pressed, text) = press_then_stream(config, "READY", at(0, 3));
     assert_eq!(pressed, 2, "the press landed on the region's top row");
     assert_eq!(text, "", "a scrolled-up anchor row selects nothing");
@@ -845,14 +928,22 @@ fn a_gesture_whose_anchor_row_was_scrolled_by_scroll_up_in_a_region_selects_noth
 /// the sentinels and the pin move together.
 #[test]
 fn a_gesture_whose_anchor_stays_on_screen_after_scrolling_keeps_its_text() {
-    let mut config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; seq 1 15; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; \
-             seq 1 12; printf 'STREAM-DONE'; sleep 30",
-        ]),
-    );
+    let mut config = support::test_child_config(&[
+        "--noecho",
+        "--seq",
+        "1",
+        "15",
+        "--emit",
+        "ANCHOR-TEXT\\nREADY",
+        "--wait-line",
+        "--seq",
+        "1",
+        "12",
+        "--emit",
+        "STREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     config.scrollback_bytes = 0;
     let text = press_then_stream_keeping_anchor(config, "READY", at(10, 10), 10);
     assert_eq!(
@@ -865,14 +956,16 @@ fn a_gesture_whose_anchor_stays_on_screen_after_scrolling_keeps_its_text() {
 /// region; it stays on screen, so the gesture keeps it.
 #[test]
 fn a_gesture_below_a_scrolled_region_top_keeps_its_text() {
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; printf '\\033[2J\\033[1;1HREADY\\033[10;1HANCHOR-TEXT\\033[3;20r\\033[20;1H'; \
-             IFS= read -r go; printf '\\nSTREAM-DONE'; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit",
+        "\\033[2J\\033[1;1HREADY\\033[10;1HANCHOR-TEXT\\033[3;20r\\033[20;1H",
+        "--wait-line",
+        "--emit",
+        "\\nSTREAM-DONE",
+        "--sleep",
+        "30",
+    ]);
     let text = press_then_stream_keeping_anchor(config, "READY", at(8, 10), 8);
     assert_eq!(
         text, "ANCHOR-TEXT",
@@ -889,10 +982,16 @@ fn a_gesture_does_not_extend_across_a_screen_switch() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -echo; printf 'PRIMARY-TEXT\\nREADY'; IFS= read -r go; \
-         printf '\\033[?1049h\\033[HALT-TEXT\\nALT-READY'; sleep 30",
-    );
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "PRIMARY-TEXT\\nREADY",
+        "--wait-line",
+        "--emit",
+        "\\033[?1049h\\033[HALT-TEXT\\nALT-READY",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

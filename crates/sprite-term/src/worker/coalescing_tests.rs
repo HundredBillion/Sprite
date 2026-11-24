@@ -34,7 +34,7 @@ struct Fixture {
     events: crate::event_mailbox::Receiver,
     snapshots: async_channel::Receiver<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
-    worker: JoinHandle<Option<pty_unix::SessionProcesses>>,
+    worker: JoinHandle<Option<pty::SessionProcesses>>,
 }
 
 impl Fixture {
@@ -42,7 +42,7 @@ impl Fixture {
         Self::start_with(
             chunks
                 .iter()
-                .map(|chunk| Message::PtyOutput(pty_unix::OutputChunk::detached(chunk)))
+                .map(|chunk| Message::PtyOutput(pty::OutputChunk::detached(chunk)))
                 .collect(),
         )
     }
@@ -74,9 +74,10 @@ impl Fixture {
         let worker = std::thread::spawn({
             let commands = commands.clone();
             let shutdown = Arc::clone(&shutdown);
+            let exe = crate::test_child_support::ensure_test_child_exe().unwrap();
             move || {
                 run(
-                    SessionConfig::command("/bin/sh", vec!["-c".into(), "exec sleep 30".into()]),
+                    SessionConfig::command(exe.as_os_str(), vec!["--sleep".into(), "30".into()]),
                     commands,
                     inbox,
                     control_rx,
@@ -205,7 +206,7 @@ fn a_pass_stops_at_sixteen_kibibytes_of_output() {
 fn a_report_taken_into_a_refused_pass_is_still_recorded() {
     within_watchdog(|| {
         let fixture = Fixture::start_with(vec![
-            Message::PtyOutput(pty_unix::OutputChunk::detached(b"\x1b]2;unread\x07")),
+            Message::PtyOutput(pty::OutputChunk::detached(b"\x1b]2;unread\x07")),
             Message::PumpStopped(PumpOutcome::ReadError("injected read failure".into())),
         ]);
         assert!(matches!(fixture.next_event(), TerminalEvent::Ready));
@@ -239,9 +240,7 @@ fn a_report_taken_into_a_refused_pass_is_still_recorded() {
 fn a_queued_command_is_applied_before_output_that_arrived_first() {
     within_watchdog(|| {
         let output = |text: &str| {
-            Message::PtyOutput(pty_unix::OutputChunk::detached(
-                format!("{text}\r\n").as_bytes(),
-            ))
+            Message::PtyOutput(pty::OutputChunk::detached(format!("{text}\r\n").as_bytes()))
         };
         let resolve = |request_id| {
             Message::Command(TerminalCommand::ResolveHyperlink {

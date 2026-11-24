@@ -6,7 +6,6 @@
 //! themselves.
 
 use std::cell::RefCell;
-use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,8 +17,7 @@ use libghostty_vt::Terminal;
 use libghostty_vt::key;
 use portable_pty::{ExitStatus, MasterPty, PtySize};
 
-use crate::pty_unix;
-use crate::pty_unix::Pump;
+use crate::pty::{self, Pump};
 use crate::snapshot::Projector;
 use crate::{
     ChildExit, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle, TerminalCommand,
@@ -78,6 +76,7 @@ pub(crate) enum PumpOutcome {
     Canceled,
     Eof,
     ReadError(String),
+    #[cfg(unix)]
     WriteError(String),
 }
 
@@ -85,6 +84,7 @@ pub(crate) enum PumpOutcome {
 fn pump_failure(outcome: PumpOutcome) -> Option<SessionError> {
     match outcome {
         PumpOutcome::ReadError(error) => Some(SessionError::new("pty_read", error)),
+        #[cfg(unix)]
         PumpOutcome::WriteError(error) => Some(SessionError::new("pty_write", error)),
         PumpOutcome::Canceled | PumpOutcome::Eof => None,
     }
@@ -106,7 +106,7 @@ pub(crate) enum Message {
         resume: Receiver<()>,
     },
     /// One chunk of PTY output, carrying one output permit.
-    PtyOutput(crate::pty_unix::OutputChunk),
+    PtyOutput(crate::pty::OutputChunk),
     /// The consumer took a snapshot and is ready for the next one.
     CaptureRequested,
     /// A knock: something is waiting on the control lane. Carries nothing.
@@ -137,11 +137,10 @@ impl Message {
 /// The live PTY side of a session, owned solely by the worker.
 struct Started {
     master: Box<dyn MasterPty + Send>,
-    master_fd: RawFd,
     /// Recorded at spawn so the session's Ordinary Session Jobs can still be reached after the child
     /// itself is gone and its own process id means nothing.
     process_group: Option<i32>,
-    processes: Option<pty_unix::SessionProcesses>,
+    processes: Option<pty::SessionProcesses>,
     waiter: JoinHandle<()>,
 }
 
@@ -251,7 +250,7 @@ struct Runtime {
 struct Session {
     owned: Owned,
     runtime: Runtime,
-    input: pty_unix::InputQueue,
+    input: pty::InputQueue,
     commands: SyncSender<Message>,
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     write_error: PtyWriteError,
@@ -285,7 +284,7 @@ pub(crate) fn run(
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
     foreground: Arc<crate::ForegroundWatch>,
-) -> Option<pty_unix::SessionProcesses> {
+) -> Option<pty::SessionProcesses> {
     let _completion = events.completion_guard();
     let started = match start::start(&config, &commands, Arc::clone(&events)) {
         Ok(started) => started,
@@ -296,10 +295,11 @@ pub(crate) fn run(
     };
     // `start` spawned the child on this thread, so this is the name it had
     // before exec.
-    foreground.attach(
-        started.master_fd,
+    foreground.attach_session(
+        &*started.master,
+        started.processes.as_ref(),
         started.process_group,
-        pty_unix::spawner_name(),
+        pty::spawner_name(),
     );
     let mut runtime = Runtime {
         started,
@@ -313,7 +313,7 @@ pub(crate) fn run(
         pump_stopped: true,
         fatal: None,
     };
-    let pump = match Pump::start(runtime.started.master_fd, commands.clone()) {
+    let pump = match Pump::start_master(&*runtime.started.master, commands.clone()) {
         Ok(pump) => pump,
         Err(error) => {
             runtime.fatal = Some(error);
@@ -490,6 +490,7 @@ impl Session {
                 Runtime {
                     started: Started { master, .. },
                     events,
+                    foreground,
                     exit_status,
                     pump_stopped,
                     fatal,
@@ -817,7 +818,7 @@ impl Session {
                     // reach the request that asked.
                     #[cfg(test)]
                     HISTORY_TRAVERSALS.set(HISTORY_TRAVERSALS.get() + 1);
-                    let foreground = foreground_executable(master.as_ref());
+                    let foreground = foreground_executable(master.as_ref(), foreground.as_ref());
                     match projector.capture_history(
                         pending.generation,
                         *size,
@@ -932,7 +933,7 @@ impl Session {
         }
     }
 
-    fn finish(mut self) -> Option<pty_unix::SessionProcesses> {
+    fn finish(mut self) -> Option<pty::SessionProcesses> {
         self.drain_accepted_output();
         if self.pending.dirty
             && let Ok(bundle) = {
@@ -959,12 +960,24 @@ impl Session {
 /// The basename of the program in the foreground of this terminal.
 ///
 /// Read from the process the kernel already reports as the terminal's
-/// foreground group leader, and only its name — see `pty_unix::process_name`
+/// foreground group leader, and only its name — see `pty::process_name`
 /// for what is deliberately not read, and why an unavailable name is `None`
 /// rather than a guess.
-fn foreground_executable(master: &(dyn MasterPty + Send)) -> Option<String> {
-    let leader = master.process_group_leader()?;
-    pty_unix::process_name(leader)
+fn foreground_executable(
+    master: &(dyn MasterPty + Send),
+    foreground: &crate::ForegroundWatch,
+) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let _ = foreground;
+        let leader = master.process_group_leader()?;
+        pty::process_name(leader)
+    }
+    #[cfg(windows)]
+    {
+        let _ = master;
+        foreground.state().program().map(str::to_owned)
+    }
 }
 
 /// Pins the viewport to live output. Returns whether it actually moved, so an
@@ -1049,8 +1062,9 @@ mod closing_regressions {
             let (events, receiver) = crate::event_mailbox::bounded(1);
             drop(receiver);
             let (snapshots, _receiver) = async_channel::bounded(1);
+            let exe = crate::test_child_support::ensure_test_child_exe().unwrap();
             run(
-                SessionConfig::command("/bin/sh", vec!["-c".into(), "exit 0".into()]),
+                SessionConfig::command(exe.as_os_str(), vec!["--exit".into(), "0".into()]),
                 commands,
                 inbox,
                 control_rx,

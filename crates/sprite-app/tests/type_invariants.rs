@@ -392,19 +392,62 @@ fn settings_cannot_bypass_validation_or_canonical_collection_construction() {
          }",
     );
     externs.push(format!("image={}", image.display()));
-    let nix = dependency_for_source(
-        &dependencies,
-        &scratch,
-        "nix",
-        &externs,
-        "use nix::errno::Errno;
-         use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-         fn probe(socket: &std::os::unix::net::UnixStream) {
-             use std::os::fd::AsFd;
-             let _ = poll(&mut [PollFd::new(socket.as_fd(), PollFlags::POLLIN)], PollTimeout::NONE);
-         }",
-    );
-    externs.push(format!("nix={}", nix.display()));
+    #[cfg(unix)]
+    {
+        let nix = dependency_for_source(
+            &dependencies,
+            &scratch,
+            "nix",
+            &externs,
+            "use nix::errno::Errno;
+             use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+             fn probe(socket: &std::os::unix::net::UnixStream) {
+                 use std::os::fd::AsFd;
+                 let _ = poll(&mut [PollFd::new(socket.as_fd(), PollFlags::POLLIN)], PollTimeout::NONE);
+             }",
+        );
+        externs.push(format!("nix={}", nix.display()));
+    }
+    #[cfg(windows)]
+    {
+        let windows = dependency_for_source(
+            &dependencies,
+            &scratch,
+            "windows",
+            &externs,
+            "pub fn probe(
+                 bytes: &mut [u8],
+                 overlapped: &mut windows::Win32::System::IO::OVERLAPPED,
+             ) {
+                 let _ = windows::Win32::System::Pipes::PIPE_REJECT_REMOTE_CLIENTS;
+                 let _ = windows::Win32::Security::Authorization::SDDL_REVISION_1;
+                 if false {
+                     // `windows 0.61.3` takes `Option<BCRYPT_ALG_HANDLE>` and `Option<u32>`,
+                     // disambiguating it from `windows 0.57.0` in `Cargo.lock`.
+                     // SAFETY: unreachable compile-time API probe inside `if false`.
+                     unsafe {
+                         let _ok = windows::Win32::Security::Cryptography::BCryptGenRandom(
+                             None,
+                             bytes,
+                             windows::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+                         )
+                         .is_ok();
+                         windows::Win32::Storage::FileSystem::LockFileEx(
+                             windows::Win32::Foundation::HANDLE::default(),
+                             windows::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK
+                                 | windows::Win32::Storage::FileSystem::LOCKFILE_FAIL_IMMEDIATELY,
+                             None,
+                             1,
+                             0,
+                             overlapped,
+                         )
+                         .ok();
+                     }
+                 }
+             }",
+        );
+        externs.push(format!("windows={}", windows.display()));
+    }
     // Cargo feature variants can load independently while having incompatible Serde traits.
     let serde = dependency_for_source(
         &dependencies,

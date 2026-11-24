@@ -336,7 +336,13 @@ impl Workspace {
     }
 
     pub(super) fn is_quit_key(key: &str) -> bool {
-        key == if cfg!(target_os = "macos") { "q" } else { "w" }
+        if cfg!(target_os = "macos") {
+            key == "q"
+        } else if cfg!(target_os = "linux") {
+            key == "w"
+        } else {
+            false
+        }
     }
 
     pub(super) fn quit_key_up(
@@ -438,6 +444,7 @@ mod tests {
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn a_native_quit_hold_requires_a_repeat_then_releases_to_quit(cx: &mut gpui::TestAppContext) {
         QUIT_REQUESTS.with(|requests| requests.set(0));
@@ -465,6 +472,7 @@ mod tests {
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn a_native_quit_hold_waits_for_quiet_when_key_up_is_missing(cx: &mut gpui::TestAppContext) {
         QUIT_REQUESTS.with(|requests| requests.set(0));
@@ -519,6 +527,7 @@ mod tests {
         assert_eq!(QUIT_REQUESTS.with(|requests| requests.get()), 1);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn a_quit_tap_with_no_release_expires_without_quitting(cx: &mut gpui::TestAppContext) {
         QUIT_REQUESTS.with(|requests| requests.set(0));
@@ -559,13 +568,20 @@ mod tests {
             cx.update(|window, _| window.activate_window());
             cx.run_until_parked();
             draw_workspace(cx);
-            let quit = press(
-                if cfg!(target_os = "macos") { "q" } else { "w" },
-                platform(),
-            );
-            cx.simulate_event(gpui::KeyDownEvent {
-                keystroke: quit.clone(),
-                is_held: false,
+            #[cfg(not(target_os = "windows"))]
+            {
+                let quit = press(
+                    if cfg!(target_os = "macos") { "q" } else { "w" },
+                    platform(),
+                );
+                cx.simulate_event(gpui::KeyDownEvent {
+                    keystroke: quit.clone(),
+                    is_held: false,
+                });
+            }
+            #[cfg(target_os = "windows")]
+            workspace.update(cx, |workspace, cx| {
+                assert!(!workspace.confirm_close(cx));
             });
             match cancellation {
                 "scroll" => cx.simulate_event(gpui::ScrollWheelEvent {
@@ -694,6 +710,7 @@ mod tests {
 
     /// The quit shortcut asks like any close, and holding it down cannot
     /// answer its own question.
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn a_held_quit_shortcut_cannot_answer_its_own_question(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;

@@ -3,10 +3,10 @@
 
 use super::*;
 use crate::control::watch::MAX_KEPT;
+use crate::local_socket::LocalStream;
 use crate::surface::SurfaceId;
 use crate::surface::channel::{Open, Ownership, Placement, Side, SurfaceConnection};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 const LIST: &str = r#"{"version":1,"root":{"kind":"virtual_list","row_height":22,"font_size":13,"font_family":"system","icon_size":16,"icon_gap":6,"left_padding":8,"right_padding":8,"colors":{"background":"terminal.background","foreground":"terminal.foreground","hover":"terminal.background","selected":"terminal.background","inactive_selected":"terminal.background","selected_foreground":"terminal.foreground","focus":"terminal.background","guide":"terminal.background","border":"terminal.background","scrollbar":"terminal.background"}}}"#;
@@ -18,8 +18,8 @@ fn open(
     placement: Placement,
     description: Value,
     cx: &mut gpui::VisualTestContext,
-) -> UnixStream {
-    let (stream, peer) = UnixStream::pair().unwrap();
+) -> LocalStream {
+    let (stream, peer) = LocalStream::pair().unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.serve_surface_request(
@@ -296,14 +296,14 @@ fn a_read_returns_what_each_kind_of_surface_shows(cx: &mut gpui::TestAppContext)
 /// A connection a test holds open, read a line at a time while the window
 /// runs.
 struct Line {
-    stream: UnixStream,
-    reader: BufReader<UnixStream>,
+    stream: LocalStream,
+    reader: BufReader<LocalStream>,
     partial: String,
 }
 
 impl Line {
     fn connect(target: &Target) -> Self {
-        let stream = UnixStream::connect(&target.socket).unwrap();
+        let stream = LocalStream::connect(&target.socket).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_millis(2)))
             .unwrap();
@@ -396,7 +396,7 @@ fn a_watch_tells_of_changes_in_the_panes_it_watches_and_no_others(cx: &mut gpui:
     }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         Workspace::new(
-            Some(vec!["/bin/cat".into()]),
+            Some(crate::test_event_pressure::child_command(&["--cat"])),
             crate::Settings::default(),
             None,
             window,
@@ -623,7 +623,10 @@ fn kept_connections_are_limited_and_their_places_come_back(cx: &mut gpui::TestAp
     // So does one that only stops sending: the window notices the end of
     // its stream while waiting, not by reading it.
     let half = kept.pop().unwrap();
+    #[cfg(unix)]
     half.stream.shutdown(std::net::Shutdown::Write).unwrap();
+    #[cfg(windows)]
+    drop(half);
     until(cx, "a half-closed connection kept its place", || {
         hub.kept() == MAX_KEPT - 3
     });
@@ -635,6 +638,7 @@ fn kept_connections_are_limited_and_their_places_come_back(cx: &mut gpui::TestAp
     });
     assert_eq!(stalled.next(cx)["outcome"], "invalid_request");
     assert_eq!(stalled.next(cx), Value::Null);
+    #[cfg(unix)]
     drop(half);
 }
 

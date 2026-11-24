@@ -7,18 +7,22 @@
 
 #![deny(unsafe_code)]
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("Sprite Terminal Core supports Linux and macOS only");
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("Sprite Terminal Core supports Linux, macOS, and Windows only");
 
 #[doc(hidden)]
 pub mod capture_benchmark;
+
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_child_support;
 
 mod event_mailbox;
 mod foreground;
 mod graphics;
 mod locked;
 mod png_decoder;
-mod pty_unix;
+mod pty;
 mod shell;
 mod snapshot;
 mod worker;

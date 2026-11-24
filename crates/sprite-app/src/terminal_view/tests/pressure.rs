@@ -47,20 +47,25 @@ fn settings_callback_pressure_child(cx: &mut gpui::TestAppContext) {
             .unwrap()
             .as_nanos()
     ));
-    // The burst must fit one macOS PTY read (1 KiB) yet overflow the event mailbox;
-    // a split burst leaves the worker holding a second chunk and the control lane short of full.
-    // Clipboard writes, because a title keeps only its latest value per pass.
-    let titles = crate::test_event_pressure::CLIPBOARD_WRITE.repeat(60);
     // ARMED proves the child waits at the gate, so a slow start cannot push the burst
     // past the pause below.
-    let program = format!(
-        "printf ARMED; while [ ! -e '{}' ]; do sleep 0.005; done; printf '%s' '{titles}'; head -c 327680 /dev/zero; sleep 30",
-        gate.to_str().unwrap()
-    );
+    let gate_arg = gate.to_str().unwrap().to_owned();
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), program.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--emit",
+                "ARMED",
+                "--wait-file",
+                &gate_arg,
+                "--emit-repeat",
+                "60",
+                "\\033]52;c;Q0xJUA==\\007",
+                "--emit-zeros",
+                "327680",
+                "--sleep",
+                "30",
+            ])),
             settings.clone(),
             Vec::new(),
             None,
@@ -223,17 +228,27 @@ fn focus_admission_pressure_child(cx: &mut gpui::TestAppContext) {
             .unwrap()
             .as_nanos()
     ));
-    let program = format!(
-        "stty raw -echo; dd bs=1 count=1 status=none >/dev/null; \
-         printf '\\033[?1004hARMED'; while [ ! -e '{}' ]; do sleep 0.005; done; \
-         head -c 327680 /dev/zero; \
-         dd bs=1 count=3 status=none | od -An -tx1 | tr -d ' \\n'; printf 'END'; sleep 30",
-        gate.to_str().unwrap()
-    );
+    let gate_arg = gate.to_str().unwrap().to_owned();
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), program.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--raw-noecho",
+                "--read-exact-discard",
+                "1",
+                "--emit",
+                "\\033[?1004hARMED",
+                "--wait-file",
+                &gate_arg,
+                "--emit-zeros",
+                "327680",
+                "--hex-read-compact",
+                "3",
+                "--emit",
+                "END",
+                "--sleep",
+                "30",
+            ])),
             settings.clone(),
             Vec::new(),
             None,
@@ -347,11 +362,12 @@ fn natural_completion_retires_idle_admission_recovery(cx: &mut gpui::TestAppCont
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "sleep .05; exit 7".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--sleep-ms",
+                "50",
+                "--exit",
+                "7",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -393,11 +409,17 @@ fn disconnected_worker_refuses_reload_and_retires_recovery(cx: &mut gpui::TestAp
     let (sender, _exits) = async_channel::unbounded();
     // One write: separate small writes exhaust the output permits while the UI is paused,
     // and macOS PTYs then block the child before it can exit.
-    let burst = crate::test_event_pressure::CLIPBOARD_WRITE.repeat(150);
-    let script = format!("stty -echo; read _; printf '%s' '{burst}'; exit 7");
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--wait-line",
+                "--emit-repeat",
+                "150",
+                "\\033]52;c;Q0xJUA==\\007",
+                "--exit",
+                "7",
+            ])),
             settings.clone(),
             Vec::new(),
             None,
@@ -471,16 +493,25 @@ fn selection_admission_pressure_child(cx: &mut gpui::TestAppContext) {
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(), "-c".into(),
-                "stty -echo; printf 'OLD-ROW\\r\\nNEW-TEXT'; IFS= read -r go; printf '\\r\\nDRAINED'; sleep 30".into(),
-            ]),
-            settings, Vec::new(), None,
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--emit",
+                "OLD-ROW\\r\\nNEW-TEXT",
+                "--wait-line",
+                "--emit",
+                "\\r\\nDRAINED",
+                "--sleep",
+                "30",
+            ])),
+            settings,
+            Vec::new(),
+            None,
             PaneExit {
                 sender,
                 identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
             },
-            window, cx,
+            window,
+            cx,
         )
     });
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -636,13 +667,10 @@ fn no_keystroke_is_refused_under_a_sustained_output_flood(cx: &mut gpui::TestApp
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
     let (sender, _exits) = async_channel::unbounded();
+    let line = "y".repeat(31);
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                format!("yes {}", "y".repeat(31)).into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&["--yes", &line])),
             settings.clone(),
             Vec::new(),
             None,

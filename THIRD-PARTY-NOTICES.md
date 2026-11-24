@@ -952,7 +952,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 | `socket2` | 0.6.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/socket2 |
 | `spin` | 0.9.9 | MIT | https://github.com/mvdnes/spin-rs.git |
 | `spirv` | 0.3.0+sdk-1.3.268.0 | Apache-2.0 | https://github.com/gfx-rs/rspirv |
-| `sprite-pane` | 0.8.0 | MIT OR Apache-2.0 |  |
+| `sprite-pane` | 0.9.1 | MIT OR Apache-2.0 |  |
 | `stable_deref_trait` | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
 | `stacker` | 0.1.25 | MIT OR Apache-2.0 | https://github.com/rust-lang/stacker |
 | `stacksafe` | 0.1.4 | Apache-2.0 | https://github.com/fast/stacksafe |

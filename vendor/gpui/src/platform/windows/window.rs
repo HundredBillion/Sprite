@@ -2,6 +2,7 @@
 
 use std::{
     cell::RefCell,
+    collections::VecDeque,
     num::NonZeroIsize,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -43,6 +44,7 @@ pub struct WindowsWindowState {
     pub callbacks: Callbacks,
     pub input_handler: Option<PlatformInputHandler>,
     pub pending_surrogate: Option<u16>,
+    pub pending_key_char_lparams: VecDeque<isize>,
     pub last_reported_modifiers: Option<Modifiers>,
     pub last_reported_capslock: Option<Capslock>,
     pub system_key_handled: bool,
@@ -74,6 +76,7 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) validation_number: usize,
     pub(crate) main_receiver: flume::Receiver<Runnable>,
     pub(crate) platform_window_handle: HWND,
+    pub(crate) vsync_hub: std::sync::Weak<VSyncHub>,
 }
 
 impl WindowsWindowState {
@@ -110,6 +113,7 @@ impl WindowsWindowState {
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
+        let pending_key_char_lparams = VecDeque::new();
         let last_reported_modifiers = None;
         let last_reported_capslock = None;
         let system_key_handled = false;
@@ -131,6 +135,7 @@ impl WindowsWindowState {
             callbacks,
             input_handler,
             pending_surrogate,
+            pending_key_char_lparams,
             last_reported_modifiers,
             last_reported_capslock,
             system_key_handled,
@@ -231,6 +236,7 @@ impl WindowsWindowInner {
             validation_number: context.validation_number,
             main_receiver: context.main_receiver.clone(),
             platform_window_handle: context.platform_window_handle,
+            vsync_hub: context.vsync_hub.clone(),
             system_settings: RefCell::new(WindowsSystemSettings::new(context.display)),
         }))
     }
@@ -356,6 +362,7 @@ struct WindowCreateContext {
     appearance: WindowAppearance,
     disable_direct_composition: bool,
     directx_devices: DirectXDevices,
+    vsync_hub: std::sync::Weak<VSyncHub>,
 }
 
 impl WindowsWindow {
@@ -375,6 +382,7 @@ impl WindowsWindow {
             platform_window_handle,
             disable_direct_composition,
             directx_devices,
+            vsync_hub,
         } = creation_info;
         register_window_class(icon);
         let hide_title_bar = params
@@ -435,6 +443,7 @@ impl WindowsWindow {
             appearance,
             disable_direct_composition,
             directx_devices,
+            vsync_hub,
         };
         let creation_result = unsafe {
             CreateWindowExW(
@@ -843,6 +852,22 @@ impl PlatformWindow for WindowsWindow {
 
     fn draw(&self, scene: &Scene) {
         self.0.state.borrow_mut().renderer.draw(scene).log_err();
+    }
+
+    fn set_frame_delivery(&self, active: bool) {
+        if let Some(vsync_hub) = self.0.vsync_hub.upgrade() {
+            vsync_hub.set_frame_delivery(self.0.hwnd.into(), active);
+        }
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let vsync_hub = self.0.vsync_hub.clone();
+        let hwnd: SafeHwnd = self.0.hwnd.into();
+        Some(Rc::new(move || {
+            if let Some(vsync_hub) = vsync_hub.upgrade() {
+                vsync_hub.set_frame_delivery(hwnd, true);
+            }
+        }))
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

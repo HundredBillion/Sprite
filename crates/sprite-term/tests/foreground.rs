@@ -33,6 +33,7 @@ fn wait_for(
     })
 }
 
+#[cfg(unix)]
 fn wait_for_owner(session: &TerminalSession, pid: u32, present: bool) -> Option<i32> {
     support::wait_until(
         &format!(
@@ -46,6 +47,7 @@ fn wait_for_owner(session: &TerminalSession, pid: u32, present: bool) -> Option<
     )
 }
 
+#[cfg(unix)]
 fn reported_owner(text: &str) -> Option<u32> {
     text.lines().find_map(|line| {
         line.strip_prefix("OWNER=")
@@ -56,9 +58,18 @@ fn reported_owner(text: &str) -> Option<u32> {
 /// An interactive shell, its prompt reached, and its snapshot pump alive for
 /// as long as the returned session is.
 fn interactive_shell() -> (TerminalSession, SnapshotPump) {
-    // `-i` because job control is what puts a started program into its own
-    // process group; a shell without it runs everything in its own.
-    let config = SessionConfig::command("/bin/sh", args(&["-i"]));
+    // `-i` on Unix because job control is what puts a started program into its
+    // own process group; a shell without it runs everything in its own.
+    #[cfg(unix)]
+    let (config, probe) = (
+        SessionConfig::command("/bin/sh", args(&["-i"])),
+        b"printf 'AT-PROMPT\\n'\n".as_slice(),
+    );
+    #[cfg(windows)]
+    let (config, probe) = (
+        SessionConfig::command("cmd.exe", args(&["/Q"])),
+        b"echo AT-PROMPT\r\n".as_slice(),
+    );
     let sprite_term::Spawned {
         mut session,
         events,
@@ -69,7 +80,7 @@ fn interactive_shell() -> (TerminalSession, SnapshotPump) {
     events.expect_ready();
 
     session
-        .send(TerminalCommand::Input(b"printf 'AT-PROMPT\\n'\n".to_vec()))
+        .send(TerminalCommand::Input(probe.to_vec()))
         .expect("send input");
     snapshots.wait_for("the shell's first output", |bundle| {
         pane_text(bundle).contains("AT-PROMPT")
@@ -102,8 +113,8 @@ fn a_directly_launched_program_is_busy() {
         mut session,
         events,
         snapshots,
-    } = TerminalSession::spawn(SessionConfig::command("/bin/cat", Vec::new()))
-        .expect("spawn cat directly");
+    } = TerminalSession::spawn(support::test_child_config(&["--cat-echo"]))
+        .expect("spawn child directly");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -111,7 +122,7 @@ fn a_directly_launched_program_is_busy() {
 
     assert_eq!(
         session.foreground(),
-        ForegroundState::Busy(Some("cat".to_owned()))
+        ForegroundState::Busy(Some(support::test_child_name().to_owned()))
     );
 }
 
@@ -121,19 +132,24 @@ fn a_program_that_replaces_the_idle_shell_is_busy() {
     wait_for(&session, "the shell's initial idle state", |state| {
         *state == ForegroundState::Idle
     });
+    let exe = support::test_child_exe();
+    #[cfg(unix)]
+    let command = format!("exec \"{}\" --cat-echo\n", exe.display());
+    #[cfg(windows)]
+    let command = format!("\"{}\" --cat-echo\r\n", exe.display());
     session
-        .send(TerminalCommand::Input(b"exec /bin/cat\n".to_vec()))
-        .expect("replace the shell with cat");
+        .send(TerminalCommand::Input(command.into_bytes()))
+        .expect("replace the shell with test child");
     // Bash can read ahead and discard queued input while replacing itself.
-    // Wait for exec to finish before sending the line cat must answer.
-    wait_for(&session, "cat to replace the shell", |state| {
-        state.program() == Some("cat")
+    // Wait for exec to finish before sending the line the child must answer.
+    wait_for(&session, "test child to become foreground", |state| {
+        state.program() == Some(support::test_child_name())
     });
     cat_has_answered(&mut session, &snapshots);
 
     assert_eq!(
         session.foreground(),
-        ForegroundState::Busy(Some("cat".to_owned()))
+        ForegroundState::Busy(Some(support::test_child_name().to_owned()))
     );
 }
 
@@ -143,14 +159,19 @@ fn a_running_program_is_reported_by_name() {
 
     // Far longer than any wait below, so the program cannot finish before it
     // is sampled; the test interrupts it instead of waiting it out.
+    let exe = support::test_child_exe();
+    #[cfg(unix)]
+    let command = format!("\"{}\" --sleep 600\n", exe.display());
+    #[cfg(windows)]
+    let command = format!("\"{}\" --sleep 600\r\n", exe.display());
     session
-        .send(TerminalCommand::Input(b"sleep 600\n".to_vec()))
+        .send(TerminalCommand::Input(command.into_bytes()))
         .expect("send input");
 
-    let state = wait_for(&session, "sleep to be in the foreground", |state| {
-        state.program() == Some("sleep")
+    let state = wait_for(&session, "child to be in the foreground", |state| {
+        state.program() == Some(support::test_child_name())
     });
-    assert_eq!(state.program(), Some("sleep"));
+    assert_eq!(state.program(), Some(support::test_child_name()));
 
     session
         .send(TerminalCommand::Input(vec![0x03]))
@@ -165,8 +186,13 @@ fn a_running_program_is_reported_by_name() {
 fn a_finished_program_leaves_the_pane_idle_again() {
     let (mut session, _snapshots) = interactive_shell();
 
+    let exe = support::test_child_exe();
+    #[cfg(unix)]
+    let command = format!("\"{}\" --sleep 1\n", exe.display());
+    #[cfg(windows)]
+    let command = format!("\"{}\" --sleep 1\r\n", exe.display());
     session
-        .send(TerminalCommand::Input(b"sleep 1\n".to_vec()))
+        .send(TerminalCommand::Input(command.into_bytes()))
         .expect("send input");
     wait_for(&session, "the program to start", |state| {
         matches!(state, ForegroundState::Busy(_))
@@ -178,6 +204,7 @@ fn a_finished_program_leaves_the_pane_idle_again() {
     assert_eq!(state, ForegroundState::Idle);
 }
 
+#[cfg(unix)]
 #[test]
 fn owner_matches_only_the_live_foreground_job() {
     let (mut session, snapshots) = interactive_shell();

@@ -5,10 +5,10 @@
 //! window; the rest pick one window, from `--window`, from the pane the command
 //! runs in, or because only one is open.
 
+use crate::local_socket::LocalStream;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -364,7 +364,7 @@ fn choose_window(directory: &Path, asked: Option<&str>) -> Result<String, String
     }
     let mut running: Vec<String> = socket_windows(directory)
         .into_iter()
-        .filter(|window| UnixStream::connect(super::socket_path(directory, window)).is_ok())
+        .filter(|window| LocalStream::connect(super::socket_path(directory, window)).is_ok())
         .collect();
     match running.len() {
         0 => Err("no Sprite window is running".into()),
@@ -451,13 +451,13 @@ pub(crate) fn ask(
 
 /// Connects to a window's socket and sends one request line, with `timeout`
 /// on every read and write that follows.
-fn send(socket: &Path, line: &str, timeout: Duration) -> Result<UnixStream, ExchangeError> {
+fn send(socket: &Path, line: &str, timeout: Duration) -> Result<LocalStream, ExchangeError> {
     if line.len() + 1 > 8192 || line.contains('\n') {
         return Err(ExchangeError::Invalid(
             "request exceeds 8 KiB or contains an unencoded newline".into(),
         ));
     }
-    let mut stream = UnixStream::connect(socket).map_err(|e| {
+    let mut stream = LocalStream::connect(socket).map_err(|e| {
         if matches!(
             e.kind(),
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
@@ -602,9 +602,9 @@ pub fn run_config_print(
 fn no_window_running() -> bool {
     std::env::var(PANE_VARIABLE).is_err()
         && directory().is_ok_and(|directory| {
-            socket_windows(&directory)
-                .into_iter()
-                .all(|window| UnixStream::connect(super::socket_path(&directory, &window)).is_err())
+            socket_windows(&directory).into_iter().all(|window| {
+                LocalStream::connect(super::socket_path(&directory, &window)).is_err()
+            })
         })
 }
 

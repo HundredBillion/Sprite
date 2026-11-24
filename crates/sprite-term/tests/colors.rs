@@ -14,27 +14,20 @@
 
 mod support;
 
-use std::ffi::OsString;
 use std::sync::Arc;
 
-use sprite_term::{
-    ColorDefaults, Rgb, SessionConfig, SnapshotBundle, SnapshotColor, TerminalSession,
-};
+use sprite_term::{ColorDefaults, Rgb, SnapshotBundle, SnapshotColor, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
-
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
 
 fn color(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
 }
 
-/// Runs one script under the given colours and returns the bundle once
+/// Runs one child sequence under the given colours and returns the bundle once
 /// `marker` is on screen.
-fn shown(colors: ColorDefaults, script: &str, marker: &str) -> Arc<SnapshotBundle> {
-    let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
+fn shown(colors: ColorDefaults, emit: &str, marker: &str) -> Arc<SnapshotBundle> {
+    let mut config = support::test_child_config(&["--emit", emit, "--sleep", "30"]);
     config.colors = colors;
     let sprite_term::Spawned {
         session: _session,
@@ -57,7 +50,7 @@ fn configured_colours_are_what_a_pane_starts_with() {
         cursor: Some(color(0x77, 0x88, 0x99)),
         palette: vec![(1, color(0xaa, 0xbb, 0xcc))],
     };
-    let bundle = shown(colors, "printf 'PLAIN\\n'; sleep 30", "PLAIN");
+    let bundle = shown(colors, "PLAIN\\n", "PLAIN");
 
     assert_eq!(bundle.render.default_foreground, color(0x11, 0x22, 0x33));
     assert_eq!(bundle.render.default_background, color(0x44, 0x55, 0x66));
@@ -70,7 +63,7 @@ fn an_erased_blank_row_keeps_the_programs_background_before_any_text_is_typed() 
     let background = color(0x8c, 0x8c, 0x8c);
     let bundle = shown(
         ColorDefaults::default(),
-        "printf '\\033[48;2;140;140;140m\\033[2K\\033[0m\\r\\nREADY\\n'; sleep 30",
+        "\\033[H\\033[48;2;140;140;140m\\033[2K\\033[0m\\r\\nREADY\\n",
         "READY",
     );
 
@@ -91,7 +84,7 @@ fn an_erased_blank_row_keeps_the_programs_background_before_any_text_is_typed() 
 fn an_erased_palette_background_keeps_its_palette_reference() {
     let bundle = shown(
         ColorDefaults::default(),
-        "printf '\\033[48;5;42m\\033[2K\\033[0m\\r\\nREADY\\n'; sleep 30",
+        "\\033[H\\033[48;5;42m\\033[2K\\033[0m\\r\\nREADY\\n",
         "READY",
     );
 
@@ -106,13 +99,13 @@ fn an_erased_palette_background_keeps_its_palette_reference() {
 /// Sparse on purpose: changing one entry must not flatten the other 255.
 #[test]
 fn an_unlisted_palette_entry_keeps_the_colour_it_had() {
-    let plain = shown(ColorDefaults::default(), "printf 'A\\n'; sleep 30", "A");
+    let plain = shown(ColorDefaults::default(), "A\\n", "A");
     let patched = shown(
         ColorDefaults {
             palette: vec![(1, color(0xaa, 0xbb, 0xcc))],
             ..ColorDefaults::default()
         },
-        "printf 'A\\n'; sleep 30",
+        "A\\n",
         "A",
     );
 
@@ -131,7 +124,7 @@ fn an_unlisted_palette_entry_keeps_the_colour_it_had() {
 /// that is what lets the renderer fall back to inverting the cell.
 #[test]
 fn an_unconfigured_cursor_has_no_colour_of_its_own() {
-    let bundle = shown(ColorDefaults::default(), "printf 'A\\n'; sleep 30", "A");
+    let bundle = shown(ColorDefaults::default(), "A\\n", "A");
     assert_eq!(bundle.render.cursor_color, None);
 }
 
@@ -146,8 +139,8 @@ fn a_program_that_sets_its_own_colours_wins() {
         palette: vec![(1, color(0xaa, 0xbb, 0xcc))],
     };
     // OSC 10, 11, 12 and 4: foreground, background, cursor, palette entry.
-    let script = "printf '\\033]10;#010203\\007\\033]11;#040506\\007\
-                  \\033]12;#070809\\007\\033]4;1;#0a0b0c\\007THEIRS\\n'; sleep 30";
+    let script = "\\033]10;#010203\\007\\033]11;#040506\\007\
+                  \\033]12;#070809\\007\\033]4;1;#0a0b0c\\007THEIRS\\n";
     let bundle = shown(colors, script, "THEIRS");
 
     assert_eq!(bundle.render.default_foreground, color(0x01, 0x02, 0x03));
@@ -172,8 +165,8 @@ fn a_reset_returns_to_the_configured_colour() {
         ..ColorDefaults::default()
     };
     // Set both, then reset both: OSC 111 and OSC 104.
-    let script = "printf '\\033]11;#040506\\007\\033]4;1;#0a0b0c\\007'; \
-                  printf '\\033]111\\007\\033]104;1\\007RESET\\n'; sleep 30";
+    let script = "\\033]11;#040506\\007\\033]4;1;#0a0b0c\\007\
+                  \\033]111\\007\\033]104;1\\007RESET\\n";
     let bundle = shown(colors, script, "RESET");
 
     assert_eq!(
@@ -190,7 +183,7 @@ fn a_reset_returns_to_the_configured_colour() {
 /// A live colour reload must repaint on its own, with the new colours.
 #[test]
 fn a_live_colour_reload_repaints_on_its_own() {
-    let config = SessionConfig::command("/bin/sh", args(&["-c", "printf 'A\\n'; sleep 30"]));
+    let config = support::test_child_config(&["--emit", "A\\n", "--sleep", "30"]);
     let sprite_term::Spawned {
         mut session,
         events,

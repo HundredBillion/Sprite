@@ -154,7 +154,8 @@ const DESCRIPTION: &str = r#"{ "version": 1, "root": { "kind": "text", "text": "
 
 #[test]
 fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
-    let (endpoint, window) = surface_window(|request| match request {
+    let mut live = None;
+    let (endpoint, window) = surface_window(move |request| match request {
         sprite_app::SurfaceRequest::Open {
             pane,
             open,
@@ -172,6 +173,7 @@ fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
             assert_eq!(open.description["root"]["text"], "hello");
             reply.send(Ok(())).expect("reply");
             assert!(connection.send(r#"{"type":"focus"}"#));
+            drop(live.replace(connection));
             true
         }
         sprite_app::SurfaceRequest::Update { description, .. } => {
@@ -179,7 +181,10 @@ fn a_surface_open_prints_the_window_s_events_and_exits_when_stdin_closes() {
             true
         }
         sprite_app::SurfaceRequest::Focus { .. } => true,
-        sprite_app::SurfaceRequest::Closed { .. } => false,
+        sprite_app::SurfaceRequest::Closed { .. } => {
+            drop(live.take());
+            false
+        }
         other @ (sprite_app::SurfaceRequest::Capabilities { .. }
         | sprite_app::SurfaceRequest::Close { .. }
         | sprite_app::SurfaceRequest::FocusPane { .. }
@@ -242,12 +247,19 @@ fn a_refused_surface_open_reports_the_reason_and_exits_five() {
 
 #[test]
 fn a_malformed_later_document_closes_the_surface_and_exits_two() {
-    let (endpoint, window) = surface_window(|request| match request {
-        sprite_app::SurfaceRequest::Open { reply, .. } => {
+    let mut live = None;
+    let (endpoint, window) = surface_window(move |request| match request {
+        sprite_app::SurfaceRequest::Open {
+            connection, reply, ..
+        } => {
+            drop(live.replace(connection));
             reply.send(Ok(())).expect("reply");
             true
         }
-        sprite_app::SurfaceRequest::Closed { .. } => false,
+        sprite_app::SurfaceRequest::Closed { .. } => {
+            drop(live.take());
+            false
+        }
         other @ (sprite_app::SurfaceRequest::Capabilities { .. }
         | sprite_app::SurfaceRequest::Update { .. }
         | sprite_app::SurfaceRequest::Focus { .. }
@@ -351,13 +363,12 @@ struct Runtime {
 
 impl Runtime {
     fn new() -> Self {
-        use std::os::unix::fs::DirBuilderExt;
         let root = scratch();
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(root.join("sprite"))
-            .expect("runtime directory");
+        #[cfg(unix)]
+        let dir = root.join("sprite");
+        #[cfg(windows)]
+        let dir = root.join("sprite").join("r");
+        sprite_app::ipc_test_support::create_private_dir(&dir).expect("runtime directory");
         Self { root }
     }
 
@@ -365,14 +376,17 @@ impl Runtime {
         let root = self.root.to_string_lossy().into_owned();
         vec![
             ("TMPDIR".to_owned(), root.clone()),
-            ("XDG_RUNTIME_DIR".to_owned(), root),
+            ("XDG_RUNTIME_DIR".to_owned(), root.clone()),
+            ("LOCALAPPDATA".to_owned(), root),
         ]
     }
 
     fn socket(&self, window: &str) -> std::path::PathBuf {
-        self.root
-            .join("sprite")
-            .join(format!("window-{window}.sock"))
+        #[cfg(unix)]
+        let dir = self.root.join("sprite");
+        #[cfg(windows)]
+        let dir = self.root.join("sprite").join("r");
+        dir.join(format!("window-{window}.sock"))
     }
 
     /// A window that answers every request with `answer(request)`, and
@@ -383,13 +397,12 @@ impl Runtime {
         answer: impl Fn(&serde_json::Value) -> serde_json::Value + Send + 'static,
     ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         use std::io::{BufRead, BufReader, Write};
-        let listener =
-            std::os::unix::net::UnixListener::bind(self.socket(id)).expect("bind a window");
+        let listener = sprite_app::ipc_test_support::TestListener::bind(&self.socket(id))
+            .expect("bind a window");
         let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let recorder = std::sync::Arc::clone(&seen);
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
+            while let Ok(mut stream) = listener.accept() {
                 let mut line = String::new();
                 // A connection that sends nothing is the command checking
                 // the window is alive.
@@ -408,7 +421,11 @@ impl Runtime {
     /// What a window killed rather than closed leaves: a socket file with
     /// nothing listening on it.
     fn dead_window(&self, id: &str) {
-        drop(std::os::unix::net::UnixListener::bind(self.socket(id)).expect("bind"));
+        #[cfg(unix)]
+        drop(sprite_app::ipc_test_support::TestListener::bind(&self.socket(id)).expect("bind"));
+        #[cfg(windows)]
+        std::fs::write(self.socket(id), format!(r"\\.\pipe\sprite-dead-{id}"))
+            .expect("write dead marker");
     }
 }
 
@@ -681,16 +698,26 @@ fn config_print_says_when_a_named_file_cannot_be_read() {
 fn surface_socket_eof_interrupts_open_stdin_and_partial_json() {
     use std::io::{BufRead, BufReader, Write};
     for tail in ["", "{\"version\":"] {
-        let (mut endpoint, window) = surface_window(|request| match request {
-            sprite_app::SurfaceRequest::Open { reply, .. } => {
+        let mut live = None;
+        let (mut endpoint, window) = surface_window(move |request| match request {
+            sprite_app::SurfaceRequest::Open {
+                connection, reply, ..
+            } => {
+                drop(live.replace(connection));
                 reply.send(Ok(())).expect("reply");
                 true
             }
-            sprite_app::SurfaceRequest::Closed { .. } => false,
+            sprite_app::SurfaceRequest::Closed { .. } => {
+                drop(live.take());
+                false
+            }
+            sprite_app::SurfaceRequest::Close { .. } => {
+                drop(live.take());
+                true
+            }
             sprite_app::SurfaceRequest::Capabilities { .. }
             | sprite_app::SurfaceRequest::Update { .. }
             | sprite_app::SurfaceRequest::Focus { .. }
-            | sprite_app::SurfaceRequest::Close { .. }
             | sprite_app::SurfaceRequest::FocusPane { .. }
             | sprite_app::SurfaceRequest::Grid { .. }
             | sprite_app::SurfaceRequest::List { .. }
@@ -895,6 +922,97 @@ fn surface_stdin_eof_drains_the_windows_final_event() {
     window.join().unwrap();
     assert_eq!(outcome.status, 0, "{}", outcome.errors);
     assert_eq!(outcome.out.lines().last(), Some(r#"{"type":"closed"}"#));
+}
+
+#[test]
+fn surface_window_drop_interrupts_open_stdin_and_delivers_closed() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let (connection_tx, connection_rx) = std::sync::mpsc::channel();
+    let (mut endpoint, window) = surface_window(move |request| match request {
+        sprite_app::SurfaceRequest::Open {
+            connection, reply, ..
+        } => {
+            connection_tx.send(connection).expect("send connection");
+            reply.send(Ok(())).expect("reply");
+            true
+        }
+        sprite_app::SurfaceRequest::Closed { .. } => false,
+        other @ (sprite_app::SurfaceRequest::Capabilities { .. }
+        | sprite_app::SurfaceRequest::Update { .. }
+        | sprite_app::SurfaceRequest::Focus { .. }
+        | sprite_app::SurfaceRequest::Close { .. }
+        | sprite_app::SurfaceRequest::FocusPane { .. }
+        | sprite_app::SurfaceRequest::Grid { .. }
+        | sprite_app::SurfaceRequest::List { .. }
+        | sprite_app::SurfaceRequest::RegisterToken { .. }) => panic!("unexpected {other:?}"),
+    });
+    let environment = surface_credentials(&endpoint, "f00d:4");
+    let mut child = Command::new(SPRITE)
+        .args(["surface", "open", "--fill"])
+        .env_clear()
+        .envs(borrowed(&environment))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(input, "{DESCRIPTION}").unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+    let output = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut first = String::new();
+        reader.read_line(&mut first).unwrap();
+        opened_tx.send(first).unwrap();
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).unwrap();
+        rest
+    });
+    let opened = opened_rx
+        .recv_timeout(watchdog())
+        .expect("surface did not open");
+    assert!(opened.contains(r#""type":"opened""#), "{opened}");
+
+    let connection = connection_rx
+        .recv_timeout(watchdog())
+        .expect("window did not receive connection");
+    assert!(connection.send(r#"{"type":"closed"}"#));
+    drop(connection);
+
+    let deadline = Instant::now() + watchdog();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        test_blocking_wait::pause(Duration::from_millis(10));
+    };
+    if status.is_none() {
+        child.kill().unwrap();
+    }
+    assert!(
+        status.is_some(),
+        "window-initiated Surface close left stdin open"
+    );
+    window.join().unwrap();
+    drop(input);
+    let finished = child.wait_with_output().unwrap();
+    let rest = output.join().unwrap();
+    endpoint.close();
+    assert!(
+        finished.status.success(),
+        "{}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    assert!(
+        finished.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    assert_eq!(rest.lines().last(), Some(r#"{"type":"closed"}"#));
 }
 
 #[cfg(target_os = "linux")]

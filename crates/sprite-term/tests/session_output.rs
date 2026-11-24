@@ -3,10 +3,8 @@
 
 mod support;
 
-use std::ffi::OsString;
-
 use sprite_term::{
-    CellWidth, KeyAction, KeyEvent, KeyModifiers, ScreenKind, Scroll, SessionConfig, SnapshotColor,
+    CellWidth, KeyAction, KeyEvent, KeyModifiers, ScreenKind, Scroll, SnapshotColor,
     TerminalCommand, TerminalSession,
 };
 
@@ -15,15 +13,11 @@ use support::{EventPump, SnapshotPump, pane_text};
 /// Red SGR text, a wide CJK character, and `e` plus a combining acute accent.
 /// The escape bytes must shape the render projection and vanish from the pane
 /// projection.
-const MIXED_OUTPUT: &str = r"printf '\033[31mred\033[0m wide:\347\225\214 combining:e\314\201\n'";
-
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
+const MIXED_OUTPUT: &str = "\\033[31mred\\033[0m wide:\\347\\225\\214 combining:e\\314\\201\\n";
 
 #[test]
 fn projections_share_one_coherent_generation() {
-    let config = SessionConfig::command("/bin/sh", args(&["-c", MIXED_OUTPUT]));
+    let config = support::test_child_config(&["--emit", MIXED_OUTPUT, "--sleep", "30"]);
     let sprite_term::Spawned {
         session: _session,
         events,
@@ -99,7 +93,7 @@ fn projections_share_one_coherent_generation() {
 fn a_silent_child_still_publishes_dimensions() {
     // No output at all: the application must still learn the grid and cursor
     // without a timer or a synthetic mutation.
-    let config = SessionConfig::command("/bin/sh", args(&["-c", "sleep 30"]));
+    let config = support::test_child_config(&["--sleep", "30"]);
     let sprite_term::Spawned {
         mut session,
         events,
@@ -135,13 +129,8 @@ fn a_silent_child_still_publishes_dimensions() {
 /// rows the next capture returns.
 #[test]
 fn scrollback_history_is_reachable_by_scrolling() {
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "i=1; while [ $i -le 200 ]; do echo line-$i; i=$((i+1)); done; sleep 30",
-        ]),
-    );
+    let config =
+        support::test_child_config(&["--seq-prefix", "line-", "1", "200", "--sleep", "30"]);
     let sprite_term::Spawned {
         mut session,
         events,
@@ -207,13 +196,8 @@ fn scrollback_history_is_reachable_by_scrolling() {
 /// implementation-defined.
 #[test]
 fn a_zero_scrollback_budget_keeps_no_history() {
-    let mut config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "i=1; while [ $i -le 400 ]; do echo line-$i; i=$((i+1)); done; sleep 30",
-        ]),
-    );
+    let mut config =
+        support::test_child_config(&["--seq-prefix", "line-", "1", "400", "--sleep", "30"]);
     config.scrollback_bytes = 0;
 
     let sprite_term::Spawned {
@@ -253,7 +237,7 @@ fn a_smaller_scrollback_budget_retains_less_history() {
     fn retained(scrollback_bytes: usize) -> usize {
         // Far more history than a small budget can hold, so the budget is what
         // limits retention rather than the amount of output.
-        let mut config = SessionConfig::command("/bin/sh", args(&["-c", "seq 1 3000; sleep 30"]));
+        let mut config = support::test_child_config(&["--seq", "1", "3000", "--sleep", "30"]);
         config.scrollback_bytes = scrollback_bytes;
 
         let sprite_term::Spawned {
@@ -290,13 +274,18 @@ fn a_smaller_scrollback_budget_retains_less_history() {
 #[test]
 fn a_scrolled_viewport_stays_anchored_while_output_arrives() {
     // Prints a first burst, waits for a newline, then prints a second burst.
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; seq 1 200; read _; seq 1000 1200; sleep 30",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--seq",
+        "1",
+        "200",
+        "--wait-line",
+        "--seq",
+        "1000",
+        "1200",
+        "--sleep",
+        "30",
+    ]);
     let sprite_term::Spawned {
         mut session,
         events,
@@ -347,7 +336,7 @@ fn a_scrolled_viewport_stays_anchored_while_output_arrives() {
 /// visible rather than scrolled off above.
 #[test]
 fn a_keystroke_returns_the_viewport_to_live_output() {
-    let config = SessionConfig::command("/bin/sh", args(&["-c", "stty -echo; seq 1 200; cat"]));
+    let config = support::test_child_config(&["--noecho", "--seq", "1", "200", "--cat"]);
     let sprite_term::Spawned {
         mut session,
         events,
@@ -391,13 +380,14 @@ fn a_keystroke_returns_the_viewport_to_live_output() {
 
 #[test]
 fn bell_burst_does_not_stall_snapshots_with_a_paused_event_consumer() {
-    let config = SessionConfig::command(
-        "/bin/sh",
-        args(&[
-            "-c",
-            "stty -echo; head -c 16384 /dev/zero | tr '\\000' '\\007'; printf 'after-bells'; read _",
-        ]),
-    );
+    let config = support::test_child_config(&[
+        "--noecho",
+        "--emit-bells",
+        "16384",
+        "--emit",
+        "after-bells",
+        "--wait-line",
+    ]);
     let sprite_term::Spawned {
         mut session,
         events,

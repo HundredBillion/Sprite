@@ -183,6 +183,20 @@ fn poke(wake: &UnixStream) {
 }
 
 impl Pump {
+    /// Starts the pump from a `MasterPty` handle.
+    pub(crate) fn start_master(
+        master: &(dyn portable_pty::MasterPty + Send),
+        commands: SyncSender<Message>,
+    ) -> Result<Self, SessionError> {
+        let Some(master_fd) = master.as_raw_fd() else {
+            return Err(SessionError::new(
+                "open_pty",
+                "the PTY master exposed no file descriptor",
+            ));
+        };
+        Self::start(master_fd, commands)
+    }
+
     /// Starts the pump for an open PTY master.
     ///
     /// The pump duplicates `master_fd` before starting its thread.

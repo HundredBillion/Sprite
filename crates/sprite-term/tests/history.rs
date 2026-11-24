@@ -7,35 +7,14 @@
 
 mod support;
 
-use std::ffi::OsString;
 use std::time::Instant;
 
 use sprite_term::{
-    HistoryLines, HistorySnapshot, ScreenKind, SessionConfig, TerminalCommand, TerminalEvent,
-    TerminalSession, Ticket,
+    HistoryLines, HistorySnapshot, ScreenKind, TerminalCommand, TerminalEvent, TerminalSession,
+    Ticket,
 };
 
 use support::{EventPump, SnapshotPump, pane_text};
-
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
-/// Whether this machine has the full-screen program the alternate-screen test
-/// drives.
-///
-/// Without this check a missing `less` is not reported as a missing `less`: the
-/// shell writes "not found", the pane stays on the normal screen, the snapshot
-/// stream goes quiet, and the wait fails five seconds later as
-/// `watchdog: no snapshot within 5s` — a message about the harness that names
-/// nothing about the cause.
-fn has_less() -> bool {
-    std::process::Command::new("sh")
-        .args(["-c", "command -v less"])
-        .output()
-        .map(|out| !out.stdout.is_empty())
-        .unwrap_or(false)
-}
 
 /// Waits for the answer to one history request, ignoring unrelated events.
 ///
@@ -84,8 +63,9 @@ fn capture(lines: HistoryLines) -> TerminalCommand {
 /// forks its last command — bash 3.2, which macOS ships as `sh` — would stay
 /// that leader itself, where bash 5 happens to exec it.
 fn counting_session(count: usize) -> (TerminalSession, EventPump, SnapshotPump) {
-    let script = format!("for i in $(seq 1 {count}); do echo line-$i; done; exec sleep 300");
-    let config = SessionConfig::command("/bin/sh", args(&["-c", &script]));
+    let end = count.to_string();
+    let config =
+        support::test_child_config(&["--seq-prefix", "line-", "1", &end, "--sleep", "300"]);
     let sprite_term::Spawned {
         session,
         events,
@@ -193,26 +173,13 @@ fn a_request_beyond_the_maximum_is_clamped_rather_than_refused() {
 /// history — never the normal screen hidden behind it.
 #[test]
 fn an_alternate_screen_application_hides_the_normal_screen() {
-    // `less` is a real full-screen program: it switches to the alternate
-    // screen and draws its own view, leaving the shell's output behind it.
-    assert!(
-        has_less(),
-        "this test drives `less` as its full-screen program, and this machine \
-         has none; install it rather than reading the watchdog timeout that \
-         would otherwise follow as a terminal defect"
-    );
-    let script = "echo secret-normal-screen-text; seq 1 500 | less; sleep 300";
-    let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
-    // `SessionConfig::command` carries no environment, so without this the
-    // child inherits whatever TERM the suite was run under. A developer's
-    // terminal supplies a real one and the test passes; CI runs with
-    // `TERM=dumb`, where `less` refuses to start, the pane never reaches the
-    // alternate screen, and the wait dies as a watchdog timeout that says
-    // nothing about terminals. `xterm` rather than Sprite's own entry, so the
-    // test does not also depend on the terminfo bootstrap having run.
-    config
-        .environment
-        .push((OsString::from("TERM"), OsString::from("xterm")));
+    let config = support::test_child_config(&[
+        "--emit",
+        "secret-normal-screen-text\\n",
+        "--alt-screen-pager",
+        "--sleep",
+        "300",
+    ]);
     let sprite_term::Spawned {
         mut session,
         events,
@@ -222,7 +189,7 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
 
-    let bundle = snapshots.wait_for("less to take the alternate screen", |bundle| {
+    let bundle = snapshots.wait_for("child to take the alternate screen", |bundle| {
         bundle.pane.screen == ScreenKind::Alternate && pane_text(bundle).contains("1")
     });
     assert_eq!(bundle.pane.screen, ScreenKind::Alternate);
@@ -264,12 +231,17 @@ fn an_alternate_screen_application_hides_the_normal_screen() {
 fn unicode_whitespace_and_wrap_markers_survive() {
     // A wide CJK character, `e` plus a combining acute, trailing spaces, and a
     // line long enough to soft-wrap on any sane terminal width.
-    let script = concat!(
-        r"printf 'wide:\347\225\214 combining:e\314\201 trailing:   \n';",
-        r"printf 'W%.0s' $(seq 1 400); printf '\n';",
-        "sleep 300"
-    );
-    let config = SessionConfig::command("/bin/sh", args(&["-c", script]));
+    let config = support::test_child_config(&[
+        "--emit",
+        "wide:\\347\\225\\214 combining:e\\314\\201 trailing:   \\n",
+        "--emit-repeat",
+        "400",
+        "W",
+        "--emit",
+        "\\n",
+        "--sleep",
+        "300",
+    ]);
     let sprite_term::Spawned {
         mut session,
         events,
@@ -447,7 +419,7 @@ fn a_history_answer_carries_the_metadata_the_schema_needs() {
     // shell that happens to own the session.
     assert_eq!(
         history.foreground.as_deref(),
-        Some("sleep"),
+        Some(support::test_child_name()),
         "the foreground executable's basename, and only its basename"
     );
     let foreground = history.foreground.clone().unwrap_or_default();
@@ -466,8 +438,8 @@ fn a_history_answer_carries_the_metadata_the_schema_needs() {
 #[test]
 fn a_small_scrollback_budget_holds_less_history() {
     fn available_after_five_thousand_lines(scrollback_bytes: usize) -> usize {
-        let script = "for i in $(seq 1 5000); do echo line-$i; done; sleep 300";
-        let mut config = SessionConfig::command("/bin/sh", args(&["-c", script]));
+        let mut config =
+            support::test_child_config(&["--seq-prefix", "line-", "1", "5000", "--sleep", "300"]);
         config.scrollback_bytes = scrollback_bytes;
         let sprite_term::Spawned {
             mut session,

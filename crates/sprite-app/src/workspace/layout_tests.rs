@@ -427,11 +427,13 @@ fn image_workspace(
     // placeholder cells: U+10EEEE followed by the row and column diacritics
     // (U+0305 is 0, U+030D is 1), in the foreground colour that names
     // image 1.
-    let script = r"printf '\033_Ga=T,U=1,f=32,s=1,v=1,i=1,c=2,r=1,q=2;/////w==\033\\\033[38;2;0;0;1m\364\216\273\256\314\205\314\205\364\216\273\256\314\205\314\215\033[39m'; exec sleep 30";
+    let emit = "\\033_Ga=T,U=1,f=32,s=1,v=1,i=1,c=2,r=1,q=2;/////w==\\033\\\\\\033[38;2;0;0;1m\\364\\216\\273\\256\\314\\205\\314\\205\\364\\216\\273\\256\\314\\205\\314\\215\\033[39m";
     cx.add_window_view(|window, cx| {
         let settings = crate::config::Settings::default();
         super::Workspace::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--emit", emit, "--sleep", "30",
+            ])),
             settings,
             None,
             window,

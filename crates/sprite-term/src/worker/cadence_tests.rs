@@ -1,19 +1,30 @@
 //! Opt-in measurements over the real PTY, worker, and immediate snapshot API.
 
 use super::*;
+#[cfg(unix)]
 use crate::{Spawned, TerminalSession, TerminalSize};
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
+#[cfg(unix)]
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 const FIRST: &str = "FIRST_NONBLANK";
+#[cfg(unix)]
 const QUIET: &str = "QUIET_TAIL";
+#[cfg(unix)]
 const BUSY: &str = "BUSY_ECHO_37";
+#[cfg(unix)]
 const ECHO: &str = "INPUT_ECHO_73";
+#[cfg(unix)]
 const FINAL: &str = "FINAL_EXIT_TAIL";
+#[cfg(unix)]
 const STALE: &str = "UNREAD_BEFORE_EXIT";
+#[cfg(unix)]
 const WATCHDOG: Duration = Duration::from_secs(20);
 const METRICS_KEY: &str = "SPRITE_CADENCE_METRICS";
 static ACTIVE: Mutex<Option<(String, Arc<Metrics>)>> = Mutex::new(None);
@@ -76,6 +87,7 @@ pub(super) struct Capture<'a> {
     cpu_started: u64,
 }
 
+#[cfg(unix)]
 #[allow(
     unsafe_code,
     reason = "reads the thread CPU clock; the out-param is a plain C struct"
@@ -85,12 +97,40 @@ fn thread_cpu_ns() -> u64 {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // Both supported platforms expose per-thread CPU time, excluding time descheduled.
+    // Both supported Unix platforms expose per-thread CPU time, excluding time descheduled.
     assert_eq!(
         unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
         0
     );
     time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+}
+
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "reads Win32 GetThreadTimes into plain FILETIME out-params"
+)]
+fn thread_cpu_ns() -> u64 {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+        .expect("GetThreadTimes");
+    }
+    let to_100ns =
+        |ft: FILETIME| (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime);
+    (to_100ns(kernel) + to_100ns(user)).saturating_mul(100)
 }
 
 impl Drop for Capture<'_> {
@@ -104,8 +144,10 @@ impl Drop for Capture<'_> {
     }
 }
 
+#[cfg(unix)]
 struct FixtureFiles(PathBuf);
 
+#[cfg(unix)]
 impl Drop for FixtureFiles {
     fn drop(&mut self) {
         *ACTIVE.lock().unwrap() = None;
@@ -113,6 +155,7 @@ impl Drop for FixtureFiles {
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum Consumer {
     Immediate,
@@ -120,6 +163,7 @@ enum Consumer {
     Paused,
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct Sample {
     mode: Consumer,
@@ -141,6 +185,7 @@ struct Sample {
     quiet_delivery_ms: f64,
 }
 
+#[cfg(unix)]
 fn wait_until(what: &str, predicate: impl Fn() -> bool) {
     let deadline = Instant::now() + WATCHDOG;
     while !predicate() {
@@ -149,16 +194,19 @@ fn wait_until(what: &str, predicate: impl Fn() -> bool) {
     }
 }
 
+#[cfg(unix)]
 fn marker_time(receiver: &mpsc::Receiver<(&'static str, Instant)>, expected: &str) -> Instant {
     let (marker, instant) = receiver.recv_timeout(WATCHDOG).expect("snapshot marker");
     assert_eq!(marker, expected);
     instant
 }
 
+#[cfg(unix)]
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+#[cfg(unix)]
 fn sample(mode: Consumer, cols: u16, rows: u16, payload_bytes: usize, ordinal: usize) -> Sample {
     let key = format!("{}-{ordinal}", std::process::id());
     let directory = std::env::temp_dir().join(format!("sprite-cadence-{key}"));
@@ -377,6 +425,7 @@ fn sample(mode: Consumer, cols: u16, rows: u16, payload_bytes: usize, ordinal: u
     }
 }
 
+#[cfg(unix)]
 fn isolated(name: &str, body: impl FnOnce()) {
     const CHILD: &str = "SPRITE_CADENCE_CHILD";
     if std::env::var(CHILD).as_deref() == Ok(name) {
@@ -403,6 +452,7 @@ fn isolated(name: &str, body: impl FnOnce()) {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn paused_consumer_preserves_live_quiet_echo_and_final() {
     isolated(
@@ -414,6 +464,7 @@ fn paused_consumer_preserves_live_quiet_echo_and_final() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "opt-in release measurement; simulated cadence is not a production timer"]
 #[allow(clippy::assertions_on_constants)]

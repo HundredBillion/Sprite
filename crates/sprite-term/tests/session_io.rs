@@ -7,17 +7,9 @@
 
 mod support;
 
-use std::ffi::OsString;
-
-use sprite_term::{
-    KeyAction, KeyEvent, KeyModifiers, SessionConfig, TerminalCommand, TerminalSession,
-};
+use sprite_term::{KeyAction, KeyEvent, KeyModifiers, TerminalCommand, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
-
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
 
 fn plain(logical_key: &str, text: Option<&str>) -> TerminalCommand {
     TerminalCommand::Key(KeyEvent {
@@ -45,9 +37,8 @@ fn release(logical_key: &str, text: Option<&str>) -> TerminalCommand {
     })
 }
 
-fn session(script: &str) -> sprite_term::Spawned {
-    TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session")
+fn session(args: &[&str]) -> sprite_term::Spawned {
+    TerminalSession::spawn(support::test_child_config(args)).expect("spawn session")
 }
 
 #[test]
@@ -56,7 +47,14 @@ fn key_events_reach_the_child_in_order() {
         mut session,
         events,
         snapshots,
-    } = session("read line; printf 'got:%s\\n' \"$line\"");
+    } = session(&[
+        "--noecho",
+        "--wait-line-prefix",
+        "got:",
+        "\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -85,7 +83,7 @@ fn arrow_up_follows_cursor_key_mode() {
         "normal mode encodes ArrowUp as CSI A, got: {normal}"
     );
 
-    let application = arrow_up_encoding(r"printf '\033[?1h';");
+    let application = arrow_up_encoding("\\033[?1h");
     assert!(
         application.contains("1b 4f 41"),
         "application mode encodes ArrowUp as SS3 A, got: {application}"
@@ -93,14 +91,20 @@ fn arrow_up_follows_cursor_key_mode() {
 }
 
 fn arrow_up_encoding(set_mode: &str) -> String {
-    let script = format!(
-        "{set_mode} stty -icanon -echo min 3 time 0; printf 'READY\\n'; head -c 3 | od -An -tx1 | tr -s ' '"
-    );
+    let emit = format!("{set_mode}READY\\n");
     let sprite_term::Spawned {
         mut session,
         events,
         snapshots,
-    } = session(&script);
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        &emit,
+        "--hex-read",
+        "3",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -128,9 +132,15 @@ fn terminal_answers_device_status_report() {
         session: _session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 4 time 0; printf '\\033[5n'; head -c 4 | od -An -tx1 | tr -s ' '",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "\\033[5n",
+        "--hex-read",
+        "4",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -150,7 +160,14 @@ fn oversized_input_is_rejected_and_the_session_survives() {
         mut session,
         events,
         snapshots,
-    } = session("read line; printf 'got:%s\\n' \"$line\"");
+    } = session(&[
+        "--noecho",
+        "--wait-line-prefix",
+        "got:",
+        "\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -180,11 +197,14 @@ fn input_survives_sustained_output() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -echo; yes sprite-flood-line & producer=$!; \
-         read line; kill $producer 2>/dev/null; wait $producer 2>/dev/null; \
-         printf '\\nMARKER:%s\\n' \"$line\"; read done",
-    );
+    } = session(&[
+        "--noecho",
+        "--flood-until-line",
+        "sprite-flood-line",
+        "\\nMARKER:",
+        "\\n",
+        "--wait-line",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -213,7 +233,7 @@ fn resize_updates_pty_and_snapshot() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; while read line; do stty size; done");
+    } = session(&["--noecho", "--pty-size-loop"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -256,7 +276,7 @@ fn degenerate_and_oversized_resizes_are_refused() {
         mut session,
         events,
         snapshots: _snapshots,
-    } = session("sleep 30");
+    } = session(&["--sleep", "30"]);
     let events = EventPump::new(events);
     events.expect_ready();
 
@@ -310,15 +330,21 @@ fn degenerate_and_oversized_resizes_are_refused() {
 #[test]
 fn kitty_keyboard_flags_change_the_encoding() {
     fn encoding_of(setup: &str, bytes: usize, marker: &str) -> String {
-        let script = format!(
-            "stty -icanon -icrnl -echo min {bytes} time 0; {setup} printf 'READY\\n'; \
-             head -c {bytes} | od -An -tx1 | tr -s ' '"
-        );
+        let emit = format!("{setup}READY\\n");
+        let count = bytes.to_string();
         let sprite_term::Spawned {
             mut session,
             events,
             snapshots,
-        } = session(&script);
+        } = session(&[
+            "--raw-noecho",
+            "--emit",
+            &emit,
+            "--hex-read",
+            &count,
+            "--sleep",
+            "30",
+        ]);
         let events = EventPump::new(events);
         let snapshots = SnapshotPump::new(snapshots);
         events.expect_ready();
@@ -336,7 +362,7 @@ fn kitty_keyboard_flags_change_the_encoding() {
 
     // Flag 8 asks for every key as an escape code, so the same key becomes
     // CSI 97 u — 1b 5b 39 37 75.
-    let kitty = encoding_of("printf '\\033[>8u';", 5, "1b 5b");
+    let kitty = encoding_of("\\033[>8u", 5, "1b 5b");
     assert!(
         kitty.contains("1b 5b 39 37 75"),
         "the Kitty protocol encodes `a` as CSI 97 u, got:\n{kitty}"
@@ -352,15 +378,23 @@ fn kitty_keyboard_flags_change_the_encoding() {
 /// character on the way up must not be able to type it.
 #[test]
 fn a_key_release_types_nothing_under_release_reporting() {
-    // One read(2) that waits, then reports every byte the press and the
-    // release together delivered.
-    let script = "printf '\\033[>2u'; stty -icanon -echo min 0 time 15; printf 'READY\\n'; \
-                  dd bs=32 count=1 2>/dev/null | od -An -tx1 | tr -s ' '; printf 'DONE\\n'";
+    // Waits briefly, then reports every byte the press and release together delivered.
     let sprite_term::Spawned {
         mut session,
         events,
         snapshots,
-    } = session(script);
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "\\033[>2uREADY\\n",
+        "--hex-read-timeout",
+        "32",
+        "1500",
+        "--emit",
+        "DONE\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -394,7 +428,14 @@ fn committed_input_method_text_reaches_the_child() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; read line; printf 'got:%s\\n' \"$line\"");
+    } = session(&[
+        "--noecho",
+        "--wait-line-prefix",
+        "got:",
+        "\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -419,7 +460,7 @@ fn committing_returns_the_viewport_to_live_output() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; seq 1 200; cat");
+    } = session(&["--noecho", "--seq", "1", "200", "--cat"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

@@ -8,15 +8,17 @@ this to drive the panes it works in.
 
 ## Who can use it
 
-Each window listens on a local socket:
+Each window listens on a local transport with no TCP ports:
 
-- macOS: `$TMPDIR/sprite/window-<window>.sock`
-- Linux: `$XDG_RUNTIME_DIR/sprite/window-<window>.sock`
+- macOS: Unix domain socket at `$TMPDIR/sprite/window-<window>.sock`
+- Linux: Unix domain socket at `$XDG_RUNTIME_DIR/sprite/window-<window>.sock`
+- Windows: owner-only Named Pipe (`\\.\pipe\sprite-...`) referenced by a discovery marker at `%LOCALAPPDATA%\sprite\r\window-<window>.sock`
 
-The directory is mode 0700 and the socket 0600, so only processes running as
-your user can connect. That is the whole check: there is no key and no Allow
-button. Anything running as you can drive every pane, including typing commands
-into a shell, just as it could already run those commands itself.
+On macOS and Linux the directory is mode 0700 and the socket 0600; on Windows the
+directory and Named Pipe use an owner-only DACL (rejecting remote clients), so only
+processes running as your user can connect. That is the whole check: there is no
+key and no Allow button. Anything running as you can drive every pane, including
+typing commands into a shell, just as it could already run those commands itself.
 
 `<window>` is 24 hex characters, chosen at random when the window opens. A
 pane's address is `<window>:<pane>`, and a tab's is `<window>:t<tab>`. A

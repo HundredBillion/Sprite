@@ -3,26 +3,47 @@
 
 #![cfg(test)]
 
-use sprite_term::{Admitted, CommandSender, StallProbe, TerminalCommand};
+use std::ffi::OsString;
+use std::path::PathBuf;
 
-/// One OSC 52 clipboard write of `CLIP`, sixteen bytes.
-///
-/// Clipboard writes are the one parser notice the worker never coalesces — a
-/// title keeps only its latest value per pass — so a run of them is what fills
-/// the event mailbox.
-pub(crate) const CLIPBOARD_WRITE: &str = "\x1b]52;c;Q0xJUA==\x07";
+use sprite_term::{Admitted, CommandSender, SessionConfig, StallProbe, TerminalCommand};
 
-/// A shell script for a child under event pressure: it waits for
-/// [`focus_and_release`], writes the clipboard a hundred times, prints a
-/// mebibyte, then runs `tail`.
-///
-/// The writes are notices the worker cannot coalesce, so they fill the event
-/// mailbox; the output behind them is more than a paused consumer lets the
-/// worker take.
-pub(crate) fn pressure_script(tail: &str) -> String {
-    format!(
-        "stty -echo; read _; i=0; while [ $i -lt 100 ]; do printf '\\033]52;c;Q0xJUA==\\007'; i=$((i+1)); done; head -c 1048576 /dev/zero; {tail}"
-    )
+pub(crate) fn child_program() -> PathBuf {
+    sprite_term::test_child_support::ensure_test_child_exe()
+        .expect("compile sprite-test-child helper binary")
+}
+
+pub(crate) fn child_program_name() -> &'static str {
+    sprite_term::test_child_support::test_child_program_name()
+}
+
+pub(crate) fn child_command(args: &[&str]) -> Vec<OsString> {
+    let mut command = Vec::with_capacity(args.len() + 1);
+    command.push(child_program().into_os_string());
+    command.extend(args.iter().map(OsString::from));
+    command
+}
+
+/// Child arguments for event pressure: waits for [`focus_and_release`], writes
+/// the clipboard a hundred times, emits one mebibyte of NUL bytes, then runs
+/// `tail_args`.
+pub(crate) fn pressure_args(tail_args: &[&str]) -> Vec<OsString> {
+    let mut args = vec![
+        "--noecho",
+        "--wait-line",
+        "--emit-repeat",
+        "100",
+        "\\033]52;c;Q0xJUA==\\007",
+        "--emit-zeros",
+        "1048576",
+    ];
+    args.extend_from_slice(tail_args);
+    args.into_iter().map(OsString::from).collect()
+}
+
+pub(crate) fn pressure_session_config(tail_args: &[&str]) -> SessionConfig {
+    let exe = child_program();
+    SessionConfig::command(exe.as_os_str(), pressure_args(tail_args))
 }
 
 /// Focuses the pane, then releases a child that began with `read _`.

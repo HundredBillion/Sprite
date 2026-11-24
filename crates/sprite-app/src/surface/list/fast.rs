@@ -376,7 +376,11 @@ mod tests {
     fn general(body: &str) -> Result<ListOp, crate::surface::Refusal> {
         match stream_line_general(body)? {
             Message::List(op) => Ok(op),
-            Message::Update(_) | Message::Focus(_) | Message::Grid(_) | Message::Close => {
+            Message::Update(_)
+            | Message::Focus(_)
+            | Message::Grid(_)
+            | Message::Close
+            | Message::Eof => {
                 panic!("{body} is not a list operation")
             }
         }

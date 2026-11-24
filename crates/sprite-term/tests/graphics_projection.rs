@@ -1,44 +1,17 @@
 //! The owned graphics projection: what a renderer receives, what it costs, and
 //! what it is guaranteed to agree with.
-#![expect(
-    clippy::expect_used,
-    reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"
-)]
 
 mod support;
 
-use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sprite_term::{
-    GraphicsPolicy, Layer, SessionConfig, SnapshotBundle, TerminalCommand, TerminalSession,
-};
+use sprite_term::{GraphicsPolicy, Layer, SnapshotBundle, TerminalCommand, TerminalSession};
 
 use support::{EventPump, SnapshotPump, base64, kitty, pane_text, png_bytes};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
 fn session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {
-    let mut config = SessionConfig::command("/bin/sh", args(&[]));
-    config.graphics = policy;
-    let sprite_term::Spawned {
-        mut session,
-        events,
-        snapshots,
-    } = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(events);
-    let snapshots = SnapshotPump::new(snapshots);
-    events.expect_ready();
-    session
-        .send(TerminalCommand::Input(support::PLAIN_SHELL_SETUP.to_vec()))
-        .expect("ask the shell to announce itself");
-    snapshots.wait_for("the shell to start", |bundle| {
-        pane_text(bundle).contains("READY")
-    });
-    (session, events, snapshots)
+    support::repl_session(policy)
 }
 
 static NEXT_MARK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -49,20 +22,8 @@ fn feed(
     snapshots: &SnapshotPump,
     escapes: String,
 ) -> Arc<SnapshotBundle> {
-    session
-        .send(TerminalCommand::Input(
-            format!("printf '{escapes}'\n").into_bytes(),
-        ))
-        .expect("ask the child to print the payload");
-
     let mark = NEXT_MARK.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let (command, marker) = support::marker_command(mark);
-    session
-        .send(TerminalCommand::Input(command))
-        .expect("ask the child to print the marker");
-    snapshots.wait_for("the payload to be processed", |bundle| {
-        pane_text(bundle).contains(&marker)
-    })
+    support::repl_feed(session, snapshots, &escapes, mark)
 }
 
 /// A pane showing no images must carry no graphics at all — not an empty frame,

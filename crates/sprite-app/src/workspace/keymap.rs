@@ -144,7 +144,8 @@ pub(super) fn workspace_action(keystroke: &gpui::Keystroke) -> Option<WorkspaceA
     // Command on macOS and Super on Linux are GPUI's platform modifier. These
     // are direct alternatives to the arrow bindings below, matching the
     // platform-native left/right pane navigation used by Ghostty.
-    if modifiers.platform
+    if !cfg!(target_os = "windows")
+        && modifiers.platform
         && !modifiers.control
         && !modifiers.shift
         && !modifiers.alt
@@ -549,6 +550,7 @@ mod tests {
         assert_eq!(&*keys.borrow(), &["a", "y"]);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn quit_keys_and_their_release_never_reach_the_focused_pane(cx: &mut gpui::TestAppContext) {
         let (workspace, cx) = test_workspace(cx);
@@ -629,7 +631,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-shift-d");
         draw_workspace(cx);
         let second = terminal_view(&workspace, PaneId(1), cx);
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         connection.establish(crate::surface::SurfaceId(998));
         second.update_in(cx, |view, window, cx| {
@@ -893,6 +895,7 @@ mod tests {
         );
         assert_eq!(workspace_action(&press("f5", ctrl_shift())), None);
     }
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn platform_brackets_move_focus_left_and_right() {
         assert_eq!(
@@ -903,6 +906,12 @@ mod tests {
             workspace_action(&press("]", platform())),
             Some(WorkspaceAction::Focus(Direction::Right))
         );
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn platform_brackets_are_not_claimed_on_windows() {
+        assert_eq!(workspace_action(&press("[", platform())), None);
+        assert_eq!(workspace_action(&press("]", platform())), None);
     }
     #[test]
     fn platform_brackets_require_only_the_platform_modifier() {
@@ -945,6 +954,16 @@ mod tests {
             workspace_action(&press("w", platform())),
             Some(WorkspaceAction::Quit)
         );
+
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(workspace_action(&press("q", platform())), None);
+            assert_eq!(workspace_action(&press("w", platform())), None);
+            assert_eq!(
+                workspace_action(&press("q", ctrl_shift())),
+                Some(WorkspaceAction::CloseTab)
+            );
+        }
     }
     #[test]
     fn ctrl_shift_alt_arrows_resize() {

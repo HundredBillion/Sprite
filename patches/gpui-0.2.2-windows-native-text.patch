@@ -1,0 +1,140 @@
+--- a/src/platform/windows/events.rs
++++ b/src/platform/windows/events.rs
+@@ -97,7 +97,7 @@
+             WM_SYSCOMMAND => self.handle_system_command(wparam),
+             WM_KEYDOWN => self.handle_keydown_msg(handle, wparam, lparam),
+             WM_KEYUP => self.handle_keyup_msg(handle, wparam, lparam),
+-            WM_CHAR => self.handle_char_msg(wparam),
++            WM_CHAR => self.handle_char_msg(wparam, lparam),
+             WM_DEADCHAR => self.handle_dead_char_msg(wparam),
+             WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
+             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
+@@ -386,6 +386,7 @@
+             .flatten()
+             .is_some();
+         if is_composing {
++            self.state.borrow_mut().pending_key_char_lparams.clear();
+             translate_message(handle, wparam, lparam);
+             return Some(0);
+         }
+@@ -394,6 +395,11 @@
+             return Some(1);
+         };
+ 
++        let should_track_key_char = matches!(
++            &input,
++            PlatformInput::KeyDown(event)
++                if event.keystroke.key_char.is_some() || event.keystroke.key == "space"
++        );
+         let handled = !func(input).propagate;
+ 
+         self.state.borrow_mut().callbacks.input = Some(func);
+@@ -401,6 +407,13 @@
+         if handled {
+             Some(0)
+         } else {
++            if should_track_key_char {
++                let mut lock = self.state.borrow_mut();
++                if lock.pending_key_char_lparams.len() == 64 {
++                    lock.pending_key_char_lparams.pop_front();
++                }
++                lock.pending_key_char_lparams.push_back(lparam.0);
++            }
+             translate_message(handle, wparam, lparam);
+             Some(1)
+         }
+@@ -425,16 +438,22 @@
+         if handled { Some(0) } else { Some(1) }
+     }
+ 
+-    fn handle_char_msg(&self, wparam: WPARAM) -> Option<isize> {
++    fn handle_char_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+         let input = self.parse_char_message(wparam)?;
++        let from_key = self.take_pending_key_char(lparam.0);
+         self.with_input_handler(|input_handler| {
+-            input_handler.replace_text_in_range(None, &input);
++            if from_key {
++                input_handler.replace_text_in_range_from_key(None, &input);
++            } else {
++                input_handler.replace_text_in_range(None, &input);
++            }
+         });
+ 
+         Some(0)
+     }
+ 
+     fn handle_dead_char_msg(&self, wparam: WPARAM) -> Option<isize> {
++        self.state.borrow_mut().pending_key_char_lparams.clear();
+         let ch = char::from_u32(wparam.0 as u32)?.to_string();
+         self.with_input_handler(|input_handler| {
+             input_handler.replace_and_mark_text_in_range(None, &ch, None);
+@@ -655,6 +674,7 @@
+     }
+ 
+     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
++        self.state.borrow_mut().pending_key_char_lparams.clear();
+         let ctx = unsafe { ImmGetContext(handle) };
+         let result = self.handle_ime_composition_inner(ctx, lparam);
+         unsafe { ImmReleaseContext(handle, ctx).ok().log_err() };
+@@ -1204,6 +1224,19 @@
+         Some(0)
+     }
+ 
++    fn take_pending_key_char(&self, lparam: isize) -> bool {
++        let mut lock = self.state.borrow_mut();
++        let Some(pos) = lock
++            .pending_key_char_lparams
++            .iter()
++            .position(|&pending| pending == lparam)
++        else {
++            return false;
++        };
++        lock.pending_key_char_lparams.drain(..=pos);
++        true
++    }
++
+     #[inline]
+     fn parse_char_message(&self, wparam: WPARAM) -> Option<String> {
+         let code_point = wparam.loword();
+@@ -1324,6 +1357,7 @@
+             }))
+         }
+         VK_PACKET => {
++            state.pending_key_char_lparams.clear();
+             translate_message(handle, wparam, lparam);
+             None
+         }
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -2,6 +2,7 @@
+ 
+ use std::{
+     cell::RefCell,
++    collections::VecDeque,
+     num::NonZeroIsize,
+     path::PathBuf,
+     rc::{Rc, Weak},
+@@ -43,6 +44,7 @@
+     pub callbacks: Callbacks,
+     pub input_handler: Option<PlatformInputHandler>,
+     pub pending_surrogate: Option<u16>,
++    pub pending_key_char_lparams: VecDeque<isize>,
+     pub last_reported_modifiers: Option<Modifiers>,
+     pub last_reported_capslock: Option<Capslock>,
+     pub system_key_handled: bool,
+@@ -110,6 +112,7 @@
+         let callbacks = Callbacks::default();
+         let input_handler = None;
+         let pending_surrogate = None;
++        let pending_key_char_lparams = VecDeque::new();
+         let last_reported_modifiers = None;
+         let last_reported_capslock = None;
+         let system_key_handled = false;
+@@ -131,6 +134,7 @@
+             callbacks,
+             input_handler,
+             pending_surrogate,
++            pending_key_char_lparams,
+             last_reported_modifiers,
+             last_reported_capslock,
+             system_key_handled,

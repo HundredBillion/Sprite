@@ -8,26 +8,22 @@
 
 mod support;
 
-use std::ffi::OsString;
-
-use sprite_term::{SessionConfig, TerminalCommand, TerminalEvent, TerminalSession};
+use sprite_term::{TerminalCommand, TerminalEvent, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
+fn session(args: &[&str]) -> sprite_term::Spawned {
+    TerminalSession::spawn(support::test_child_config(args)).expect("spawn session")
 }
 
-fn session(script: &str) -> sprite_term::Spawned {
-    TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session")
-}
-
-/// Wraps a script so it does nothing until told. A child can emit OSC 52 the
-/// instant it starts, which would race whatever focus the test is trying to
+/// Wraps steps so the child does nothing until told. A child can emit OSC 52
+/// the instant it starts, which would race whatever focus the test is trying to
 /// establish.
-fn on_cue(body: &str) -> String {
-    format!("stty -echo; read _; {body} printf 'DONE\\n'; sleep 30")
+fn cue_session(body: &[&str]) -> sprite_term::Spawned {
+    let mut args = vec!["--noecho", "--wait-line"];
+    args.extend_from_slice(body);
+    args.extend_from_slice(&["--emit", "DONE\\n", "--sleep", "30"]);
+    session(&args)
 }
 
 /// Waits briefly for a clipboard write, returning `None` if the policy denied
@@ -48,7 +44,7 @@ fn a_focused_pane_may_write_the_clipboard() {
         mut session,
         events,
         snapshots,
-    } = session(&on_cue("printf '\\033]52;c;aGk=\\007';"));
+    } = cue_session(&["--emit", "\\033]52;c;aGk=\\007"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -75,7 +71,7 @@ fn an_unfocused_pane_may_not_write_the_clipboard() {
         mut session,
         events,
         snapshots,
-    } = session(&on_cue("printf '\\033]52;c;aGk=\\007';"));
+    } = cue_session(&["--emit", "\\033]52;c;aGk=\\007"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -99,14 +95,19 @@ fn an_unfocused_pane_may_not_write_the_clipboard() {
 #[test]
 fn an_oversized_payload_is_denied() {
     // 2 MiB of base64 'A', which decodes to well over the 1 MiB bound.
-    let body = "printf '\\033]52;c;'; i=0; \
-         while [ $i -lt 2048 ]; do printf 'QUFB%.0s' $(seq 1 512); i=$((i+1)); done; \
-         printf '\\007';";
     let sprite_term::Spawned {
         mut session,
         events,
         snapshots,
-    } = session(&on_cue(body));
+    } = cue_session(&[
+        "--emit",
+        "\\033]52;c;",
+        "--emit-repeat",
+        "1048576",
+        "QUFB",
+        "--emit",
+        "\\007",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -133,10 +134,18 @@ fn a_clipboard_read_request_is_never_answered() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 1 time 0; read _; printf '\\033]52;c;?\\007'; \
-         printf 'DONE\\n'; head -c 1 | od -An -tx1 | tr -s ' '; printf 'ANSWERED\\n'; sleep 30",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--wait-line",
+        "--emit",
+        "\\033]52;c;?\\007DONE\\n",
+        "--hex-read",
+        "1",
+        "--emit",
+        "ANSWERED\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -171,7 +180,7 @@ fn the_selection_clipboard_obeys_the_same_policy() {
         mut session,
         events,
         snapshots,
-    } = session(&on_cue("printf '\\033]52;p;aGk=\\007';"));
+    } = cue_session(&["--emit", "\\033]52;p;aGk=\\007"]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -198,10 +207,17 @@ fn losing_focus_withdraws_the_clipboard() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -echo; read _; printf '\\033]52;c;b25l\\007'; printf 'ONE\\n'; \
-         read _; printf '\\033]52;c;dHdv\\007'; printf 'TWO\\n'; sleep 30",
-    );
+    } = session(&[
+        "--noecho",
+        "--wait-line",
+        "--emit",
+        "\\033]52;c;b25l\\007ONE\\n",
+        "--wait-line",
+        "--emit",
+        "\\033]52;c;dHdv\\007TWO\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

@@ -42,7 +42,7 @@ fn benchmark_binary() -> PathBuf {
     if path.ends_with("deps") {
         path.pop();
     }
-    path.join("sprite-term-bench")
+    path.join(format!("sprite-term-bench{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Reads one `"key": value` number out of a small flat JSON object body.

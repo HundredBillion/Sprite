@@ -14,6 +14,10 @@
 #[path = "../test_allocations.rs"]
 mod allocations;
 
+#[allow(dead_code, clippy::duplicate_mod)]
+#[path = "../test_child_support.rs"]
+mod test_child_support;
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -238,11 +242,10 @@ fn write_report(path: &PathBuf, samples: usize, measurements: &[Measurement]) ->
 // Workloads
 // ---------------------------------------------------------------------------
 
-fn shell(script: &str) -> SessionConfig {
-    SessionConfig::command(
-        "/bin/sh",
-        vec![OsString::from("-c"), OsString::from(script)],
-    )
+fn child_config(args: &[&str]) -> SessionConfig {
+    let exe = test_child_support::ensure_test_child_exe()
+        .unwrap_or_else(|error| fatal(&format!("compile sprite-test-child: {error}")));
+    SessionConfig::command(exe.as_os_str(), args.iter().map(OsString::from).collect())
 }
 
 /// Every workload fails loudly rather than silently recording a wrong number.
@@ -277,7 +280,7 @@ fn spawn_to_ready() -> Duration {
         session,
         events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(shell("exec sleep 30"))
+    } = TerminalSession::spawn(child_config(&["--sleep", "30"]))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
     let _events = await_ready(events);
     let elapsed = started.elapsed();
@@ -292,7 +295,7 @@ fn input_to_snapshot_idle() -> Duration {
         mut session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(shell("stty -icanon -echo min 1 time 0; cat"))
+    } = TerminalSession::spawn(child_config(&["--raw-noecho", "--cat"]))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
     let _events = await_ready(events);
 
@@ -312,12 +315,17 @@ fn input_to_snapshot_idle() -> Duration {
 /// The same keystroke, but while the child is flooding the terminal. The child
 /// stops its own producer on receipt, so the marker survives long enough to be
 /// observed rather than scrolling away.
-/// The shell stays alive until observation, excluding natural-exit drain time.
+/// The child stays alive until observation, excluding natural-exit drain time.
 fn input_to_snapshot_under_load() -> Duration {
     measure_input_under_load(
-        "stty -echo; yes sprite-load-line & producer=$!; \
-         read line; kill $producer 2>/dev/null; wait $producer 2>/dev/null; \
-         printf '\\nMARK:%s\\n' \"$line\"; read done",
+        &[
+            "--noecho",
+            "--flood-until-line",
+            "sprite-load-line",
+            "\\nMARK:",
+            "\\n",
+            "--wait-line",
+        ],
         "MARK:Z",
         SAMPLE_TIMEOUT,
     )
@@ -325,7 +333,7 @@ fn input_to_snapshot_under_load() -> Duration {
 }
 
 fn measure_input_under_load(
-    script: &str,
+    args: &[&str],
     marker: &str,
     timeout: Duration,
 ) -> Result<Duration, String> {
@@ -333,7 +341,7 @@ fn measure_input_under_load(
         mut session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(shell(script)).map_err(|error| format!("spawn: {error}"))?;
+    } = TerminalSession::spawn(child_config(args)).map_err(|error| format!("spawn: {error}"))?;
     let result = (|| {
         let _events = await_ready(events);
         // Only measure once the flood is genuinely under way.
@@ -354,15 +362,13 @@ fn output_to_final_snapshot(output_bytes: usize) -> Duration {
     // wrapped line that forces continuous reflow, which measures a pathological
     // case rather than ordinary heavy output.
     let lines = output_bytes / LINE_BYTES;
-    let script = format!(
-        "awk 'BEGIN{{s=sprintf(\"%79s\",\"\"); gsub(/ /,\"a\",s); \
-         for(i=0;i<{lines};i++) print s}}'"
-    );
+    let lines_arg = lines.to_string();
+    let line = format!("{}\\n", "a".repeat(79));
     let sprite_term::Spawned {
         session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(shell(&script))
+    } = TerminalSession::spawn(child_config(&["--emit-lines", &lines_arg, &line]))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
     let _events = await_ready(events);
 
@@ -387,7 +393,7 @@ fn output_to_final_snapshot(output_bytes: usize) -> Duration {
 /// A pending same-generation snapshot can satisfy the wait before capture runs.
 /// Use `isolated_projector_capture` to measure projection work.
 fn capture_100x100_grid() -> Duration {
-    let mut config = shell("stty -icanon -echo min 1 time 0; cat");
+    let mut config = child_config(&["--raw-noecho", "--cat"]);
     config.size = sprite_term::ValidTerminalSize::new(
         TerminalSize {
             rows: 100,
@@ -459,7 +465,7 @@ fn capture_with_full_scrollback() -> Duration {
         mut session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(shell("seq 1 20000; sleep 30"))
+    } = TerminalSession::spawn(child_config(&["--seq", "1", "20000", "--sleep", "30"]))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
     let _events = await_ready(events);
 
@@ -485,7 +491,7 @@ fn scroll_round_trip() -> Duration {
         mut session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(shell("seq 1 5000; sleep 30"))
+    } = TerminalSession::spawn(child_config(&["--seq", "1", "5000", "--sleep", "30"]))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
     let _events = await_ready(events);
 
@@ -510,7 +516,7 @@ fn select_full_screen() -> Duration {
         mut session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(shell("seq 1 200; sleep 30"))
+    } = TerminalSession::spawn(child_config(&["--seq", "1", "200", "--sleep", "30"]))
         .unwrap_or_else(|error| fatal(&format!("spawn: {error}")));
     let _events = await_ready(events);
 
@@ -665,7 +671,7 @@ fn isolated_capture(samples: usize) -> Vec<Measurement> {
     .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use nix::sys::signal::{Signal, kill};
@@ -677,14 +683,24 @@ mod tests {
     fn missing_marker_times_out_and_reaps_the_live_shell() {
         let pid_file =
             std::env::temp_dir().join(format!("sprite-bench-missing-marker-{}.pid", process::id()));
-        let script = format!(
-            "stty -echo; echo $$ > '{}'; printf 'sprite-load-line\\n'; \
-             read line; printf 'WRONG\\n'; read done",
-            pid_file.display()
-        );
+        let pid_file_str = pid_file.to_string_lossy().into_owned();
         let (sender, receiver) = mpsc::channel();
         let worker = thread::spawn(move || {
-            let result = measure_input_under_load(&script, "MARK:Z", Duration::from_millis(500));
+            let result = measure_input_under_load(
+                &[
+                    "--noecho",
+                    "--write-pid-file",
+                    &pid_file_str,
+                    "--emit",
+                    "sprite-load-line\\n",
+                    "--wait-line-prefix",
+                    "WRONG\\n",
+                    "",
+                    "--wait-line",
+                ],
+                "MARK:Z",
+                Duration::from_millis(500),
+            );
             sender.send(result).ok();
         });
         let result = receiver.recv_timeout(Duration::from_secs(10));

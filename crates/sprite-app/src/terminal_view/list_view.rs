@@ -1650,7 +1650,7 @@ mod tests {
                 cx,
             )
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = crate::surface::channel::SurfaceConnection::new(&stream).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/surface-list-v1.json"

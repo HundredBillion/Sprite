@@ -314,9 +314,10 @@ mod tests {
 
     /// Keep both receivers alive so the worker can serve registry commands.
     fn session() -> Spawned {
+        let exe = crate::test_event_pressure::child_program();
         let mut spawned = TerminalSession::spawn(SessionConfig::command(
-            "/bin/sh",
-            vec!["-c".into(), "sleep 30".into()],
+            exe.as_os_str(),
+            vec!["--sleep".into(), "30".into()],
         ))
         .expect("spawn a session");
         assert!(matches!(
@@ -489,14 +490,11 @@ mod tests {
 
     #[test]
     fn saturated_observation_refuses_without_holding_the_ui_registry() {
-        let mut spawned = TerminalSession::spawn(SessionConfig::command(
-            "/bin/sh",
-            vec![
-                "-c".into(),
-                crate::test_event_pressure::pressure_script("sleep 30").into(),
-            ],
-        ))
-        .unwrap();
+        let mut spawned =
+            TerminalSession::spawn(crate::test_event_pressure::pressure_session_config(&[
+                "--sleep", "30",
+            ]))
+            .unwrap();
         crate::test_event_pressure::focus_and_release(&spawned.session.commands());
         crate::test_event_pressure::saturate_control(
             &spawned.session.commands(),

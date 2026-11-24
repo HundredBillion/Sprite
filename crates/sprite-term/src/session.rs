@@ -245,7 +245,7 @@ impl Drop for HistoryRequest {
 }
 
 pub struct ShutdownHandle {
-    worker: JoinHandle<Option<crate::pty_unix::SessionProcesses>>,
+    worker: JoinHandle<Option<crate::pty::SessionProcesses>>,
     requested_at: std::time::Instant,
 }
 
@@ -317,7 +317,7 @@ pub struct TerminalSession {
     shutdown: Arc<AtomicBool>,
     /// Answers "what is running in this pane" without a round-trip.
     foreground: Arc<ForegroundWatch>,
-    worker: Option<JoinHandle<Option<crate::pty_unix::SessionProcesses>>>,
+    worker: Option<JoinHandle<Option<crate::pty::SessionProcesses>>>,
     events: Arc<crate::event_mailbox::Mailbox>,
 }
 
@@ -463,9 +463,10 @@ mod history_cancellation_tests {
 
     #[test]
     fn abandoned_queued_history_skips_traversal_and_publication() {
+        let exe = crate::test_child_support::ensure_test_child_exe().unwrap();
         let mut spawned = TerminalSession::spawn(SessionConfig::command(
-            "/bin/sh",
-            vec!["-c".into(), "exec sleep 30".into()],
+            exe.as_os_str(),
+            vec!["--sleep".into(), "30".into()],
         ))
         .unwrap();
         assert!(matches!(
@@ -480,7 +481,7 @@ mod history_cancellation_tests {
         commands
             .control
             .send(worker::Message::PtyOutput(
-                crate::pty_unix::OutputChunk::detached(b"history-marker"),
+                crate::pty::OutputChunk::detached(b"history-marker"),
             ))
             .unwrap();
         let abandoned = commands
@@ -576,9 +577,10 @@ mod history_cancellation_tests {
 
     #[test]
     fn history_completed_before_cancel_retains_its_ticket() {
+        let exe = crate::test_child_support::ensure_test_child_exe().unwrap();
         let mut spawned = TerminalSession::spawn(SessionConfig::command(
-            "/bin/sh",
-            vec!["-c".into(), "exec sleep 30".into()],
+            exe.as_os_str(),
+            vec!["--sleep".into(), "30".into()],
         ))
         .unwrap();
         assert!(matches!(
@@ -614,9 +616,10 @@ mod history_cancellation_tests {
 
     #[test]
     fn history_event_receiver_drop_releases_worker_and_request_state() {
+        let exe = crate::test_child_support::ensure_test_child_exe().unwrap();
         let mut spawned = TerminalSession::spawn(SessionConfig::command(
-            "/bin/sh",
-            vec!["-c".into(), "exec sleep 30".into()],
+            exe.as_os_str(),
+            vec!["--sleep".into(), "30".into()],
         ))
         .unwrap();
         assert!(matches!(

@@ -8,7 +8,7 @@ fn content_only_snapshots_do_not_probe_cosmetic_foreground(cx: &mut gpui::TestAp
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/cat".into()]),
+            Some(crate::test_event_pressure::child_command(&["--cat"])),
             settings,
             Vec::new(),
             None,

@@ -69,7 +69,9 @@ fn idle_view_accepts_colour_and_cursor_reloads(cx: &mut gpui::TestAppContext) {
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sleep".into(), "30".into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--sleep", "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -198,7 +200,9 @@ fn startup_and_reload_apply_identical_session_defaults(cx: &mut gpui::TestAppCon
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sleep".into(), "30".into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--sleep", "30",
+            ])),
             settings.clone(),
             Vec::new(),
             None,
@@ -271,10 +275,27 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
+    let exe = crate::test_event_pressure::child_program();
+    let expected_program = crate::test_event_pressure::child_program_name();
+    let shell_command: Vec<std::ffi::OsString> = if cfg!(windows) {
+        vec!["cmd.exe".into(), "/Q".into()]
+    } else {
+        vec!["/bin/sh".into(), "-i".into()]
+    };
+    let launch_line = if cfg!(windows) {
+        format!("\"{}\" --noecho --wait-line\r\n", exe.display())
+    } else {
+        format!("\"{}\" --noecho --wait-line\n", exe.display())
+    };
+    let stop_line = if cfg!(windows) {
+        b"\r".to_vec()
+    } else {
+        b"\n".to_vec()
+    };
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-i".into()]),
+            Some(shell_command),
             settings,
             Vec::new(),
             None,
@@ -306,17 +327,19 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
             crate::terminal_events::Effect::Title(Some("explicit".into())),
             cx,
         );
-        view.send(TerminalCommand::Input(b"stty -echo; cat\n".to_vec()));
+        view.send(TerminalCommand::Input(launch_line.clone().into_bytes()));
     });
     // Wait on the kernel condition without advancing GPUI's blink clock or delivering snapshots.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if view.read_with(cx, |view, _| view.foreground().program() == Some("cat")) {
+        if view.read_with(cx, |view, _| {
+            view.foreground().program() == Some(expected_program)
+        }) {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "cat did not become the foreground job"
+            "{expected_program} did not become the foreground job"
         );
         std::thread::yield_now();
     }
@@ -330,7 +353,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     );
     view.update(cx, |view, cx| {
         let queries = FOREGROUND_QUERIES.with(|count| count.get());
-        assert_eq!(view.foreground().program(), Some("cat"));
+        assert_eq!(view.foreground().program(), Some(expected_program));
         assert_eq!(
             FOREGROUND_QUERIES.with(|count| count.get()),
             queries + 1,
@@ -338,7 +361,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         );
         assert!(view.foreground_owner_group(std::process::id()).is_none());
         view.apply(crate::terminal_events::Effect::Title(None), cx);
-        assert_eq!(view.title().unwrap().as_ref(), "cat");
+        assert_eq!(view.title().unwrap().as_ref(), expected_program);
     });
     assert_eq!(
         events
@@ -346,7 +369,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
             .iter()
             .map(|title| title.as_ref().map(|title| title.as_ref()))
             .collect::<Vec<_>>(),
-        [Some("explicit"), Some("cat")]
+        [Some("explicit"), Some(expected_program)]
     );
     let strings = TITLE_STRINGS.with(|count| count.get());
     clock_beat(&view, cx);
@@ -356,7 +379,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         "unchanged fallback names reuse the cached display String"
     );
     assert_eq!(events.borrow().len(), 2);
-    view.update(cx, |view, _| view.send(TerminalCommand::Input(vec![0x04])));
+    view.update(cx, |view, _| view.send(TerminalCommand::Input(stop_line)));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         if view.read_with(cx, |view, _| {
@@ -366,7 +389,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "cat did not leave the foreground"
+            "{expected_program} did not leave the foreground"
         );
         std::thread::yield_now();
     }
@@ -378,22 +401,24 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     view.update(cx, |view, _| view._snapshots = Task::ready(()));
     let generation = view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation);
     view.update(cx, |view, _| {
-        view.send(TerminalCommand::Input(b"cat\n".to_vec()))
+        view.send(TerminalCommand::Input(launch_line.into_bytes()))
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if view.read_with(cx, |view, _| view.foreground().program() == Some("cat")) {
+        if view.read_with(cx, |view, _| {
+            view.foreground().program() == Some(expected_program)
+        }) {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "silent cat did not become the foreground job"
+            "silent {expected_program} did not become the foreground job"
         );
         std::thread::yield_now();
     }
     clock_beat(&view, cx);
     view.read_with(cx, |view, _| {
-        assert_eq!(view.title().unwrap().as_ref(), "cat")
+        assert_eq!(view.title().unwrap().as_ref(), expected_program)
     });
     assert_eq!(
         view.read_with(cx, |view, _| view.bundle.as_ref().unwrap().generation),
@@ -402,7 +427,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     );
     assert_eq!(
         events.borrow().last().unwrap().as_ref().unwrap().as_ref(),
-        "cat"
+        expected_program
     );
     assert!(
         !view.read_with(cx, |view, _| view.pane_focused()),
@@ -428,7 +453,7 @@ fn closing_an_owned_terminal_unregisters_before_retained_handles_drop(
     let view = host.update_in(cx, |_, window, cx| {
         cx.new(|cx| {
             TerminalView::new(
-                Some(vec!["/bin/cat".into()]),
+                Some(crate::test_event_pressure::child_command(&["--cat"])),
                 settings,
                 Vec::new(),
                 Some(PaneLink {
@@ -485,11 +510,12 @@ fn texture_budget_growth_restores_a_quiet_terminal_image(cx: &mut gpui::TestAppC
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "printf '\\033_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\\033\\\\'; exec sleep 30".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--emit",
+                "\\033_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\\033\\\\",
+                "--sleep",
+                "30",
+            ])),
             settings.clone(),
             Vec::new(),
             None,
@@ -547,18 +573,33 @@ fn explicit_application_command_receives_sprite_terminal_identity(cx: &mut gpui:
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(),
-                "printf 'IDENT:%s:%s:%s\\n' \"$TERM\" \"$TERM_PROGRAM\" \"$COLORTERM\"; infocmp xterm-ghostty >/dev/null 2>&1 && printf 'TERMINFO_OK\\n'; exec sleep 30".into()]),
-            settings, Vec::new(), None,
-            PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
+            Some(crate::test_event_pressure::child_command(&[
+                "--print-identity-short",
+                "--sleep",
+                "30",
+            ])),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
         )
     });
     let bundle = wait_for_bundle(&view, cx, |b| {
-        b.pane.rows.iter().any(|row| row.text.contains("IDENT:"))
-            && b.pane
-                .rows
-                .iter()
-                .any(|row| row.text.contains("TERMINFO_OK"))
+        let has_ident = b.pane.rows.iter().any(|row| row.text.contains("IDENT:"));
+        #[cfg(unix)]
+        let has_terminfo = b
+            .pane
+            .rows
+            .iter()
+            .any(|row| row.text.contains("TERMINFO_OK"));
+        #[cfg(not(unix))]
+        let has_terminfo = true;
+        has_ident && has_terminfo
     });
     let text = bundle
         .pane
@@ -571,6 +612,7 @@ fn explicit_application_command_receives_sprite_terminal_identity(cx: &mut gpui:
         text.contains("IDENT:xterm-ghostty:Sprite:truecolor"),
         "explicit child identity: {text}"
     );
+    #[cfg(unix)]
     assert!(
         text.contains("TERMINFO_OK"),
         "explicit child can find bundled terminfo: {text}"
@@ -624,16 +666,26 @@ fn native_ime_ranges_use_utf16(cx: &mut gpui::TestAppContext) {
 fn pointer_events_preserve_buttons_modifiers_and_buttonless_motion(cx: &mut gpui::TestAppContext) {
     use gpui::{Modifiers, MouseButton};
     let expected = "\x1b[<59;2;2M\x1b[<24;2;2M\x1b[<56;3;2M\x1b[<24;3;2m\x1b[<25;2;2M\x1b[<57;3;2M\x1b[<25;3;2m\x1b[<26;2;2M\x1b[<58;3;2M\x1b[<26;3;2m";
-    let script = format!(
-        "stty raw -echo; printf '\\033[?1003h\\033[?1006hREADY\\r\\n'; IFS= read -r go; stty min 1 time 0; printf 'CAPTURING\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
-        expected.len() + 1
-    );
+    let count = (expected.len() + 1).to_string();
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--raw-noecho",
+                "--emit",
+                "\\033[?1003h\\033[?1006hREADY\\r\\n",
+                "--wait-line",
+                "--emit",
+                "CAPTURING\\r\\n",
+                "--hex-read-compact",
+                &count,
+                "--emit",
+                "\\r\\nDONE\\r\\n",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -740,10 +792,35 @@ fn pointer_selection_keeps_shift_override_and_click_drag_semantics(cx: &mut gpui
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-        Some(vec!["/bin/sh".into(), "-c".into(), r#"stty -icanon -echo; printf 'SELECTABLE'; IFS= read -r go; stty raw min 0 time 5; printf '\033[?1003h\033[?1006h'; bytes=$(dd bs=1 count=1 status=none | od -An -tx1 -v | tr -d ' \n'); printf '\r\nMOUSE:%s:END\r\n' "$bytes"; sleep 30"#.into()]), settings,
-        Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
-    ));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--emit",
+                "SELECTABLE",
+                "--wait-line",
+                "--raw-noecho",
+                "--emit",
+                "\\033[?1003h\\033[?1006h",
+                "--hex-read-compact-timeout-tagged",
+                "1",
+                "500",
+                "\\r\\nMOUSE:",
+                ":END\\r\\n",
+                "--sleep",
+                "30",
+            ])),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         wait_for_bundle(&view, cx, |bundle| {
             bundle
@@ -827,11 +904,9 @@ fn dragging_above_the_grid_scrolls_history_and_extends_selection(cx: &mut gpui::
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "seq 1 100; sleep 30".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--seq", "1", "100", "--sleep", "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -923,11 +998,9 @@ fn dragging_below_the_grid_scrolls_toward_live_output_until_release(cx: &mut gpu
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "seq 1 100; sleep 30".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--seq", "1", "100", "--sleep", "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -1012,7 +1085,13 @@ fn buttonless_reporting_preserves_hyperlink_hover_and_owns_plain_clicks(
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-        Some(vec!["/bin/sh".into(), "-c".into(), "stty -echo; printf '\\033[?1003h\\033[?1006h\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007'; sleep 30".into()]), settings,
+        Some(crate::test_event_pressure::child_command(&[
+            "--noecho",
+            "--emit",
+            "\\033[?1003h\\033[?1006h\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007",
+            "--sleep",
+            "30",
+        ])), settings,
         Vec::new(), None, PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
     ));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1073,7 +1152,8 @@ fn buttonless_reporting_preserves_hyperlink_hover_and_owns_plain_clicks(
             "the program owns ordinary reported clicks"
         );
         let modifiers = gpui::Modifiers {
-            platform: true,
+            control: cfg!(target_os = "windows"),
+            platform: !cfg!(target_os = "windows"),
             ..Default::default()
         };
         cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
@@ -1112,10 +1192,24 @@ fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::Test
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let script = "stty -echo; printf '\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007\\r\\nREADY\\r\\n'; IFS= read -r go; i=0; while [ $i -lt 5 ]; do printf '\\033[3;1Hrow%s' $i; sleep 0.05; i=$((i+1)); done; printf '\\033[4;1HQUIET'; IFS= read -r go; printf '\\033[1;10HCHANGED'; sleep 30";
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--emit",
+                "\\033]8;;https://example.com\\007https://example.com\\033]8;;\\007\\r\\nREADY\\r\\n",
+                "--wait-line",
+                "--emit-rows-stepped",
+                "5",
+                "50",
+                "--emit",
+                "\\033[4;1HQUIET",
+                "--wait-line",
+                "--emit",
+                "\\033[1;10HCHANGED",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -1265,16 +1359,23 @@ fn hover_link_requests_and_repaints_follow_only_real_changes(cx: &mut gpui::Test
 fn native_commit_without_preedit_reaches_actual_pty(cx: &mut gpui::TestAppContext) {
     use gpui::{ElementInputHandler, InputHandler};
     let expected = "日本😀aaa";
-    let script = format!(
-        "stty raw -echo min 1 time 0; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
-        expected.len() + 1
-    );
+    let count = (expected.len() + 1).to_string();
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--raw-noecho",
+                "--emit",
+                "READY\\r\\n",
+                "--hex-read-compact",
+                &count,
+                "--emit",
+                "\\r\\nDONE\\r\\n",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -1332,16 +1433,23 @@ fn ordinary_key_fallback_preserves_enhanced_protocol_and_native_identical_commit
 ) {
     use gpui::{ElementInputHandler, InputHandler, Keystroke};
     let expected = "\x1b[97ua";
-    let script = format!(
-        "stty raw -echo min 1 time 0; printf '\\033[>8uREADY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
-        expected.len() + 1
-    );
+    let count = (expected.len() + 1).to_string();
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--raw-noecho",
+                "--emit",
+                "\\033[>8uREADY\\r\\n",
+                "--hex-read-compact",
+                &count,
+                "--emit",
+                "\\r\\nDONE\\r\\n",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -1416,16 +1524,23 @@ fn ordinary_repeated_shift_unicode_keys_and_delayed_native_ascii_are_not_doubled
 ) {
     use gpui::{ElementInputHandler, InputHandler, Keystroke};
     let expected = "aaAé a";
-    let script = format!(
-        "stty raw -echo min 1 time 0; printf 'READY\\r\\n'; dd bs=1 count={} status=none | od -An -tx1 -v | tr -d ' \\n'; printf '\\r\\nDONE\\r\\n'; sleep 30",
-        expected.len() + 1
-    );
+    let count = (expected.len() + 1).to_string();
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--raw-noecho",
+                "--emit",
+                "READY\\r\\n",
+                "--hex-read-compact",
+                &count,
+                "--emit",
+                "\\r\\nDONE\\r\\n",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -1613,11 +1728,15 @@ fn a_screen_that_takes_longer_than_a_second_is_still_waited_for(cx: &mut gpui::T
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "stty -echo; sleep 2; printf LATE-MARK; sleep 300".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--sleep",
+                "2",
+                "--emit",
+                "LATE-MARK",
+                "--sleep",
+                "300",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -1652,11 +1771,32 @@ fn a_drag_extends_from_the_pressed_content_after_output_scrolls(cx: &mut gpui::T
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-        Some(vec!["/bin/sh".into(), "-c".into(), "stty -echo; seq 1 300; printf 'ANCHOR-TEXT\\nREADY'; IFS= read -r go; printf '\\nafter-1\\nafter-2\\nafter-3'; sleep 30".into()]),
-        settings, Vec::new(), None,
-        PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) }, window, cx,
-    ));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--seq",
+                "1",
+                "300",
+                "--emit",
+                "ANCHOR-TEXT\\nREADY",
+                "--wait-line",
+                "--emit",
+                "\\nafter-1\\nafter-2\\nafter-3",
+                "--sleep",
+                "30",
+            ])),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let row_of = |bundle: &SnapshotBundle, text: &str| {
             bundle

@@ -107,20 +107,27 @@ const CLOSED_RUNS: usize = 10;
 
 struct Disk {
     run: PathBuf,
-    file: std::fs::File,
+    file: Option<std::fs::File>,
     size: u64,
     _marker: std::fs::File,
 }
 
 fn private_file(path: &std::path::Path, truncate: bool) -> io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(truncate)
-        .mode(0o600)
-        .open(path)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(truncate)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        crate::local_socket::create_private_file(path, truncate)
+    }
 }
 
 fn cleanup(root: &std::path::Path) -> io::Result<()> {
@@ -173,6 +180,7 @@ fn cleanup(root: &std::path::Path) -> io::Result<()> {
                 .open(old.join(".active"))
                 && marker.try_lock().is_ok()
             {
+                drop(marker);
                 std::fs::remove_dir_all(old).ok();
             }
         }
@@ -182,12 +190,7 @@ fn cleanup(root: &std::path::Path) -> io::Result<()> {
 
 impl Disk {
     fn open(root: PathBuf) -> io::Result<Self> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&root)?;
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+        crate::local_socket::create_private_dir(&root)?;
         let lock = private_file(&root.join(".lock"), false)?;
         lock.lock()?;
         let stamp = SystemTime::now()
@@ -195,7 +198,7 @@ impl Disk {
             .unwrap_or_default()
             .as_nanos();
         let run = root.join(format!("run-{}-{stamp}", std::process::id()));
-        std::fs::DirBuilder::new().mode(0o700).create(&run)?;
+        crate::local_socket::create_private_dir(&run)?;
         let opened = (|| {
             let marker = private_file(&run.join(".active"), false)?;
             marker.try_lock().map_err(io::Error::from)?;
@@ -213,7 +216,7 @@ impl Disk {
         cleanup(&root).ok();
         Ok(Self {
             run,
-            file,
+            file: Some(file),
             size: 0,
             _marker: marker,
         })
@@ -222,6 +225,7 @@ impl Disk {
     fn write_event(&mut self, event: &[u8]) -> io::Result<()> {
         let event = &event[..event.len().min(EVENT_LIMIT)];
         if self.size + event.len() as u64 > SEGMENT_LIMIT {
+            self.file = None;
             for index in (1..SEGMENTS).rev() {
                 let previous = if index == 1 {
                     self.run.join("sprite.log")
@@ -235,12 +239,18 @@ impl Disk {
                     Err(error) => return Err(error),
                 }
             }
-            self.file = private_file(&self.run.join("sprite.log"), true)?;
+            self.file = Some(private_file(&self.run.join("sprite.log"), true)?);
             self.size = 0;
         }
-        self.file.write_all(event)?;
+        let file = match self.file.as_mut() {
+            Some(file) => file,
+            None => self
+                .file
+                .insert(private_file(&self.run.join("sprite.log"), false)?),
+        };
+        file.write_all(event)?;
         self.size += event.len() as u64;
-        self.file.flush()
+        file.flush()
     }
 }
 
@@ -279,6 +289,10 @@ pub fn init() -> Option<Guard> {
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?
         .join("sprite/logs");
+    #[cfg(target_os = "windows")]
+    let root = PathBuf::from(std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())?)
+        .join("sprite")
+        .join("logs");
     let requested = std::env::var("SPRITE_LOG").unwrap_or_else(|_| "sprite_app=warn".to_owned());
     let filter = if tracing_subscriber::EnvFilter::try_new(&requested).is_ok() {
         requested
@@ -370,12 +384,16 @@ impl ResourceSample {
     pub fn read() -> Self {
         let (cpu_user, cpu_system) = cpu_times().unzip();
         let (resident_bytes, threads) = memory_and_threads();
+        #[cfg(unix)]
+        let open_files = count_entries(std::path::Path::new("/dev/fd"));
+        #[cfg(windows)]
+        let open_files = open_handle_count();
         Self {
             resident_bytes,
             cpu_user,
             cpu_system,
             threads,
-            open_files: count_entries(std::path::Path::new("/dev/fd")),
+            open_files,
         }
     }
 }
@@ -403,6 +421,7 @@ pub fn log_resources(reason: &'static str, panes: usize) {
     );
 }
 
+#[cfg(unix)]
 fn cpu_times() -> Option<(Duration, Duration)> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage fills the whole struct when it returns 0.
@@ -414,6 +433,33 @@ fn cpu_times() -> Option<(Duration, Duration)> {
         Duration::from_secs(value.tv_sec as u64) + Duration::from_micros(value.tv_usec as u64)
     };
     Some((time(usage.ru_utime), time(usage.ru_stime)))
+}
+
+#[cfg(windows)]
+fn cpu_times() -> Option<(Duration, Duration)> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: queries CPU times for the current process pseudo-handle.
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .ok()?;
+    let to_duration = |ft: FILETIME| {
+        let ticks = (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime);
+        Duration::from_micros(ticks / 10) + Duration::from_nanos((ticks % 10) * 100)
+    };
+    Some((to_duration(user), to_duration(kernel)))
 }
 
 #[cfg(target_os = "macos")]
@@ -460,6 +506,71 @@ fn memory_and_threads() -> (Option<u64>, Option<u32>) {
     )
 }
 
+#[cfg(target_os = "windows")]
+fn memory_and_threads() -> (Option<u64>, Option<u32>) {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `counters` is properly sized with `cb` set before calling `K32GetProcessMemoryInfo`.
+    let memory = unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    }
+    .as_bool()
+    .then_some(counters.WorkingSetSize as u64);
+
+    let threads = (|| -> Option<u32> {
+        let pid = std::process::id();
+        // SAFETY: snapshots system threads; returned handle is wrapped in `OwnedHandle`.
+        let raw_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.ok()?;
+        // SAFETY: `raw_snapshot` is a fresh valid snapshot handle.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(raw_snapshot.0) };
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let handle = HANDLE(snapshot.as_raw_handle());
+        // SAFETY: `entry.dwSize` is initialized before `Thread32First`.
+        unsafe { Thread32First(handle, &mut entry) }.ok()?;
+        let mut count = 0_u32;
+        loop {
+            if entry.th32OwnerProcessID == pid {
+                count = count.saturating_add(1);
+            }
+            // SAFETY: `entry.dwSize` stays set for `Thread32Next`.
+            if unsafe { Thread32Next(handle, &mut entry) }.is_err() {
+                break;
+            }
+        }
+        Some(count)
+    })();
+
+    (memory, threads)
+}
+
+#[cfg(windows)]
+fn open_handle_count() -> Option<u32> {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+    let mut count = 0_u32;
+    // SAFETY: queries open handle count for the current process pseudo-handle.
+    unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }.ok()?;
+    Some(count)
+}
+
+#[cfg(any(unix, test))]
 fn count_entries(directory: &std::path::Path) -> Option<u32> {
     u32::try_from(std::fs::read_dir(directory).ok()?.count()).ok()
 }
@@ -502,7 +613,7 @@ mod tests {
         let mut written = Vec::new();
         drain_pending(&rx, true, |event| {
             written.extend_from_slice(&event[..3]);
-            Err(io::Error::from_raw_os_error(nix::libc::ENOSPC))
+            Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
         });
         assert_eq!(written, vec![1; 3]);
         assert_eq!(rx.try_recv().unwrap(), vec![2; 10]);
@@ -565,6 +676,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_handles_many_closed_runs_with_a_low_descriptor_limit() {
         const CHILD: &str = "SPRITE_LOG_LOW_FD_CHILD";

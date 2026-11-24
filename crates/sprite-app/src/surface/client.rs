@@ -7,21 +7,28 @@
 //! reaches standard output that is not the window's own answer.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+#[cfg(windows)]
+use std::sync::{Condvar, Mutex};
+#[cfg(windows)]
+use std::time::Duration;
 
-use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
-
+#[cfg(unix)]
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde_json::{Value, json};
 
 use super::socket_reader::SocketReader;
 use crate::cli::{SurfaceOpenArgs, TokenRegisterArgs};
 use crate::control::client::PANE_VARIABLE;
+use crate::local_socket::LocalStream;
 use crate::surface::channel::{KEY_VARIABLE, SOCKET_VARIABLE, VERSION};
 use crate::surface::wire::versioned;
 
@@ -41,7 +48,7 @@ pub enum Exit {
 }
 
 /// One line to the window, flushed, with the truth about whether it went.
-fn send_line(stream: &UnixStream, line: &str) -> bool {
+fn send_line(stream: &LocalStream, line: &str) -> bool {
     let mut writer = stream;
     writeln!(writer, "{line}")
         .and_then(|_| writer.flush())
@@ -79,8 +86,8 @@ fn credentials(errors: &mut dyn Write) -> Result<Credentials, Exit> {
     Ok(Credentials { socket, key, pane })
 }
 
-fn connect(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exit> {
-    UnixStream::connect(socket).map_err(|error| {
+fn connect(socket: &str, errors: &mut dyn Write) -> Result<LocalStream, Exit> {
+    LocalStream::connect(std::path::Path::new(socket)).map_err(|error| {
         writeln!(
             errors,
             "sprite: could not reach this window's surface channel: {error}"
@@ -93,7 +100,7 @@ fn connect(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exit> {
 /// Connects for one exchange, bounded by the client timeout. A Surface's own
 /// connection goes through `connect` instead and has no timeout: it lives as
 /// long as the Surface.
-fn open_exchange(socket: &str, errors: &mut dyn Write) -> Result<UnixStream, Exit> {
+fn open_exchange(socket: &str, errors: &mut dyn Write) -> Result<LocalStream, Exit> {
     let stream = connect(socket, errors)?;
     bound_client(&stream).ok();
     Ok(stream)
@@ -124,12 +131,14 @@ fn refused(verdict: &Value, errors: &mut dyn Write) -> Exit {
     Exit::Refused
 }
 
+#[cfg(unix)]
 struct CancellableInput<Fd> {
     input: Fd,
     cancellation: UnixStream,
     canceled: Arc<AtomicBool>,
 }
 
+#[cfg(unix)]
 impl<Fd: AsFd> Read for CancellableInput<Fd> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
@@ -164,18 +173,61 @@ impl<Fd: AsFd> Read for CancellableInput<Fd> {
     }
 }
 
+#[cfg(windows)]
+struct CancelState {
+    canceled: Arc<AtomicBool>,
+    reading: AtomicBool,
+    idle_lock: Mutex<()>,
+    idle: Condvar,
+}
+
+#[cfg(windows)]
+struct ReadGuard<'a>(&'a CancelState);
+
+#[cfg(windows)]
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        self.0.reading.store(false, Ordering::SeqCst);
+        drop(crate::locked::locked(&self.0.idle_lock));
+        self.0.idle.notify_all();
+    }
+}
+
+#[cfg(windows)]
+struct CancellableInput<R> {
+    input: R,
+    state: Arc<CancelState>,
+}
+
+#[cfg(windows)]
+impl<R: Read> Read for CancellableInput<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        if self.state.canceled.load(Ordering::SeqCst) {
+            return Err(io::Error::other("surface channel closed"));
+        }
+        self.state.reading.store(true, Ordering::SeqCst);
+        let _guard = ReadGuard(&self.state);
+        if self.state.canceled.load(Ordering::SeqCst) {
+            return Err(io::Error::other("surface channel closed"));
+        }
+        let result = self.input.read(buffer);
+        if self.state.canceled.load(Ordering::SeqCst) {
+            return Err(io::Error::other("surface channel closed"));
+        }
+        result
+    }
+}
+
+#[cfg(unix)]
 pub fn run_surface_open(
     args: &SurfaceOpenArgs,
     input: impl AsFd,
-    mut out: impl Write + Send + 'static,
+    out: impl Write + Send + 'static,
     errors: &mut dyn Write,
 ) -> Exit {
-    let credentials = match credentials(errors) {
-        Ok(credentials) => credentials,
-        Err(exit) => return exit,
-    };
-    // Documents, not lines: a description file is usually pretty-printed, and
-    // the streaming deserializer takes either.
     let (cancellation, cancel_events) = match UnixStream::pair() {
         Ok(pair) => pair,
         Err(error) => {
@@ -189,6 +241,107 @@ pub fn run_surface_open(
         cancellation,
         canceled: Arc::clone(&canceled),
     };
+    run_surface_open_reader(
+        args,
+        input,
+        canceled,
+        Box::new(move || drop(cancel_events)),
+        out,
+        errors,
+    )
+}
+
+#[cfg(windows)]
+pub fn run_surface_open(
+    args: &SurfaceOpenArgs,
+    input: impl Read,
+    out: impl Write + Send + 'static,
+    errors: &mut dyn Write,
+) -> Exit {
+    let canceled = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(CancelState {
+        canceled: Arc::clone(&canceled),
+        reading: AtomicBool::new(false),
+        idle_lock: Mutex::new(()),
+        idle: Condvar::new(),
+    });
+    let input = CancellableInput {
+        input,
+        state: Arc::clone(&state),
+    };
+    // Duplicate the calling thread handle so the event thread can cancel a
+    // blocking stdin read via `CancelSynchronousIo` when the Surface closes.
+    let cancel_io = current_thread_cancel_fn(state);
+    run_surface_open_reader(args, input, canceled, cancel_io, out, errors)
+}
+
+#[cfg(windows)]
+fn current_thread_cancel_fn(state: Arc<CancelState>) -> Box<dyn FnOnce() + Send> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::{
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_NOT_FOUND, HANDLE,
+    };
+    use windows::Win32::System::IO::CancelSynchronousIo;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
+
+    let mut duplicate = HANDLE::default();
+    // SAFETY: duplicates the current thread pseudo-handle into a real handle usable from another thread.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            GetCurrentThread(),
+            GetCurrentProcess(),
+            &mut duplicate,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }
+    .is_ok();
+    if !ok {
+        return Box::new(move || {
+            state.canceled.store(true, Ordering::SeqCst);
+        });
+    }
+    // SAFETY: `duplicate` is a freshly created handle owned exclusively here.
+    let handle = unsafe { OwnedHandle::from_raw_handle(duplicate.0) };
+    Box::new(move || {
+        state.canceled.store(true, Ordering::SeqCst);
+        let raw = HANDLE(handle.as_raw_handle());
+        while state.reading.load(Ordering::SeqCst) {
+            // SAFETY: cancels any pending synchronous stdin read on the main thread.
+            let wait = match unsafe { CancelSynchronousIo(raw) } {
+                Ok(()) => Duration::from_millis(10),
+                Err(error) if error.code() == ERROR_NOT_FOUND.to_hresult() => {
+                    Duration::from_millis(1)
+                }
+                Err(_) => break,
+            };
+            let guard = crate::locked::locked(&state.idle_lock);
+            drop(
+                state
+                    .idle
+                    .wait_timeout_while(guard, wait, |_| state.reading.load(Ordering::SeqCst))
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+        }
+    })
+}
+
+fn run_surface_open_reader(
+    args: &SurfaceOpenArgs,
+    input: impl Read,
+    canceled: Arc<AtomicBool>,
+    cancel_input: Box<dyn FnOnce() + Send>,
+    mut out: impl Write + Send + 'static,
+    errors: &mut dyn Write,
+) -> Exit {
+    let credentials = match credentials(errors) {
+        Ok(credentials) => credentials,
+        Err(exit) => return exit,
+    };
+    // Documents, not lines: a description file is usually pretty-printed, and
+    // the streaming deserializer takes either.
     let mut documents =
         serde_json::Deserializer::from_reader(BufReader::new(input)).into_iter::<Value>();
     let description = match documents.next() {
@@ -265,9 +418,10 @@ pub fn run_surface_open(
         }
         reader.get_ref().0.shutdown(Shutdown::Both).ok();
         event_canceled.store(true, Ordering::Release);
-        drop(cancel_events);
+        cancel_input();
     });
     let mut bad_input = false;
+    let mut write_failed = false;
     for document in documents {
         if canceled.load(Ordering::Acquire) {
             break;
@@ -282,11 +436,18 @@ pub fn run_surface_open(
             }
         };
         if !send_line(&stream, &versioned(message).to_string()) {
+            write_failed = true;
             stream.shutdown(Shutdown::Both).ok();
             break;
         }
     }
     // Standard input is done: tell the window, and let it say `closed`.
+    #[cfg(windows)]
+    if !write_failed && !canceled.load(Ordering::Acquire) {
+        send_line(&stream, &versioned(json!({ "type": "eof" })).to_string());
+    }
+    #[cfg(not(windows))]
+    let _ = write_failed;
     stream.shutdown(Shutdown::Write).ok();
     events.join().ok();
     if bad_input { Exit::Usage } else { Exit::Ok }

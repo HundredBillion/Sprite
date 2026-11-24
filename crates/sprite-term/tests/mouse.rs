@@ -7,22 +7,15 @@
 
 mod support;
 
-use std::ffi::OsString;
-
 use sprite_term::{
-    CellPosition, MouseAction, MouseButton, MouseEvent, SessionConfig, TerminalCommand,
-    TerminalSession, WheelEvent,
+    CellPosition, MouseAction, MouseButton, MouseEvent, TerminalCommand, TerminalSession,
+    WheelEvent,
 };
 
 use support::{EventPump, SnapshotPump, pane_text};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
-fn session(script: &str) -> sprite_term::Spawned {
-    TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session")
+fn session(args: &[&str]) -> sprite_term::Spawned {
+    TerminalSession::spawn(support::test_child_config(args)).expect("spawn session")
 }
 
 fn click(row: u16, column: u16, shift: bool) -> TerminalCommand {
@@ -45,10 +38,15 @@ fn a_child_with_reporting_enabled_receives_mouse_events() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 6 time 0; printf '\\033[?1000h'; printf 'READY\\n'; \
-         head -c 6 | od -An -tx1 | tr -s ' '",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "\\033[?1000hREADY\\n",
+        "--hex-read",
+        "6",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -77,10 +75,17 @@ fn a_child_without_reporting_receives_no_mouse_events() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 1 time 0; printf 'READY\\n'; \
-         head -c 1 | od -An -tx1 | tr -s ' '; printf 'GOT-INPUT\\n'",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "READY\\n",
+        "--hex-read",
+        "1",
+        "--emit",
+        "GOT-INPUT\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -114,10 +119,17 @@ fn the_override_modifier_withholds_the_event_from_the_child() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 1 time 0; printf '\\033[?1000h'; printf 'READY\\n'; \
-         head -c 1 | od -An -tx1 | tr -s ' '; printf 'GOT-INPUT\\n'",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "\\033[?1000hREADY\\n",
+        "--hex-read",
+        "1",
+        "--emit",
+        "GOT-INPUT\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -165,10 +177,15 @@ fn a_child_with_reporting_enabled_receives_the_wheel() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 6 time 0; printf '\\033[?1049h\\033[?1000h'; printf 'READY\\n'; \
-         head -c 6 | od -An -tx1 | tr -s ' '",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "\\033[?1049h\\033[?1000hREADY\\n",
+        "--hex-read",
+        "6",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -198,10 +215,15 @@ fn a_full_screen_child_without_reporting_receives_arrow_keys() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 3 time 0; printf '\\033[?1049h'; printf 'READY\\n'; \
-         head -c 3 | od -An -tx1 | tr -s ' '",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "\\033[?1049hREADY\\n",
+        "--hex-read",
+        "3",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -233,10 +255,18 @@ fn the_wheel_is_not_sent_to_a_child_on_the_primary_screen() {
         mut session,
         events,
         snapshots,
-    } = session(
-        "stty -icanon -echo min 0 time 10; printf 'READY\\n'; \
-         head -c 3 | od -An -tx1 | tr -s ' '; printf 'QUIET\\n'",
-    );
+    } = session(&[
+        "--raw-noecho",
+        "--emit",
+        "READY\\n",
+        "--hex-read-timeout",
+        "3",
+        "1000",
+        "--emit",
+        "QUIET\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

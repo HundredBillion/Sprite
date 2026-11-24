@@ -2413,8 +2413,15 @@ impl TerminalView {
                 // reader is the shell that will run after that program exits;
                 // and copy reaches grid editors, which own their selections.
                 // Other Surface kinds keep consuming copy without forwarding.
-                let preview_copy = event.keystroke.modifiers.platform
-                    && matches!(event.keystroke.key.as_str(), "c" | "a");
+                let preview_copy = if cfg!(target_os = "windows") {
+                    event.keystroke.modifiers.control
+                        && event.keystroke.modifiers.shift
+                        && !event.keystroke.modifiers.platform
+                        && !event.keystroke.modifiers.alt
+                        && !event.keystroke.modifiers.function
+                } else {
+                    event.keystroke.modifiers.platform
+                } && matches!(event.keystroke.key.as_str(), "c" | "a");
                 if preview_copy
                     && let Some(surface) = view.surfaces.get_mut(|s| s.id == id)
                     && let Body::Grid { grid, markdown, .. } = &surface.body
@@ -2797,7 +2804,7 @@ mod tests {
                 cx,
             )
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/surface-list-v1.json"
@@ -2848,7 +2855,7 @@ mod tests {
                 cx,
             )
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let svg = |color: &str| {
             format!(
@@ -2909,7 +2916,7 @@ mod tests {
                 cx,
             )
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let svg = |color: &str| {
             format!(
@@ -3012,7 +3019,7 @@ mod tests {
                 cx,
             )
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let svg = crate::surface::svg_decode::merged_floods(4, 64);
         host.update_in(cx, |view, window, cx| {
@@ -3073,7 +3080,7 @@ mod tests {
     /// so a read first waits for it to put everything already sent on the
     /// wire.
     struct Peer {
-        stream: std::os::unix::net::UnixStream,
+        stream: crate::local_socket::LocalStream,
         connection: SurfaceConnection,
     }
 
@@ -3083,8 +3090,7 @@ mod tests {
         id: SurfaceId,
         open: Open,
     ) -> (Result<(), Refusal>, Peer) {
-        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        peer.set_nonblocking(true).unwrap();
+        let (stream, peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let mut peer = Peer {
             stream: peer,
@@ -3163,12 +3169,9 @@ mod tests {
     }
 
     fn events(peer: &mut Peer) -> Vec<serde_json::Value> {
-        use std::io::Read;
+        use crate::local_socket::LocalStreamExt as _;
         peer.connection.settle();
-        let mut wire = String::new();
-        if let Err(error) = peer.stream.read_to_string(&mut wire) {
-            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-        }
+        let wire = peer.stream.drain_available().unwrap();
         wire.lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
@@ -3184,7 +3187,7 @@ mod tests {
         let (host, cx) = cx.add_window_view(|window, cx| {
             TerminalView::failed("test".into(), ".SystemUIFont".into(), window, cx)
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         dispatch(
@@ -3252,11 +3255,11 @@ mod tests {
         let (sender, _exits) = async_channel::unbounded();
         let (host, cx) = cx.add_window_view(|window, cx| {
             TerminalView::new(
-                Some(vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    r#"printf '\033]0;%s\007' "$$"; exec /bin/cat"#.into(),
-                ]),
+                Some(crate::test_event_pressure::child_command(&[
+                    "--noecho",
+                    "--emit-pid-title",
+                    "--cat",
+                ])),
                 settings,
                 Vec::new(),
                 None,
@@ -3775,15 +3778,24 @@ mod tests {
         });
         draw_test_window(cx);
         events(&mut peer);
+        let modifiers = if cfg!(target_os = "windows") {
+            gpui::Modifiers {
+                control: true,
+                shift: true,
+                ..Default::default()
+            }
+        } else {
+            gpui::Modifiers {
+                platform: true,
+                ..Default::default()
+            }
+        };
         cx.update(|window, cx| {
             window.dispatch_keystroke(
                 gpui::Keystroke {
                     key: "c".into(),
                     key_char: None,
-                    modifiers: gpui::Modifiers {
-                        platform: true,
-                        ..Default::default()
-                    },
+                    modifiers,
                 },
                 cx,
             );
@@ -3800,6 +3812,8 @@ mod tests {
         if expected_inputs > 0 {
             let expected = if cfg!(target_os = "macos") {
                 "cmd-c"
+            } else if cfg!(target_os = "windows") {
+                "ctrl-shift-c"
             } else {
                 "super-c"
             };
@@ -5134,11 +5148,11 @@ mod tests {
         let (sender, _exits) = async_channel::unbounded();
         let (host, cx) = cx.add_window_view(|window, cx| {
             TerminalView::new(
-                Some(vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    r#"printf '\033]0;%s\007' "$$"; exec /bin/cat"#.into(),
-                ]),
+                Some(crate::test_event_pressure::child_command(&[
+                    "--noecho",
+                    "--emit-pid-title",
+                    "--cat",
+                ])),
                 settings,
                 Vec::new(),
                 None,
@@ -5663,11 +5677,11 @@ mod tests {
         let (sender, _exits) = async_channel::unbounded();
         let (host, cx) = cx.add_window_view(|window, cx| {
             TerminalView::new(
-                Some(vec![
-                    "/bin/sh".into(),
-                    "-c".into(),
-                    r#"printf '\033]0;%s\007' "$$"; exec /bin/cat"#.into(),
-                ]),
+                Some(crate::test_event_pressure::child_command(&[
+                    "--noecho",
+                    "--emit-pid-title",
+                    "--cat",
+                ])),
                 settings,
                 Vec::new(),
                 None,
@@ -5899,7 +5913,10 @@ mod tests {
         let (host, cx) = cx.add_window_view(|window, cx| {
             let (sender, _receiver) = async_channel::unbounded();
             TerminalView::new_allocated(
-                Some(vec!["/bin/sh".into(), "-c".into(), "read release".into()]),
+                Some(crate::test_event_pressure::child_command(&[
+                    "--noecho",
+                    "--wait-line",
+                ])),
                 crate::config::Settings::default(),
                 Vec::new(),
                 None,

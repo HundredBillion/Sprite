@@ -9,18 +9,23 @@
 //! slowly it reads.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::io::{Read, Write};
-use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
+use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use nix::errno::Errno;
+#[cfg(unix)]
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde_json::json;
 
-use crate::local_socket::{READ_RECHECK, wait_readable, write_within};
+#[cfg(unix)]
+use std::os::fd::AsFd;
+
+use crate::local_socket::{
+    LocalStream, READ_RECHECK, WakeReceiver, WakeSender, wait_readable, wake_pair, write_within,
+};
 use crate::locked::locked;
 use crate::timeouts::drain_deadline;
 
@@ -134,8 +139,8 @@ struct Watcher {
     /// The panes this watcher asked about; `None` for every pane.
     panes: Option<HashSet<u64>>,
     pending: Mutex<Pending>,
-    /// Written to wake the watcher's thread. Never blocks.
-    wake: UnixStream,
+    /// Signalled to wake the watcher's thread. Never blocks.
+    wake: WakeSender,
 }
 
 impl Watcher {
@@ -153,10 +158,7 @@ impl Watcher {
             !std::mem::replace(&mut pending.signalled, true)
         };
         if wake {
-            // One byte, to a socket that never blocks: it is written whole
-            // or refused. A refusal means the pipe is full of wake-ups
-            // already, so it loses nothing.
-            (&self.wake).write_all(&[1]).ok();
+            self.wake.wake();
         }
     }
 }
@@ -223,9 +225,7 @@ impl Hub {
 
     /// Starts watching `panes`, or every pane.
     pub(crate) fn subscribe(&self, panes: Option<HashSet<u64>>) -> std::io::Result<Subscription> {
-        let (wake, woken) = UnixStream::pair()?;
-        wake.set_nonblocking(true)?;
-        woken.set_nonblocking(true)?;
+        let (wake, woken) = wake_pair()?;
         let watcher = Arc::new(Watcher {
             panes,
             pending: Mutex::default(),
@@ -256,7 +256,7 @@ impl Drop for Kept {
 pub(crate) struct Subscription {
     hub: Hub,
     watcher: Arc<Watcher>,
-    woken: UnixStream,
+    woken: WakeReceiver,
 }
 
 impl Drop for Subscription {
@@ -270,8 +270,7 @@ impl Drop for Subscription {
 impl Subscription {
     /// Takes every change marked since the last call, as notice lines.
     fn take(&self, window: &str) -> Vec<u8> {
-        let mut scratch = [0_u8; 64];
-        while matches!((&self.woken).read(&mut scratch), Ok(read) if read > 0) {}
+        self.woken.drain();
         let changes = {
             let mut pending = locked(&self.watcher.pending);
             pending.signalled = false;
@@ -288,29 +287,42 @@ impl Subscription {
     /// Sends notices down `stream` until the peer closes it, the window
     /// closes it, or the peer stops reading.
     ///
-    /// Nothing here can wait forever. The thread sleeps in `poll`, looking
-    /// again every [`READ_RECHECK`], so a peer that closed is noticed even
-    /// when the system fails to wake a sleeping reader (issue #79). Every
-    /// write has a deadline that a slow reader cannot stretch (issue #67).
-    pub(crate) fn serve(self, window: &str, stream: &UnixStream) {
+    /// Nothing here can wait forever. The thread wakes periodically every
+    /// [`READ_RECHECK`], so a peer that closed is noticed even when the system
+    /// fails to wake a sleeping reader (issue #79). Every write has a deadline
+    /// that a slow reader cannot stretch (issue #67).
+    pub(crate) fn serve(self, window: &str, stream: &LocalStream) {
+        #[cfg(unix)]
         let recheck = PollTimeout::from(u16::try_from(READ_RECHECK.as_millis()).unwrap_or(1000));
         let mut not_before = Instant::now();
         loop {
-            let mut descriptors = [
-                PollFd::new(stream.as_fd(), PollFlags::POLLIN),
-                PollFd::new(self.woken.as_fd(), PollFlags::POLLIN),
-            ];
-            match poll(&mut descriptors, recheck) {
-                Ok(_) | Err(Errno::EINTR) => {}
-                Err(_) => return,
-            }
-            let ready = |index: usize| {
-                descriptors
-                    .get(index)
-                    .and_then(|descriptor| descriptor.revents())
-                    .is_some_and(|events| !events.is_empty())
+            #[cfg(unix)]
+            let (peer, woken) = {
+                let mut descriptors = [
+                    PollFd::new(stream.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(self.woken.as_fd(), PollFlags::POLLIN),
+                ];
+                match poll(&mut descriptors, recheck) {
+                    Ok(_) | Err(Errno::EINTR) => {}
+                    Err(_) => return,
+                }
+                let ready = |index: usize| {
+                    descriptors
+                        .get(index)
+                        .and_then(|descriptor| descriptor.revents())
+                        .is_some_and(|events| !events.is_empty())
+                };
+                (ready(0), ready(1))
             };
-            let (peer, woken) = (ready(0), ready(1));
+            #[cfg(windows)]
+            let (peer, woken) = {
+                let woken = self.woken.wait_timeout(READ_RECHECK);
+                let peer = match stream.peek_readable_or_closed() {
+                    Ok(flag) => flag,
+                    Err(_) => return,
+                };
+                (peer, woken)
+            };
             if peer && !peer_still_open(stream) {
                 return;
             }
@@ -336,10 +348,10 @@ impl Subscription {
     }
 }
 
-/// Reads what a watching peer sent, after `poll` reported something. A
+/// Reads what a watching peer sent, after readiness reported something. A
 /// watching connection takes no further requests, so anything it sends is
 /// discarded; the end of its stream, or an error, ends the watch.
-fn peer_still_open(mut stream: &UnixStream) -> bool {
+fn peer_still_open(mut stream: &LocalStream) -> bool {
     if stream.set_read_timeout(Some(READ_RECHECK)).is_err() {
         return false;
     }
@@ -446,13 +458,13 @@ mod tests {
     fn a_watch_ends_when_its_peer_closes_while_nothing_changes() {
         let hub = Hub::default();
         let watch = hub.subscribe(None).unwrap();
-        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (ours, theirs) = LocalStream::pair().unwrap();
         let (done, finished) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             watch.serve("w", &ours);
             done.send(()).unwrap();
         });
-        theirs.shutdown(std::net::Shutdown::Write).unwrap();
+        drop(theirs);
         finished
             .recv_timeout(crate::test_blocking_wait::watchdog())
             .expect("the watch ended");
@@ -466,7 +478,7 @@ mod tests {
     fn a_watch_ends_when_its_peer_stops_reading() {
         let hub = Hub::default();
         let watch = hub.subscribe(None).unwrap();
-        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let (ours, _theirs) = LocalStream::pair().unwrap();
         let (done, finished) = std::sync::mpsc::channel();
         let marker = hub.clone();
         let thread = std::thread::spawn(move || {
@@ -502,7 +514,7 @@ mod tests {
     fn notices_reach_the_peer_as_lines_no_closer_than_a_frame_apart() {
         let hub = Hub::default();
         let watch = hub.subscribe(None).unwrap();
-        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (ours, theirs) = LocalStream::pair().unwrap();
         let thread = std::thread::spawn(move || watch.serve("w", &ours));
         let mut lines = BufReader::new(theirs.try_clone().unwrap()).lines();
         hub.mark(1, Mark::Terminal(1));

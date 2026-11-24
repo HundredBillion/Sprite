@@ -38,6 +38,7 @@ pub(crate) enum Message {
     Grid(Vec<super::grid::Op>),
     List(super::list::ListOp),
     Close,
+    Eof,
 }
 
 struct Envelope<'a> {
@@ -113,6 +114,7 @@ pub(crate) fn parse_message(message: &Value) -> Result<Message, Refusal> {
             .ok_or_else(|| Refusal::Malformed("update needs a description".to_owned())),
         "focus" => focus_target(message).map(Message::Focus),
         "close" => Ok(Message::Close),
+        "eof" => Ok(Message::Eof),
         kind if super::grid::is_op(kind) => super::grid::parse_ops(message).map(Message::Grid),
         kind if super::list::is_op(kind) => super::list::parse_op(message).map(Message::List),
         other => Err(Refusal::Malformed(format!(
@@ -575,6 +577,7 @@ mod tests {
             json!({"type":"focus","target":"terminal"}),
             json!({"type":"clear"}),
             json!({"type":"close"}),
+            json!({"type":"eof"}),
         ] {
             assert!(parse_message(&message).is_ok());
             let mut emitted = versioned(message);

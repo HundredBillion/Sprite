@@ -97,7 +97,7 @@ impl CellMetrics {
 /// that name silently yields a sans face with uneven cell widths. The family is
 /// resolved once and then used for both measuring and drawing, because grid
 /// geometry and rendered text must come from the same font.
-const MONOSPACE_PREFERENCES: [&str; 10] = [
+const MONOSPACE_PREFERENCES: [&str; 13] = [
     "JetBrainsMono Nerd Font",
     "JetBrains Mono",
     "Fira Code",
@@ -107,6 +107,9 @@ const MONOSPACE_PREFERENCES: [&str; 10] = [
     "Liberation Mono",
     "Adwaita Mono",
     "Menlo",
+    "Cascadia Mono",
+    "Cascadia Code",
+    "Consolas",
     "Courier New",
 ];
 
@@ -609,7 +612,9 @@ mod fallback_admission_tests {
         let (sender, _exits) = async_channel::unbounded();
         let (view, cx) = cx.add_window_view(|window, cx| {
             TerminalView::new(
-                Some(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()]),
+                Some(crate::test_event_pressure::child_command(&[
+                    "--sleep", "30",
+                ])),
                 original.clone(),
                 Vec::new(),
                 None,

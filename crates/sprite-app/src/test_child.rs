@@ -5,7 +5,8 @@
 #![cfg(test)]
 
 use std::ffi::OsStr;
-use std::time::Duration;
+use std::io::Read;
+use std::time::{Duration, Instant};
 
 /// How long a child test may take before it counts as stalled.
 const CHILD_DEADLINE: Duration = Duration::from_secs(30);
@@ -19,28 +20,43 @@ pub(crate) fn run_child_test(name: &str, env: &[(&str, &OsStr)], what: &str) {
     for (key, value) in env {
         command.env(key, value);
     }
-    let child = command
+    let mut child = command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let pid = nix::unistd::Pid::from_raw(child.id() as i32);
-    // Waited on its own thread, so both pipes are drained while it runs.
-    let (done, finished) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        done.send(child.wait_with_output()).ok();
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout_pipe.read_to_end(&mut buf).ok();
+        buf
     });
-    let Ok(output) = finished.recv_timeout(CHILD_DEADLINE) else {
-        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL).ok();
-        panic!("{what} stalled");
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stderr_pipe.read_to_end(&mut buf).ok();
+        buf
+    });
+    let deadline = Instant::now() + CHILD_DEADLINE;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().ok();
+            child.wait().ok();
+            panic!("{what} stalled");
+        }
+        crate::test_blocking_wait::pause(Duration::from_millis(10));
     };
-    let output = output.unwrap();
+    let stdout_bytes = stdout_reader.join().unwrap();
+    let stderr_bytes = stderr_reader.join().unwrap();
     let (stdout, stderr) = (
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&stdout_bytes),
+        String::from_utf8_lossy(&stderr_bytes),
     );
     assert!(
-        output.status.success() && stdout.contains("1 passed"),
+        status.success() && stdout.contains("1 passed"),
         "{what} failed, or its child did not run the one test\n{stdout}\n{stderr}"
     );
 }

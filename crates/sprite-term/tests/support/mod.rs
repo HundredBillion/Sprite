@@ -247,36 +247,79 @@ impl EventPump {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-platform test-child binary
+// ---------------------------------------------------------------------------
+
+#[path = "../../src/test_child_support.rs"]
+mod test_child_support;
+
+pub fn test_child_exe() -> std::path::PathBuf {
+    test_child_support::ensure_test_child_exe().expect("compile sprite-test-child helper binary")
+}
+
+pub fn test_child_name() -> &'static str {
+    test_child_support::test_child_program_name()
+}
+
+pub fn test_child_config(args: &[&str]) -> SessionConfig {
+    let exe = test_child_exe();
+    SessionConfig::command(
+        exe.as_os_str(),
+        args.iter().map(std::ffi::OsString::from).collect(),
+    )
+}
+
+pub fn test_child_os_config(args: &[std::ffi::OsString]) -> SessionConfig {
+    let exe = test_child_exe();
+    SessionConfig::command(exe.as_os_str(), args.to_vec())
+}
+
+// ---------------------------------------------------------------------------
 // Kitty graphics
 // ---------------------------------------------------------------------------
 
-/// Typed into an interactive `/bin/sh` before any graphics command, then
-/// acknowledged with `READY`.
-///
-/// `-icanon` because long graphics commands exceed the Linux canonical input
-/// line limit. Line editing off because macOS's bash 3.2 readline, with echo
-/// off, sometimes keeps a command typed while the previous one runs and never
-/// acts on its newline: the shell sits at its prompt and waits for good, which
-/// a plain `pty` driving `/bin/sh` shows too, so it is not the terminal's doing.
-/// With editing off the shell reads plain lines. `READY` is split so the echo
-/// of this line, before `stty` turns echo off, cannot match it.
-pub const PLAIN_SHELL_SETUP: &[u8] =
-    b"set +o emacs +o vi; stty -icanon -echo min 1 time 0 && printf 'RE%sADY\\n' ''\n";
-
-/// A command that prints `MARK<n>`, and the text that proves it ran.
-///
-/// The number is passed as an argument rather than written into the command,
-/// because the tty echoes input as it is written — before the shell has read
-/// the line, let alone run the one before it. A marker spelled out in the
-/// command is therefore already on screen while the payload it exists to prove
-/// is still unexecuted, so waiting for it proves nothing about the payload.
-/// `printf 'MARK%s\n' 7` echoes as `MARK%s`, which cannot be mistaken for the
-/// `MARK7` the child writes when it actually runs.
+/// A command that tells the `--repl` child to print `MARK<n>`, and the text
+/// that proves it ran.
 pub fn marker_command(n: u32) -> (Vec<u8>, String) {
-    (
-        format!("printf 'MARK%s\\n' {n}\n").into_bytes(),
-        format!("MARK{n}"),
-    )
+    (format!("MARK {n}\n").into_bytes(), format!("MARK{n}"))
+}
+
+pub fn repl_session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {
+    let mut config = test_child_config(&["--noecho", "--emit", "READY\\n", "--repl"]);
+    config.graphics = policy;
+    let sprite_term::Spawned {
+        session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("the child repl to start", |bundle| {
+        pane_text(bundle).contains("READY")
+    });
+    (session, events, snapshots)
+}
+
+pub fn repl_feed(
+    session: &mut TerminalSession,
+    snapshots: &SnapshotPump,
+    escapes: &str,
+    mark: u32,
+) -> Arc<SnapshotBundle> {
+    session
+        .send(TerminalCommand::Input(
+            format!("PRINT {escapes}\n").into_bytes(),
+        ))
+        .expect("ask the child to print the payload");
+
+    let (command, marker) = marker_command(mark);
+    session
+        .send(TerminalCommand::Input(command))
+        .expect("ask the child to print the marker");
+    snapshots.wait_for("the payload to be processed", |bundle| {
+        pane_text(bundle).contains(&marker)
+    })
 }
 
 /// Base64 as the Kitty protocol wants it, without a dependency for it.
@@ -345,22 +388,7 @@ pub struct GraphicsSession {
 
 impl GraphicsSession {
     pub fn start(policy: GraphicsPolicy) -> Self {
-        let mut config = SessionConfig::command("/bin/sh", Vec::new());
-        config.graphics = policy;
-        let sprite_term::Spawned {
-            mut session,
-            events,
-            snapshots,
-        } = TerminalSession::spawn(config).expect("spawn session");
-        let events = EventPump::new(events);
-        let snapshots = SnapshotPump::new(snapshots);
-        events.expect_ready();
-        session
-            .send(TerminalCommand::Input(PLAIN_SHELL_SETUP.to_vec()))
-            .expect("ask the shell to announce itself");
-        snapshots.wait_for("the shell to start", |bundle| {
-            pane_text(bundle).contains("READY")
-        });
+        let (session, events, snapshots) = repl_session(policy);
         Self {
             session,
             events,
@@ -376,21 +404,8 @@ impl GraphicsSession {
     /// which is a fact about the terminal's parser rather than a guess about
     /// timing.
     pub fn feed(&mut self, escapes: &str) -> Arc<SnapshotBundle> {
-        self.session
-            .send(TerminalCommand::Input(
-                format!("printf '{escapes}'\n").into_bytes(),
-            ))
-            .expect("ask the child to print the payload");
-
         self.marks += 1;
-        let (command, marker) = marker_command(self.marks);
-        self.session
-            .send(TerminalCommand::Input(command))
-            .expect("ask the child to print the marker");
-        self.snapshots
-            .wait_for("the payload to be processed", |bundle| {
-                pane_text(bundle).contains(&marker)
-            })
+        repl_feed(&mut self.session, &self.snapshots, escapes, self.marks)
     }
 
     /// Asks what the pane is holding, without any image data.
