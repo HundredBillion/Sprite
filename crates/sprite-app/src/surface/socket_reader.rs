@@ -10,6 +10,7 @@ pub(super) struct SocketReader(pub(super) LocalStream);
 /// of it one read takes. A Unix socket's default is a few kilobytes, so a
 /// megabyte of list rows arrived in over a hundred reads, the sender waking
 /// for each; with room for the whole message it arrives in a handful.
+#[cfg(unix)]
 pub(super) const RECEIVE_BUFFER: usize = 1024 * 1024;
 pub(super) const READ_BUFFER: usize = 64 * 1024;
 
