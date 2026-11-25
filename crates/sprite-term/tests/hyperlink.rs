@@ -348,9 +348,7 @@ fn a_url_the_terminal_wrapped_opens_whole_from_its_second_row() {
         mut session,
         events,
         snapshots,
-    } = session(&format!(
-        "printf 'go {uri} now\\n'; printf 'DONE\\n'; sleep 30"
-    ));
+    } = session(&format!("\\033[Hgo {uri} now\\nDONE\\n"));
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
