@@ -112,14 +112,8 @@ impl PaintBenchmark {
                 &self.snapshot
             }
         };
-        let hover = (scenario == Scenario::Hover).then_some((
-            snapshot.generation,
-            HyperlinkSpan {
-                row: 12,
-                start_column: 20,
-                end_column: 48,
-            },
-        ));
+        let hover = (scenario == Scenario::Hover)
+            .then_some((snapshot.generation, HyperlinkSpan::single(12, 20, 48)));
         let rows = prepare_rows(&mut self.cache, Some(snapshot), hover);
         GridPaint::prepare_spec(
             GridPaintSpec {

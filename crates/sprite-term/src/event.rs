@@ -123,20 +123,60 @@ impl fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
-/// A half-open range of visible cells containing one hyperlink label.
+/// The visible cells of one hyperlink label, which may run across rows when a
+/// long URL wraps.
+///
+/// It starts at `start_column` on `row` and ends before `end_column` on its
+/// last row. When it covers more than one row, every row before the last ends
+/// before `right_column`, and every row after the first starts at
+/// `left_column`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperlinkSpan {
     pub row: u16,
     pub start_column: u16,
     pub end_column: u16,
+    /// How many rows the label covers: 1 for a label on one row.
+    pub rows: u16,
+    pub left_column: u16,
+    pub right_column: u16,
 }
 
 impl HyperlinkSpan {
+    /// A label on one row, from `start_column` up to `end_column`.
+    pub fn single(row: u16, start_column: u16, end_column: u16) -> Self {
+        Self {
+            row,
+            start_column,
+            end_column,
+            rows: 1,
+            left_column: start_column,
+            right_column: end_column,
+        }
+    }
+
+    /// The half-open columns this label covers on `row`, if any.
+    pub fn columns_on(self, row: u16) -> Option<(u16, u16)> {
+        let last = self.row.checked_add(self.rows.max(1) - 1)?;
+        if row < self.row || row > last {
+            return None;
+        }
+        let start = if row == self.row {
+            self.start_column
+        } else {
+            self.left_column
+        };
+        let end = if row == last {
+            self.end_column
+        } else {
+            self.right_column
+        };
+        Some((start, end))
+    }
+
     /// Whether a terminal cell lies within this visible link label.
     pub fn contains(self, position: CellPosition) -> bool {
-        position.row == self.row
-            && self.start_column <= position.column
-            && position.column < self.end_column
+        self.columns_on(position.row)
+            .is_some_and(|(start, end)| start <= position.column && position.column < end)
     }
 }
 
