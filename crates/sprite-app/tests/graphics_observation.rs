@@ -4,6 +4,9 @@
 //! filenames. Graphics are the first feature that could breach it by accident,
 //! so this drives a real terminal, transmits a recognisable picture, and
 //! searches the finished JSON for it.
+// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
+// graphics tests run on Unix.
+#![cfg(unix)]
 #![expect(
     clippy::expect_used,
     reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"

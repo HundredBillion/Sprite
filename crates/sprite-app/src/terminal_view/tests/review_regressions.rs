@@ -43,6 +43,9 @@ fn shell(args: &[&str]) -> Vec<std::ffi::OsString> {
 /// cells' grounds and their glyphs, so text printed over it stays readable.
 /// The grid's two passes are each one layer, and this is the order those two
 /// layers and the image between them reach the renderer in.
+// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
+// graphics tests run on Unix while parser/cache unit tests cover all platforms.
+#[cfg(unix)]
 #[gpui::test]
 fn an_image_below_the_text_is_drawn_under_the_glyphs_over_it(cx: &mut gpui::TestAppContext) {
     use gpui::DrawnKind;
@@ -88,6 +91,7 @@ fn an_image_below_the_text_is_drawn_under_the_glyphs_over_it(cx: &mut gpui::Test
     );
 }
 
+#[cfg(unix)]
 #[gpui::test]
 fn review_fixed_image_matches_requested_columns_at_two_x(cx: &mut gpui::TestAppContext) {
     with_view(
@@ -135,6 +139,7 @@ fn review_fixed_image_matches_requested_columns_at_two_x(cx: &mut gpui::TestAppC
     );
 }
 
+#[cfg(unix)]
 #[gpui::test]
 fn fixed_image_crop_and_offsets_use_logical_pixels_at_each_scale(cx: &mut gpui::TestAppContext) {
     let emit = format!(
@@ -240,6 +245,7 @@ fn review_ime_stays_at_cursor_across_blink(cx: &mut gpui::TestAppContext) {
     );
 }
 
+#[cfg(unix)]
 #[gpui::test]
 fn review_unchanged_images_reuse_textures_under_collective_pressure(cx: &mut gpui::TestAppContext) {
     with_view(

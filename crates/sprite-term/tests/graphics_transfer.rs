@@ -5,6 +5,9 @@
 //! transfer path is the protocol parser, the decoder, and image storage acting
 //! together. A decoder that works in isolation and never receives a byte in
 //! practice would pass a unit test and show nothing on screen.
+// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
+// graphics tests run on Unix.
+#![cfg(unix)]
 #![expect(
     clippy::expect_used,
     reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"

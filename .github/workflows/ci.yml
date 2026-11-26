@@ -466,22 +466,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo fetch --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:ZIG_GLOBAL_CACHE_DIR = "$PWD\target\zig-global-cache"
-          $env:ZIG_LOCAL_CACHE_DIR = "$PWD\target\zig-local-cache"
+          $repoRoot = $PWD.Path
+          $env:ZIG_GLOBAL_CACHE_DIR = "$repoRoot\target\zig-global-cache"
+          $env:ZIG_LOCAL_CACHE_DIR = "$repoRoot\target\zig-local-cache"
           Push-Location vendor/ghostty
           try {
-            # The iterm2_themes tarball has names such as "Neon Raincheck:
-            # After Hours", and NTFS reads the colon as an alternate data
-            # stream of "Neon Raincheck", so unpacking it fails with
-            # PathAlreadyExists. Only the full app installs themes; libghostty-vt
-            # never reads them. An existing package directory counts as
-            # fetched, so an empty one lets --fetch=all fetch everything else.
-            $zon = Get-Content -Raw build.zig.zon
-            if ($zon -notmatch '(?s)\.iterm2_themes\s*=\s*\.\{.*?\.hash\s*=\s*"([^"]+)"') {
-              throw "iterm2_themes hash not found in build.zig.zon"
-            }
-            New-Item -ItemType Directory -Force -Path "zig-pkg\$($Matches[1])" | Out-Null
-            zig build --fetch=all -Demit-lib-vt=true -Demit-xcframework=false -Dapp-runtime=none
+            zig build `
+              -Demit-lib-vt=true `
+              -Doptimize=Debug `
+              -Dcpu=baseline `
+              -Demit-xcframework=false `
+              -Dapp-runtime=none `
+              --prefix "$env:RUNNER_TEMP\ghostty-install" `
+              --cache-dir "$repoRoot\target\zig-local-cache"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             Pop-Location

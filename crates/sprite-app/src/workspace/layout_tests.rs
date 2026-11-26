@@ -420,6 +420,9 @@ fn placement_matching_scales_linearly(cx: &mut gpui::TestAppContext) {
 
 /// A workspace in which every pane draws one Kitty image through two Unicode
 /// placeholder cells, row 0 columns 0 and 1, and then waits.
+// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
+// graphics tests run on Unix.
+#[cfg(unix)]
 fn image_workspace(
     cx: &mut gpui::TestAppContext,
 ) -> (gpui::Entity<super::Workspace>, &mut gpui::VisualTestContext) {
@@ -449,6 +452,7 @@ fn image_workspace(
 /// window moves to a 1x display, and GPUI draws once, as it does when macOS
 /// reports the change. The pane without Pane Focus gets no blink to repaint
 /// it, so that one frame is what stays on screen.
+#[cfg(unix)]
 #[gpui::test]
 fn placeholder_tiles_land_on_this_frames_cells_after_a_scale_change(cx: &mut gpui::TestAppContext) {
     let (workspace, cx) = image_workspace(cx);

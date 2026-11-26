@@ -7,6 +7,10 @@
 //! `graphics_identity`, limits in `graphics_policy`, texture reclamation in
 //! `sprite-app`'s cache tests.
 
+// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
+// graphics tests run on Unix.
+#![cfg(unix)]
+
 mod support;
 
 use sprite_term::{GraphicsPolicy, Layer, Placement};
