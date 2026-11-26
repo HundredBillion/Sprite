@@ -99,8 +99,12 @@ fn a_shell_at_its_prompt_is_idle() {
 }
 
 fn cat_has_answered(session: &mut TerminalSession, snapshots: &SnapshotPump) {
+    #[cfg(windows)]
+    let input = b"CAT-IS-RUNNING\r";
+    #[cfg(unix)]
+    let input = b"CAT-IS-RUNNING\n";
     session
-        .send(TerminalCommand::Input(b"CAT-IS-RUNNING\n".to_vec()))
+        .send(TerminalCommand::Input(input.to_vec()))
         .expect("send input to cat");
     snapshots.wait_for("cat's output after the terminal's input echo", |bundle| {
         pane_text(bundle).matches("CAT-IS-RUNNING").count() >= 2

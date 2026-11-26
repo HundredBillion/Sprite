@@ -330,7 +330,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         view.send(TerminalCommand::Input(launch_line.clone().into_bytes()));
     });
     // Wait on the kernel condition without advancing GPUI's blink clock or delivering snapshots.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
     loop {
         if view.read_with(cx, |view, _| {
             view.foreground().program() == Some(expected_program)
@@ -380,7 +380,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     );
     assert_eq!(events.borrow().len(), 2);
     view.update(cx, |view, _| view.send(TerminalCommand::Input(stop_line)));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
     loop {
         if view.read_with(cx, |view, _| {
             view.foreground() == sprite_term::ForegroundState::Idle
@@ -403,7 +403,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     view.update(cx, |view, _| {
         view.send(TerminalCommand::Input(launch_line.into_bytes()))
     });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
     loop {
         if view.read_with(cx, |view, _| {
             view.foreground().program() == Some(expected_program)
@@ -502,6 +502,9 @@ fn closing_an_owned_terminal_unregisters_before_retained_handles_drop(
     assert!(panes.panes().is_empty());
 }
 
+// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
+// graphics tests run on Unix while parser/cache unit tests cover all platforms.
+#[cfg(unix)]
 #[gpui::test]
 fn texture_budget_growth_restores_a_quiet_terminal_image(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
@@ -1173,7 +1176,7 @@ fn buttonless_reporting_preserves_hyperlink_hover_and_owns_plain_clicks(
 /// answer that changes nothing no longer notifies, and a notification-driven
 /// condition would never wake for it.
 fn settle_hover(view: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
     loop {
         cx.run_until_parked();
         if view.read_with(cx, |view, _| view.hover_request.is_none()) {

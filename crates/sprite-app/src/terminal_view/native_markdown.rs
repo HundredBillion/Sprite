@@ -846,9 +846,11 @@ fn runs(
 }
 
 pub(super) fn local_destination(destination: &str) -> bool {
+    let drive_local = cfg!(windows)
+        && document::has_windows_drive_prefix(document::strip_file_scheme(destination));
     !destination.starts_with('#')
         && !destination.starts_with("//")
-        && (!destination.contains(':') || destination.starts_with("file://"))
+        && (!destination.contains(':') || destination.starts_with("file://") || drive_local)
         && !destination.contains('\0')
 }
 

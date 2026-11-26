@@ -1427,6 +1427,8 @@ mod tests {
             "claimed Open cleanup must not hold the server: {outcome:?}"
         );
         assert!(handle.is_dead());
+        #[cfg(windows)]
+        drop(handle);
         assert_eq!(receivers.stream.len(), 1);
         let mut wire = String::new();
         peer.read_to_string(&mut wire).unwrap();
@@ -1479,6 +1481,8 @@ mod tests {
             "refused Open must not block sending Closed: {outcome:?}"
         );
         assert!(handle.is_dead());
+        #[cfg(windows)]
+        drop(handle);
         assert_eq!(receivers.one_shot.len(), 1, "the Open was never queued");
         assert!(
             receivers.stream.is_empty(),
@@ -1653,7 +1657,7 @@ mod tests {
         assert!(connection.is_dead());
         assert!(!connection.send("later"));
         #[cfg(windows)]
-        drop((connection, stream));
+        drop((connection, stream, writer));
         let mut received = Vec::new();
         peer.read_to_end(&mut received).unwrap();
         assert!(received.len() > opened.len() + 1);

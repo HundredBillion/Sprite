@@ -3315,7 +3315,7 @@ mod tests {
         let _observer =
             cx.update(|_, cx| cx.observe(&host, move |_, _| counter.set(counter.get() + 1)));
         let mut quiet = 0;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
         while quiet < 5 {
             assert!(std::time::Instant::now() < deadline, "the pane goes quiet");
             let before = notified.get();
@@ -6704,7 +6704,9 @@ mod tests {
                     key: key.into(),
                     key_char: None,
                     modifiers: gpui::Modifiers {
-                        platform: true,
+                        control: cfg!(target_os = "windows"),
+                        shift: cfg!(target_os = "windows"),
+                        platform: !cfg!(target_os = "windows"),
                         ..Default::default()
                     },
                 },

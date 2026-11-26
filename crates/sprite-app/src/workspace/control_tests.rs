@@ -63,9 +63,8 @@ fn target(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext)
 /// Sends one raw line to a window socket, running the window until it answers.
 fn send(socket: &std::path::Path, line: String, cx: &mut gpui::VisualTestContext) -> Value {
     let socket = socket.to_path_buf();
-    let thread = std::thread::spawn(move || {
-        control::client::exchange(&socket, &line, std::time::Duration::from_secs(3))
-    });
+    let timeout = std::time::Duration::from_secs(3).max(crate::test_blocking_wait::watchdog());
+    let thread = std::thread::spawn(move || control::client::exchange(&socket, &line, timeout));
     let started = std::time::Instant::now();
     while !thread.is_finished() {
         cx.run_until_parked();

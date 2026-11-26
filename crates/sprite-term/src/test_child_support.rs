@@ -1,4 +1,4 @@
-//! Lazy, cross-process cached compiler for the standalone `sprite-test-child`
+//! Lazy, cross-process cached compiler for the standalone `sprite-child`
 //! test helper binary.
 //!
 //! Compiling once per `target/<profile>` with a file lock and source hash stamp
@@ -20,9 +20,9 @@ const TEST_CHILD_SOURCE: &str = include_str!("../tests/support/test_child_bin.rs
 /// against this one.
 pub fn test_child_program_name() -> &'static str {
     if cfg!(windows) {
-        "sprite-tchild.exe"
+        "sprite-child.exe"
     } else {
-        "sprite-tchild"
+        "sprite-child"
     }
 }
 
@@ -63,13 +63,13 @@ fn target_profile_dir() -> io::Result<PathBuf> {
     }
 }
 
-/// Ensures `sprite-test-child` is compiled for the current target profile and
+/// Ensures `sprite-child` is compiled for the current target profile and
 /// returns its path.
 pub fn ensure_test_child_exe() -> io::Result<PathBuf> {
     let dir = target_profile_dir()?;
     let exe_path = dir.join(test_child_program_name());
-    let stamp_path = dir.join("sprite-test-child.stamp");
-    let lock_path = dir.join("sprite-test-child.lock");
+    let stamp_path = dir.join("sprite-child.stamp");
+    let lock_path = dir.join("sprite-child.lock");
 
     let lock_file = fs::OpenOptions::new()
         .create(true)
@@ -90,9 +90,9 @@ pub fn ensure_test_child_exe() -> io::Result<PathBuf> {
     }
 
     let pid = std::process::id();
-    let src_path = dir.join(format!("sprite-test-child-{pid}.rs"));
+    let src_path = dir.join(format!("sprite-child-{pid}.rs"));
     let tmp_exe = dir.join(format!(
-        "sprite-test-child-{pid}.tmp{}",
+        "sprite-child-{pid}.tmp{}",
         std::env::consts::EXE_SUFFIX
     ));
 
@@ -118,7 +118,7 @@ pub fn ensure_test_child_exe() -> io::Result<PathBuf> {
         fs::remove_file(&tmp_exe).ok();
         drop(lock_file);
         return Err(io::Error::other(format!(
-            "failed to compile sprite-test-child: {}",
+            "failed to compile sprite-child: {}",
             String::from_utf8_lossy(&output.stderr)
         )));
     }

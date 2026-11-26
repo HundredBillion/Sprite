@@ -138,7 +138,7 @@ fn startup_tab_and_splits_paint_each_controlled_child(cx: &mut gpui::TestAppCont
             redraw(cx);
             cx.update(|_, cx| assert!(cx.global::<Probe>().sample.is_none()));
             cx.simulate_keystrokes("g o enter");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
             loop {
                 redraw(cx);
                 if cx.update(|_, cx| cx.global::<Probe>().sample.is_some()) {

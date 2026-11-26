@@ -792,6 +792,9 @@ mod tests {
         let mut total = 0;
         let mut found = false;
         for entry in std::fs::read_dir(&disk.run).unwrap().flatten() {
+            if entry.file_name() == ".active" {
+                continue;
+            }
             let data = std::fs::read(entry.path()).unwrap();
             total += data.len() as u64;
             found |= data.windows(13).any(|part| part == b"recent marker");

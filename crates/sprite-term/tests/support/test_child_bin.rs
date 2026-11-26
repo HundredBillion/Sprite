@@ -7,9 +7,9 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::process::{self, Command};
 #[cfg(unix)]
 use std::process::Stdio;
+use std::process::{self, Command};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -33,6 +33,7 @@ mod win {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const STILL_ACTIVE: u32 = 259;
+    const WAIT_TIMEOUT: u32 = 258;
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -84,6 +85,7 @@ mod win {
         ) -> *mut c_void;
         fn CloseHandle(h_object: *mut c_void) -> i32;
         fn GetExitCodeProcess(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32;
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
         fn TerminateProcess(h_process: *mut c_void, u_exit_code: u32) -> i32;
     }
 
@@ -154,6 +156,9 @@ mod win {
     }
 
     pub fn is_pid_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
             if handle.is_null() {
@@ -161,12 +166,16 @@ mod win {
             }
             let mut code = 0_u32;
             let ok = GetExitCodeProcess(handle, &mut code);
+            let wait = WaitForSingleObject(handle, 0);
             let _ = CloseHandle(handle);
-            ok != 0 && code == STILL_ACTIVE
+            ok != 0 && code == STILL_ACTIVE && wait == WAIT_TIMEOUT
         }
     }
 
     pub fn kill_pid(pid: u32) {
+        if pid == 0 {
+            return;
+        }
         unsafe {
             let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
             if !handle.is_null() {
@@ -179,7 +188,7 @@ mod win {
 
 #[cfg(unix)]
 mod unix {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     #[repr(C)]
     struct Winsize {
@@ -213,11 +222,24 @@ mod unix {
     }
 
     pub fn pty_size() -> Option<(u16, u16)> {
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
         const TIOCGWINSZ: usize = 0x4008_7468;
         #[cfg(target_os = "linux")]
         const TIOCGWINSZ: usize = 0x5413;
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly", target_os = "linux"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly",
+            target_os = "linux"
+        ))]
         {
             for fd in [0, 1] {
                 let mut ws = Winsize {
@@ -226,7 +248,8 @@ mod unix {
                     ws_xpixel: 0,
                     ws_ypixel: 0,
                 };
-                if unsafe { ioctl(fd, TIOCGWINSZ, &mut ws) } == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
+                if unsafe { ioctl(fd, TIOCGWINSZ, &mut ws) } == 0 && ws.ws_row > 0 && ws.ws_col > 0
+                {
                     return Some((ws.ws_row, ws.ws_col));
                 }
             }
@@ -259,6 +282,40 @@ mod unix {
             let _ = signal(SIGHUP, SIG_IGN);
             let _ = signal(SIGTERM, SIG_IGN);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn is_pid_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some(pos) = stat.rfind(')') else {
+            return false;
+        };
+        let Some(state) = stat[pos + 1..].split_whitespace().next() else {
+            return false;
+        };
+        !matches!(state, "Z" | "X" | "x")
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn is_pid_alive(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        let Ok(output) = Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return false;
+        };
+        let state = String::from_utf8_lossy(&output.stdout);
+        let state = state.trim();
+        !state.is_empty() && !state.starts_with('Z') && !state.contains('E')
     }
 }
 
@@ -579,7 +636,7 @@ fn run_drain_stdin() {
 fn next_arg(args: &[String], index: &mut usize, flag: &str) -> String {
     *index += 1;
     if *index >= args.len() {
-        eprintln!("sprite-test-child: missing argument for {flag}");
+        eprintln!("sprite-child: missing argument for {flag}");
         process::exit(2);
     }
     args[*index].clone()
@@ -826,7 +883,8 @@ fn main() {
                     let payload = format!("{flood_line}\n");
                     while !stop_worker.load(Ordering::Relaxed) {
                         let mut stdout = io::stdout().lock();
-                        if stdout.write_all(payload.as_bytes()).is_err() || stdout.flush().is_err() {
+                        if stdout.write_all(payload.as_bytes()).is_err() || stdout.flush().is_err()
+                        {
                             break;
                         }
                         drop(stdout);
@@ -1032,33 +1090,24 @@ fn main() {
                 }
                 #[cfg(unix)]
                 {
-                    // `kill -0` succeeds on a zombie, and a killed descendant
-                    // reparented to a container's PID 1 may never be reaped.
-                    // Read the state instead: empty is gone, `Z` has exited,
-                    // and macOS shows a fatally signalled process as `E`.
-                    let state = Command::new("ps")
-                        .args(["-o", "state=", "-p", &pid.to_string()])
-                        .stderr(Stdio::null())
-                        .output()
-                        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-                        .unwrap_or_default();
-                    let ok = !state.is_empty() && !state.starts_with('Z') && !state.contains('E');
-                    process::exit(if ok { 0 } else { 1 });
+                    process::exit(if unix::is_pid_alive(pid) { 0 } else { 1 });
                 }
             }
             "--kill-pid" => {
                 let pid: u32 = next_arg(&args, &mut i, flag).parse().unwrap_or(0);
-                #[cfg(windows)]
-                win::kill_pid(pid);
-                #[cfg(unix)]
-                {
-                    let _ = Command::new("kill")
-                        .args(["-KILL", &pid.to_string()])
-                        .status();
+                if pid > 0 {
+                    #[cfg(windows)]
+                    win::kill_pid(pid);
+                    #[cfg(unix)]
+                    {
+                        let _ = Command::new("kill")
+                            .args(["-KILL", &pid.to_string()])
+                            .status();
+                    }
                 }
             }
             other => {
-                eprintln!("sprite-test-child: unknown flag {other}");
+                eprintln!("sprite-child: unknown flag {other}");
                 process::exit(2);
             }
         }

@@ -319,7 +319,7 @@ fn a_child_clipboard_write_arriving_after_focus_is_lost_is_dropped_and_a_copy_is
         });
         let executor = cx.executor();
         executor.allow_parking();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
         while clipboard(cx).as_deref() == Some("before") {
             assert!(
                 std::time::Instant::now() < deadline,

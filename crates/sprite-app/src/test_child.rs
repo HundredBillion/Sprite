@@ -9,7 +9,9 @@ use std::io::Read;
 use std::time::{Duration, Instant};
 
 /// How long a child test may take before it counts as stalled.
-const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+fn child_deadline() -> Duration {
+    Duration::from_secs(30).max(crate::test_blocking_wait::watchdog() * 6)
+}
 
 /// Runs the test at `name` alone in a child of this test binary, with `env`
 /// set, and fails unless it runs and passes. A child still running at the
@@ -37,7 +39,7 @@ pub(crate) fn run_child_test(name: &str, env: &[(&str, &OsStr)], what: &str) {
         stderr_pipe.read_to_end(&mut buf).ok();
         buf
     });
-    let deadline = Instant::now() + CHILD_DEADLINE;
+    let deadline = Instant::now() + child_deadline();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

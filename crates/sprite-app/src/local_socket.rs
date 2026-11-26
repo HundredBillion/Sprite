@@ -2673,6 +2673,7 @@ mod tests {
     #[test]
     fn closing_interrupts_silent_handshakes_and_removes_only_the_socket() {
         let scratch = Scratch::new();
+        create_private_dir(&scratch.0).unwrap();
         let policy = TransportPolicy {
             handshake_timeout: Duration::from_secs(30),
             ..POLICY
