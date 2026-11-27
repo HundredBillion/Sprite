@@ -107,6 +107,8 @@ fn private_type_contracts_compile_only_valid_constructions() {
         .filter(|(index, _)| index % 2 == 1)
     {
         let (header, body) = block.split_once('\n').unwrap();
+        // A Windows checkout may end the README's lines in CRLF.
+        let header = header.trim_end_matches('\r');
         let file = scratch.join(format!("probe_{index}.rs"));
         std::fs::write(&file, format!("{prelude}\nfn probe() {{\n{body}\n}}\n")).unwrap();
         let mut command = rustc();
@@ -168,6 +170,8 @@ fn public_examples(source: &str, marker: &str) -> Vec<(String, String)> {
         .filter(|(index, _)| index % 2 == 1)
         .map(|(_, block)| {
             let (header, body) = block.split_once('\n').unwrap();
+            // A Windows checkout may end the README's lines in CRLF.
+            let header = header.trim_end_matches('\r');
             (header.to_owned(), body.to_owned())
         })
         .collect()
