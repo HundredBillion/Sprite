@@ -282,7 +282,7 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     #[cfg(windows)]
     impl Drop for ShellDirCleanup {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            std::fs::remove_dir_all(&self.0).ok();
         }
     }
     #[cfg(windows)]
