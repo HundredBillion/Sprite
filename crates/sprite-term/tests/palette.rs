@@ -11,19 +11,13 @@
 
 mod support;
 
-use std::ffi::OsString;
-
-use sprite_term::{SessionConfig, SnapshotColor, TerminalSession};
+use sprite_term::{SnapshotColor, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
-/// Runs one script and returns the bundle once `marker` is on screen.
-fn shown(script: &str, marker: &str) -> std::sync::Arc<sprite_term::SnapshotBundle> {
-    let config = SessionConfig::command("/bin/sh", args(&["-c", script]));
+/// Runs one emission and returns the bundle once `marker` is on screen.
+fn shown(emit: &str, marker: &str) -> std::sync::Arc<sprite_term::SnapshotBundle> {
+    let config = support::test_child_config(&["--emit", emit, "--sleep", "30"]);
     let sprite_term::Spawned {
         session: _session,
         events,
@@ -56,7 +50,7 @@ fn first_cell_style(bundle: &sprite_term::SnapshotBundle, needle: &str) -> sprit
 
 #[test]
 fn the_snapshot_carries_a_palette() {
-    let bundle = shown("printf 'plain\\n'; sleep 30", "plain");
+    let bundle = shown("plain\\n", "plain");
 
     // Entry 1 is red and entry 2 is green in every standard palette, so a
     // palette that is present and sane is one where they differ from each other
@@ -76,7 +70,7 @@ fn the_snapshot_carries_a_palette() {
 
 #[test]
 fn a_foreground_colour_is_reported_as_a_palette_index() {
-    let bundle = shown("printf '\\033[31mRED\\033[0m\\n'; sleep 30", "RED");
+    let bundle = shown("\\033[31mRED\\033[0m\\n", "RED");
 
     assert_eq!(
         first_cell_style(&bundle, "RED").foreground,
@@ -88,10 +82,10 @@ fn a_foreground_colour_is_reported_as_a_palette_index() {
 #[test]
 fn every_standard_colour_is_a_distinct_index() {
     let script = (0..8)
-        .map(|index| format!("printf '\\033[3{index}mC{index}\\033[0m '"))
+        .map(|index| format!("\\033[3{index}mC{index}\\033[0m "))
         .collect::<Vec<_>>()
-        .join("; ");
-    let bundle = shown(&format!("{script}; printf 'END\\n'; sleep 30"), "END");
+        .join("");
+    let bundle = shown(&format!("{script}END\\n"), "END");
 
     let row = bundle
         .render
@@ -121,7 +115,7 @@ fn every_standard_colour_is_a_distinct_index() {
 #[test]
 fn a_bright_colour_and_a_background_colour_are_also_indices() {
     let bundle = shown(
-        "printf '\\033[91mBRIGHT\\033[0m \\033[44mONBLUE\\033[0m\\n'; sleep 30",
+        "\\033[91mBRIGHT\\033[0m \\033[44mONBLUE\\033[0m\\n",
         "BRIGHT",
     );
 
@@ -151,10 +145,7 @@ fn a_bright_colour_and_a_background_colour_are_also_indices() {
 /// applications use.
 #[test]
 fn an_extended_index_is_carried_and_has_a_colour() {
-    let bundle = shown(
-        "printf '\\033[38;5;208mORANGE\\033[0m\\n'; sleep 30",
-        "ORANGE",
-    );
+    let bundle = shown("\\033[38;5;208mORANGE\\033[0m\\n", "ORANGE");
 
     assert_eq!(
         first_cell_style(&bundle, "ORANGE").foreground,

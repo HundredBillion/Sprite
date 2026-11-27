@@ -565,7 +565,7 @@ fn element(
         None => boxed.into_any_element(),
         Some((name, id)) => {
             let name = name.clone();
-            let connection = connection.clone();
+            let connection = host.is_none().then(|| connection.clone());
             let host = host.clone();
             boxed
                 .id(id)
@@ -576,7 +576,9 @@ fn element(
                             view.dispatch_surface_event(surface, &event, window, cx);
                         }),
                         None => {
-                            connection.send(&event);
+                            if let Some(connection) = &connection {
+                                connection.send(&event);
+                            }
                         }
                     }
                 })
@@ -588,7 +590,7 @@ fn element(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixStream;
+    use crate::local_socket::LocalStream;
 
     use serde_json::json;
 
@@ -657,7 +659,7 @@ mod tests {
 
     #[gpui::test]
     fn element_image_cache_bounds_retained_pixels_and_resets(cx: &mut gpui::TestAppContext) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         // Distinct texts: identical SVGs would share a single decode.
@@ -721,7 +723,7 @@ mod tests {
     fn retaining_a_new_description_releases_what_it_does_not_draw_and_retries_what_did_not_fit(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         // Each one is a distinct 16 MiB raster: four fill the 64 MiB budget.
@@ -792,7 +794,7 @@ mod tests {
     /// text.
     #[gpui::test]
     fn an_unchanged_description_never_looks_its_svg_text_up_again(cx: &mut gpui::TestAppContext) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let svg = |n: usize| {
@@ -858,7 +860,7 @@ mod tests {
     /// formats a string. That is done once per description, not per frame.
     #[test]
     fn an_unchanged_description_builds_its_click_ids_once() {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let document = |names: &[&str]| {
@@ -893,7 +895,7 @@ mod tests {
 
     #[test]
     fn click_ids_and_element_walk_the_tree_in_the_same_order() {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let document = description::parse(
@@ -952,7 +954,7 @@ mod tests {
     fn legacy_image_redraw_reuses_decode_and_new_cache_decodes_changed_svg(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let (ours, _theirs) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let svg = |color: &str| {
@@ -990,7 +992,7 @@ mod tests {
 
     #[test]
     fn every_kind_becomes_an_element_without_a_window() {
-        let (ours, _theirs) = UnixStream::pair().expect("socket pair");
+        let (ours, _theirs) = LocalStream::pair().expect("socket pair");
         let connection = SurfaceConnection::new(&ours).expect("connection");
         let registry = TokenRegistry::new(&Colors::default());
         let parsed = description::parse(
@@ -1195,7 +1197,7 @@ mod tests {
     fn a_pending_image_draws_nothing_and_nothing_is_rasterised_until_the_executor_runs(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let svg = merged_floods(4, 64);
@@ -1239,7 +1241,7 @@ mod tests {
     fn a_document_over_the_filter_cap_is_refused_never_rasterised_and_not_tried_again(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         // That many flood results plus the merge: one use past the cap.
@@ -1282,7 +1284,7 @@ mod tests {
     fn a_cache_decodes_at_most_two_images_at_a_time_in_the_order_they_were_drawn(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let svg = |n: usize| {
@@ -1330,7 +1332,7 @@ mod tests {
     fn a_decode_that_finishes_after_its_image_left_the_description_is_discarded(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let svg = |n: usize| {
@@ -1370,7 +1372,7 @@ mod tests {
     fn a_decode_refused_for_a_budget_an_update_has_since_freed_is_tried_again(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         // Each one is a distinct 16 MiB raster: four fill the 64 MiB budget.
@@ -1418,7 +1420,7 @@ mod tests {
     fn a_decode_for_an_image_dropped_and_drawn_again_is_installed_once(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (ours, _peer) = UnixStream::pair().unwrap();
+        let (ours, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&ours).unwrap();
         let registry = TokenRegistry::new(&Colors::default());
         let svg = |n: usize| {

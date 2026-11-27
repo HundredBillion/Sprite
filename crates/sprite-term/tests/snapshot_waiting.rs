@@ -9,10 +9,9 @@
 
 mod support;
 
-use std::ffi::OsString;
 use std::time::Instant;
 
-use sprite_term::{SessionConfig, TerminalSession};
+use sprite_term::TerminalSession;
 
 use support::{SnapshotPump, pane_text, watchdog};
 
@@ -27,18 +26,22 @@ use support::{SnapshotPump, pane_text, watchdog};
 #[test]
 fn a_child_still_producing_output_is_not_timed_out() {
     let ticks = (watchdog().as_secs() + 2) * 10;
-    let script = format!(
-        "i=0; while [ $i -lt {ticks} ]; do printf 'filler %d\\n' \"$i\"; \
-         i=$((i+1)); sleep 0.1; done; printf 'ARRIVED\\n'; sleep 30"
-    );
+    let end = (ticks - 1).to_string();
     let sprite_term::Spawned {
         session: _session,
         events: _events,
         snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec![OsString::from("-c"), OsString::from(script)],
-    ))
+    } = TerminalSession::spawn(support::test_child_config(&[
+        "--seq-prefix-ms",
+        "filler ",
+        "0",
+        &end,
+        "100",
+        "--emit",
+        "ARRIVED\\n",
+        "--sleep",
+        "30",
+    ]))
     .expect("spawn session");
     let snapshots = SnapshotPump::new(snapshots);
 

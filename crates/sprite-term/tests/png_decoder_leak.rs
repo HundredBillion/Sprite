@@ -11,35 +11,14 @@
 
 mod support;
 
-use std::ffi::OsString;
-
 use sprite_term::{
-    GraphicsPolicy, GraphicsSnapshot, SessionConfig, TerminalCommand, TerminalEvent,
-    TerminalSession,
+    GraphicsPolicy, GraphicsSnapshot, TerminalCommand, TerminalEvent, TerminalSession,
 };
 
-use support::{EventPump, SnapshotPump, base64, kitty, pane_text, png_bytes};
+use support::{EventPump, SnapshotPump, base64, kitty, png_bytes};
 
 fn start(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {
-    let mut config = SessionConfig::command("/bin/sh", Vec::<OsString>::new());
-    config.graphics = policy;
-    let sprite_term::Spawned {
-        mut session,
-        events,
-        snapshots,
-    } = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(events);
-    let snapshots = SnapshotPump::new(snapshots);
-    events.expect_ready();
-    session
-        // Split by a `%s` for the reason `marker_command` gives: the tty echoes
-        // this line before the shell has run it, and an echo that already read
-        // `READY` would end the wait below while the shell is still starting —
-        // exactly when a long line typed ahead of it can be lost.
-        .send(TerminalCommand::Input(b"printf 'RE%sADY\\n' ''\n".to_vec()))
-        .expect("announce");
-    snapshots.wait_for("the shell", |b| pane_text(b).contains("READY"));
-    (session, events, snapshots)
+    support::repl_session(policy)
 }
 
 fn probe(session: &mut TerminalSession, events: &EventPump) -> GraphicsSnapshot {
@@ -63,14 +42,12 @@ fn a_disabled_pane_does_not_disable_png_for_another_pane() {
     let (_hidden, _hidden_events, _hidden_snapshots) = start(GraphicsPolicy::disabled());
 
     let png = png_bytes(6, 5, 0x40);
-    shown
-        .send(TerminalCommand::Input(
-            format!("printf '{}'\n", kitty("a=T,f=100,i=1", &base64(&png))).into_bytes(),
-        ))
-        .expect("payload");
-    let (command, marker) = support::marker_command(1);
-    shown.send(TerminalCommand::Input(command)).expect("marker");
-    shown_snapshots.wait_for("the payload", |b| pane_text(b).contains(&marker));
+    support::repl_feed(
+        &mut shown,
+        &shown_snapshots,
+        &kitty("a=T,f=100,i=1", &base64(&png)),
+        1,
+    );
 
     let graphics = probe(&mut shown, &shown_events);
     assert_eq!(

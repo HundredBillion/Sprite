@@ -48,6 +48,12 @@ pub(crate) struct Projector<'vt> {
     previous_selection: bool,
     previous_rows_valid: bool,
     row_cells: Vec<RenderCell>,
+    /// On Windows, the title the worker reports, which is not always the
+    /// parser's: a console's own default title is no title (see
+    /// `Notices::retitle`). Set before each capture, so a snapshot agrees
+    /// with the events.
+    #[cfg(windows)]
+    pub(crate) shown_title: Option<String>,
     #[cfg(test)]
     fail_capture: Option<CaptureFailure>,
 }
@@ -74,6 +80,8 @@ impl Projector<'static> {
             previous_selection: false,
             previous_rows_valid: false,
             row_cells: Vec::new(),
+            #[cfg(windows)]
+            shown_title: None,
             #[cfg(test)]
             fail_capture: None,
         })
@@ -106,6 +114,8 @@ impl<'vt> Projector<'vt> {
         let Self {
             render_state,
             placements,
+            #[cfg(windows)]
+            shown_title,
             ..
         } = self;
         let screen = match terminal.active_screen().map_err(vt("active_screen"))? {
@@ -138,7 +148,10 @@ impl<'vt> Projector<'vt> {
             offset: usize::try_from(scrollbar.offset).unwrap_or(0),
             visible_rows: usize::try_from(scrollbar.len).unwrap_or(usize::from(size.rows())),
         };
+        #[cfg(not(windows))]
         let title = crate::reported(terminal.title());
+        #[cfg(windows)]
+        let title = shown_title.clone();
         let working_directory = crate::reported(terminal.pwd());
         let snapshot = render_state.update(terminal).map_err(vt("render_update"))?;
         let cursor = cursor_snapshot(&snapshot)?;
@@ -200,6 +213,8 @@ impl<'vt> Projector<'vt> {
             previous_selection,
             previous_rows_valid,
             row_cells,
+            #[cfg(windows)]
+            shown_title,
             #[cfg(test)]
             fail_capture,
         } = self;
@@ -216,7 +231,10 @@ impl<'vt> Projector<'vt> {
             .is_mouse_tracking()
             .map_err(vt("is_mouse_tracking"))?;
         // Empty means the child never set one; that is unknown, not a title.
+        #[cfg(not(windows))]
         let title = crate::reported(terminal.title());
+        #[cfg(windows)]
+        let title = shown_title.clone();
         let working_directory = crate::reported(terminal.pwd());
         let viewport = Viewport {
             total_rows: usize::try_from(scrollbar.total).unwrap_or(usize::MAX),

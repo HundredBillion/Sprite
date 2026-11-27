@@ -40,6 +40,11 @@ pub(crate) struct SessionProcesses {
 }
 
 impl SessionProcesses {
+    #[cfg(test)]
+    pub(crate) fn for_test(session: i32) -> Option<Self> {
+        u32::try_from(session).ok().and_then(Self::capture)
+    }
+
     pub(crate) fn session_id(&self) -> i32 {
         self.session
     }

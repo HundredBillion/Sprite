@@ -5,6 +5,8 @@
 //! never touches a display, a GPU, or a terminal session — it is a small client
 //! that happens to live in the same binary.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::process::ExitCode;
 
 mod reference_fonts;

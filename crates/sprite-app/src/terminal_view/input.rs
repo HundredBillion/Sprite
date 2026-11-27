@@ -85,7 +85,8 @@ pub(super) enum Shortcut {
 /// child, and a binding claimed here is never also typed.
 pub(super) fn application_shortcut(keystroke: &gpui::Keystroke) -> Option<Shortcut> {
     let modifiers = &keystroke.modifiers;
-    let platform = modifiers.platform
+    let platform = !cfg!(target_os = "windows")
+        && modifiers.platform
         && !modifiers.control
         && !modifiers.shift
         && !modifiers.alt
@@ -117,7 +118,14 @@ pub(super) fn dropped_paths_text(paths: &[impl AsRef<Path>]) -> String {
 }
 
 fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    #[cfg(target_os = "windows")]
+    {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -525,7 +533,11 @@ mod tests {
 
     #[test]
     fn clipboard_shortcuts_accept_platform_and_terminal_families() {
-        for modifiers in [platform(), ctrl_shift()] {
+        #[cfg(not(target_os = "windows"))]
+        let families = [platform(), ctrl_shift()];
+        #[cfg(target_os = "windows")]
+        let families = [ctrl_shift()];
+        for modifiers in families {
             assert_eq!(
                 application_shortcut(&press("c", modifiers)),
                 Some(Shortcut::Copy)
@@ -534,6 +546,11 @@ mod tests {
                 application_shortcut(&press("v", modifiers)),
                 Some(Shortcut::Paste)
             );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(application_shortcut(&press("c", platform())), None);
+            assert_eq!(application_shortcut(&press("v", platform())), None);
         }
     }
 
@@ -580,10 +597,13 @@ mod tests {
 
     #[test]
     fn command_backspace_kills_the_line() {
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(
             application_shortcut(&press("backspace", platform())),
             Some(Shortcut::DeleteLine)
         );
+        #[cfg(target_os = "windows")]
+        assert_eq!(application_shortcut(&press("backspace", platform())), None);
         assert_eq!(
             application_shortcut(&press(
                 "backspace",
@@ -656,9 +676,10 @@ mod tests {
             Path::new("/tmp/a screenshot.png"),
             Path::new("/tmp/O'Reilly.txt"),
         ];
-        assert_eq!(
-            dropped_paths_text(&paths),
-            "'/tmp/a screenshot.png' '/tmp/O'\\''Reilly.txt'"
-        );
+        #[cfg(target_os = "windows")]
+        let expected = "'/tmp/a screenshot.png' '/tmp/O''Reilly.txt'";
+        #[cfg(not(target_os = "windows"))]
+        let expected = "'/tmp/a screenshot.png' '/tmp/O'\\''Reilly.txt'";
+        assert_eq!(dropped_paths_text(&paths), expected);
     }
 }

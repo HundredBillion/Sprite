@@ -15,7 +15,6 @@ use crate::workspace::{Patience, Relayed};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -29,8 +28,8 @@ use sprite_term::Rgb;
 pub use super::wire::*;
 use super::wire::{FirstRequest, Message, first_line, stream_line};
 use crate::local_socket::{
-    Authenticated, ConnectionSlot, LocalSocket, SocketKey, TransportPolicy, runtime_directory,
-    write_within,
+    Authenticated, ConnectionSlot, LocalSocket, LocalStream, SocketKey, TransportPolicy,
+    runtime_directory, write_within,
 };
 use crate::pane_tree::PaneId;
 use crate::surface::lanes::SurfaceLanes;
@@ -261,7 +260,7 @@ struct Shared {
     changed: Condvar,
     /// The socket. Only the writer thread writes to it; any other thread
     /// only ever shuts it down, which never blocks.
-    stream: UnixStream,
+    stream: LocalStream,
 }
 
 impl Shared {
@@ -333,10 +332,28 @@ pub struct SurfaceConnection {
     handle: Arc<Handle>,
 }
 
+struct WeakSurfaceConnection {
+    handle: std::sync::Weak<Handle>,
+}
+
+impl WeakSurfaceConnection {
+    fn send(&self, line: &str) -> bool {
+        self.handle
+            .upgrade()
+            .is_some_and(|handle| SurfaceConnection { handle }.send(line))
+    }
+}
+
 impl SurfaceConnection {
+    fn downgrade(self) -> WeakSurfaceConnection {
+        WeakSurfaceConnection {
+            handle: Arc::downgrade(&self.handle),
+        }
+    }
+
     /// A connection outside any endpoint, holding no slot.
     #[cfg(test)]
-    pub(crate) fn new(stream: &UnixStream) -> std::io::Result<Self> {
+    pub(crate) fn new(stream: &LocalStream) -> std::io::Result<Self> {
         Self::holding(stream, None)
     }
 
@@ -344,7 +361,7 @@ impl SurfaceConnection {
     /// connection still draining events counts against the endpoint's cap
     /// after its connection thread has gone, and the cap on connections is
     /// also the cap on writer threads.
-    fn holding(stream: &UnixStream, slot: Option<Arc<ConnectionSlot>>) -> std::io::Result<Self> {
+    fn holding(stream: &LocalStream, slot: Option<Arc<ConnectionSlot>>) -> std::io::Result<Self> {
         let stream = stream.try_clone()?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         let shared = Arc::new(Shared {
@@ -513,7 +530,10 @@ fn write_events(shared: &Shared) {
             // stream. A dead one was already shut down, or — refused — is
             // about to carry the connection thread's refusal.
             if !queue.dead && queue.ready {
+                #[cfg(unix)]
                 shared.stream.shutdown(Shutdown::Write).ok();
+                #[cfg(windows)]
+                shared.stream.shutdown(Shutdown::Both).ok();
             }
             if let Some(id) = queue.surface {
                 tracing::debug!(target: "sprite_app::surface", surface = id.0, "surface closed");
@@ -858,8 +878,8 @@ fn converse(connection: Authenticated, window: &str, lanes: &SurfaceLanes) {
 }
 
 fn serve_surface(
-    mut stream: UnixStream,
-    reader: BufReader<UnixStream>,
+    mut stream: LocalStream,
+    reader: BufReader<LocalStream>,
     connection: std::io::Result<SurfaceConnection>,
     pane: PaneId,
     open: Open,
@@ -926,6 +946,9 @@ fn serve_surface(
             return;
         }
     }
+    // Release the strong handle so dropping the window's SurfaceConnection
+    // immediately notifies the writer thread even while stdin/socket reads stay open.
+    let handle = handle.downgrade();
 
     // Authentication may already have read the first stream messages into its buffer.
     let buffered = std::io::Cursor::new(reader.buffer().to_vec());
@@ -966,6 +989,7 @@ fn serve_surface(
                     .ok();
                 return;
             }
+            Ok(Message::Eof) => break,
             Err(refusal) => {
                 if handle.send(&event_refused(&refusal.reason())) {
                     continue;
@@ -985,7 +1009,7 @@ fn serve_surface(
 
 /// Asks the window once and relays its answer, then ends the connection.
 fn one_shot<T>(
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     requests: &async_channel::Sender<SurfaceRequest>,
     request: impl FnOnce(Relayed<Result<T, Refusal>>) -> SurfaceRequest,
     success: impl FnOnce(T) -> String,
@@ -1005,7 +1029,7 @@ fn one_shot<T>(
     }
 }
 
-fn refuse(stream: &mut UnixStream, reason: &str) {
+fn refuse(stream: &mut LocalStream, reason: &str) {
     writeln!(stream, "{}", event_refused(reason)).ok();
     stream.shutdown(Shutdown::Write).ok();
 }
@@ -1013,8 +1037,8 @@ fn refuse(stream: &mut UnixStream, reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_socket::LocalStream;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -1089,8 +1113,8 @@ mod tests {
         receivers.stream.is_empty() && receivers.one_shot.is_empty()
     }
 
-    fn connect(endpoint: &SurfaceEndpoint) -> (UnixStream, BufReader<UnixStream>) {
-        let stream = UnixStream::connect(endpoint.socket_path()).expect("connect");
+    fn connect(endpoint: &SurfaceEndpoint) -> (LocalStream, BufReader<LocalStream>) {
+        let stream = LocalStream::connect(endpoint.socket_path()).expect("connect");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("timeout");
@@ -1098,7 +1122,7 @@ mod tests {
         (stream, reader)
     }
 
-    fn line(reader: &mut BufReader<UnixStream>) -> Value {
+    fn line(reader: &mut BufReader<LocalStream>) -> Value {
         let mut text = String::new();
         reader.read_line(&mut text).expect("read a line");
         serde_json::from_str(text.trim()).unwrap_or_else(|_| panic!("not JSON: {text:?}"))
@@ -1112,7 +1136,7 @@ mod tests {
     /// own copy of the window's end has no such second wakeup. So a short
     /// read timeout makes the reader look again, and only a stream that
     /// really never ends fails.
-    fn read_to_eof(peer: &mut UnixStream) -> Vec<u8> {
+    fn read_to_eof(peer: &mut LocalStream) -> Vec<u8> {
         use std::io::Read;
         peer.set_read_timeout(Some(Duration::from_millis(50)))
             .expect("timeout");
@@ -1123,7 +1147,12 @@ mod tests {
             match peer.read(&mut chunk) {
                 Ok(0) => return received,
                 Ok(count) => received.extend_from_slice(&chunk[..count]),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
                     assert!(Instant::now() < deadline, "the stream never ended");
                 }
                 Err(error) => panic!("read failed: {error}"),
@@ -1150,7 +1179,7 @@ mod tests {
 
     #[test]
     fn a_huge_batch_stops_consuming_when_the_peer_stops_reading() {
-        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (stream, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         assert!(connection.establish(SurfaceId(1)));
         let line = "x".repeat(1023);
@@ -1182,7 +1211,7 @@ mod tests {
     fn a_program_that_hangs_up_is_logged_as_closed_not_as_a_failure() {
         let ((), log) =
             crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
-                let (stream, peer) = UnixStream::pair().unwrap();
+                let (stream, peer) = LocalStream::pair().unwrap();
                 let connection = SurfaceConnection::new(&stream).unwrap();
                 let writer = connection.writer();
                 assert!(connection.establish(SurfaceId(1)));
@@ -1201,7 +1230,7 @@ mod tests {
     fn a_program_that_stops_reading_is_warned_about_with_what_was_waiting() {
         let ((), log) =
             crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
-                let (stream, _peer) = UnixStream::pair().unwrap();
+                let (stream, _peer) = LocalStream::pair().unwrap();
                 let connection = SurfaceConnection::new(&stream).unwrap();
                 let writer = connection.writer();
                 assert!(connection.establish(SurfaceId(7)));
@@ -1234,7 +1263,7 @@ mod tests {
             crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
                 let mut writers = Vec::new();
                 for id in [3, 4] {
-                    let (stream, peer) = UnixStream::pair().unwrap();
+                    let (stream, peer) = LocalStream::pair().unwrap();
                     let connection = SurfaceConnection::new(&stream).unwrap();
                     writers.push((connection.writer(), peer));
                     assert!(connection.establish(SurfaceId(id)));
@@ -1261,7 +1290,7 @@ mod tests {
     fn a_program_whose_queue_overflows_is_warned_about_not_logged_as_closed() {
         let ((), log) =
             crate::workspace::test_support::capture_logs("sprite_app::surface=debug", || {
-                let (stream, _peer) = UnixStream::pair().unwrap();
+                let (stream, _peer) = LocalStream::pair().unwrap();
                 let connection = SurfaceConnection::new(&stream).unwrap();
                 let writer = connection.writer();
                 assert!(connection.establish(SurfaceId(5)));
@@ -1282,7 +1311,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_leaves_later_batches_unconsumed() {
-        let (stream, peer) = UnixStream::pair().unwrap();
+        let (stream, peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let writer = connection.writer();
         assert!(connection.establish(SurfaceId(1)));
@@ -1306,7 +1335,7 @@ mod tests {
     #[test]
     fn pre_open_overflow_discards_the_queue_and_cannot_establish_later() {
         use std::io::Read;
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let line = "x".repeat(1023);
         assert!(
@@ -1317,6 +1346,10 @@ mod tests {
         assert_eq!(connection.pending_bytes(), 0);
         assert!(!connection.establish(SurfaceId(1)));
         assert!(connection.is_dead());
+        #[cfg(windows)]
+        drop((connection, stream));
+        peer.set_read_timeout(Some(crate::test_blocking_wait::watchdog()))
+            .unwrap();
         let mut received = Vec::new();
         peer.read_to_end(&mut received).unwrap();
         assert!(
@@ -1327,7 +1360,7 @@ mod tests {
 
     #[test]
     fn pre_open_gestures_stop_at_the_queue_limit_without_collecting_the_iterator() {
-        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (stream, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let line = "x".repeat(1023);
         let consumed = std::cell::Cell::new(0);
@@ -1342,7 +1375,7 @@ mod tests {
         // One event is never refused for its own size: it is admitted
         // because nothing was pending, and the next one finds the bound
         // reached.
-        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (stream, _peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         assert!(connection.send(&"x".repeat(MAX_PENDING_BYTES)));
         assert_eq!(connection.pending_bytes(), MAX_PENDING_BYTES + 1);
@@ -1353,10 +1386,12 @@ mod tests {
 
     #[test]
     fn a_claimed_surface_open_releases_its_server_when_cleanup_queue_is_full() {
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
+        #[cfg(windows)]
+        let writer = connection.writer();
         let handle = connection.clone();
         let (lanes, receivers) = surface_lanes_with(1, 1);
         let filler = lanes.stream.clone();
@@ -1396,6 +1431,11 @@ mod tests {
             "claimed Open cleanup must not hold the server: {outcome:?}"
         );
         assert!(handle.is_dead());
+        #[cfg(windows)]
+        {
+            assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+            drop((writer, handle));
+        }
         assert_eq!(receivers.stream.len(), 1);
         let mut wire = String::new();
         peer.read_to_string(&mut wire).unwrap();
@@ -1405,10 +1445,12 @@ mod tests {
 
     #[test]
     fn a_surface_open_refused_admission_finishes_with_the_lane_still_full() {
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
+        #[cfg(windows)]
+        let writer = connection.writer();
         let handle = connection.clone();
         let (lanes, receivers) = surface_lanes_with(1, 1);
         // Another program's handshake, unanswered, holds the one slot.
@@ -1448,6 +1490,11 @@ mod tests {
             "refused Open must not block sending Closed: {outcome:?}"
         );
         assert!(handle.is_dead());
+        #[cfg(windows)]
+        {
+            assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+            drop((writer, handle));
+        }
         assert_eq!(receivers.one_shot.len(), 1, "the Open was never queued");
         assert!(
             receivers.stream.is_empty(),
@@ -1464,7 +1511,7 @@ mod tests {
     /// hears of it.
     #[test]
     fn a_surface_that_cannot_get_a_writer_is_refused_with_a_reason() {
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
         // Set while both ends are open: macOS refuses it on a closed pair.
         peer.set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -1493,7 +1540,7 @@ mod tests {
 
     #[test]
     fn concurrent_batches_each_reach_the_wire_in_one_piece() {
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         assert!(connection.establish(SurfaceId(1)));
         let reader = std::thread::spawn(move || {
@@ -1518,6 +1565,8 @@ mod tests {
         // A graceful close: the writer sends everything queued, then ends
         // its side, so the reader reaches the end of the stream.
         drop(connection);
+        #[cfg(windows)]
+        drop(stream);
         let events = reader.join().unwrap();
         assert_eq!(events.len(), 513);
         assert_eq!(events[0]["type"], "opened");
@@ -1534,7 +1583,7 @@ mod tests {
 
     #[test]
     fn batches_follow_opened_and_keep_concurrent_gestures_contiguous() {
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         assert!(
             connection.send_batch([r#"{"type":"queued","n":1}"#, r#"{"type":"queued","n":2}"#])
@@ -1552,6 +1601,8 @@ mod tests {
             }
         });
         drop(connection);
+        #[cfg(windows)]
+        drop(stream);
         let received = String::from_utf8(read_to_eof(&mut peer)).unwrap();
         let messages = received
             .lines()
@@ -1573,7 +1624,7 @@ mod tests {
 
     #[test]
     fn a_closed_peer_stops_further_sends() {
-        let (stream, peer) = UnixStream::pair().unwrap();
+        let (stream, peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let writer = connection.writer();
         assert!(connection.establish(SurfaceId(1)));
@@ -1587,7 +1638,7 @@ mod tests {
 
     #[test]
     fn a_large_batch_delivers_every_byte_while_the_peer_drains_in_small_chunks() {
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let opened = event_opened(SurfaceId(1));
         assert!(connection.establish(SurfaceId(1)));
@@ -1596,13 +1647,17 @@ mod tests {
         let reader = std::thread::spawn(move || read_to_eof(&mut peer));
         assert!(connection.send_batch([line.as_str(), line.as_str()]));
         drop(connection);
+        #[cfg(windows)]
+        drop(stream);
         assert_eq!(reader.join().unwrap(), expected.as_bytes());
     }
 
     #[test]
     fn a_backpressured_batch_keeps_its_written_prefix_and_shuts_down_on_timeout() {
         use std::io::Read;
-        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (stream, mut peer) = LocalStream::pair().unwrap();
+        peer.set_read_timeout(Some(crate::test_blocking_wait::watchdog()))
+            .unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let writer = connection.writer();
         let opened = event_opened(SurfaceId(1));
@@ -1615,6 +1670,8 @@ mod tests {
         assert!(writer.finished_within(WRITE_TIMEOUT * 10));
         assert!(connection.is_dead());
         assert!(!connection.send("later"));
+        #[cfg(windows)]
+        drop((connection, stream, writer));
         let mut received = Vec::new();
         peer.read_to_end(&mut received).unwrap();
         assert!(received.len() > opened.len() + 1);
@@ -1622,6 +1679,7 @@ mod tests {
         assert!(expected.as_bytes().starts_with(&received));
     }
 
+    #[cfg(unix)]
     #[test]
     fn surface_socket_permissions_and_platform_path_limit_match_the_window_socket() {
         use crate::local_socket::MAX_SOCKET_PATH;
@@ -1663,15 +1721,22 @@ mod tests {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
         let (seen, received) = mpsc::channel();
+        let mut live = None;
         let worker = window(rx, move |request| {
             match request {
-                SurfaceRequest::Open { reply, .. } => {
+                SurfaceRequest::Open {
+                    connection, reply, ..
+                } => {
+                    drop(live.replace(connection));
                     reply.send(Ok(())).unwrap();
                 }
                 SurfaceRequest::Update { description, .. } => {
                     seen.send(description).unwrap();
                 }
-                SurfaceRequest::Close { .. } => return false,
+                SurfaceRequest::Close { .. } => {
+                    drop(live.take());
+                    return false;
+                }
                 other @ (SurfaceRequest::Capabilities { .. }
                 | SurfaceRequest::Focus { .. }
                 | SurfaceRequest::Closed { .. }
@@ -1887,6 +1952,7 @@ mod tests {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
         let (seen_tx, seen_rx) = mpsc::channel::<String>();
+        let mut live = None;
         let _window = window(rx, move |request| match request {
             SurfaceRequest::Open {
                 id,
@@ -1904,6 +1970,7 @@ mod tests {
                 assert!(!open.focus);
                 reply.send(Ok(())).expect("reply");
                 assert!(connection.send(&event_focus()));
+                drop(live.replace(connection));
                 seen_tx.send(format!("open {}", id.0)).expect("seen");
                 true
             }
@@ -1916,6 +1983,7 @@ mod tests {
                 true
             }
             SurfaceRequest::Closed { .. } => {
+                drop(live.take());
                 seen_tx.send("closed".to_owned()).expect("seen");
                 false
             }
@@ -1968,9 +2036,14 @@ mod tests {
         // Only the one-shot lane is served; the stream lane is left to fill.
         let one_shot = receivers.one_shot;
         let answering = std::thread::spawn(move || {
+            let mut live = Vec::new();
             while let Ok(request) = one_shot.recv_blocking() {
-                if let SurfaceRequest::Open { reply, .. } = request {
+                if let SurfaceRequest::Open {
+                    connection, reply, ..
+                } = request
+                {
                     assert!(reply.claim());
+                    live.push(connection);
                     reply.send(Ok(())).ok();
                 } else {
                     panic!("only Opens reach the one-shot lane here");
@@ -2008,7 +2081,8 @@ mod tests {
     fn an_event_sent_before_the_open_is_answered_follows_opened_on_the_wire() {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
-        let _window = window(rx, |request| match request {
+        let mut live = None;
+        let _window = window(rx, move |request| match request {
             SurfaceRequest::Open {
                 connection, reply, ..
             } => {
@@ -2017,6 +2091,7 @@ mod tests {
                 // socket, so `send` must not either.
                 assert!(connection.send(&event_focus()));
                 reply.send(Ok(())).expect("reply");
+                drop(live.replace(connection));
                 true
             }
             other @ (SurfaceRequest::Capabilities { .. }
@@ -2041,7 +2116,7 @@ mod tests {
     /// after it returns at once instead of queuing more.
     #[test]
     fn overflowing_the_queue_marks_the_connection_dead_and_later_sends_return_at_once() {
-        let (here, there) = UnixStream::pair().expect("pair");
+        let (here, there) = LocalStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         assert!(connection.establish(SurfaceId(1)));
         // `there` is kept open and never read, so once the socket buffer is
@@ -2077,7 +2152,7 @@ mod tests {
     #[test]
     fn sends_to_a_peer_that_never_reads_return_at_once_then_the_connection_closes() {
         use std::io::Read;
-        let (here, mut there) = UnixStream::pair().expect("pair");
+        let (here, mut there) = LocalStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         assert!(connection.establish(SurfaceId(1)));
         // 200 × 64 KiB is 12.5 MiB: several socket buffers, and three times
@@ -2098,6 +2173,8 @@ mod tests {
             connection.is_dead(),
             "12.5 MiB of events cannot fit the pending bound"
         );
+        #[cfg(windows)]
+        drop((connection, here));
         there
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("timeout");
@@ -2112,7 +2189,7 @@ mod tests {
     /// and then its stream ends.
     #[test]
     fn a_graceful_close_sends_everything_queued_then_ends_the_stream() {
-        let (here, mut there) = UnixStream::pair().expect("pair");
+        let (here, mut there) = LocalStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let opened = event_opened(SurfaceId(1));
         assert!(connection.establish(SurfaceId(1)));
@@ -2122,6 +2199,8 @@ mod tests {
         assert!(connection.send_batch(lines.iter().map(String::as_str)));
         assert!(connection.send(&event_closed()));
         drop(connection);
+        #[cfg(windows)]
+        drop(here);
         // The writer ends its side after the last line.
         let received = String::from_utf8(read_to_eof(&mut there)).unwrap();
         let expected = std::iter::once(opened)
@@ -2130,6 +2209,7 @@ mod tests {
             .map(|line| line + "\n")
             .collect::<String>();
         assert_eq!(received, expected);
+        #[cfg(unix)]
         drop(here);
     }
 
@@ -2138,7 +2218,7 @@ mod tests {
     /// writer must still end on its own.
     #[test]
     fn dropping_the_last_handle_never_waits_for_a_stalled_writer() {
-        let (here, _there) = UnixStream::pair().expect("pair");
+        let (here, _there) = LocalStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let writer = connection.writer();
         assert!(connection.establish(SurfaceId(1)));
@@ -2162,7 +2242,7 @@ mod tests {
     /// program that reads gets every byte of it.
     #[test]
     fn a_single_event_larger_than_the_bound_is_delivered_whole() {
-        let (here, mut there) = UnixStream::pair().expect("pair");
+        let (here, mut there) = LocalStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let opened = event_opened(SurfaceId(1));
         assert!(connection.establish(SurfaceId(1)));
@@ -2172,10 +2252,13 @@ mod tests {
         // admitted however large it is.
         assert!(connection.send(&paste));
         drop(connection);
+        #[cfg(windows)]
+        drop(here);
         assert_eq!(
             reader.join().unwrap(),
             format!("{opened}\n{paste}\n").into_bytes()
         );
+        #[cfg(unix)]
         drop(here);
     }
 
@@ -2282,7 +2365,7 @@ mod tests {
     /// dead, so it does not keep writing a queue to a client that is gone.
     #[test]
     fn the_writer_stops_at_the_first_failed_write() {
-        let (here, there) = UnixStream::pair().expect("pair");
+        let (here, there) = LocalStream::pair().expect("pair");
         let connection = SurfaceConnection::new(&here).expect("connection");
         let writer = connection.writer();
         for _ in 0..4 {
@@ -2544,9 +2627,9 @@ mod tests {
         let (surfaces, _rx) = endpoint(&scratch);
         // A third endpoint opening sweeps dead sockets; the two live ones stay.
         let (later, _rx2) = endpoint(&scratch);
-        assert!(UnixStream::connect(window.socket_path()).is_ok());
-        assert!(UnixStream::connect(surfaces.socket_path()).is_ok());
-        assert!(UnixStream::connect(later.socket_path()).is_ok());
+        assert!(LocalStream::connect(window.socket_path()).is_ok());
+        assert!(LocalStream::connect(surfaces.socket_path()).is_ok());
+        assert!(LocalStream::connect(later.socket_path()).is_ok());
         assert_ne!(window.socket_path(), surfaces.socket_path());
     }
 
@@ -2557,7 +2640,7 @@ mod tests {
         let path = endpoint.socket_path().to_path_buf();
         endpoint.close();
         assert!(!path.exists());
-        assert!(UnixStream::connect(&path).is_err());
+        assert!(LocalStream::connect(&path).is_err());
     }
 
     #[test]
@@ -2580,8 +2663,12 @@ mod tests {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
         let (seen_tx, seen_rx) = mpsc::channel::<usize>();
+        let mut live = None;
         let _window = window(rx, move |request| match request {
-            SurfaceRequest::Open { reply, .. } => {
+            SurfaceRequest::Open {
+                connection, reply, ..
+            } => {
+                drop(live.replace(connection));
                 reply.send(Ok(())).expect("reply");
                 true
             }
@@ -2589,7 +2676,10 @@ mod tests {
                 seen_tx.send(ops.len()).expect("seen");
                 true
             }
-            SurfaceRequest::Closed { .. } => false,
+            SurfaceRequest::Closed { .. } => {
+                drop(live.take());
+                false
+            }
             other @ (SurfaceRequest::Capabilities { .. }
             | SurfaceRequest::Update { .. }
             | SurfaceRequest::Focus { .. }
@@ -2631,8 +2721,12 @@ mod tests {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
         let (seen_tx, seen_rx) = mpsc::channel::<FocusTarget>();
+        let mut live = None;
         let _window = window(rx, move |request| match request {
-            SurfaceRequest::Open { reply, .. } => {
+            SurfaceRequest::Open {
+                connection, reply, ..
+            } => {
+                drop(live.replace(connection));
                 reply.send(Ok(())).expect("reply");
                 true
             }
@@ -2640,7 +2734,10 @@ mod tests {
                 seen_tx.send(target).expect("seen");
                 true
             }
-            SurfaceRequest::Closed { .. } => false,
+            SurfaceRequest::Closed { .. } => {
+                drop(live.take());
+                false
+            }
             other @ (SurfaceRequest::Capabilities { .. }
             | SurfaceRequest::Update { .. }
             | SurfaceRequest::Close { .. }
@@ -2746,12 +2843,17 @@ mod tests {
         let scratch = Scratch::new();
         let (endpoint, rx) = endpoint(&scratch);
         let (seen, received) = mpsc::channel();
+        let mut live = None;
         let window = window(rx, move |request| match request {
-            SurfaceRequest::Open { reply, .. } => {
+            SurfaceRequest::Open {
+                connection, reply, ..
+            } => {
+                drop(live.replace(connection));
                 reply.send(Ok(())).unwrap();
                 true
             }
             SurfaceRequest::Closed { .. } => {
+                drop(live.take());
                 seen.send("closed").unwrap();
                 false
             }
@@ -2760,6 +2862,7 @@ mod tests {
                 true
             }
             SurfaceRequest::Close { .. } => {
+                drop(live.take());
                 seen.send("close").unwrap();
                 false
             }
@@ -2781,14 +2884,8 @@ mod tests {
             frame.extend_from_slice(b"{\"type\":\"close\"}\n");
         }
         stream.write_all(&frame).ok();
-        // The window closes an oversized connection on its own, so the peer may already be gone.
-        if let Err(error) = stream.shutdown(Shutdown::Write) {
-            assert_eq!(
-                error.kind(),
-                std::io::ErrorKind::NotConnected,
-                "shutdown: {error}"
-            );
-        }
+        // Named Pipes have no half-close, so dropping both handles delivers EOF.
+        drop((stream, reader));
         assert_eq!(
             received
                 .recv_timeout(crate::test_blocking_wait::watchdog())
@@ -2806,5 +2903,105 @@ mod tests {
     #[test]
     fn an_eof_terminated_stream_json_cannot_dispatch() {
         invalid_stream_frame_is_never_dispatched(false);
+    }
+
+    #[test]
+    fn window_initiated_drop_unblocks_events_and_releases_slot_while_client_stays_open() {
+        let scratch = Scratch::new();
+        let (endpoint, rx) = endpoint(&scratch);
+        let (connections, connection) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let _window = window(rx, move |request| match request {
+            SurfaceRequest::Open {
+                connection, reply, ..
+            } => {
+                reply.send(Ok(())).expect("reply");
+                connections.send(connection).expect("connection");
+                true
+            }
+            SurfaceRequest::Closed { .. } => {
+                closed_tx.send(()).ok();
+                false
+            }
+            other @ (SurfaceRequest::Capabilities { .. }
+            | SurfaceRequest::Update { .. }
+            | SurfaceRequest::Focus { .. }
+            | SurfaceRequest::Close { .. }
+            | SurfaceRequest::FocusPane { .. }
+            | SurfaceRequest::Grid { .. }
+            | SurfaceRequest::List { .. }
+            | SurfaceRequest::RegisterToken { .. }) => panic!("unexpected request: {other:?}"),
+        });
+        let (mut stream, mut reader) = connect(&endpoint);
+        writeln!(stream, "{} {}", endpoint.key_hex(), open_message(3)).expect("open");
+        assert_eq!(line(&mut reader)["type"], "opened");
+        let connection = connection
+            .recv_timeout(crate::test_blocking_wait::watchdog())
+            .expect("the window saw the open");
+
+        // Window closes the Surface while the client keeps its stream open and
+        // has not sent close or EOF.
+        assert!(connection.send(&event_closed()));
+        drop(connection);
+
+        assert_eq!(line(&mut reader), json!({ "type": "closed" }));
+        reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("timeout");
+        let eof_deadline = Instant::now() + crate::test_blocking_wait::watchdog();
+        let mut rest = String::new();
+        let bytes = loop {
+            match reader.read_line(&mut rest) {
+                Ok(count) => break count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(
+                        Instant::now() < eof_deadline,
+                        "event reader never reached EOF after window-initiated close"
+                    );
+                }
+                Err(error) => panic!("eof: {error}"),
+            }
+        };
+        assert_eq!(
+            bytes, 0,
+            "event reader must reach EOF after window-initiated close: {rest:?}"
+        );
+
+        #[cfg(windows)]
+        {
+            closed_rx
+                .recv_timeout(crate::test_blocking_wait::watchdog())
+                .expect("serve_surface exited on Windows Shutdown::Both");
+            let deadline = Instant::now() + crate::test_blocking_wait::watchdog();
+            while endpoint.transport.live_connections() != 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "slot remained held after window-initiated close on Windows"
+                );
+                crate::test_blocking_wait::pause(Duration::from_millis(5));
+            }
+        }
+
+        drop((stream, reader));
+        #[cfg(unix)]
+        {
+            closed_rx
+                .recv_timeout(crate::test_blocking_wait::watchdog())
+                .expect("serve_surface exited after client closed");
+            let deadline = Instant::now() + crate::test_blocking_wait::watchdog();
+            while endpoint.transport.live_connections() != 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "slot remained held after client closed on Unix"
+                );
+                crate::test_blocking_wait::pause(Duration::from_millis(5));
+            }
+        }
     }
 }

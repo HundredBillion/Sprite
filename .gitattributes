@@ -10,3 +10,8 @@ patches/gpui-0.2.2-linux-release-and-idle.patch -whitespace
 docs/performance/linux-resource-release/instrumentation.patch -whitespace
 patches/gpui-0.2.2-test-drawn-clip.patch -whitespace
 patches/gpui-0.2.2-recorded-paint.patch -whitespace
+patches/gpui-0.2.2-windows-native-text.patch -whitespace
+patches/gpui-0.2.2-windows-release-and-idle.patch -whitespace
+# Keep GPUI vendor sources and unified diff patches at LF across Windows core.autocrlf checkouts.
+vendor/gpui/** -text
+patches/** -text

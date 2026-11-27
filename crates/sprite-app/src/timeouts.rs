@@ -64,7 +64,7 @@ pub(crate) const CLIENT_TIMEOUT: Duration = REPLY_TIMEOUT
     .saturating_add(Duration::from_secs(1));
 
 /// Gives a one-exchange client socket `CLIENT_TIMEOUT` on every read and write.
-pub(crate) fn bound_client(stream: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+pub(crate) fn bound_client(stream: &crate::local_socket::LocalStream) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CLIENT_TIMEOUT))
 }
@@ -77,7 +77,7 @@ pub(crate) fn bound_client(stream: &std::os::unix::net::UnixStream) -> std::io::
 /// macOS's 103-byte limit for a socket path.
 #[cfg(test)]
 pub(crate) fn exchange_timeouts(
-    open: impl FnOnce(&std::path::Path) -> std::io::Result<std::os::unix::net::UnixStream>,
+    open: impl FnOnce(&std::path::Path) -> std::io::Result<crate::local_socket::LocalStream>,
 ) -> std::io::Result<(Option<Duration>, Option<Duration>)> {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let directory = std::env::temp_dir().join(format!(
@@ -87,7 +87,7 @@ pub(crate) fn exchange_timeouts(
     ));
     std::fs::create_dir(&directory)?;
     let socket = directory.join("w.sock");
-    let timeouts = std::os::unix::net::UnixListener::bind(&socket).and_then(|_listener| {
+    let timeouts = crate::local_socket::bind_private(&socket).and_then(|_listener| {
         let stream = open(&socket)?;
         Ok((stream.read_timeout()?, stream.write_timeout()?))
     });
@@ -120,7 +120,7 @@ mod tests {
     /// the bound a client actually gets, not only the constants.
     #[test]
     fn a_client_outlives_the_windows_reply_and_after_claim_waits() -> std::io::Result<()> {
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair()?;
+        let (stream, _peer) = crate::local_socket::LocalStream::pair()?;
         bound_client(&stream)?;
         assert_eq!(stream.read_timeout()?, Some(CLIENT_TIMEOUT));
         assert_eq!(stream.write_timeout()?, Some(CLIENT_TIMEOUT));

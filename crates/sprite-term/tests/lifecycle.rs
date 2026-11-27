@@ -8,21 +8,25 @@
 
 mod support;
 
+#[cfg(unix)]
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use sprite_term::{SessionConfig, TerminalEvent, TerminalSession};
 
 use support::EventPump;
 
+#[cfg(unix)]
 fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
 #[test]
 fn child_exit_is_reported() {
-    let config = SessionConfig::command("/bin/sh", args(&["-c", "exit 7"]));
+    let config = support::test_child_config(&["--exit", "7"]);
     let sprite_term::Spawned {
         session: _session,
         events,
@@ -96,7 +100,7 @@ fn missing_executable_reports_spawn_error() {
 
 #[test]
 fn begin_shutdown_is_idempotent() {
-    let config = SessionConfig::command("/bin/sh", args(&["-c", "exit 0"]));
+    let config = support::test_child_config(&["--exit", "0"]);
     let sprite_term::Spawned {
         mut session,
         events: _events,
@@ -130,106 +134,141 @@ fn the_login_shell_carries_sprite_identity() {
         .expect("utf-8 path")
         .to_owned();
 
-    // User startup files can delay input or rewrite the environment under test.
-    let (mut config, complaints) = SessionConfig::shell(&sprite_term::ShellPreference {
-        program: Some("/bin/bash".into()),
-        args: Some(args(&["--noprofile", "--norc", "-l"])),
-        ..Default::default()
-    })
-    .expect("configure a login shell");
-    assert!(complaints.is_empty(), "{complaints:?}");
-    config
-        .environment
-        .push(("INPUTRC".into(), "/dev/null".into()));
-    let sprite_term::Spawned {
-        mut session,
-        events,
-        snapshots,
-    } = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(events);
-    let snapshots = support::SnapshotPump::new(snapshots);
-    events.expect_ready();
+    #[cfg(unix)]
+    {
+        // User startup files can delay input or rewrite the environment under test.
+        let (mut config, complaints) = SessionConfig::shell(&sprite_term::ShellPreference {
+            program: Some("/bin/bash".into()),
+            args: Some(args(&["--noprofile", "--norc", "-l"])),
+            ..Default::default()
+        })
+        .expect("configure a login shell");
+        assert!(complaints.is_empty(), "{complaints:?}");
+        config
+            .environment
+            .push(("INPUTRC".into(), "/dev/null".into()));
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots,
+        } = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(events);
+        let snapshots = support::SnapshotPump::new(snapshots);
+        events.expect_ready();
 
-    // Ready reports PTY startup; this reply proves a login shell is reading input.
-    session
-        .send(sprite_term::TerminalCommand::Input(
-            b"stty -echo; shopt -q login_shell && printf 'LOGIN''_READY\\n'\n".to_vec(),
-        ))
-        .expect("ask the login shell to announce readiness");
-    snapshots.wait_for("the login shell to read commands", |bundle| {
-        support::pane_text(bundle).contains("LOGIN_READY")
-    });
+        // Ready reports PTY startup; this reply proves a login shell is reading input.
+        session
+            .send(sprite_term::TerminalCommand::Input(
+                b"stty -echo; shopt -q login_shell && printf 'LOGIN''_READY\\n'\n".to_vec(),
+            ))
+            .expect("ask the login shell to announce readiness");
+        snapshots.wait_for("the login shell to read commands", |bundle| {
+            support::pane_text(bundle).contains("LOGIN_READY")
+        });
 
-    // Every marker is written as two adjacent shell strings, so the command the
-    // terminal echoes back can never be mistaken for the command's output.
-    // The PATH membership test runs in the shell because a full PATH would wrap
-    // across pane rows and defeat a plain text search.
-    let probe = format!(
-        "printf 'ID''ENT:%s:%s:%s:%s\\n' \"$TERM\" \"$TERM_PROGRAM\" \"$TERM_PROGRAM_VERSION\" \"$COLORTERM\"\n\
-         infocmp xterm-ghostty >/dev/null 2>&1 && printf 'TERMINFO''_OK\\n'\n\
-         case \":$PATH:\" in *\":{executable_directory}:\"*) printf 'EXEDIR''_OK\\n' ;; \
-         *) printf 'EXEDIR''_MISSING\\n' ;; esac\n"
-    );
-    session
-        .send(sprite_term::TerminalCommand::Input(probe.into_bytes()))
-        .expect("ask the shell about its environment");
+        // Every marker is written as two adjacent shell strings, so the command the
+        // terminal echoes back can never be mistaken for the command's output.
+        // The PATH membership test runs in the shell because a full PATH would wrap
+        // across pane rows and defeat a plain text search.
+        let probe = format!(
+            "printf 'ID''ENT:%s:%s:%s:%s\\n' \"$TERM\" \"$TERM_PROGRAM\" \"$TERM_PROGRAM_VERSION\" \"$COLORTERM\"\n\
+             infocmp xterm-ghostty >/dev/null 2>&1 && printf 'TERMINFO''_OK\\n'\n\
+             case \":$PATH:\" in *\":{executable_directory}:\"*) printf 'EXEDIR''_OK\\n' ;; \
+             *) printf 'EXEDIR''_MISSING\\n' ;; esac\n"
+        );
+        session
+            .send(sprite_term::TerminalCommand::Input(probe.into_bytes()))
+            .expect("ask the shell about its environment");
 
-    let bundle = snapshots.wait_for("the shell's reported identity", |bundle| {
-        let text = support::pane_text(bundle);
-        text.contains("IDENT:") && (text.contains("EXEDIR_OK") || text.contains("EXEDIR_MISSING"))
-    });
-    let text = support::pane_text(&bundle);
+        let bundle = snapshots.wait_for("the shell's reported identity", |bundle| {
+            let text = support::pane_text(bundle);
+            text.contains("IDENT:")
+                && (text.contains("EXEDIR_OK") || text.contains("EXEDIR_MISSING"))
+        });
+        let text = support::pane_text(&bundle);
 
-    let identity = format!(
-        "IDENT:xterm-ghostty:Sprite:{}:truecolor",
-        env!("CARGO_PKG_VERSION")
-    );
-    assert!(
-        text.contains(&identity),
-        "the child sees Sprite's terminal identity, got:\n{text}"
-    );
-    assert!(
-        text.contains("TERMINFO_OK"),
-        "the child can look up the terminfo entry generated from the pinned \
-         Ghostty source, got:\n{text}"
-    );
-    // The pure builder tests PATH ordering; this proves the child inherited it.
-    assert!(
-        text.contains("EXEDIR_OK"),
-        "the executable directory reaches the child's PATH, got:\n{text}"
-    );
+        let identity = format!(
+            "IDENT:xterm-ghostty:Sprite:{}:truecolor",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(
+            text.contains(&identity),
+            "the child sees Sprite's terminal identity, got:\n{text}"
+        );
+        assert!(
+            text.contains("TERMINFO_OK"),
+            "the child can look up the terminfo entry generated from the pinned \
+             Ghostty source, got:\n{text}"
+        );
+        // The pure builder tests PATH ordering; this proves the child inherited it.
+        assert!(
+            text.contains("EXEDIR_OK"),
+            "the executable directory reaches the child's PATH, got:\n{text}"
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        let exe = support::test_child_exe();
+        // Absolute, as a configured shell must be: a bare name is refused and
+        // the login shell, whatever that is here, runs instead.
+        let cmd = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()),
+        )
+        .join(r"System32\cmd.exe");
+        let (config, complaints) = SessionConfig::shell(&sprite_term::ShellPreference {
+            program: Some(cmd),
+            args: Some(vec!["/Q".into()]),
+            ..Default::default()
+        })
+        .expect("configure a shell");
+        assert!(complaints.is_empty(), "{complaints:?}");
+        let sprite_term::Spawned {
+            mut session,
+            events,
+            snapshots,
+        } = TerminalSession::spawn(config).expect("spawn session");
+        let events = EventPump::new(events);
+        let snapshots = support::SnapshotPump::new(snapshots);
+        events.expect_ready();
+
+        let probe = format!(
+            "\"{}\" --check-identity \"{}\"\r\n",
+            exe.display(),
+            executable_directory
+        );
+        session
+            .send(sprite_term::TerminalCommand::Input(probe.into_bytes()))
+            .expect("ask the shell about its environment");
+
+        let bundle = snapshots.wait_for("the shell's reported identity", |bundle| {
+            let text = support::pane_text(bundle);
+            text.contains("IDENT:")
+                && (text.contains("EXEDIR_OK") || text.contains("EXEDIR_MISSING"))
+        });
+        let text = support::pane_text(&bundle);
+
+        let identity = format!(
+            "IDENT:xterm-ghostty:Sprite:{}:truecolor",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(
+            text.contains(&identity),
+            "the child sees Sprite's terminal identity, got:\n{text}"
+        );
+        assert!(
+            text.contains("EXEDIR_OK"),
+            "the executable directory reaches the child's PATH, got:\n{text}"
+        );
+    }
 }
 
-/// True while the process is still alive, asked the same way a shell would.
 /// Whether `pid` names a process that is still running.
-///
-/// `kill -0` cannot answer this on its own: it succeeds for a zombie — a
-/// process that has already died and whose parent has not yet reaped it — so a
-/// test asserting that cleanup killed something can find the corpse and call it
-/// alive. That window is real here, because the descendant's parent is the
-/// shell, which cleanup is killing at the same time; reparenting to init and
-/// the reap that follows take a moment, and a loaded machine lengthens it.
-///
-/// The state is asked for instead, with `Z` read as dead, which is what it
-/// means. `ps -o state=` is POSIX, so this stays one mechanism on both
-/// platforms rather than a `/proc` read that macOS could not make.
 fn process_is_alive(pid: &str) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-o", "state=", "-p", pid])
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    let state = String::from_utf8_lossy(&output.stdout);
-    let state = state.trim();
-    // Empty means the process is gone. A zombie (`Z`) has exited and is only
-    // awaiting a reap. On macOS a process that has taken a fatal signal can sit
-    // in the `E` ("trying to exit") state for the whole test while the PTY master
-    // it was attached to stays open, where Linux would show `Z` at once — the
-    // same "already dead" condition in a different letter. Both are dead here:
-    // the descendant took the kill.
-    !state.is_empty() && !state.starts_with('Z') && !state.contains('E')
+    std::process::Command::new(support::test_child_exe())
+        .args(["--pid-alive", pid])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Reads one `MARKER:a:b` line out of the pane text.
@@ -251,16 +290,16 @@ fn marker_fields(text: &str, marker: &str) -> Vec<String> {
 
 #[test]
 fn shutdown_reaps_the_child_and_is_idempotent() {
-    // `exec` replaces the shell, so the recorded child is the sleeping process
-    // itself rather than a shell that would exit on its own.
     let sprite_term::Spawned {
         mut session,
         events,
         snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        args(&["-c", "printf 'PID''S:%s\\n' \"$$\"; exec sleep 60"]),
-    ))
+    } = TerminalSession::spawn(support::test_child_config(&[
+        "--emit-pid-marker",
+        "PIDS:",
+        "--sleep",
+        "60",
+    ]))
     .expect("spawn session");
     let events = EventPump::new(events);
     let snapshots = support::SnapshotPump::new(snapshots);
@@ -306,11 +345,8 @@ fn dropping_after_a_shutdown_request_finishes_quickly() {
             mut session,
             events,
             snapshots: _snapshots,
-        } = TerminalSession::spawn(SessionConfig::command(
-            "/bin/sh",
-            args(&["-c", "exec sleep 60"]),
-        ))
-        .expect("spawn session");
+        } = TerminalSession::spawn(support::test_child_config(&["--sleep", "60"]))
+            .expect("spawn session");
         let events = EventPump::new(events);
         events.expect_ready();
 
@@ -335,11 +371,8 @@ fn dropping_after_a_shutdown_request_finishes_quickly() {
 /// because the descendant holds the PTY open long after the shell exits.
 #[test]
 fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
-    let sprite_term::Spawned {
-        mut session,
-        events,
-        snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
+    #[cfg(unix)]
+    let config = SessionConfig::command(
         "/bin/sh",
         args(&[
             "-c",
@@ -349,8 +382,14 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
             // be nothing left to escalate and the test would race its subject.
             "( trap '' HUP TERM; sleep 60 ) & printf 'PID''S:%s:%s\\n' \"$$\" \"$!\"; sleep 30",
         ]),
-    ))
-    .expect("spawn session");
+    );
+    #[cfg(windows)]
+    let config = support::test_child_config(&["--spawn-stubborn-child"]);
+    let sprite_term::Spawned {
+        mut session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
     let events = EventPump::new(events);
     let snapshots = support::SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -394,6 +433,7 @@ fn shutdown_escalates_to_kill_for_a_stubborn_descendant() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn three_hostile_sessions_shutdown_concurrently() {
     let mut sessions = Vec::new();
@@ -473,28 +513,33 @@ fn natural_exit_deadline_is_not_renewed_by_continuous_output() {
 const NATURAL_EXIT_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(6);
 
 fn retained_descendant_exits(writes: bool) {
-    let pid_file = std::env::temp_dir().join(format!(
-        "sprite-exit-descendant-{}-{}.pid",
+    let unique = format!(
+        "{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos(),
-    ));
-    struct Descendant(std::path::PathBuf);
+    );
+    let pid_file = std::env::temp_dir().join(format!("sprite-exit-descendant-{unique}.pid"));
+    let ready_file = std::env::temp_dir().join(format!("sprite-exit-descendant-{unique}.ready"));
+    struct Descendant(std::path::PathBuf, std::path::PathBuf);
     impl Drop for Descendant {
         fn drop(&mut self) {
             if let Ok(pid) = std::fs::read_to_string(&self.0) {
-                std::process::Command::new("kill")
-                    .args(["-KILL", pid.trim()])
+                std::process::Command::new(support::test_child_exe())
+                    .args(["--kill-pid", pid.trim()])
                     .status()
                     .ok();
             }
             std::fs::remove_file(&self.0).ok();
+            std::fs::remove_file(&self.1).ok();
         }
     }
-    let _descendant = Descendant(pid_file.clone());
-    let script = r#"import os, signal, sys, time
+    let _descendant = Descendant(pid_file.clone(), ready_file.clone());
+    #[cfg(unix)]
+    let config = {
+        let script = r#"import os, signal, sys, time
 r, w = os.pipe()
 pid = os.fork()
 if pid == 0:
@@ -513,24 +558,32 @@ with open(sys.argv[1], 'w') as f:
     f.write(str(pid))
 os._exit(7)
 "#;
+        SessionConfig::command(
+            "python3",
+            vec![
+                "-c".into(),
+                script.into(),
+                pid_file.into_os_string(),
+                if writes {
+                    "write".into()
+                } else {
+                    "sleep".into()
+                },
+            ],
+        )
+    };
+    #[cfg(windows)]
+    let config = support::test_child_os_config(&[
+        "--spawn-retained-descendant".into(),
+        pid_file.into_os_string(),
+        ready_file.into_os_string(),
+        if writes { "write" } else { "sleep" }.into(),
+    ]);
     let sprite_term::Spawned {
         session: _session,
         events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "python3",
-        vec![
-            "-c".into(),
-            script.into(),
-            pid_file.into_os_string(),
-            if writes {
-                "write".into()
-            } else {
-                "sleep".into()
-            },
-        ],
-    ))
-    .expect("spawn parent and retained-descriptor descendant");
+    } = TerminalSession::spawn(config).expect("spawn parent and retained-descriptor descendant");
     let events = EventPump::new(events);
     events.expect_ready();
     // A deadline that output renewed would never publish the exit, so the
@@ -556,20 +609,19 @@ os._exit(7)
 
 #[test]
 fn natural_exit_publishes_the_output_tail_in_the_final_snapshot() {
-    let script = r"import os
-output = b'line\r\n' * 1500 + b'FINAL_EXIT_TAIL'
-while output:
-    output = output[os.write(1, output):]
-os._exit(7)
-";
     let sprite_term::Spawned {
         session: _session,
         events,
         mut snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "python3",
-        vec!["-c".into(), script.into()],
-    ))
+    } = TerminalSession::spawn(support::test_child_config(&[
+        "--emit-lines",
+        "1500",
+        "line\\r\\n",
+        "--emit",
+        "FINAL_EXIT_TAIL",
+        "--exit",
+        "7",
+    ]))
     .expect("spawn a child with a large output tail");
     let (final_tx, final_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -617,24 +669,28 @@ fn an_ended_session_releases_the_terminal_to_a_lingering_descendant() {
             .as_nanos(),
     );
     let pid_file = std::env::temp_dir().join(format!("sprite-hangup-{unique}.pid"));
+    let ready_file = std::env::temp_dir().join(format!("sprite-hangup-{unique}.ready"));
     let hung_up = std::env::temp_dir().join(format!("sprite-hangup-{unique}.done"));
-    struct Descendant(std::path::PathBuf, std::path::PathBuf);
+    struct Descendant(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf);
     impl Drop for Descendant {
         fn drop(&mut self) {
             if let Ok(pid) = std::fs::read_to_string(&self.0) {
-                std::process::Command::new("kill")
-                    .args(["-KILL", pid.trim()])
+                std::process::Command::new(support::test_child_exe())
+                    .args(["--kill-pid", pid.trim()])
                     .status()
                     .ok();
             }
             std::fs::remove_file(&self.0).ok();
             std::fs::remove_file(&self.1).ok();
+            std::fs::remove_file(&self.2).ok();
         }
     }
-    let _descendant = Descendant(pid_file.clone(), hung_up.clone());
-    // The descendant ignores SIGHUP and blocks reading the terminal; a read
-    // only returns once no master is left open, and then it says so in a file.
-    let script = r#"import os, signal, sys
+    let _descendant = Descendant(pid_file.clone(), ready_file.clone(), hung_up.clone());
+    #[cfg(unix)]
+    let config = {
+        // The descendant ignores SIGHUP and blocks reading the terminal; a read
+        // only returns once no master is left open, and then it says so in a file.
+        let script = r#"import os, signal, sys
 r, w = os.pipe()
 pid = os.fork()
 if pid == 0:
@@ -656,20 +712,28 @@ with open(sys.argv[1], 'w') as f:
     f.write(str(pid))
 os._exit(0)
 "#;
+        SessionConfig::command(
+            "python3",
+            vec![
+                "-c".into(),
+                script.into(),
+                pid_file.into_os_string(),
+                hung_up.clone().into_os_string(),
+            ],
+        )
+    };
+    #[cfg(windows)]
+    let config = support::test_child_os_config(&[
+        "--spawn-eof-waiter".into(),
+        pid_file.clone().into_os_string(),
+        ready_file.into_os_string(),
+        hung_up.clone().into_os_string(),
+    ]);
     let sprite_term::Spawned {
         session: _session,
         events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "python3",
-        vec![
-            "-c".into(),
-            script.into(),
-            pid_file.into_os_string(),
-            hung_up.clone().into_os_string(),
-        ],
-    ))
-    .expect("spawn parent and lingering descendant");
+    } = TerminalSession::spawn(config).expect("spawn parent and lingering descendant");
     let events = EventPump::new(events);
     events.expect_ready();
     match events.next() {
@@ -687,11 +751,28 @@ os._exit(0)
         | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
     // `_session` is still alive here, as the application keeps an ended pane.
+    #[cfg(unix)]
     support::wait_until("the descendant to release the terminal", || {
         hung_up.exists().then_some(())
     });
+    // Windows has no hangup a console process can outlast: closing a console
+    // ends every process still attached to it, whatever it asked for, so the
+    // release shows as the descendant ending rather than reading its end.
+    #[cfg(windows)]
+    {
+        let pid = std::fs::read_to_string(&pid_file).expect("the parent named its descendant");
+        support::wait_until("the descendant to end with the terminal", || {
+            let alive = std::process::Command::new(support::test_child_exe())
+                .args(["--pid-alive", pid.trim()])
+                .status()
+                .expect("ask after the descendant")
+                .success();
+            (!alive).then_some(())
+        });
+    }
 }
 
+#[cfg(unix)]
 #[test]
 fn shutdown_does_not_wait_for_the_deadline_when_a_child_prints_while_exiting() {
     let spawned = TerminalSession::spawn(SessionConfig::command(

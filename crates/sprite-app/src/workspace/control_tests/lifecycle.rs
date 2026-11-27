@@ -11,11 +11,12 @@ fn public_move_keeps_a_pending_capture_and_publishes_current_membership(
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         let settings = crate::Settings::default();
         Workspace::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "printf retained-session; exec /bin/cat".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--emit",
+                "retained-session",
+                "--cat",
+            ])),
             settings,
             None,
             window,

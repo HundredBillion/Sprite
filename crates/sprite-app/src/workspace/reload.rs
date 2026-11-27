@@ -17,6 +17,11 @@ impl Workspace {
             return "this window is closing".to_owned();
         }
         let Some(path) = self.config_path.clone().or_else(crate::config::path) else {
+            #[cfg(target_os = "windows")]
+            return "there is nowhere to read a configuration file from \
+                    (neither XDG_CONFIG_HOME, APPDATA, nor USERPROFILE is set)"
+                .to_owned();
+            #[cfg(not(target_os = "windows"))]
             return "there is nowhere to read a configuration file from \
                     (neither XDG_CONFIG_HOME nor HOME is set)"
                 .to_owned();

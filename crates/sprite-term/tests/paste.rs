@@ -8,31 +8,28 @@
 
 mod support;
 
-use std::ffi::OsString;
-
-use sprite_term::{SessionConfig, TerminalCommand, TerminalSession};
+use sprite_term::{TerminalCommand, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
-fn session(script: &str) -> sprite_term::Spawned {
-    TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session")
+fn session(args: &[&str]) -> sprite_term::Spawned {
+    TerminalSession::spawn(support::test_child_config(args)).expect("spawn session")
 }
 
 /// Reads `count` bytes from the child and dumps them as hex, after the child
 /// has announced it is ready.
-fn hex_reader(setup: &str, count: usize) -> String {
-    // `-icrnl` matters: the line discipline otherwise rewrites carriage returns
-    // into newlines before the child sees them, so a test without it measures
-    // the tty rather than what Sprite actually wrote.
-    format!(
-        "stty -icanon -icrnl -echo min {count} time 0; {setup} printf 'READY\\n'; \
-         head -c {count} | od -An -tx1 | tr -s ' '"
-    )
+fn hex_reader(setup: &str, count: usize) -> sprite_term::Spawned {
+    let emit = format!("{setup}READY\\n");
+    let count_str = count.to_string();
+    session(&[
+        "--raw-noecho",
+        "--emit",
+        &emit,
+        "--hex-read",
+        &count_str,
+        "--sleep",
+        "30",
+    ])
 }
 
 /// With bracketed paste on, the text arrives wrapped so the shell treats it as
@@ -43,7 +40,7 @@ fn bracketed_paste_wraps_the_text() {
         mut session,
         events,
         snapshots,
-    } = session(&hex_reader("printf '\\033[?2004h';", 14));
+    } = hex_reader("\\033[?2004h", 14);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -80,7 +77,7 @@ fn unbracketed_paste_converts_newlines_to_carriage_returns() {
         mut session,
         events,
         snapshots,
-    } = session(&hex_reader("", 3));
+    } = hex_reader("", 3);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -106,7 +103,7 @@ fn paste_cannot_escape_its_own_brackets() {
         mut session,
         events,
         snapshots,
-    } = session(&hex_reader("printf '\\033[?2004h';", 25));
+    } = hex_reader("\\033[?2004h", 25);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -146,7 +143,7 @@ fn a_large_paste_is_queued_rather_than_rejected() {
         mut session,
         events,
         snapshots: _snapshots,
-    } = session("stty -echo; cat > /tmp/sprite-paste-test.txt & sleep 30");
+    } = session(&["--noecho", "--drain-stdin"]);
     let events = EventPump::new(events);
     events.expect_ready();
 
@@ -163,7 +160,7 @@ fn focus_is_reported_only_when_the_child_asks() {
         mut session,
         events,
         snapshots,
-    } = session(&hex_reader("printf '\\033[?1004h';", 3));
+    } = hex_reader("\\033[?1004h", 3);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -187,7 +184,7 @@ fn focus_loss_is_reported_after_focus_gain() {
         mut session,
         events,
         snapshots,
-    } = session(&hex_reader("printf '\\033[?1004h';", 6));
+    } = hex_reader("\\033[?1004h", 6);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -217,7 +214,7 @@ fn an_unbracketed_paste_with_a_newline_is_written_as_typed() {
         mut session,
         events,
         snapshots,
-    } = session(&hex_reader("", 3));
+    } = hex_reader("", 3);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -243,7 +240,7 @@ fn a_bracketed_paste_with_newlines_is_wrapped() {
         mut session,
         events,
         snapshots,
-    } = session(&hex_reader("printf '\\033[?2004h';", 15));
+    } = hex_reader("\\033[?2004h", 15);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -267,7 +264,15 @@ fn paste_from_history(command: TerminalCommand) {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; seq 1 200; read line; sleep 30");
+    } = session(&[
+        "--noecho",
+        "--seq",
+        "1",
+        "200",
+        "--wait-line",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -304,7 +309,13 @@ fn a_bracketed_paste_of_the_largest_allowed_text_is_accepted() {
         mut session,
         events,
         snapshots,
-    } = session("stty -echo; printf '\\033[?2004h'; printf 'READY\\n'; sleep 30");
+    } = session(&[
+        "--noecho",
+        "--emit",
+        "\\033[?2004hREADY\\n",
+        "--sleep",
+        "30",
+    ]);
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

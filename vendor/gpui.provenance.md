@@ -59,9 +59,11 @@ were read, including compatibility-only Windows (Sprite supports Unix only).
   classifies only exact unchanged text without a replacement range in that
   scope as fallback. Marked text and transformed/ranged insertions invalidate
   every enclosing scope. Invalid scopes cannot rearm even after app delivery.
-- Windows `events.rs`: WM_CHAR, empty composition clearing, and IME result
-  retain ordinary replace/default behavior. Windows native origin distinction
-  is outside Sprite's supported platforms; no Windows provenance claim is made.
+- Windows `events.rs`: originally left unchanged in
+  `gpui-0.2.2-native-text.patch`; updated in
+  `gpui-0.2.2-windows-native-text.patch` (see "Windows native text" below) to
+  distinguish `WM_CHAR` key fallback from native IME/dead-key/`VK_PACKET`
+  commits.
 - `key_dispatch.rs`: test-only existing input handler remains default-compatible.
 
 ## Should-terminate hook
@@ -341,12 +343,66 @@ Sprite uses it to replay unchanged grid rows (#159)
 (`grid_paint::tests::a_small_update_paints_only_its_rows_and_draws_what_a_full_paint_draws`,
 `grid_paint::tests::a_recording_replays_only_in_its_own_window_and_opacity`).
 
+## Windows native text
+
+`patches/gpui-0.2.2-windows-native-text.patch` follows the recorded-paint
+patch.
+
+- `platform/windows/window.rs` and `platform/windows/events.rs`: GPUI's Windows
+  event loop calls `TranslateMessage` from `WM_KEYDOWN` when `!is_composing`
+  and `!handled` (which Sprite's `TerminalView` triggers because it handles
+  `KeyDownEvent` without calling `stop_propagation`), posting a `WM_CHAR` with
+  the same `lParam`. Unhandled `WM_KEYDOWN` events carrying `key_char.is_some()`
+  or `key == "space"` (`VK_SPACE` sets `key_char` to `None` in
+  `parse_immutable`) push `lparam.0` onto a bounded `VecDeque<isize>`
+  (`pending_key_char_lparams`, capped at 64 entries) before `translate_message`.
+- `handle_char_msg` leaves `pending_key_char_lparams` untouched while
+  `parse_char_message` is waiting on a low surrogate (`None`), and once a
+  character completes, drains up to a matching `lparam.0` to route key fallback
+  to `replace_text_in_range_from_key`, while unmatched `WM_CHAR`s (such as
+  external commits or `VK_PACKET` emoji/voice input) stay native
+  `replace_text_in_range`.
+- `is_composing`, `VK_PACKET`, `WM_DEADCHAR`, and `WM_IME_COMPOSITION` clear
+  `pending_key_char_lparams` so dead-key sequences, IME compositions, and
+  `SendInput` Unicode packets are never misclassified as `from_key`.
+- `WM_CLOSE` (`handle_close_msg` -> `should_close`, reached from both title-bar
+  close and `Alt+F4`) and `WM_DPICHANGED` (`handle_dpi_changed_msg` ->
+  `SetWindowPos` / `handle_size_change`) already route cleanly without edits.
+
+## Windows picture release and idle frames
+
+`patches/gpui-0.2.2-windows-release-and-idle.patch` follows the
+windows-native-text patch.
+
+- DirectX `DirectXAtlas::remove` (`platform/windows/directx_atlas.rs`): retains
+  the removed `AtlasTile` from `tiles_by_key`, removes the redundant second
+  `tiles_by_key.remove` in the unreferenced branch, and calls
+  `texture.allocator.deallocate(tile.tile_id.into())` before restoring the
+  still-referenced texture slot so removed image regions are immediately
+  reusable by `etagere`.
+- Idle `VSyncProvider` pause (`platform/windows/{platform.rs, window.rs}`):
+  `WindowsPlatform` owns an `Arc<VSyncHub>` (`Mutex<VSyncWindows>` + `Condvar`
+  tracking `(SafeHwnd, active)` pairs and `shutdown`). `open_window` registers
+  `(hwnd, true)` and wakes the condvar; `close_one_window` unregisters it;
+  `WindowsPlatform::drop` sets `shutdown = true` and calls `notify_all()`.
+- `WindowsWindow` implements `PlatformWindow::set_frame_delivery` and
+  `PlatformWindow::frame_waker` using only `Weak<VSyncHub>` and `SafeHwnd`
+  (never borrowing `WindowsWindowInner`'s `RefCell`, avoiding re-entrant
+  borrow panics). `begin_vsync_thread` parks on `Condvar::wait_while` when
+  `!shutdown` and no window has `active == true`, and calls `RedrawWindow` only
+  for active windows.
+
 ## Execution limits
 
 Linux headless Sprite tests, actual raw PTYs and Surface sockets execute here.
 The portable Cocoa scope test runs Rust policy code, not AppKit. Wayland trace
 adapters execute exact match-arm source, not a live compositor or IBus daemon.
-Cocoa and live Linux IME smoke testing remain native qualification gates.
+Windows native-text origin tracking, `DirectXAtlas::remove`, and `VSyncHub`
+pause/wake/shutdown tests execute exact production source extracted into
+portable Rust harnesses rather than a live Win32 message loop, DirectX device,
+or `DwmFlush` compositor.
+Cocoa, live Linux IME, and interactive Windows 11 GUI/IME/HiDPI smoke testing
+remain native qualification gates.
 Existing macOS hosted CI compiles and runs tests on a real macOS runner when
 executed; it has not been executed in this local Linux session.
 

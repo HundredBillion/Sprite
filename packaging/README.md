@@ -16,6 +16,9 @@ from the pinned Ghostty checkout before installation.
 | `macos/bundle.sh`, `macos/Info.plist` | Wrap a built Sprite as `Sprite.app`. Build nothing. |
 | `macos/install.sh` | Stage and replace a bundle while retaining the old app on ordinary failures. |
 | `macos/update.sh` | Build, generate terminfo, bundle, install to `/Applications`, link the command. |
+| `windows/sprite.rc`, `windows/sprite.ico`, `windows/make-icon.sh` | Embed the application icon into `sprite.exe` (`gpui` owns `RT_MANIFEST`). |
+| `windows/sprite-shim.rs` | `std`-only console shim (`sprite.com`) forwarding CLI calls to `sprite.exe`. |
+| `windows/update.ps1` | Build release binary and `sprite.com`, install to `%LOCALAPPDATA%\Programs\Sprite`, update user `Path` and Start Menu. |
 
 ## What ends up where
 
@@ -94,6 +97,41 @@ The icon is rendered from `sprite.svg` with `sips` and `iconutil` at bundle
 time. The signature is ad-hoc: enough for an app built on the machine that runs
 it, which is the only install path there is. A Developer ID and notarization
 protect a download, and there is no download yet.
+
+## Windows
+
+`windows/update.ps1` builds the release binary (`sprite.exe`) and the small
+`std`-only console shim (`sprite.com`), installs them side by side into
+`%LOCALAPPDATA%\Programs\Sprite`, adds that directory to the user `Path`, and
+writes a Start Menu shortcut:
+
+~~~
+%LOCALAPPDATA%\Programs\Sprite\sprite.exe
+%LOCALAPPDATA%\Programs\Sprite\sprite.com
+%LOCALAPPDATA%\Programs\Sprite\LICENSE-MIT
+%LOCALAPPDATA%\Programs\Sprite\LICENSE-APACHE
+%LOCALAPPDATA%\Programs\Sprite\THIRD-PARTY-NOTICES.md
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Sprite.lnk
+~~~
+
+Release builds of `sprite.exe` use `windows_subsystem = "windows"`, so Start
+Menu and Explorer launches do not flash a console window. Because Windows
+`%PATHEXT%` resolves `.COM` ahead of `.EXE`, running `sprite` from a terminal
+invokes `sprite.com`, which spawns the sibling `sprite.exe` synchronously with
+inherited stdin, stdout, stderr, and exit status so `sprite panes ...`,
+`sprite surface ...`, and `sprite --version` behave identically to Unix.
+
+`crates/sprite-app/build.rs` embeds `packaging/windows/sprite.rc` (`1 ICON
+"sprite.ico"` only, linked exclusively into the `sprite` binary). `vendor/gpui`
+already embeds `1 RT_MANIFEST` via the `windows-manifest` feature (`PerMonitorV2`
+DPI awareness and Common Controls v6), so adding a second manifest in Sprite
+would fail the resource linker (`CVT1100`). Because Windows builds have no
+`sips` or SVG rasterizer, `windows/sprite.ico` is generated on macOS with
+`windows/make-icon.sh` and committed directly.
+
+No terminfo database is bundled on Windows: native Windows shells (`pwsh.exe`,
+`powershell.exe`, `cmd.exe`) communicate through ConPTY rather than ncurses
+terminfo, and `vendor/ghostty` skips terminfo emission on Windows targets.
 
 ## Building it
 

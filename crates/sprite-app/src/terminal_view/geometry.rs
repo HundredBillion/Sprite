@@ -214,7 +214,10 @@ mod tests {
             let (view, cx) = cx.add_window_view(|window, cx| {
                 let (sender, _receiver) = async_channel::unbounded();
                 TerminalView::new_allocated(
-                    Some(vec!["/bin/sh".into(), "-c".into(), "read release".into()]),
+                    Some(crate::test_event_pressure::child_command(&[
+                        "--noecho",
+                        "--wait-line",
+                    ])),
                     crate::config::Settings::default(),
                     Vec::new(),
                     None,

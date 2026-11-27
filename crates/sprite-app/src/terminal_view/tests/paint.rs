@@ -17,11 +17,13 @@ fn ready_and_blank_paint_are_not_a_prompt(cx: &mut gpui::TestAppContext) {
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                format!("IFS= read -r go; printf '{MARKER}'; IFS= read -r done").into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--wait-line",
+                "--emit",
+                MARKER,
+                "--wait-line",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -102,11 +104,13 @@ fn startup_tab_and_splits_paint_each_controlled_child(cx: &mut gpui::TestAppCont
     cx.set_global(Probe::new("startup"));
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         crate::Workspace::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                format!("IFS= read -r go; printf '{MARKER}'; IFS= read -r done").into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--wait-line",
+                "--emit",
+                MARKER,
+                "--wait-line",
+            ])),
             crate::Settings::default(),
             None,
             window,
@@ -134,7 +138,7 @@ fn startup_tab_and_splits_paint_each_controlled_child(cx: &mut gpui::TestAppCont
             redraw(cx);
             cx.update(|_, cx| assert!(cx.global::<Probe>().sample.is_none()));
             cx.simulate_keystrokes("g o enter");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
             loop {
                 redraw(cx);
                 if cx.update(|_, cx| cx.global::<Probe>().sample.is_some()) {

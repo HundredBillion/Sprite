@@ -14,13 +14,31 @@ fn first_quiet_and_final_output_install_without_paint(cx: &mut gpui::TestAppCont
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
     let (sender, _exits) = async_channel::unbounded();
-    let (view, cx) = cx.add_window_view(|window, cx| TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(),
-                "stty -echo; read a; printf FIRST_CONTENT; read b; printf QUIET_CONTENT; read c; printf FINAL_CONTENT".into()]),
-            settings, Vec::new(), None,
-            PaneExit { sender, identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)) },
-            window, cx,
-        ));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--wait-line",
+                "--emit",
+                "FIRST_CONTENT",
+                "--wait-line",
+                "--emit",
+                "QUIET_CONTENT",
+                "--wait-line",
+                "--emit",
+                "FINAL_CONTENT",
+            ])),
+            settings,
+            Vec::new(),
+            None,
+            PaneExit {
+                sender,
+                identity: (crate::tabs::TabId(1), crate::pane_tree::PaneId(1)),
+            },
+            window,
+            cx,
+        )
+    });
     // Keep the pane alive outside the drawn tree, as an inactive tab does.
     cx.update(|window, cx| {
         window.replace_root(cx, |_, _| gpui::Empty);

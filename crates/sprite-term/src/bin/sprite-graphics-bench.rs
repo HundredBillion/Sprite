@@ -17,6 +17,10 @@
     reason = "a benchmark is a developer tool; a failed setup stops it with the cause"
 )]
 
+#[allow(dead_code, clippy::duplicate_mod)]
+#[path = "../test_child_support.rs"]
+mod test_child_support;
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -115,9 +119,10 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// A pane running a shell that reads commands, with images enabled.
+/// A pane running the test child repl, with images enabled.
 fn pane() -> (TerminalSession, sprite_term::SnapshotStream) {
-    let mut config = SessionConfig::command("/bin/sh", Vec::<OsString>::new());
+    let exe = test_child_support::ensure_test_child_exe().expect("compile sprite-test-child");
+    let mut config = SessionConfig::command(exe.as_os_str(), vec![OsString::from("--repl")]);
     config.graphics = GraphicsPolicy::default();
     let sprite_term::Spawned {
         session,
@@ -175,7 +180,7 @@ fn transmit_to_placement(size: u32) -> Duration {
     )
     .expect("write the fixture");
 
-    send(&mut session, &format!("cat {}\n", path.display()));
+    send(&mut session, &format!("PRINT_FILE {}\n", path.display()));
     let elapsed = wait(&mut snapshots, |bundle| {
         bundle
             .graphics
@@ -196,7 +201,7 @@ fn text_capture(with_image: bool) -> Duration {
     // not, and the comparison reads backwards — an image appearing to make
     // text capture *faster*, which is what the first run of this benchmark
     // reported.
-    send(&mut session, "printf 'warm\\n'\n");
+    send(&mut session, "PRINT warm\\n\n");
     wait(&mut snapshots, |bundle| {
         bundle.pane.rows.iter().any(|row| row.text.contains("warm"))
     });
@@ -211,7 +216,7 @@ fn text_capture(with_image: bool) -> Duration {
             format!("\x1b_Ga=T,f=32,s=64,v=64,i=1,q=2;{}\x1b\\", base64(&pixels)),
         )
         .expect("write the fixture");
-        send(&mut session, &format!("cat {}\n", path.display()));
+        send(&mut session, &format!("PRINT_FILE {}\n", path.display()));
         wait(&mut snapshots, |bundle| {
             bundle
                 .graphics
@@ -222,7 +227,7 @@ fn text_capture(with_image: bool) -> Duration {
     }
 
     // The measurement: one line of text, from written to captured.
-    send(&mut session, "printf 'measure-me\\n'\n");
+    send(&mut session, "PRINT measure-me\\n\n");
     wait(&mut snapshots, |bundle| {
         bundle
             .pane
@@ -239,7 +244,8 @@ fn text_capture(with_image: bool) -> Duration {
 /// sampled at ten images, before the pane had filled, and then called the rise
 /// to the limit a leak — growth towards a bound is the bound working.
 fn steady_state() -> (usize, usize) {
-    let mut config = SessionConfig::command("/bin/sh", Vec::<OsString>::new());
+    let exe = test_child_support::ensure_test_child_exe().expect("compile sprite-test-child");
+    let mut config = SessionConfig::command(exe.as_os_str(), vec![OsString::from("--repl")]);
     config.graphics = GraphicsPolicy {
         storage_bytes: 64 * 1024,
         ..GraphicsPolicy::default()
@@ -283,7 +289,7 @@ fn steady_state() -> (usize, usize) {
             ),
         )
         .expect("write the fixture");
-        send(&mut session, &format!("cat {}\n", path.display()));
+        send(&mut session, &format!("PRINT_FILE {}\n", path.display()));
         wait(&mut snapshots, |bundle| {
             bundle
                 .graphics

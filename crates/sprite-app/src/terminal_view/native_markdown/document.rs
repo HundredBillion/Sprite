@@ -626,14 +626,51 @@ fn percent_decode(encoded: &str) -> Option<String> {
     Some(decoded)
 }
 
+pub(super) fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+pub(super) fn strip_file_scheme(destination: &str) -> &str {
+    let Some(mut rest) = destination.strip_prefix("file://") else {
+        return destination;
+    };
+    if rest
+        .as_bytes()
+        .get(..10)
+        .is_some_and(|head| head.eq_ignore_ascii_case(b"localhost/"))
+    {
+        rest = &rest[9..];
+    }
+    if cfg!(windows)
+        && let Some(stripped) = rest.strip_prefix('/')
+        && has_windows_drive_prefix(stripped)
+    {
+        return stripped;
+    }
+    rest
+}
+
 pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf> {
     if destination.starts_with('#') {
         return None;
     }
     let encoded = destination.split(['?', '#']).next()?;
     let decoded = percent_decode(encoded)?;
-    let destination = decoded.strip_prefix("file://").unwrap_or(&decoded);
-    if destination.contains(':') || destination.starts_with("//") {
+    let destination = strip_file_scheme(&decoded);
+    let drive_colon_only = cfg!(windows) && has_windows_drive_prefix(destination);
+    let has_scheme = if drive_colon_only {
+        destination[2..].contains(':')
+    } else {
+        destination.contains(':')
+    };
+    if has_scheme
+        || destination.starts_with("//")
+        || (cfg!(windows) && destination.starts_with("\\\\"))
+    {
         return None;
     }
     let path = Path::new(destination);
@@ -940,6 +977,42 @@ mod tests {
             assert!(
                 super::resource_path("/tmp/README.md", destination).is_none(),
                 "{destination}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_windows_drive_paths_distinguish_schemes_from_local_drives() {
+        assert!(super::has_windows_drive_prefix("C:\\tmp\\a.png"));
+        assert!(super::has_windows_drive_prefix("C:/tmp/a.png"));
+        assert!(!super::has_windows_drive_prefix("C:a.png"));
+        assert!(!super::has_windows_drive_prefix("javascript:bad"));
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                super::resource_path("C:\\tmp\\README.md", "C:\\tmp\\a b.png").unwrap(),
+                std::path::PathBuf::from("C:\\tmp\\a b.png")
+            );
+            assert_eq!(
+                super::resource_path("C:\\tmp\\README.md", "file:///C:/tmp/a%20b.png").unwrap(),
+                std::path::PathBuf::from("C:/tmp/a b.png")
+            );
+            assert_eq!(
+                super::resource_path("C:\\tmp\\README.md", "file://localhost/C:/tmp/a%20b.png")
+                    .unwrap(),
+                std::path::PathBuf::from("C:/tmp/a b.png")
+            );
+            assert!(super::resource_path("C:\\tmp\\README.md", "C:\\tmp\\bad:name.png").is_none());
+            assert!(
+                super::resource_path("C:\\tmp\\README.md", "\\\\server\\share\\a.png").is_none()
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(super::resource_path("/tmp/README.md", "C:\\tmp\\a.png").is_none());
+            assert_eq!(
+                super::resource_path("/tmp/README.md", "file://localhost/tmp/a%20b.png").unwrap(),
+                std::path::PathBuf::from("/tmp/a b.png")
             );
         }
     }

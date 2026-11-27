@@ -11,7 +11,7 @@ pub(super) struct Initialized {
 }
 pub(super) fn initialize(
     config: &SessionConfig,
-    input: &pty_unix::InputQueue,
+    input: &pty::InputQueue,
 ) -> Result<Initialized, SessionError> {
     let write_error: PtyWriteError = Rc::new(RefCell::new(None));
     // Deny until the application declares focus. A pane that has never been
@@ -25,6 +25,10 @@ pub(super) fn initialize(
     // Lifecycle notices raised from inside the parser. Same reason as the
     // clipboard: a callback must not block on a channel.
     let notices = Rc::new(RefCell::new(Notices::default()));
+    #[cfg(windows)]
+    {
+        notices.borrow_mut().console_program = Some(config.program.clone());
+    }
 
     let size = config.size;
     let mut terminal = match crate::new_terminal(size.cols(), size.rows(), config.scrollback_bytes)
@@ -449,6 +453,8 @@ fn start_with(
     }
     configure_child_environment(&mut command, &config.environment);
 
+    #[cfg(windows)]
+    pty::let_children_take_ctrl_c();
     let child = pair
         .slave
         .spawn_command(command)
@@ -487,15 +493,16 @@ fn adopt_child(
     };
     // Foreground observation retains the shell group; cleanup separately owns
     // the session before the waiter can reap an already exited leader.
-    let process_group = pty_unix::process_group_of(child_pid);
-    let processes = pty_unix::SessionProcesses::capture(child_pid);
-    let Some(master_fd) = master.as_raw_fd() else {
+    let process_group = pty::process_group_of(child_pid);
+    let processes = pty::SessionProcesses::capture(child_pid);
+    #[cfg(unix)]
+    if master.as_raw_fd().is_none() {
         discard(child, master);
         return Err(SessionError::new(
             "open_pty",
             "the PTY master exposed no file descriptor",
         ));
-    };
+    }
 
     let waiter = match spawn_waiter(child, commands.clone(), events) {
         Ok(waiter) => waiter,
@@ -507,7 +514,6 @@ fn adopt_child(
 
     Ok(Started {
         master,
-        master_fd,
         process_group,
         processes,
         waiter,
@@ -522,9 +528,23 @@ fn adopt_child(
 /// sent KILL and left unreaped, so `wait` is what reaps that one.
 fn discard(mut child: SpawnedChild, master: Box<dyn MasterPty + Send>) {
     drop(master);
+    #[cfg(windows)]
+    let pid = child.process_id();
     let _killed = child.kill();
     let _reaped = child.wait();
+    // A killed Windows child reports its exit before it has finished ending,
+    // and `wait` returns on that report; wait for the end itself.
+    #[cfg(windows)]
+    if let Some(pid) = pid {
+        pty::wait_until_ended(pid, DISCARD_END_LIMIT);
+    }
 }
+
+/// How long a discarded Windows child is given to finish ending once it has
+/// been terminated. It is at most a shell with nothing started, so this is
+/// a bound on a stuck system, not a time it is expected to take.
+#[cfg(windows)]
+const DISCARD_END_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Blocks in `Child::wait` off the worker so a quiet exit is reaped without a
 /// timer, and Ordinary Session Jobs holding the PTY open cannot mask it.
@@ -697,7 +717,13 @@ mod tests {
     fn a_failed_start_up_step_discards_the_child() {
         let (commands, _inbox) = std::sync::mpsc::sync_channel(1);
         let (events, _receiver) = crate::event_mailbox::bounded(1);
+        #[cfg(unix)]
         let config = SessionConfig::command("/bin/sh", vec!["-c".into(), "sleep 30".into()]);
+        #[cfg(windows)]
+        let config = SessionConfig::command(
+            "cmd.exe",
+            vec!["/C".into(), "ping -n 30 127.0.0.1 >nul".into()],
+        );
         let pid = std::cell::Cell::new(None);
         let started = super::start_with(&config, &commands, events, |child, _, _| {
             pid.set(child.process_id());
@@ -706,13 +732,24 @@ mod tests {
                 SessionError::new("spawn_child_waiter", "no thread for the test"),
             ))
         });
-        let pid = nix::unistd::Pid::from_raw(pid.get().expect("the child had a pid") as i32);
+        let raw_pid = pid.get().expect("the child had a pid");
         // Discarding is synchronous: the child is reaped before the error is
         // returned, not at some later point.
-        assert!(
-            nix::sys::signal::kill(pid, None).is_err(),
-            "the child outlived its failed start-up"
-        );
+        #[cfg(unix)]
+        {
+            let pid = nix::unistd::Pid::from_raw(raw_pid as i32);
+            assert!(
+                nix::sys::signal::kill(pid, None).is_err(),
+                "the child outlived its failed start-up"
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                crate::pty::wait_until_ended(raw_pid, std::time::Duration::ZERO),
+                "the child outlived its failed start-up"
+            );
+        }
         assert_eq!(
             started.err().map(|error| error.operation),
             Some("spawn_child_waiter")

@@ -6,7 +6,6 @@
 //! themselves.
 
 use std::cell::RefCell;
-use std::os::fd::RawFd;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,8 +17,7 @@ use libghostty_vt::Terminal;
 use libghostty_vt::key;
 use portable_pty::{ExitStatus, MasterPty, PtySize};
 
-use crate::pty_unix;
-use crate::pty_unix::Pump;
+use crate::pty::{self, Pump};
 use crate::snapshot::Projector;
 use crate::{
     ChildExit, Scroll, SelectionMode, SessionConfig, SessionError, SnapshotBundle, TerminalCommand,
@@ -63,8 +61,15 @@ struct Batch {
 impl Batch {
     fn admit(&mut self, message: &Message) {
         self.messages += 1;
-        if let Message::PtyOutput(chunk) = message {
-            self.output_bytes += chunk.as_bytes().len();
+        match message {
+            Message::PtyOutput(chunk) => {
+                self.output_bytes += chunk.as_bytes().len();
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            Message::TestVtOutput(bytes) => {
+                self.output_bytes += bytes.len();
+            }
+            _ => {}
         }
     }
 
@@ -78,6 +83,7 @@ pub(crate) enum PumpOutcome {
     Canceled,
     Eof,
     ReadError(String),
+    #[cfg(unix)]
     WriteError(String),
 }
 
@@ -85,6 +91,7 @@ pub(crate) enum PumpOutcome {
 fn pump_failure(outcome: PumpOutcome) -> Option<SessionError> {
     match outcome {
         PumpOutcome::ReadError(error) => Some(SessionError::new("pty_read", error)),
+        #[cfg(unix)]
         PumpOutcome::WriteError(error) => Some(SessionError::new("pty_write", error)),
         PumpOutcome::Canceled | PumpOutcome::Eof => None,
     }
@@ -106,7 +113,11 @@ pub(crate) enum Message {
         resume: Receiver<()>,
     },
     /// One chunk of PTY output, carrying one output permit.
-    PtyOutput(crate::pty_unix::OutputChunk),
+    PtyOutput(crate::pty::OutputChunk),
+    /// Direct VT output injected by tests when a platform PTY filters a
+    /// sequence (such as Kitty graphics APC under Windows inbox ConPTY).
+    #[cfg(any(test, feature = "test-support"))]
+    TestVtOutput(Vec<u8>),
     /// The consumer took a snapshot and is ready for the next one.
     CaptureRequested,
     /// A knock: something is waiting on the control lane. Carries nothing.
@@ -130,6 +141,8 @@ impl Message {
             | Self::Shutdown => unreachable!("only a command is offered through admit"),
             #[cfg(test)]
             Self::HistoryGate { .. } => unreachable!("only a command is offered through admit"),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::TestVtOutput(_) => unreachable!("only a command is offered through admit"),
         }
     }
 }
@@ -137,11 +150,10 @@ impl Message {
 /// The live PTY side of a session, owned solely by the worker.
 struct Started {
     master: Box<dyn MasterPty + Send>,
-    master_fd: RawFd,
     /// Recorded at spawn so the session's Ordinary Session Jobs can still be reached after the child
     /// itself is gone and its own process id means nothing.
     process_group: Option<i32>,
-    processes: Option<pty_unix::SessionProcesses>,
+    processes: Option<pty::SessionProcesses>,
     waiter: JoinHandle<()>,
 }
 
@@ -168,9 +180,56 @@ struct Notices {
     bell_pending: bool,
     title: Option<Option<String>>,
     working_directory: Option<Option<String>>,
+    /// The program a Windows console was started for. ConPTY titles a new
+    /// console with that program's path, and cmd.exe puts the path back after
+    /// each command; neither is a title the program chose.
+    #[cfg(windows)]
+    console_program: Option<std::path::PathBuf>,
+    /// Whether a title of the program's own is the latest one taken in.
+    #[cfg(windows)]
+    titled: bool,
+    /// The latest title taken in, as `retitle` reports it. Snapshots carry
+    /// this rather than the parser's, so they agree with the events.
+    #[cfg(windows)]
+    shown: Option<String>,
 }
 
 impl Notices {
+    fn retitle(&mut self, title: Option<String>) {
+        #[cfg(windows)]
+        let title = {
+            let title = title.filter(|title| !self.is_console_default(title));
+            // The default is reported as no title, and a console that has
+            // not been titled yet has no title to take back.
+            if title.is_none() && !self.titled {
+                return;
+            }
+            self.titled = title.is_some();
+            self.shown.clone_from(&title);
+            title
+        };
+        self.title = Some(title);
+    }
+
+    #[cfg(windows)]
+    fn is_console_default(&self, title: &str) -> bool {
+        let title = std::path::Path::new(title);
+        let (Some(program), Some(name)) = (self.console_program.as_deref(), title.file_name())
+        else {
+            return false;
+        };
+        let Some(program_name) = program.file_name() else {
+            return false;
+        };
+        let name = name.to_ascii_lowercase();
+        let mut wanted = program_name.to_ascii_lowercase();
+        // A program named without its extension still runs as an `.exe`.
+        if program.extension().is_none() {
+            wanted.push(".exe");
+        }
+        title.is_absolute() && name == wanted
+    }
+
     fn take(&mut self) -> Vec<TerminalEvent> {
         let mut events = Vec::new();
         if let Some(title) = self.title.take() {
@@ -203,7 +262,9 @@ fn register_title(
 ) -> Result<(), libghostty_vt::Error> {
     terminal
         .on_title_changed(move |terminal: &Terminal<'_, '_>| {
-            notices.borrow_mut().title = Some(crate::reported(terminal.title()));
+            notices
+                .borrow_mut()
+                .retitle(crate::reported(terminal.title()));
         })
         .map(|_| ())
 }
@@ -251,7 +312,7 @@ struct Runtime {
 struct Session {
     owned: Owned,
     runtime: Runtime,
-    input: pty_unix::InputQueue,
+    input: pty::InputQueue,
     commands: SyncSender<Message>,
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     write_error: PtyWriteError,
@@ -285,7 +346,7 @@ pub(crate) fn run(
     snapshots: async_channel::Sender<Arc<SnapshotBundle>>,
     shutdown: Arc<AtomicBool>,
     foreground: Arc<crate::ForegroundWatch>,
-) -> Option<pty_unix::SessionProcesses> {
+) -> Option<pty::SessionProcesses> {
     let _completion = events.completion_guard();
     let started = match start::start(&config, &commands, Arc::clone(&events)) {
         Ok(started) => started,
@@ -296,10 +357,11 @@ pub(crate) fn run(
     };
     // `start` spawned the child on this thread, so this is the name it had
     // before exec.
-    foreground.attach(
-        started.master_fd,
+    foreground.attach_session(
+        &*started.master,
+        started.processes.as_ref(),
         started.process_group,
-        pty_unix::spawner_name(),
+        pty::spawner_name(),
     );
     let mut runtime = Runtime {
         started,
@@ -313,7 +375,7 @@ pub(crate) fn run(
         pump_stopped: true,
         fatal: None,
     };
-    let pump = match Pump::start(runtime.started.master_fd, commands.clone()) {
+    let pump = match Pump::start_master(&*runtime.started.master, commands.clone()) {
         Ok(pump) => pump,
         Err(error) => {
             runtime.fatal = Some(error);
@@ -397,7 +459,10 @@ impl Session {
             // What earlier output in this pass raised is published before
             // anything else is handled, so a command's own event never
             // overtakes the notices that preceded it.
-            if !matches!(message, Message::PtyOutput(_)) && self.publish_notices().is_break() {
+            let is_output = matches!(message, Message::PtyOutput(_));
+            #[cfg(any(test, feature = "test-support"))]
+            let is_output = is_output || matches!(message, Message::TestVtOutput(_));
+            if !is_output && self.publish_notices().is_break() {
                 // Nothing more is delivered, but a helper's report already
                 // taken from the queue is still recorded: each helper reports
                 // once, and closing waits for both reports.
@@ -476,6 +541,8 @@ impl Session {
             | Message::Shutdown) => other,
             #[cfg(test)]
             other @ Message::HistoryGate { .. } => other,
+            #[cfg(any(test, feature = "test-support"))]
+            other @ Message::TestVtOutput(_) => other,
         };
         let Self {
             owned:
@@ -490,6 +557,7 @@ impl Session {
                 Runtime {
                     started: Started { master, .. },
                     events,
+                    foreground,
                     exit_status,
                     pump_stopped,
                     fatal,
@@ -501,6 +569,8 @@ impl Session {
             pending,
             size,
             has_selection,
+            #[cfg(windows)]
+            notices,
             ..
         } = self;
         match message {
@@ -522,6 +592,15 @@ impl Session {
                 }
                 pending.mutated();
                 drop(chunk);
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            Message::TestVtOutput(bytes) => {
+                terminal.vt_write(&bytes);
+                #[cfg(test)]
+                if let Some(metrics) = &self.cadence_metrics {
+                    metrics.parsed(bytes.len());
+                }
+                pending.mutated();
             }
             // Not a no-op: a wake. The snapshot slot holds one bundle
             // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full
@@ -817,7 +896,9 @@ impl Session {
                     // reach the request that asked.
                     #[cfg(test)]
                     HISTORY_TRAVERSALS.set(HISTORY_TRAVERSALS.get() + 1);
-                    let foreground = foreground_executable(master.as_ref());
+                    let foreground = foreground_executable(master.as_ref(), foreground.as_ref());
+                    #[cfg(windows)]
+                    projector.shown_title.clone_from(&notices.borrow().shown);
                     match projector.capture_history(
                         pending.generation,
                         *size,
@@ -882,6 +963,11 @@ impl Session {
                     .cadence_metrics
                     .as_ref()
                     .map(|metrics| metrics.capture(false));
+                #[cfg(windows)]
+                self.owned
+                    .projector
+                    .shown_title
+                    .clone_from(&self.notices.borrow().shown);
                 self.owned.projector.capture(
                     self.pending.generation,
                     self.size,
@@ -932,7 +1018,7 @@ impl Session {
         }
     }
 
-    fn finish(mut self) -> Option<pty_unix::SessionProcesses> {
+    fn finish(mut self) -> Option<pty::SessionProcesses> {
         self.drain_accepted_output();
         if self.pending.dirty
             && let Ok(bundle) = {
@@ -941,6 +1027,11 @@ impl Session {
                     .cadence_metrics
                     .as_ref()
                     .map(|metrics| metrics.capture(true));
+                #[cfg(windows)]
+                self.owned
+                    .projector
+                    .shown_title
+                    .clone_from(&self.notices.borrow().shown);
                 self.owned.projector.capture(
                     self.pending.generation,
                     self.size,
@@ -959,12 +1050,24 @@ impl Session {
 /// The basename of the program in the foreground of this terminal.
 ///
 /// Read from the process the kernel already reports as the terminal's
-/// foreground group leader, and only its name — see `pty_unix::process_name`
+/// foreground group leader, and only its name — see `pty::process_name`
 /// for what is deliberately not read, and why an unavailable name is `None`
 /// rather than a guess.
-fn foreground_executable(master: &(dyn MasterPty + Send)) -> Option<String> {
-    let leader = master.process_group_leader()?;
-    pty_unix::process_name(leader)
+fn foreground_executable(
+    master: &(dyn MasterPty + Send),
+    foreground: &crate::ForegroundWatch,
+) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let _ = foreground;
+        let leader = master.process_group_leader()?;
+        pty::process_name(leader)
+    }
+    #[cfg(windows)]
+    {
+        let _ = master;
+        foreground.state().program().map(str::to_owned)
+    }
 }
 
 /// Pins the viewport to live output. Returns whether it actually moved, so an
@@ -1049,8 +1152,9 @@ mod closing_regressions {
             let (events, receiver) = crate::event_mailbox::bounded(1);
             drop(receiver);
             let (snapshots, _receiver) = async_channel::bounded(1);
+            let exe = crate::test_child_support::ensure_test_child_exe().unwrap();
             run(
-                SessionConfig::command("/bin/sh", vec!["-c".into(), "exit 0".into()]),
+                SessionConfig::command(exe.as_os_str(), vec!["--exit".into(), "0".into()]),
                 commands,
                 inbox,
                 control_rx,

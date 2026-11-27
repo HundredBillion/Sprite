@@ -24,6 +24,8 @@ PATCHES = (
     "gpui-0.2.2-nested-layer-order.patch",
     "gpui-0.2.2-test-drawn-clip.patch",
     "gpui-0.2.2-recorded-paint.patch",
+    "gpui-0.2.2-windows-native-text.patch",
+    "gpui-0.2.2-windows-release-and-idle.patch",
 )
 
 
@@ -49,7 +51,7 @@ def apply_exact_patch(files, patch):
         path = lines[index + 1][4:].strip().removeprefix("b/")
         if Path(path).is_absolute() or ".." in Path(path).parts:
             raise ValueError("unsafe GPUI patch path")
-        original = files.get(path, b"").decode().splitlines(keepends=True)
+        original = files.get(path, b"").decode("utf-8").splitlines(keepends=True)
         if old_path == "/dev/null" and path in files:
             raise ValueError("patch addition already exists")
         if old_path != "/dev/null" and old_path != "a/" + path:
@@ -84,7 +86,7 @@ def apply_exact_patch(files, patch):
             if (consumed, produced) != (old_count, new_count):
                 raise ValueError("GPUI patch hunk count mismatch")
         output.extend(original[cursor:])
-        files[path] = "".join(output).encode()
+        files[path] = "".join(output).encode("utf-8")
     return files
 
 
@@ -95,8 +97,8 @@ def verify(tree, archive):
         expected = {member.name.removeprefix("gpui-0.2.2/"): source.extractfile(member).read()
                     for member in source.getmembers() if member.isfile()}
     for name in PATCHES:
-        expected = apply_exact_patch(expected, (ROOT / "patches" / name).read_text())
-    actual = {str(p.relative_to(tree)): p.read_bytes() for p in tree.rglob("*") if p.is_file()}
+        expected = apply_exact_patch(expected, (ROOT / "patches" / name).read_text(encoding="utf-8"))
+    actual = {p.relative_to(tree).as_posix(): p.read_bytes() for p in tree.rglob("*") if p.is_file()}
     changed = sorted(p for p in expected.keys() | actual.keys() if expected.get(p) != actual.get(p))
     if changed:
         raise ValueError("local GPUI differs from exact archive + patches: " + ", ".join(changed))

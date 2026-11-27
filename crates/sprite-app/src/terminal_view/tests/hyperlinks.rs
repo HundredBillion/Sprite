@@ -7,28 +7,11 @@ fn reporting_view(
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let script = r#"
-import os, re, tty
-tty.setraw(0)
-os.write(1, b"\x1b[?1000h\x1b[?1006hhttps://example.com\r\nREADY\r\n")
-pending = b""
-opened = 0
-while True:
-    pending += os.read(0, 1024)
-    match = re.search(rb"\x1b\[<([0-9]+);([0-9]+);([0-9]+)([Mm])", pending)
-    while match:
-        if match[4] == b"m":
-            opened += 1
-            os.write(1, b"\r\nCHILD_OPEN:https://example.com\r\n")
-        pending = pending[match.end():]
-        match = re.search(rb"\x1b\[<([0-9]+);([0-9]+);([0-9]+)([Mm])", pending)
-    if b"REPORT" in pending:
-        os.write(1, f"\r\nCHILD_REPORT:{opened}\r\n".encode())
-        pending = b""
-"#;
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["python3".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--mouse-reporter",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -112,7 +95,8 @@ fn a_modified_url_click_does_not_send_an_unpaired_release_to_the_program(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let position = url_position(&view, cx);
         let modifiers = gpui::Modifiers {
-            platform: true,
+            control: cfg!(target_os = "windows"),
+            platform: !cfg!(target_os = "windows"),
             ..Default::default()
         };
         cx.simulate_mouse_down(position, gpui::MouseButton::Left, modifiers);
@@ -160,12 +144,12 @@ fn only_the_displayed_url_opens_once_for_each_intentional_click(cx: &mut gpui::T
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let script = format!(
-        "stty -echo; printf '\\033]8;;{URL}\\007Sprite PR #95\\033]8;;\\007 ({URL})\\r\\nREADY'; sleep 30"
-    );
+    let emit = format!("\\033[H\\033]8;;{URL}\\007Sprite PR #95\\033]8;;\\007 ({URL})\\r\\nREADY");
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho", "--emit", &emit, "--sleep", "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -256,12 +240,12 @@ fn a_titled_link_with_no_visible_address_opens_once_for_each_click(cx: &mut gpui
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     let (sender, _exits) = async_channel::unbounded();
-    let script = format!(
-        "stty -echo; printf '\\033]8;;{URL}\\007Sprite issue 161\\033]8;;\\007 after\\r\\nREADY'; sleep 30"
-    );
+    let emit = format!("\\033[H\\033]8;;{URL}\\007Sprite issue 161\\033]8;;\\007 after\\r\\nREADY");
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho", "--emit", &emit, "--sleep", "30",
+            ])),
             settings,
             Vec::new(),
             None,

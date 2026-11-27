@@ -1,5 +1,13 @@
 use std::time::{Duration, Instant};
 
+fn watchdog() -> Duration {
+    let configured = std::env::var("SPRITE_TEST_WATCHDOG_SECS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(Duration::from_secs(5), Duration::from_secs);
+    Duration::from_secs(5).max(configured)
+}
+
 #[test]
 fn diagnostics_are_persisted_to_the_selected_directory() {
     let root = std::env::temp_dir().join(format!("sprite-logging-test-{}", std::process::id()));
@@ -91,7 +99,7 @@ fn a_resource_sample_reads_this_process() {
 
     // Open files are counted, not estimated: holding ten more shows ten more.
     let held: Vec<_> = (0..10)
-        .map(|_| std::fs::File::open(env!("CARGO_MANIFEST_DIR")).unwrap())
+        .map(|_| std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap())
         .collect();
     let after = sprite_app::diagnostics::ResourceSample::read();
     assert!(after.open_files.unwrap() >= before.open_files.unwrap() + 10);
@@ -133,30 +141,22 @@ fn cli_stdout_is_not_contaminated_by_logging() {
 #[test]
 fn a_pane_control_reply_is_not_mixed_with_diagnostics() {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
 
     let root = std::env::temp_dir().join(format!("sprite-log-protocol-{}", std::process::id()));
     std::fs::remove_dir_all(&root).ok();
-    std::fs::create_dir_all(root.join("sprite")).unwrap();
-    let socket = root.join("sprite").join("window-test.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    #[cfg(unix)]
+    let runtime_dir = root.join("sprite");
+    #[cfg(windows)]
+    let runtime_dir = root.join("sprite").join("r");
+    sprite_app::ipc_test_support::create_private_dir(&runtime_dir).unwrap();
+    let socket = runtime_dir.join("window-test.sock");
+    let listener = sprite_app::ipc_test_support::TestListener::bind(&socket).unwrap();
     let peer = std::thread::spawn(move || {
-        listener.set_nonblocking(true).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "client did not connect");
-                    std::thread::park_timeout(Duration::from_millis(10));
-                }
-                Err(error) => panic!("accept failed: {error}"),
-            }
-        };
-        stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let mut stream = listener
+            .accept_within(watchdog())
+            .unwrap()
+            .expect("client did not connect");
+        stream.set_read_timeout(Some(watchdog())).unwrap();
         let mut line = String::new();
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)
@@ -174,6 +174,7 @@ fn a_pane_control_reply_is_not_mixed_with_diagnostics() {
         .args(["panes", "focus", "--pane", "test:0"])
         .env("TMPDIR", &root)
         .env("XDG_RUNTIME_DIR", &root)
+        .env("LOCALAPPDATA", &root)
         .env_remove("SPRITE_PANE")
         .env("SPRITE_LOG", "trace")
         .output()
@@ -193,31 +194,19 @@ fn a_pane_control_reply_is_not_mixed_with_diagnostics() {
 #[test]
 fn authenticated_surface_stream_is_not_mixed_with_diagnostics() {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
     use std::process::Stdio;
 
     let root = std::env::temp_dir().join(format!("sprite-log-surface-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    sprite_app::ipc_test_support::create_private_dir(&root).unwrap();
     let socket = root.join("test.sock");
     std::fs::remove_file(&socket).ok();
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = sprite_app::ipc_test_support::TestListener::bind(&socket).unwrap();
     let peer = std::thread::spawn(move || {
-        listener.set_nonblocking(true).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "client did not connect");
-                    std::thread::park_timeout(Duration::from_millis(10));
-                }
-                Err(error) => panic!("accept failed: {error}"),
-            }
-        };
-        stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let mut stream = listener
+            .accept_within(watchdog())
+            .unwrap()
+            .expect("client did not connect");
+        stream.set_read_timeout(Some(watchdog())).unwrap();
         let mut line = String::new();
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)

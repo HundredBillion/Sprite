@@ -32,7 +32,7 @@ impl gpui::Render for TwoPanes {
 fn two_panes<'a>(
     cx: &'a mut gpui::TestAppContext,
     settings: &crate::config::Settings,
-    script: &str,
+    args: &[&str],
 ) -> (
     gpui::Entity<TerminalView>,
     gpui::Entity<TerminalView>,
@@ -44,7 +44,7 @@ fn two_panes<'a>(
         let mut pane = |id: u64| {
             cx.new(|cx| {
                 TerminalView::new(
-                    Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+                    Some(crate::test_event_pressure::child_command(args)),
                     settings.clone(),
                     Vec::new(),
                     None,
@@ -78,10 +78,19 @@ fn pane_focus_follows_the_keyboard_and_the_window_and_reaches_the_child(
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-    let script = "stty raw -echo; dd bs=1 count=1 status=none >/dev/null; \
-                  printf '\\033[?1004hREADY\\r\\n'; \
-                  while :; do dd bs=1 count=3 status=none | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'; done";
-    let (left, right, cx) = two_panes(cx, &settings, script);
+    let (left, right, cx) = two_panes(
+        cx,
+        &settings,
+        &[
+            "--raw-noecho",
+            "--read-exact-discard",
+            "1",
+            "--emit",
+            "\\033[?1004hREADY\\r\\n",
+            "--hex-read-compact-loop",
+            "3",
+        ],
+    );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for view in [&left, &right] {
             view.update(cx, |view, _| {
@@ -164,12 +173,20 @@ fn only_a_pane_with_pane_focus_may_write_the_clipboard(cx: &mut gpui::TestAppCon
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-    let script = "stty -echo; read _; printf '\\033]52;c;b25l\\007'; printf 'ONE\\n'; \
-                  read _; printf '\\033]52;c;dHdv\\007'; printf 'TWO\\n'; sleep 30";
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--wait-line",
+                "--emit",
+                "\\033]52;c;b25l\\007ONE\\n",
+                "--wait-line",
+                "--emit",
+                "\\033]52;c;dHdv\\007TWO\\n",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -236,11 +253,16 @@ fn a_child_clipboard_write_arriving_after_focus_is_lost_is_dropped_and_a_copy_is
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-    let script = "stty -echo; printf 'COPYME\\n'; exec sleep 30";
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho",
+                "--emit",
+                "COPYME\\n",
+                "--sleep",
+                "30",
+            ])),
             settings,
             Vec::new(),
             None,
@@ -297,7 +319,7 @@ fn a_child_clipboard_write_arriving_after_focus_is_lost_is_dropped_and_a_copy_is
         });
         let executor = cx.executor();
         executor.allow_parking();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + crate::test_blocking_wait::watchdog();
         while clipboard(cx).as_deref() == Some("before") {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -330,7 +352,7 @@ fn a_clock_beat_repaints_only_the_pane_with_pane_focus(cx: &mut gpui::TestAppCon
     settings.cursor.blink = Some(true);
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
-    let (left, right, cx) = two_panes(cx, &settings, "printf READY; exec sleep 30");
+    let (left, right, cx) = two_panes(cx, &settings, &["--emit", "READY", "--sleep", "30"]);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for view in [&left, &right] {
             wait_for_bundle(view, cx, |b| {

@@ -29,6 +29,7 @@ env:
   ZIG_VERSION: "0.17.0"
   ZIG_SHA256_X86_64_LINUX: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
   ZIG_SHA256_AARCH64_MACOS: "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a"
+  ZIG_SHA256_X86_64_WINDOWS: "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428"
   GHOSTTY_COMMIT: "108cacb17ed8990840cd14abfce43d8ed8503ca1"
   # File and line numbers only, which is all a CI panic backtrace uses. Full
   # debug info makes every compile and link slower for a debugger nobody runs
@@ -387,3 +388,137 @@ jobs:
           test -x target/Sprite.app/Contents/MacOS/sprite
           test -f target/Sprite.app/Contents/Resources/terminfo/78/xterm-ghostty
           target/Sprite.app/Contents/MacOS/sprite --version
+
+  windows:
+    name: windows
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # A starved hosted runner can leave a worker silent for longer than the
+      # five-second default without anything being stuck.
+      SPRITE_TEST_WATCHDOG_SECS: "20"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+
+      - name: Verify the pinned Ghostty commit
+        shell: pwsh
+        run: |
+          $actual = (git -C vendor/ghostty rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($actual -ne $env:GHOSTTY_COMMIT) {
+            throw "Ghostty commit mismatch: expected $($env:GHOSTTY_COMMIT), got $actual"
+          }
+
+      - name: Install exact toolchains
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          rustup set profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup toolchain install $env:RUST_VERSION --profile minimal --component clippy --component rustfmt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default $env:RUST_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $zigZip = "$env:RUNNER_TEMP\zig.zip"
+          $zigUrl = "https://ziglang.org/download/$($env:ZIG_VERSION)/zig-x86_64-windows-$($env:ZIG_VERSION).zip"
+          Invoke-WebRequest -Uri $zigUrl -OutFile $zigZip
+          $actual = (Get-FileHash $zigZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:ZIG_SHA256_X86_64_WINDOWS) {
+            throw "Zig SHA-256 mismatch: expected $($env:ZIG_SHA256_X86_64_WINDOWS), got $actual"
+          }
+          $zigExtract = "$env:RUNNER_TEMP\zig-extract"
+          Expand-Archive -Path $zigZip -DestinationPath $zigExtract -Force
+          $zigDir = "$env:USERPROFILE\zig"
+          New-Item -ItemType Directory -Force -Path $zigDir | Out-Null
+          Move-Item -Path "$zigExtract\zig-x86_64-windows-$($env:ZIG_VERSION)\*" -Destination $zigDir -Force
+          $zigDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $zigVersion = (& "$zigDir\zig.exe" version).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($zigVersion -ne $env:ZIG_VERSION) {
+            throw "Zig version mismatch: expected $($env:ZIG_VERSION), got $zigVersion"
+          }
+
+      # The same two caches as the Arch and macOS jobs, for the same reasons.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.event_name != 'schedule'
+        with:
+          add-rust-environment-hash-key: "false"
+          key: rust-${{ env.RUST_VERSION }}
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+
+      - name: Restore Ghostty's Zig cache
+        id: zig-cache
+        if: github.event_name != 'schedule'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/zig-global-cache
+          key: zig-cache-${{ runner.os }}-${{ env.ZIG_VERSION }}-${{ env.GHOSTTY_COMMIT }}
+
+      - name: Fetch dependencies (the only network-enabled build stage)
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/check_gpui_patch.py --fetch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $repoRoot = $PWD.Path
+          $env:ZIG_GLOBAL_CACHE_DIR = "$repoRoot\target\zig-global-cache"
+          $env:ZIG_LOCAL_CACHE_DIR = "$repoRoot\target\zig-local-cache"
+          Push-Location vendor/ghostty
+          try {
+            zig build `
+              -Demit-lib-vt=true `
+              -Doptimize=Debug `
+              -Dcpu=baseline `
+              -Demit-xcframework=false `
+              -Dapp-runtime=none `
+              --prefix "$env:RUNNER_TEMP\ghostty-install" `
+              --cache-dir "$repoRoot\target\zig-local-cache"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Offline locked gate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustfmt --edition 2024 --check vendor/gpui/src/platform/key_text_scope.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/check_gpui_patch.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest scripts.test_gpui_patch -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --workspace --locked --offline --no-fail-fast
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --workspace --locked --offline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save Ghostty's Zig cache
+        if: >-
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          && steps.zig-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/zig-global-cache
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}
+
+      - name: Smoke-test Windows console shim and binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          rustc --edition 2024 -O -o target\debug\sprite.com packaging\windows\sprite-shim.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & target\debug\sprite.com --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & target\debug\sprite.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

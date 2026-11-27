@@ -665,6 +665,8 @@ impl Render for Workspace {
                                 .shadow_lg()
                                 .child(if cfg!(target_os = "macos") {
                                     "Hold ⌘Q or press twice to quit"
+                                } else if cfg!(target_os = "windows") {
+                                    "Press Alt+F4 or close twice to quit"
                                 } else {
                                     "Hold Super+W or press twice to quit"
                                 }),

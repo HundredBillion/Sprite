@@ -11,19 +11,13 @@
 
 mod support;
 
-use std::ffi::OsString;
 use std::time::Instant;
 
 use sprite_term::{
-    GraphicsPolicy, GraphicsSnapshot, SessionConfig, TerminalCommand, TerminalEvent,
-    TerminalSession,
+    GraphicsPolicy, GraphicsSnapshot, TerminalCommand, TerminalEvent, TerminalSession,
 };
 
 use support::{EventPump, SnapshotPump, pane_text};
-
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
 
 /// Waits for the answer to one graphics probe, ignoring unrelated events.
 fn wait_for_graphics(events: &EventPump) -> GraphicsSnapshot {
@@ -109,23 +103,7 @@ fn base64(bytes: &[u8]) -> String {
 /// Only what a child writes to its output reaches the terminal's parser, so an
 /// image has to be printed by the child to exist at all.
 fn session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, SnapshotPump) {
-    let mut config = SessionConfig::command("/bin/sh", args(&[]));
-    config.graphics = policy;
-    let sprite_term::Spawned {
-        mut session,
-        events,
-        snapshots,
-    } = TerminalSession::spawn(config).expect("spawn session");
-    let events = EventPump::new(events);
-    let snapshots = SnapshotPump::new(snapshots);
-    events.expect_ready();
-    session
-        .send(TerminalCommand::Input(support::PLAIN_SHELL_SETUP.to_vec()))
-        .expect("ask the shell to announce itself");
-    snapshots.wait_for("the shell to start", |bundle| {
-        pane_text(bundle).contains("READY")
-    });
-    (session, events, snapshots)
+    support::repl_session(policy)
 }
 
 /// Distinguishes one marker from the last, since the screen still holds them.
@@ -133,7 +111,7 @@ static NEXT_MARK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 
 /// Has the child print `escapes`, then waits until the terminal has read them.
 ///
-/// The marker is printed by a second command, so seeing it means the shell has
+/// The marker is printed by a second command, so seeing it means the child has
 /// finished the first — which is a fact about the terminal's parser rather than
 /// a guess about timing.
 fn feed(
@@ -141,23 +119,8 @@ fn feed(
     snapshots: &SnapshotPump,
     escapes: String,
 ) -> std::sync::Arc<sprite_term::SnapshotBundle> {
-    // Sent verbatim: the sequence is already written as printf escapes, and
-    // doubling the backslashes here would make printf emit the text `\033`
-    // rather than an escape character.
-    session
-        .send(TerminalCommand::Input(
-            format!("printf '{escapes}'\n").into_bytes(),
-        ))
-        .expect("ask the child to print the payload");
-
     let mark = NEXT_MARK.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let (command, marker) = support::marker_command(mark);
-    session
-        .send(TerminalCommand::Input(command))
-        .expect("ask the child to print the marker");
-    snapshots.wait_for("the payload to be processed", |bundle| {
-        pane_text(bundle).contains(&marker)
-    })
+    support::repl_feed(session, snapshots, &escapes, mark)
 }
 
 fn probe(session: &mut TerminalSession, events: &EventPump) -> GraphicsSnapshot {

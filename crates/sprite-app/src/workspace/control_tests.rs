@@ -11,7 +11,6 @@ impl Drop for PrivateRuntime {
 }
 
 fn private_runtime(module: &str, cx: &gpui::TestAppContext) -> bool {
-    use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let module = module.split_once("::").unwrap().1;
@@ -28,10 +27,7 @@ fn private_runtime(module: &str, cx: &gpui::TestAppContext) -> bool {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&directory.0)
-        .unwrap();
+    crate::local_socket::create_private_dir(&directory.0).unwrap();
     // A subprocess owns runtime variables so parallel tests never change each other's socket environment.
     crate::test_child::run_child_test(
         &name,
@@ -39,6 +35,7 @@ fn private_runtime(module: &str, cx: &gpui::TestAppContext) -> bool {
             ("SPRITE_CONTROL_TEST_CHILD", name.as_ref()),
             ("XDG_RUNTIME_DIR", directory.0.as_os_str()),
             ("TMPDIR", directory.0.as_os_str()),
+            ("LOCALAPPDATA", directory.0.as_os_str()),
         ],
         "pane control with a private runtime directory",
     );
@@ -66,9 +63,8 @@ fn target(workspace: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext)
 /// Sends one raw line to a window socket, running the window until it answers.
 fn send(socket: &std::path::Path, line: String, cx: &mut gpui::VisualTestContext) -> Value {
     let socket = socket.to_path_buf();
-    let thread = std::thread::spawn(move || {
-        control::client::exchange(&socket, &line, std::time::Duration::from_secs(3))
-    });
+    let timeout = std::time::Duration::from_secs(3).max(crate::test_blocking_wait::watchdog());
+    let thread = std::thread::spawn(move || control::client::exchange(&socket, &line, timeout));
     let started = std::time::Instant::now();
     while !thread.is_finished() {
         cx.run_until_parked();
@@ -93,7 +89,6 @@ fn ask(target: &Target, operation: Operation, cx: &mut gpui::VisualTestContext) 
 /// own file in a private directory, and a request carries no key.
 #[gpui::test]
 fn any_process_of_the_user_can_drive_a_window_without_a_key(cx: &mut gpui::TestAppContext) {
-    use std::os::unix::fs::PermissionsExt;
     if !private_runtime(module_path!(), cx) {
         return;
     }
@@ -106,10 +101,14 @@ fn any_process_of_the_user_can_drive_a_window_without_a_key(cx: &mut gpui::TestA
             .join(format!("window-{}.sock", target.window))
     );
     assert_eq!(target.window.len(), 24);
-    let mode =
-        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&target.socket), 0o600);
-    assert_eq!(mode(target.socket.parent().unwrap()), 0o700);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&target.socket), 0o600);
+        assert_eq!(mode(target.socket.parent().unwrap()), 0o700);
+    }
 
     let pane = format!("{}:0", target.window);
     let answer = ask(
@@ -240,11 +239,9 @@ fn public_control_input_is_sent_unchecked(cx: &mut gpui::TestAppContext) {
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         let settings = crate::config::Settings::default();
         Workspace::new(
-            Some(vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "printf ready; exec /bin/cat".into(),
-            ]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--noecho", "--emit", "ready", "--cat",
+            ])),
             settings,
             None,
             window,
@@ -335,7 +332,7 @@ fn the_cli_lists_renames_and_types_with_no_access_file(cx: &mut gpui::TestAppCon
     }
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         Workspace::new(
-            Some(vec!["/bin/cat".into()]),
+            Some(crate::test_event_pressure::child_command(&["--cat"])),
             crate::Settings::default(),
             None,
             window,
@@ -548,7 +545,7 @@ fn public_control_preserves_surfaces_when_moving_their_pane(cx: &mut gpui::TestA
     .into_iter()
     .enumerate()
     {
-        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, peer) = crate::local_socket::LocalStream::pair().unwrap();
         peers.push(peer);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let description = match index {
@@ -759,7 +756,21 @@ fn only_open_panes_count_toward_the_cap(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
-    let (workspace, cx) = test_support::test_workspace(cx);
+    // Every pane runs the test child, which ends as soon as it is hung up.
+    // The workspace's own command is what a split runs, ahead of the shell
+    // setting, and the missing test command would fall back to the login
+    // shell — on Windows a PowerShell that, closed while it starts, can take
+    // the full escalation to end, a cap's worth of which outlasts the child
+    // test's deadline.
+    let (workspace, cx) = cx.add_window_view(|window, cx| {
+        super::Workspace::new(
+            Some(crate::test_event_pressure::child_command(&["--cat"])),
+            crate::config::Settings::default(),
+            None,
+            window,
+            cx,
+        )
+    });
     let fixed = target(&workspace, cx);
     let human = format!("{}:0", fixed.window);
     for _ in 0..control::MAX_PANES {

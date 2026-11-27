@@ -6,6 +6,7 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,7 @@ const TERM_PROGRAM: &str = "Sprite";
 const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Where the bootstrap writes the compiled terminfo database.
+#[cfg(unix)]
 const TERMINFO_DIR_VAR: &str = "SPRITE_TERMINFO_DIR";
 
 /// Where Sprite's shell-integration scripts live, if they have been installed.
@@ -27,11 +29,22 @@ const TERMINFO_DIR_VAR: &str = "SPRITE_TERMINFO_DIR";
 /// not yet inject it automatically — see `integration_directory`.
 const INTEGRATION_DIR_VAR: &str = "SPRITE_SHELL_INTEGRATION_DIR";
 
-/// Tried in order when `SHELL` is unusable.
+/// Tried in order when `SHELL` is unusable on Unix.
 #[cfg(target_os = "macos")]
 const FALLBACK_SHELLS: [&str; 2] = ["/bin/zsh", "/bin/sh"];
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 const FALLBACK_SHELLS: [&str; 2] = ["/bin/bash", "/bin/sh"];
+
+fn default_shell_args() -> Vec<OsString> {
+    #[cfg(unix)]
+    {
+        vec![OsString::from("-l")]
+    }
+    #[cfg(windows)]
+    {
+        Vec::new()
+    }
+}
 
 /// A login shell in the current directory, carrying Sprite's identity.
 pub(crate) fn login_shell() -> Result<SessionConfig, SessionError> {
@@ -65,11 +78,11 @@ pub(crate) fn configured_shell(
                 configured.display(),
                 program.display()
             ));
-            (program, vec![OsString::from("-l")])
+            (program, default_shell_args())
         }
         None => (
             resolve_shell(env::var_os("SHELL").as_deref())?,
-            vec![OsString::from("-l")],
+            default_shell_args(),
         ),
     };
 
@@ -114,6 +127,7 @@ fn resolve_shell(configured: Option<&OsStr>) -> Result<PathBuf, SessionError> {
         }
     }
 
+    #[cfg(unix)]
     for fallback in FALLBACK_SHELLS {
         let candidate = Path::new(fallback);
         if is_usable_shell(candidate) {
@@ -121,10 +135,43 @@ fn resolve_shell(configured: Option<&OsStr>) -> Result<PathBuf, SessionError> {
         }
     }
 
+    #[cfg(windows)]
+    for candidate in windows_fallback_shells() {
+        if is_usable_shell(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
     Err(SessionError::new(
         "resolve_shell",
         "no absolute executable login shell was found",
     ))
+}
+
+#[cfg(windows)]
+fn windows_fallback_shells() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    // PowerShell 7 (`pwsh.exe`) first: on PATH, then its standard install directory.
+    if let Some(path) = env::var_os("PATH") {
+        for directory in env::split_paths(&path) {
+            let candidate = directory.join("pwsh.exe");
+            if candidate.is_absolute() {
+                candidates.push(candidate);
+            }
+        }
+    }
+    if let Some(program_files) = env::var_os("ProgramFiles") {
+        candidates.push(PathBuf::from(program_files).join("PowerShell\\7\\pwsh.exe"));
+    }
+    let system_root = env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    candidates.push(system_root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+    if let Some(comspec) = env::var_os("COMSPEC") {
+        candidates.push(PathBuf::from(comspec));
+    }
+    candidates.push(system_root.join(r"System32\cmd.exe"));
+    candidates
 }
 
 fn is_usable_shell(candidate: &Path) -> bool {
@@ -137,6 +184,27 @@ fn is_executable_file(candidate: &Path) -> bool {
 
     std::fs::metadata(candidate)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn is_executable_file(candidate: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(candidate) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    let Some(extension) = candidate.extension().and_then(OsStr::to_str) else {
+        return false;
+    };
+    let lower = extension.to_ascii_lowercase();
+    if matches!(lower.as_str(), "exe" | "com" | "cmd" | "bat") {
+        return true;
+    }
+    env::var("PATHEXT").is_ok_and(|exts| {
+        exts.split(';')
+            .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(&lower))
+    })
 }
 
 /// Sprite's identity, applied after the inherited user environment so these
@@ -155,6 +223,7 @@ pub(crate) fn identity_environment() -> Vec<(OsString, OsString)> {
     // When the bootstrapped database is present it overrides any user TERMINFO
     // for this child, because that is the only copy guaranteed to match the
     // pinned Ghostty source. That is the development case.
+    #[cfg(unix)]
     if let Some(directory) = bootstrapped_terminfo() {
         entries.push((OsString::from("TERMINFO"), directory.into_os_string()));
     } else if let Some(directory) = packaged_terminfo() {
@@ -208,6 +277,7 @@ fn integration_directory() -> Option<PathBuf> {
 /// `current_exe` returns the path the process was started by, and a `sprite`
 /// that is a symlink into a bundle must find the database in the bundle, not
 /// beside the link.
+#[cfg(unix)]
 fn packaged_terminfo() -> Option<PathBuf> {
     let executable = env::current_exe().ok()?;
     let executable = fs::canonicalize(&executable).unwrap_or(executable);
@@ -223,6 +293,7 @@ fn packaged_terminfo() -> Option<PathBuf> {
 /// bundle, where the binary is `<Contents>/MacOS/sprite`. Both are tried on
 /// every platform: a directory that is absent costs one `stat`, and a `cfg`
 /// would cost a code path nobody on the other platform exercises.
+#[cfg(any(unix, test))]
 fn terminfo_candidates(executable: &Path) -> Vec<PathBuf> {
     let Some(prefix) = executable.parent().and_then(Path::parent) else {
         return Vec::new();
@@ -233,6 +304,7 @@ fn terminfo_candidates(executable: &Path) -> Vec<PathBuf> {
     ]
 }
 
+#[cfg(unix)]
 fn bootstrapped_terminfo() -> Option<PathBuf> {
     let directory = PathBuf::from(env::var_os(TERMINFO_DIR_VAR)?);
     directory.is_dir().then_some(directory)
@@ -240,6 +312,18 @@ fn bootstrapped_terminfo() -> Option<PathBuf> {
 
 fn executable_directory() -> Option<PathBuf> {
     Some(env::current_exe().ok()?.parent()?.to_path_buf())
+}
+
+fn same_path_entry(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 /// Puts `directories` at the front of PATH, in order, and drops them from
@@ -257,7 +341,7 @@ fn prepend_path(directories: &[PathBuf], current: Option<&OsStr>) -> Option<OsSt
     entries.extend(
         existing
             .into_iter()
-            .filter(|entry| !directories.contains(entry)),
+            .filter(|entry| !directories.iter().any(|dir| same_path_entry(dir, entry))),
     );
 
     env::join_paths(entries).ok()
@@ -309,50 +393,69 @@ mod tests {
         assert!(terminfo_candidates(Path::new("sprite")).is_empty());
     }
 
+    fn test_shell_path() -> PathBuf {
+        #[cfg(unix)]
+        {
+            PathBuf::from("/bin/sh")
+        }
+        #[cfg(windows)]
+        {
+            resolve_shell(None).expect("resolve a Windows fallback shell")
+        }
+    }
+
     #[test]
     fn an_absolute_executable_shell_wins() {
-        let resolved = resolve_shell(Some(OsStr::new("/bin/sh"))).expect("resolve");
-        assert_eq!(resolved, PathBuf::from("/bin/sh"));
+        let shell = test_shell_path();
+        let resolved = resolve_shell(Some(shell.as_os_str())).expect("resolve");
+        assert_eq!(resolved, shell);
     }
 
     #[test]
     fn unusable_shells_fall_back() {
-        for unusable in [
+        let temp = env::temp_dir();
+        let cases: Vec<OsString> = [
             // Relative, so never honoured.
-            "sh",
+            OsString::from("sh"),
             // Absolute but absent.
-            "/nonexistent/sprite-shell",
+            temp.join("nonexistent-sprite-shell").into_os_string(),
             // Absolute and present, but a directory rather than a program.
-            "/tmp",
-            // Present but not executable.
-            "/etc/hostname",
+            temp.into_os_string(),
             // Empty.
-            "",
-        ] {
-            let resolved = resolve_shell(Some(OsStr::new(unusable)))
+            OsString::new(),
+        ]
+        .into_iter()
+        .chain(cfg!(unix).then(|| OsString::from("/etc/hostname")))
+        .collect();
+
+        for unusable in cases {
+            let resolved = resolve_shell(Some(unusable.as_os_str()))
                 .unwrap_or_else(|error| panic!("{unusable:?} should fall back: {error}"));
+            #[cfg(unix)]
             assert!(
                 FALLBACK_SHELLS.contains(&resolved.to_str().expect("utf-8 fallback")),
                 "{unusable:?} fell back to {resolved:?}, which is not a fallback shell"
             );
             assert!(resolved.is_absolute());
+            assert!(is_usable_shell(&resolved));
         }
     }
 
     #[test]
     fn an_absent_shell_variable_falls_back() {
         let resolved = resolve_shell(None).expect("resolve");
+        #[cfg(unix)]
         assert!(FALLBACK_SHELLS.contains(&resolved.to_str().expect("utf-8 fallback")));
+        assert!(resolved.is_absolute());
+        assert!(is_usable_shell(&resolved));
     }
 
     #[test]
     fn the_executable_directory_becomes_the_first_path_entry() {
         let directory = PathBuf::from("/opt/sprite/bin");
-        let joined = prepend_path(
-            std::slice::from_ref(&directory),
-            Some(OsStr::new("/usr/bin:/bin")),
-        )
-        .expect("join");
+        let existing = env::join_paths([Path::new("/usr/bin"), Path::new("/bin")]).expect("join");
+        let joined = prepend_path(std::slice::from_ref(&directory), Some(existing.as_os_str()))
+            .expect("join");
 
         let entries: Vec<PathBuf> = env::split_paths(&joined).collect();
         assert_eq!(entries[0], directory);
@@ -363,7 +466,8 @@ mod tests {
     #[test]
     fn an_existing_entry_moves_to_the_front_rather_than_duplicating() {
         let directory = PathBuf::from("/usr/bin");
-        let joined = prepend_path(&[directory], Some(OsStr::new("/bin:/usr/bin"))).expect("join");
+        let existing = env::join_paths([Path::new("/bin"), Path::new("/usr/bin")]).expect("join");
+        let joined = prepend_path(&[directory], Some(existing.as_os_str())).expect("join");
 
         let entries: Vec<PathBuf> = env::split_paths(&joined).collect();
         assert_eq!(
@@ -385,9 +489,11 @@ mod tests {
     fn an_integration_directory_goes_ahead_of_sprite_s_own_and_nothing_goes_ahead_of_nothing() {
         let integration = PathBuf::from("/opt/sprite-nvim/bin");
         let own = PathBuf::from("/opt/sprite/bin");
+        let existing =
+            env::join_paths([Path::new("/opt/sprite/bin"), Path::new("/usr/bin")]).expect("join");
         let joined = prepend_path(
             &[integration.clone(), own.clone()],
-            Some(OsStr::new("/opt/sprite/bin:/usr/bin")),
+            Some(existing.as_os_str()),
         )
         .expect("join");
 
@@ -399,14 +505,15 @@ mod tests {
 
     #[test]
     fn a_configured_shell_is_run_with_its_own_arguments() {
+        let shell = test_shell_path();
         let preference = crate::ShellPreference {
-            program: Some(PathBuf::from("/bin/sh")),
+            program: Some(shell.clone()),
             args: Some(vec![OsString::from("-i")]),
             startup_directory: None,
         };
         let (config, complaints) = configured_shell(&preference).expect("resolve");
 
-        assert_eq!(config.program, PathBuf::from("/bin/sh"));
+        assert_eq!(config.program, shell);
         assert_eq!(config.args, vec![OsString::from("-i")]);
         assert!(complaints.is_empty());
     }
@@ -414,18 +521,19 @@ mod tests {
     /// The rule that keeps a typo from costing somebody their terminal.
     #[test]
     fn an_unusable_shell_falls_back_whole_and_says_so() {
+        let missing = env::temp_dir().join("nonexistent-sprite-shell");
         let preference = crate::ShellPreference {
-            program: Some(PathBuf::from("/nonexistent/sprite-shell")),
+            program: Some(missing.clone()),
             args: Some(vec![OsString::from("--flag-for-the-other-shell")]),
             startup_directory: None,
         };
         let (config, complaints) = configured_shell(&preference).expect("resolve");
 
         assert!(config.program.is_absolute());
-        assert_ne!(config.program, PathBuf::from("/nonexistent/sprite-shell"));
+        assert_ne!(config.program, missing);
         assert_eq!(
             config.args,
-            vec![OsString::from("-l")],
+            default_shell_args(),
             "arguments written for one shell are not passed to another"
         );
         assert_eq!(complaints.len(), 1);
@@ -434,20 +542,21 @@ mod tests {
 
     #[test]
     fn a_startup_directory_is_used_when_it_exists() {
+        let directory = env::temp_dir();
         let preference = crate::ShellPreference {
-            startup_directory: Some(PathBuf::from("/tmp")),
+            startup_directory: Some(directory.clone()),
             ..crate::ShellPreference::default()
         };
         let (config, complaints) = configured_shell(&preference).expect("resolve");
 
-        assert_eq!(config.working_directory, Some(PathBuf::from("/tmp")));
+        assert_eq!(config.working_directory, Some(directory));
         assert!(complaints.is_empty());
     }
 
     #[test]
     fn a_missing_startup_directory_keeps_the_pane_and_says_so() {
         let preference = crate::ShellPreference {
-            startup_directory: Some(PathBuf::from("/nonexistent/sprite-directory")),
+            startup_directory: Some(env::temp_dir().join("nonexistent-sprite-directory")),
             ..crate::ShellPreference::default()
         };
         let (config, complaints) = configured_shell(&preference).expect("resolve");
@@ -462,7 +571,7 @@ mod tests {
         let config = login_shell().expect("resolve a login shell");
 
         assert!(config.program.is_absolute());
-        assert_eq!(config.args, vec![OsString::from("-l")]);
+        assert_eq!(config.args, default_shell_args());
         assert_eq!(config.size, ValidTerminalSize::DEFAULT);
         assert!(config.scrollback_bytes > 0);
 

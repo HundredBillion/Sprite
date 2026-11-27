@@ -578,14 +578,54 @@ pub fn path() -> Option<PathBuf> {
 
 /// Where this user's configuration lives.
 ///
-/// Both platforms prefer a nonempty `$XDG_CONFIG_HOME` and fall back to `$HOME/.config`.
+/// All platforms prefer a nonempty `$XDG_CONFIG_HOME`; Unix falls back to
+/// `$HOME/.config/sprite/config.toml`, while Windows checks
+/// `%APPDATA%\sprite\config.toml` and `%USERPROFILE%\.config\sprite\config.toml`.
 /// A window's explicit `--config` path is selected by its caller.
 fn configuration_path() -> Option<PathBuf> {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(base).join("sprite/config.toml"));
+    #[cfg(target_os = "windows")]
+    {
+        windows_configuration_path_from(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("APPDATA").as_deref(),
+            std::env::var_os("USERPROFILE").as_deref(),
+        )
     }
-    let home = std::env::var_os("HOME").filter(|value| !value.is_empty())?;
-    Some(PathBuf::from(home).join(".config/sprite/config.toml"))
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(base).join("sprite/config.toml"));
+        }
+        let home = std::env::var_os("HOME").filter(|value| !value.is_empty())?;
+        Some(PathBuf::from(home).join(".config/sprite/config.toml"))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_configuration_path_from(
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    appdata: Option<&std::ffi::OsStr>,
+    userprofile: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if let Some(base) = xdg_config_home.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(base).join("sprite").join("config.toml"));
+    }
+    let roaming = appdata
+        .filter(|value| !value.is_empty())
+        .map(|base| PathBuf::from(base).join("sprite").join("config.toml"));
+    let dot_config = userprofile.filter(|value| !value.is_empty()).map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("sprite")
+            .join("config.toml")
+    });
+    if let Some(path) = roaming.as_ref().filter(|path| path.exists()) {
+        return Some(path.clone());
+    }
+    if let Some(path) = dot_config.as_ref().filter(|path| path.exists()) {
+        return Some(path.clone());
+    }
+    roaming.or(dot_config)
 }
 
 #[cfg(test)]
@@ -1330,6 +1370,7 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_explicit_file_without_read_permission_is_a_complaint() {
         use std::os::unix::fs::PermissionsExt;
@@ -1371,6 +1412,71 @@ mod tests {
             "{:?}",
             complaints.0
         );
+    }
+
+    #[test]
+    fn windows_config_discovery_follows_xdg_appdata_and_userprofile_precedence() {
+        let root = std::env::temp_dir().join(format!("sprite-win-cfg-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let xdg = root.join("xdg");
+        let appdata = root.join("appdata");
+        let profile = root.join("profile");
+        std::fs::create_dir_all(&xdg).unwrap();
+        std::fs::create_dir_all(appdata.join("sprite")).unwrap();
+        std::fs::create_dir_all(profile.join(".config").join("sprite")).unwrap();
+
+        let roaming_file = appdata.join("sprite").join("config.toml");
+        let profile_file = profile.join(".config").join("sprite").join("config.toml");
+
+        // Neither exists -> defaults to %APPDATA%\sprite\config.toml when APPDATA is set.
+        assert_eq!(
+            windows_configuration_path_from(
+                Some(std::ffi::OsStr::new("")),
+                Some(appdata.as_os_str()),
+                Some(profile.as_os_str()),
+            ),
+            Some(roaming_file.clone())
+        );
+
+        // Fallback to %USERPROFILE%\.config\sprite\config.toml when only it exists.
+        std::fs::write(&profile_file, "").unwrap();
+        assert_eq!(
+            windows_configuration_path_from(
+                None,
+                Some(appdata.as_os_str()),
+                Some(profile.as_os_str()),
+            ),
+            Some(profile_file.clone())
+        );
+
+        // %APPDATA%\sprite\config.toml wins over %USERPROFILE%\.config when both exist.
+        std::fs::write(&roaming_file, "").unwrap();
+        assert_eq!(
+            windows_configuration_path_from(
+                None,
+                Some(appdata.as_os_str()),
+                Some(profile.as_os_str()),
+            ),
+            Some(roaming_file)
+        );
+
+        // Non-empty XDG_CONFIG_HOME wins over everything else.
+        assert_eq!(
+            windows_configuration_path_from(
+                Some(xdg.as_os_str()),
+                Some(appdata.as_os_str()),
+                Some(profile.as_os_str()),
+            ),
+            Some(xdg.join("sprite").join("config.toml"))
+        );
+
+        // All unset/empty -> None.
+        assert_eq!(
+            windows_configuration_path_from(None, Some(std::ffi::OsStr::new("")), None),
+            None
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 

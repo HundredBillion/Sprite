@@ -77,23 +77,36 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
     let payload = base64(&pixels);
     let sequence = format!("\x1b_Ga=T,f=32,s=32,v=32,i=1,q=2;{payload}\x1b\\");
 
-    let directory = fixture_directory();
-    std::fs::create_dir_all(&directory).expect("a directory for the fixture");
-    let path = directory.join("image.esc");
-    std::fs::write(&path, &sequence).expect("write the fixture");
+    #[cfg(not(windows))]
+    let (directory, args) = {
+        let directory = fixture_directory();
+        std::fs::create_dir_all(&directory).expect("a directory for the fixture");
+        let path = directory.join("image.esc");
+        std::fs::write(&path, &sequence).expect("write the fixture");
+        let args = vec![
+            "--cat-file".into(),
+            path.into_os_string(),
+            "--sleep".into(),
+            "300".into(),
+        ];
+        (Some(directory), args)
+    };
+    #[cfg(windows)]
+    let (directory, args): (Option<PathBuf>, Vec<std::ffi::OsString>) =
+        (None, vec!["--sleep".into(), "300".into()]);
 
+    let exe = sprite_term::test_child_support::ensure_test_child_exe()
+        .expect("compile sprite-test-child helper binary");
     let sprite_term::Spawned {
         mut session,
         mut events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec![
-            "-c".into(),
-            format!("cat {}; sleep 300", path.display()).into(),
-        ],
-    ))
-    .expect("spawn session");
+    } = TerminalSession::spawn(SessionConfig::command(exe.as_os_str(), args))
+        .expect("spawn session");
+    #[cfg(windows)]
+    session
+        .inject_test_vt_output(sequence.as_bytes())
+        .expect("inject graphics sequence");
 
     // Give the child time to print, then ask. The history answer is what the
     // schema is built from.
@@ -130,7 +143,9 @@ fn pane_showing_an_image() -> (HistorySnapshot, String) {
         }
     }
 
-    std::fs::remove_dir_all(&directory).ok();
+    if let Some(directory) = directory {
+        std::fs::remove_dir_all(&directory).ok();
+    }
     (
         snapshot.expect("the pane showed an image within the watchdog"),
         payload,

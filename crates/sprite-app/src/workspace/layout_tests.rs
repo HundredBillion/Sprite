@@ -427,16 +427,16 @@ fn image_workspace(
     // placeholder cells: U+10EEEE followed by the row and column diacritics
     // (U+0305 is 0, U+030D is 1), in the foreground colour that names
     // image 1.
-    let script = r"printf '\033_Ga=T,U=1,f=32,s=1,v=1,i=1,c=2,r=1,q=2;/////w==\033\\\033[38;2;0;0;1m\364\216\273\256\314\205\314\205\364\216\273\256\314\205\314\215\033[39m'; exec sleep 30";
+    #[cfg(not(windows))]
+    let command = {
+        let emit = "\\033_Ga=T,U=1,f=32,s=1,v=1,i=1,c=2,r=1,q=2;/////w==\\033\\\\\\033[38;2;0;0;1m\\364\\216\\273\\256\\314\\205\\314\\205\\364\\216\\273\\256\\314\\205\\314\\215\\033[39m";
+        crate::test_event_pressure::child_command(&["--emit", emit, "--sleep", "30"])
+    };
+    #[cfg(windows)]
+    let command = crate::test_event_pressure::child_command(&["--sleep", "30"]);
     cx.add_window_view(|window, cx| {
         let settings = crate::config::Settings::default();
-        super::Workspace::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
-            settings,
-            None,
-            window,
-            cx,
-        )
+        super::Workspace::new(Some(command), settings, None, window, cx)
     })
 }
 
@@ -472,6 +472,12 @@ fn placeholder_tiles_land_on_this_frames_cells_after_a_scale_change(cx: &mut gpu
     });
     let unfocused = panes.into_iter().find(|pane| *pane != focused).unwrap();
     let view = terminal_view(&workspace, unfocused, cx);
+    #[cfg(windows)]
+    view.update(cx, |view, _| {
+        view.inject_test_vt_output(
+            b"\x1b_Ga=T,U=1,f=32,s=1,v=1,i=1,c=2,r=1,q=2;/////w==\x1b\\\x1b[38;2;0;0;1m\xf4\x8e\xbb\xae\xcc\x85\xcc\x85\xf4\x8e\xbb\xae\xcc\x85\xcc\x8d\x1b[39m",
+        );
+    });
     let executor = cx.executor();
     executor.allow_parking();
     executor.block_test(crate::test_blocking_wait::condition(

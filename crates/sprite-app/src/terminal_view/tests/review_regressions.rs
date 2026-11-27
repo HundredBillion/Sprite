@@ -35,8 +35,8 @@ fn with_view(
     }
 }
 
-fn shell(script: &str) -> Vec<std::ffi::OsString> {
-    vec!["/bin/sh".into(), "-c".into(), script.into()]
+fn shell(args: &[&str]) -> Vec<std::ffi::OsString> {
+    crate::test_event_pressure::child_command(args)
 }
 
 /// An image placed below the text (a negative z-index) is drawn between the
@@ -47,94 +47,136 @@ fn shell(script: &str) -> Vec<std::ffi::OsString> {
 fn an_image_below_the_text_is_drawn_under_the_glyphs_over_it(cx: &mut gpui::TestAppContext) {
     use gpui::DrawnKind;
     gpui::ink_test_glyphs(true);
-    with_view(
-        cx,
-        shell(
-            r"printf '\033_Ga=T,f=32,s=1,v=1,i=1,c=4,r=1,z=-1,C=1,q=2;/////w==\033\\WWWW'; exec sleep 30",
-        ),
-        |view, cx| {
+    #[cfg(not(windows))]
+    let command = shell(&[
+        "--emit",
+        r"\033_Ga=T,f=32,s=1,v=1,i=1,c=4,r=1,z=-1,C=1,q=2;/////w==\033\\WWWW",
+        "--sleep",
+        "30",
+    ]);
+    #[cfg(windows)]
+    let command = shell(&["--emit", "READY", "--sleep", "30"]);
+    with_view(cx, command, |view, cx| {
+        // ConPTY's first paint of its own buffer would blank injected text,
+        // so the letters go in only after that paint has arrived.
+        #[cfg(windows)]
+        {
             wait_for_bundle(view, cx, |bundle| {
                 bundle
-                    .graphics
-                    .as_ref()
-                    .is_some_and(|frame| !frame.placements.is_empty())
-                    && bundle
-                        .render
-                        .rows
-                        .iter()
-                        .any(|row| row.cells.iter().any(|cell| cell.text == "W"))
+                    .pane
+                    .rows
+                    .iter()
+                    .any(|row| row.text.contains("READY"))
             });
-            focus_and_draw(view, cx);
-            let drawn = cx.drawn_primitives();
-            let image = drawn
-                .iter()
-                .position(|primitive| primitive.kind == DrawnKind::PolychromeSprite)
-                .unwrap_or_else(|| panic!("the image is drawn: {drawn:?}"));
-            let over: Vec<usize> = (0..drawn.len())
-                .filter(|&index| {
-                    drawn[index].kind == DrawnKind::MonochromeSprite
-                        && drawn[index].bounds.intersects(&drawn[image].bounds)
-                })
-                .collect();
-            assert!(!over.is_empty(), "letters lie over the image: {drawn:?}");
-            assert!(
-                over.iter().all(|&glyph| glyph > image),
-                "every letter over the image is drawn after it: {drawn:?}"
-            );
-        },
-    );
+            view.update(cx, |view, _| {
+                view.inject_test_vt_output(
+                    b"\x1b_Ga=T,f=32,s=1,v=1,i=1,c=4,r=1,z=-1,C=1,q=2;/////w==\x1b\\WWWW",
+                );
+            });
+        }
+        wait_for_bundle(view, cx, |bundle| {
+            bundle
+                .graphics
+                .as_ref()
+                .is_some_and(|frame| !frame.placements.is_empty())
+                && bundle
+                    .render
+                    .rows
+                    .iter()
+                    .any(|row| row.cells.iter().any(|cell| cell.text == "W"))
+        });
+        focus_and_draw(view, cx);
+        let drawn = cx.drawn_primitives();
+        let image = drawn
+            .iter()
+            .position(|primitive| primitive.kind == DrawnKind::PolychromeSprite)
+            .unwrap_or_else(|| panic!("the image is drawn: {drawn:?}"));
+        let over: Vec<usize> = (0..drawn.len())
+            .filter(|&index| {
+                drawn[index].kind == DrawnKind::MonochromeSprite
+                    && drawn[index].bounds.intersects(&drawn[image].bounds)
+            })
+            .collect();
+        assert!(!over.is_empty(), "letters lie over the image: {drawn:?}");
+        assert!(
+            over.iter().all(|&glyph| glyph > image),
+            "every letter over the image is drawn after it: {drawn:?}"
+        );
+    });
 }
 
 #[gpui::test]
 fn review_fixed_image_matches_requested_columns_at_two_x(cx: &mut gpui::TestAppContext) {
-    with_view(
-        cx,
-        shell(r"printf '\033_Ga=T,f=32,s=1,v=1,i=1,c=10,r=2,q=2;/////w==\033\\'; exec sleep 30"),
-        |view, cx| {
-            cx.simulate_scale_factor(2.0);
-            wait_for_bundle(view, cx, |bundle| {
-                bundle
-                    .graphics
-                    .as_ref()
-                    .is_some_and(|frame| !frame.placements.is_empty())
-            });
-            focus_and_draw(view, cx);
-            let scale = cx.update(|window, _| window.scale_factor());
-            assert_eq!(scale, 2.0);
-            let expected = view.read_with(cx, |view, _| {
-                let placement = &view
-                    .bundle
-                    .as_ref()
-                    .unwrap()
-                    .graphics
-                    .as_ref()
-                    .unwrap()
-                    .placements[0];
-                px(placement.pixel_width as f32 / scale)
-            });
-            let drawn = cx
-                .debug_bounds("review-fixed-image")
-                .expect("fixed image was laid out");
-            eprintln!(
-                "requested 10 columns: expected={expected:?}, drawn={:?}",
-                drawn.size.width
-            );
-            assert!(
-                (f32::from(drawn.size.width) - f32::from(expected)).abs() < 1.0,
-                "physical placement dimensions must be converted to logical pixels"
-            );
-        },
-    );
+    #[cfg(not(windows))]
+    let command = shell(&[
+        "--emit",
+        r"\033_Ga=T,f=32,s=1,v=1,i=1,c=10,r=2,q=2;/////w==\033\\",
+        "--sleep",
+        "30",
+    ]);
+    #[cfg(windows)]
+    let command = shell(&["--sleep", "30"]);
+    with_view(cx, command, |view, cx| {
+        #[cfg(windows)]
+        view.update(cx, |view, _| {
+            view.inject_test_vt_output(b"\x1b_Ga=T,f=32,s=1,v=1,i=1,c=10,r=2,q=2;/////w==\x1b\\");
+        });
+        cx.simulate_scale_factor(2.0);
+        wait_for_bundle(view, cx, |bundle| {
+            bundle
+                .graphics
+                .as_ref()
+                .is_some_and(|frame| !frame.placements.is_empty())
+        });
+        focus_and_draw(view, cx);
+        let scale = cx.update(|window, _| window.scale_factor());
+        assert_eq!(scale, 2.0);
+        let expected = view.read_with(cx, |view, _| {
+            let placement = &view
+                .bundle
+                .as_ref()
+                .unwrap()
+                .graphics
+                .as_ref()
+                .unwrap()
+                .placements[0];
+            px(placement.pixel_width as f32 / scale)
+        });
+        let drawn = cx
+            .debug_bounds("review-fixed-image")
+            .expect("fixed image was laid out");
+        eprintln!(
+            "requested 10 columns: expected={expected:?}, drawn={:?}",
+            drawn.size.width
+        );
+        assert!(
+            (f32::from(drawn.size.width) - f32::from(expected)).abs() < 1.0,
+            "physical placement dimensions must be converted to logical pixels"
+        );
+    });
 }
 
 #[gpui::test]
 fn fixed_image_crop_and_offsets_use_logical_pixels_at_each_scale(cx: &mut gpui::TestAppContext) {
-    let script = format!(
-        "printf '\\033_Ga=T,f=32,s=8,v=6,i=11,c=10,r=2,x=2,y=1,w=4,h=3,X=4,Y=6,q=2;{}\\033\\\\'; exec sleep 30",
-        "/".repeat(256)
-    );
+    let payload = "/".repeat(256);
+    #[cfg(not(windows))]
+    let command = {
+        let emit = format!(
+            "\\033_Ga=T,f=32,s=8,v=6,i=11,c=10,r=2,x=2,y=1,w=4,h=3,X=4,Y=6,q=2;{payload}\\033\\\\"
+        );
+        shell(&["--emit", &emit, "--sleep", "30"])
+    };
+    #[cfg(windows)]
+    let command = shell(&["--sleep", "30"]);
     for scale in [1.0, 2.0] {
-        with_view(cx, shell(&script), |view, cx| {
+        with_view(cx, command.clone(), |view, cx| {
+            #[cfg(windows)]
+            view.update(cx, |view, _| {
+                let raw = format!(
+                    "\x1b_Ga=T,f=32,s=8,v=6,i=11,c=10,r=2,x=2,y=1,w=4,h=3,X=4,Y=6,q=2;{payload}\x1b\\"
+                );
+                view.inject_test_vt_output(raw.as_bytes());
+            });
             cx.simulate_scale_factor(scale);
             wait_for_bundle(view, cx, |bundle| {
                 bundle
@@ -190,7 +232,7 @@ fn fixed_image_crop_and_offsets_use_logical_pixels_at_each_scale(cx: &mut gpui::
 fn review_ime_stays_at_cursor_across_blink(cx: &mut gpui::TestAppContext) {
     with_view(
         cx,
-        shell(r"printf '\033[5;9H\033[?12h'; exec sleep 30"),
+        shell(&["--emit", r"\033[5;9H\033[?12h", "--sleep", "30"]),
         |view, cx| {
             wait_for_bundle(view, cx, |bundle| {
                 bundle.render.cursor.row == 4
@@ -228,8 +270,23 @@ fn review_ime_stays_at_cursor_across_blink(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn review_unchanged_images_reuse_textures_under_collective_pressure(cx: &mut gpui::TestAppContext) {
-    let script = r#"stty -echo; for id in 1 2 3; do printf '\033_Ga=T,f=32,s=1,v=1,i=%s,q=2;/////w==\033\\' "$id"; done; printf READY; while IFS= read -r line; do printf UPDATED; done"#;
-    with_view(cx, shell(script), |view, cx| {
+    #[cfg(not(windows))]
+    let command = shell(&[
+        "--noecho",
+        "--emit",
+        r"\033_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\033\\\033_Ga=T,f=32,s=1,v=1,i=2,q=2;/////w==\033\\\033_Ga=T,f=32,s=1,v=1,i=3,q=2;/////w==\033\\READY",
+        "--on-line-emit",
+        "UPDATED",
+    ]);
+    #[cfg(windows)]
+    let command = shell(&["--noecho", "--on-line-emit", "UPDATED"]);
+    with_view(cx, command, |view, cx| {
+        #[cfg(windows)]
+        view.update(cx, |view, _| {
+            view.inject_test_vt_output(
+                b"\x1b_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\x1b\\\x1b_Ga=T,f=32,s=1,v=1,i=2,q=2;/////w==\x1b\\\x1b_Ga=T,f=32,s=1,v=1,i=3,q=2;/////w==\x1b\\READY",
+            );
+        });
         let initial = wait_for_bundle(view, cx, |bundle| {
             bundle
                 .graphics

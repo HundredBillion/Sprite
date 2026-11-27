@@ -2,27 +2,34 @@ use super::test_support::{capture_logs, capture_perf};
 use super::*;
 
 fn workspace_running<'a>(
-    script: &str,
+    args: &[&str],
     cx: &'a mut gpui::TestAppContext,
 ) -> (gpui::Entity<Workspace>, &'a mut gpui::VisualTestContext) {
-    let script = script.to_owned();
+    let command = crate::test_event_pressure::child_command(args);
     cx.add_window_view(move |window, cx| {
         let settings = crate::config::Settings::default();
-        Workspace::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
-            settings,
-            None,
-            window,
-            cx,
-        )
+        Workspace::new(Some(command), settings, None, window, cx)
     })
 }
 
 #[gpui::test]
 fn a_pane_logs_its_first_output_once(cx: &mut gpui::TestAppContext) {
     let ((), log) = capture_perf(|| {
-        let (workspace, cx) =
-            workspace_running("sleep 0.3; echo one; sleep 0.2; echo two; read release", cx);
+        let (workspace, cx) = workspace_running(
+            &[
+                "--noecho",
+                "--sleep-ms",
+                "300",
+                "--emit",
+                "one\\n",
+                "--sleep-ms",
+                "200",
+                "--emit",
+                "two\\n",
+                "--wait-line",
+            ],
+            cx,
+        );
         // Wait past the second line, so a repeat would have been logged by now.
         let view = workspace.read_with(cx, |workspace, _| {
             workspace
@@ -69,7 +76,7 @@ fn a_pane_logs_its_first_output_once(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn closing_a_pane_logs_how_long_its_cleanup_took(cx: &mut gpui::TestAppContext) {
     let ((), log) = capture_perf(|| {
-        let (workspace, cx) = workspace_running("read release", cx);
+        let (workspace, cx) = workspace_running(&["--noecho", "--wait-line"], cx);
         cx.background_executor.allow_parking();
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.split(Orientation::Vertical, window, cx)
@@ -92,7 +99,7 @@ fn closing_a_pane_logs_how_long_its_cleanup_took(cx: &mut gpui::TestAppContext) 
 fn only_an_applied_reload_logs_its_duration(cx: &mut gpui::TestAppContext) {
     let path = std::env::temp_dir().join(format!("sprite-perf-reload-{}.toml", std::process::id()));
     let ((), log) = capture_perf(|| {
-        let (workspace, cx) = workspace_running("read release", cx);
+        let (workspace, cx) = workspace_running(&["--noecho", "--wait-line"], cx);
         workspace.update(cx, |workspace, _| {
             workspace.config_path = Some(path.clone())
         });
@@ -116,7 +123,7 @@ fn a_reload_logs_the_time_its_panes_take_to_follow_it(cx: &mut gpui::TestAppCont
     ));
     let delay = std::time::Duration::from_millis(200);
     let ((), log) = capture_perf(|| {
-        let (workspace, cx) = workspace_running("read release", cx);
+        let (workspace, cx) = workspace_running(&["--noecho", "--wait-line"], cx);
         workspace.update(cx, |workspace, _| {
             workspace.config_path = Some(path.clone())
         });
@@ -173,7 +180,7 @@ fn beat(cx: &mut gpui::VisualTestContext, duration: std::time::Duration) {
 fn resources_are_sampled_when_panes_change_and_once_a_minute(cx: &mut gpui::TestAppContext) {
     let second = std::time::Duration::from_secs(1);
     let ((), log) = capture_perf(|| {
-        let (workspace, cx) = workspace_running("read release", cx);
+        let (workspace, cx) = workspace_running(&["--noecho", "--wait-line"], cx);
         beat(cx, second);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.split(Orientation::Vertical, window, cx)
@@ -215,7 +222,8 @@ fn resources_are_sampled_when_panes_change_and_once_a_minute(cx: &mut gpui::Test
 #[gpui::test]
 fn the_default_level_records_no_performance_events(cx: &mut gpui::TestAppContext) {
     let ((), log) = capture_logs("sprite_app=warn", || {
-        let (workspace, cx) = workspace_running("echo ready; read release", cx);
+        let (workspace, cx) =
+            workspace_running(&["--noecho", "--emit", "ready\\n", "--wait-line"], cx);
         beat(cx, std::time::Duration::from_secs(61));
         workspace.update(cx, |workspace, cx| workspace.close_window(cx));
     });
@@ -225,7 +233,8 @@ fn the_default_level_records_no_performance_events(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn only_a_paint_over_the_threshold_is_logged(cx: &mut gpui::TestAppContext) {
     let ((), log) = capture_perf(|| {
-        let (workspace, cx) = workspace_running("echo ready; read release", cx);
+        let (workspace, cx) =
+            workspace_running(&["--noecho", "--emit", "ready\\n", "--wait-line"], cx);
         cx.run_until_parked();
         super::test_support::draw_workspace(cx);
         crate::grid_paint::set_slow_paint_for_test(std::time::Duration::ZERO);
@@ -250,7 +259,8 @@ fn only_a_paint_over_the_threshold_is_logged(cx: &mut gpui::TestAppContext) {
     // can exceed.
     crate::grid_paint::set_slow_paint_for_test(std::time::Duration::MAX);
     let ((), quiet) = capture_perf(|| {
-        let (workspace, cx) = workspace_running("echo ready; read release", cx);
+        let (workspace, cx) =
+            workspace_running(&["--noecho", "--emit", "ready\\n", "--wait-line"], cx);
         cx.run_until_parked();
         super::test_support::draw_workspace(cx);
         workspace.update(cx, |workspace, cx| workspace.close_window(cx));

@@ -46,14 +46,16 @@ fn clipboard_writes(count: usize) -> String {
 }
 
 /// A child that waits for one line before writing `writes`, then runs `then`.
-fn on_cue(writes: &str, then: &str) -> SessionConfig {
-    SessionConfig::command(
-        "/bin/sh",
-        vec![
-            "-c".into(),
-            format!("stty -echo; read _; printf '%s' '{writes}'; {then}").into(),
-        ],
-    )
+fn on_cue(writes: &str, then: &[&str]) -> SessionConfig {
+    let mut args = vec![
+        "--noecho".to_owned(),
+        "--wait-line".to_owned(),
+        "--emit".to_owned(),
+        writes.replace('\x1b', "\\033").replace('\x07', "\\007"),
+    ];
+    args.extend(then.iter().map(|s| (*s).to_owned()));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    support::test_child_config(&refs)
 }
 
 /// Focuses the pane, then releases the child: an unfocused pane is denied the
@@ -75,7 +77,7 @@ fn shutdown_retains_accepted_clipboard_writes_without_consumer_progress() {
         mut session,
         mut events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(on_cue(&writes, "sleep 30")).unwrap();
+    } = TerminalSession::spawn(on_cue(&writes, &["--sleep", "30"])).unwrap();
     focus_and_release(&mut session);
     std::thread::sleep(Duration::from_millis(300));
     let handle = session.begin_shutdown().unwrap().unwrap();
@@ -127,11 +129,7 @@ fn every_submission_method_bounds_variable_sized_input() {
         mut session,
         events: _events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec!["-c".into(), "sleep 30".into()],
-    ))
-    .unwrap();
+    } = TerminalSession::spawn(support::test_child_config(&["--sleep", "30"])).unwrap();
     let sender = session.commands();
     let oversized = vec![
         TerminalCommand::Input(vec![b'x'; 16 * 1024 + 1]),
@@ -173,7 +171,7 @@ fn resumed_consumer_receives_all_clipboard_writes_in_order() {
         mut session,
         mut events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(on_cue(&writes, "sleep 0.2; exit 7")).unwrap();
+    } = TerminalSession::spawn(on_cue(&writes, &["--sleep-ms", "200", "--exit", "7"])).unwrap();
     focus_and_release(&mut session);
     std::thread::sleep(Duration::from_millis(100));
     let mut received = Vec::new();
@@ -196,7 +194,7 @@ fn dropping_the_consumer_releases_event_pressure() {
         mut session,
         events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(on_cue(&writes, "sleep 30")).unwrap();
+    } = TerminalSession::spawn(on_cue(&writes, &["--sleep", "30"])).unwrap();
     focus_and_release(&mut session);
     std::thread::sleep(Duration::from_millis(300));
     drop(events);
@@ -219,7 +217,7 @@ fn natural_exit_releases_event_pressure_before_shutdown_is_requested() {
         mut session,
         mut events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(on_cue(&writes, "exit 7")).unwrap();
+    } = TerminalSession::spawn(on_cue(&writes, &["--exit", "7"])).unwrap();
     focus_and_release(&mut session);
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -281,7 +279,7 @@ fn input_is_admitted_while_every_output_permit_is_outstanding() {
         mut session,
         events,
         snapshots: _snapshots,
-    } = TerminalSession::spawn(on_cue(&writes, "yes")).unwrap();
+    } = TerminalSession::spawn(on_cue(&writes, &["--yes", "y"])).unwrap();
     focus_and_release(&mut session);
     // The flood has begun once the first clipboard write arrives: the worker
     // has taken the release, and the ninety-nine writes left unread are more

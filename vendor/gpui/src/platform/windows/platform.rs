@@ -4,7 +4,7 @@ use std::{
     mem::ManuallyDrop,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 
 use ::util::{ResultExt, paths::SanitizedPath};
@@ -31,6 +31,7 @@ use crate::*;
 pub(crate) struct WindowsPlatform {
     inner: Rc<WindowsPlatformInner>,
     raw_window_handles: Arc<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    vsync_hub: Arc<VSyncHub>,
     // The below members will never change throughout the entire lifecycle of the app.
     icon: HICON,
     background_executor: BackgroundExecutor,
@@ -45,9 +46,103 @@ pub(crate) struct WindowsPlatform {
 struct WindowsPlatformInner {
     state: RefCell<WindowsPlatformState>,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    vsync_hub: std::sync::Weak<VSyncHub>,
     // The below members will never change throughout the entire lifecycle of the app.
     validation_number: usize,
     main_receiver: flume::Receiver<Runnable>,
+}
+
+pub(crate) struct VSyncHub {
+    state: Mutex<VSyncWindows>,
+    condvar: Condvar,
+}
+
+#[derive(Default)]
+struct VSyncWindows {
+    windows: Vec<(SafeHwnd, bool)>,
+    shutdown: bool,
+}
+
+impl VSyncHub {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new(VSyncWindows::default()),
+            condvar: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, VSyncWindows> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn register_window(&self, hwnd: SafeHwnd) {
+        let mut state = self.lock();
+        if let Some((_, active)) = state
+            .windows
+            .iter_mut()
+            .find(|(entry, _)| entry.as_raw() == hwnd.as_raw())
+        {
+            *active = true;
+        } else {
+            state.windows.push((hwnd, true));
+        }
+        self.condvar.notify_one();
+    }
+
+    pub(crate) fn unregister_window(&self, hwnd: SafeHwnd) {
+        let mut state = self.lock();
+        if let Some(index) = state
+            .windows
+            .iter()
+            .position(|(entry, _)| entry.as_raw() == hwnd.as_raw())
+        {
+            state.windows.swap_remove(index);
+        }
+    }
+
+    pub(crate) fn set_frame_delivery(&self, hwnd: SafeHwnd, active: bool) {
+        let mut state = self.lock();
+        let was_any_active = state.windows.iter().any(|(_, is_active)| *is_active);
+        if let Some((_, window_active)) = state
+            .windows
+            .iter_mut()
+            .find(|(entry, _)| entry.as_raw() == hwnd.as_raw())
+        {
+            *window_active = active;
+            if active && !was_any_active {
+                self.condvar.notify_one();
+            }
+        }
+    }
+
+    pub(crate) fn wait_until_active(&self) -> bool {
+        let state = self.lock();
+        let state = self
+            .condvar
+            .wait_while(state, |state| {
+                !state.shutdown && !state.windows.iter().any(|(_, active)| *active)
+            })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.shutdown
+    }
+
+    pub(crate) fn collect_active_windows(&self, out: &mut Vec<SafeHwnd>) {
+        out.clear();
+        let state = self.lock();
+        out.extend(
+            state
+                .windows
+                .iter()
+                .filter_map(|(hwnd, active)| active.then_some(*hwnd)),
+        );
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.lock().shutdown = true;
+        self.condvar.notify_all();
+    }
 }
 
 pub(crate) struct WindowsPlatformState {
@@ -100,6 +195,7 @@ impl WindowsPlatform {
             rand::random::<u32>() as usize
         };
         let raw_window_handles = Arc::new(RwLock::new(SmallVec::new()));
+        let vsync_hub = Arc::new(VSyncHub::new());
         let text_system = Arc::new(
             DirectWriteTextSystem::new(&directx_devices)
                 .context("Error creating DirectWriteTextSystem")?,
@@ -108,6 +204,7 @@ impl WindowsPlatform {
         let mut context = PlatformWindowCreateContext {
             inner: None,
             raw_window_handles: Arc::downgrade(&raw_window_handles),
+            vsync_hub: Arc::downgrade(&vsync_hub),
             validation_number,
             main_receiver: Some(main_receiver),
             directx_devices: Some(directx_devices),
@@ -151,6 +248,7 @@ impl WindowsPlatform {
             inner,
             handle,
             raw_window_handles,
+            vsync_hub,
             icon,
             background_executor,
             foreground_executor,
@@ -191,6 +289,7 @@ impl WindowsPlatform {
             platform_window_handle: self.handle,
             disable_direct_composition: self.disable_direct_composition,
             directx_devices: (*self.inner.state.borrow().directx_devices).clone(),
+            vsync_hub: Arc::downgrade(&self.vsync_hub),
         }
     }
 
@@ -242,12 +341,19 @@ impl WindowsPlatform {
         let platform_window: SafeHwnd = self.handle.into();
         let validation_number = self.inner.validation_number;
         let all_windows = Arc::downgrade(&self.raw_window_handles);
+        let vsync_hub = Arc::downgrade(&self.vsync_hub);
         let text_system = Arc::downgrade(&self.text_system);
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
-                loop {
+                let mut active_windows = Vec::new();
+                while let Some(hub) = vsync_hub.upgrade() {
+                    if !hub.wait_until_active() {
+                        break;
+                    }
+                    drop(hub);
+
                     vsync_provider.wait_for_vsync();
                     if check_device_lost(&directx_device.device) {
                         handle_gpu_device_lost(
@@ -258,10 +364,12 @@ impl WindowsPlatform {
                             &text_system,
                         );
                     }
-                    let Some(all_windows) = all_windows.upgrade() else {
+                    let Some(hub) = vsync_hub.upgrade() else {
                         break;
                     };
-                    for hwnd in all_windows.read().iter() {
+                    hub.collect_active_windows(&mut active_windows);
+                    drop(hub);
+                    for &hwnd in &active_windows {
                         unsafe {
                             let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
                         }
@@ -413,6 +521,7 @@ impl Platform for WindowsPlatform {
         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
         let handle = window.get_raw_handle();
         self.raw_window_handles.write().push(handle.into());
+        self.vsync_hub.register_window(handle.into());
 
         Ok(Box::new(window))
     }
@@ -682,6 +791,7 @@ impl WindowsPlatformInner {
         Ok(Rc::new(Self {
             state,
             raw_window_handles: context.raw_window_handles.clone(),
+            vsync_hub: context.vsync_hub.clone(),
             validation_number: context.validation_number,
             main_receiver: context.main_receiver.take().unwrap(),
         }))
@@ -730,6 +840,9 @@ impl WindowsPlatformInner {
     }
 
     fn close_one_window(&self, target_window: HWND) -> bool {
+        if let Some(vsync_hub) = self.vsync_hub.upgrade() {
+            vsync_hub.unregister_window(target_window.into());
+        }
         let Some(all_windows) = self.raw_window_handles.upgrade() else {
             log::error!("Failed to upgrade raw window handles");
             return false;
@@ -798,6 +911,7 @@ impl WindowsPlatformInner {
 
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
+        self.vsync_hub.shutdown();
         unsafe {
             DestroyWindow(self.handle)
                 .context("Destroying platform window")
@@ -826,11 +940,13 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) platform_window_handle: HWND,
     pub(crate) disable_direct_composition: bool,
     pub(crate) directx_devices: DirectXDevices,
+    pub(crate) vsync_hub: std::sync::Weak<VSyncHub>,
 }
 
 struct PlatformWindowCreateContext {
     inner: Option<Result<Rc<WindowsPlatformInner>>>,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    vsync_hub: std::sync::Weak<VSyncHub>,
     validation_number: usize,
     main_receiver: Option<flume::Receiver<Runnable>>,
     directx_devices: Option<DirectXDevices>,

@@ -43,7 +43,9 @@ fn an_unrelated_error_neither_fails_nor_shifts_waiting_history_requests(
     let (sender, _exits) = async_channel::unbounded();
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()]),
+            Some(crate::test_event_pressure::child_command(&[
+                "--sleep", "30",
+            ])),
             settings,
             Vec::new(),
             Some(PaneLink {
@@ -121,7 +123,7 @@ fn a_capture_waiting_on_a_session_that_ends_fails_at_once(cx: &mut gpui::TestApp
     let (sender, _exits) = async_channel::unbounded();
     let (_view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(vec!["/bin/sh".into(), "-c".into(), "sleep 1".into()]),
+            Some(crate::test_event_pressure::child_command(&["--sleep", "1"])),
             settings,
             Vec::new(),
             Some(PaneLink {
@@ -142,9 +144,10 @@ fn a_capture_waiting_on_a_session_that_ends_fails_at_once(cx: &mut gpui::TestApp
     // Its events are never read, so whatever it answers never reaches the
     // registry; the request can only be resolved by the pane's own session
     // ending.
+    let exe = crate::test_event_pressure::child_program();
     let stand_in = TerminalSession::spawn(SessionConfig::command(
-        "/bin/sh",
-        vec!["-c".into(), "exec sleep 30".into()],
+        exe.as_os_str(),
+        vec!["--sleep".into(), "30".into()],
     ))
     .expect("spawn the stand-in session");
     panes.register(PaneId(0), TabId(0), stand_in.session.commands());

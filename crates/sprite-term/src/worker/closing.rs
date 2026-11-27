@@ -1,5 +1,5 @@
 use super::*;
-use crate::pty_unix::GroupSignal;
+use crate::pty::GroupSignal;
 use std::ffi::OsStr;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
@@ -114,10 +114,10 @@ impl Escalation {
 
 /// Sends whatever is due and reports where escalation then stands.
 fn escalate(
-    processes: &mut pty_unix::SessionProcesses,
+    processes: &mut pty::SessionProcesses,
     escalation: Escalation,
     requested: Option<Duration>,
-    signal_processes: &mut impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
+    signal_processes: &mut impl FnMut(&mut pty::SessionProcesses, &GroupSignal) -> bool,
 ) -> Escalation {
     let Some(signal) = escalation.due(requested) else {
         return escalation;
@@ -126,27 +126,26 @@ fn escalate(
     escalation.after(signal, attempted)
 }
 
-pub(super) fn close(runtime: Runtime) -> Option<pty_unix::SessionProcesses> {
-    close_with_signal(runtime, pty_unix::SessionProcesses::signal)
+pub(super) fn close(runtime: Runtime) -> Option<pty::SessionProcesses> {
+    close_with_signal(runtime, pty::SessionProcesses::signal)
 }
 
 fn close_with_signal(
     runtime: Runtime,
-    signal_processes: impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
-) -> Option<pty_unix::SessionProcesses> {
+    signal_processes: impl FnMut(&mut pty::SessionProcesses, &GroupSignal) -> bool,
+) -> Option<pty::SessionProcesses> {
     close_with_signal_since(runtime, signal_processes, Instant::now())
 }
 
 fn close_with_signal_since(
     runtime: Runtime,
-    mut signal_processes: impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
+    mut signal_processes: impl FnMut(&mut pty::SessionProcesses, &GroupSignal) -> bool,
     closing_started: Instant,
-) -> Option<pty_unix::SessionProcesses> {
+) -> Option<pty::SessionProcesses> {
     let Runtime {
         started:
             Started {
                 master,
-                master_fd: _,
                 process_group,
                 mut processes,
                 waiter,
@@ -176,9 +175,7 @@ fn close_with_signal_since(
     // relative to the request rather than to the child's exit.
     let mut requested_at: Option<Instant> = None;
     let mut logged_pending_worker = false;
-    let session = processes
-        .as_ref()
-        .map(pty_unix::SessionProcesses::session_id);
+    let session = processes.as_ref().map(pty::SessionProcesses::session_id);
     let trace = ShutdownTrace::new(closing_started, session, process_group);
 
     loop {
@@ -343,20 +340,20 @@ fn close_with_signal_since(
     }
 }
 
-pub(crate) fn finish_shutdown(processes: pty_unix::SessionProcesses, requested_at: Instant) {
+pub(crate) fn finish_shutdown(processes: pty::SessionProcesses, requested_at: Instant) {
     finish_shutdown_with(
         processes,
         requested_at,
-        pty_unix::SessionProcesses::signal,
-        pty_unix::SessionProcesses::is_alive,
+        pty::SessionProcesses::signal,
+        pty::SessionProcesses::is_alive,
     );
 }
 
 fn finish_shutdown_with(
-    mut processes: pty_unix::SessionProcesses,
+    mut processes: pty::SessionProcesses,
     requested_at: Instant,
-    mut signal_processes: impl FnMut(&mut pty_unix::SessionProcesses, &GroupSignal) -> bool,
-    mut is_alive: impl FnMut(&mut pty_unix::SessionProcesses) -> bool,
+    mut signal_processes: impl FnMut(&mut pty::SessionProcesses, &GroupSignal) -> bool,
+    mut is_alive: impl FnMut(&mut pty::SessionProcesses) -> bool,
 ) {
     let session = Some(processes.session_id());
     let trace = ShutdownTrace::new(requested_at, session, session);
@@ -446,9 +443,8 @@ mod tests {
         Runtime {
             started: Started {
                 master: pair.master,
-                master_fd: -1,
                 process_group: None,
-                processes: pty_unix::SessionProcesses::capture(i32::MAX as u32),
+                processes: pty::SessionProcesses::for_test(i32::MAX),
                 waiter: std::thread::spawn(|| {}),
             },
             pump: None,

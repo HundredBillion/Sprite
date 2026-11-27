@@ -317,12 +317,34 @@ fn non_utf8_cli_commands_reach_session_config_unchanged() {
 
 #[test]
 fn padded_preferences_normalize_while_arguments_and_names_remain_verbatim() {
-    let text = "[font]\nfamily = '  Fira Code  '\n[shell]\nprogram = ' /bin/sh '\nstartup_directory = ' /tmp '\nargs = [' -i ', '']\n[colors.tokens]\n' token ' = '#010203'\n[highlights]\n' group ' = { bold = true }\n";
-    let (settings, complaints) = Settings::parse_candidate(text).unwrap();
+    #[cfg(unix)]
+    let (program, startup_directory) = ("/bin/sh".to_owned(), "/tmp".to_owned());
+    #[cfg(windows)]
+    let (program, startup_directory) = (
+        sprite_term::SessionConfig::login_shell()
+            .expect("resolve Windows login shell")
+            .program
+            .into_os_string()
+            .into_string()
+            .expect("UTF-8 Windows shell path"),
+        std::env::temp_dir()
+            .into_os_string()
+            .into_string()
+            .expect("UTF-8 temp directory"),
+    );
+    let quoted_program = quote(&format!(" {program} "));
+    let quoted_directory = quote(&format!(" {startup_directory} "));
+    let text = format!(
+        "[font]\nfamily = '  Fira Code  '\n[shell]\nprogram = {quoted_program}\nstartup_directory = {quoted_directory}\nargs = [' -i ', '']\n[colors.tokens]\n' token ' = '#010203'\n[highlights]\n' group ' = {{ bold = true }}\n"
+    );
+    let (settings, complaints) = Settings::parse_candidate(&text).unwrap();
     assert!(complaints.0.is_empty());
     assert_eq!(settings.font.family.as_deref(), Some("Fira Code"));
-    assert_eq!(settings.shell.program.as_deref(), Some("/bin/sh"));
-    assert_eq!(settings.shell.startup_directory.as_deref(), Some("/tmp"));
+    assert_eq!(settings.shell.program.as_deref(), Some(program.as_str()));
+    assert_eq!(
+        settings.shell.startup_directory.as_deref(),
+        Some(startup_directory.as_str())
+    );
     assert_eq!(settings.shell.args, Some(vec![" -i ".into(), "".into()]));
     assert_eq!(settings.colors.tokens[0].0, " token ");
     assert!(settings.highlights.get(" group ").is_some());
@@ -332,8 +354,12 @@ fn padded_preferences_normalize_while_arguments_and_names_remain_verbatim() {
     );
     let (session, refused) =
         sprite_term::SessionConfig::shell(&settings.shell.session_preference()).unwrap();
-    assert!(refused.is_empty());
-    assert_eq!(session.program, std::path::Path::new("/bin/sh"));
+    assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(session.program, std::path::Path::new(&program));
+    assert_eq!(
+        session.working_directory.as_deref(),
+        Some(std::path::Path::new(&startup_directory))
+    );
     assert_eq!(
         session.args,
         vec![

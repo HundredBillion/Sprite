@@ -10,19 +10,15 @@
 
 mod support;
 
-use std::ffi::OsString;
-
-use sprite_term::{PromptKind, SessionConfig, TerminalCommand, TerminalEvent, TerminalSession};
+use sprite_term::{PromptKind, TerminalCommand, TerminalEvent, TerminalSession};
 
 use support::{EventPump, SnapshotPump, pane_text};
 
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
-
-fn session(script: &str) -> sprite_term::Spawned {
-    TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session")
+fn session(emit: &str) -> sprite_term::Spawned {
+    TerminalSession::spawn(support::test_child_config(&[
+        "--emit", emit, "--sleep", "30",
+    ]))
+    .expect("spawn session")
 }
 
 /// A title set with OSC 2 reaches both the snapshot and a typed event.
@@ -32,7 +28,7 @@ fn the_title_is_reported() {
         session: _session,
         events,
         snapshots,
-    } = session("printf '\\033]2;my-title\\007'; printf 'DONE\\n'; sleep 30");
+    } = session("\\033]2;my-title\\007DONE\\n");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -51,7 +47,7 @@ fn the_working_directory_is_reported() {
         session: _session,
         events,
         snapshots,
-    } = session("printf '\\033]7;file:///tmp\\007'; printf 'DONE\\n'; sleep 30");
+    } = session("\\033]7;file:///tmp\\007DONE\\n");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -78,7 +74,7 @@ fn metadata_is_unknown_when_the_shell_says_nothing() {
         session: _session,
         events,
         snapshots,
-    } = session("printf 'just some output\\n'; sleep 30");
+    } = session("just some output\\n");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();
@@ -115,9 +111,7 @@ fn prompt_marks_are_reported_per_row() {
         events,
         snapshots,
     } = session(
-        "printf '\\033]133;A\\007'; printf 'prompt$ '; printf '\\033]133;B\\007'; \
-         printf 'ls\\n'; printf '\\033]133;C\\007'; printf 'output-line\\n'; \
-         printf 'DONE\\n'; sleep 30",
+        "\\033]133;A\\007prompt$ \\033]133;B\\007ls\\n\\033]133;C\\007output-line\\nDONE\\n",
     );
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
@@ -172,7 +166,7 @@ fn a_bell_is_reported_as_an_event() {
         mut session,
         events,
         snapshots,
-    } = session("printf 'ring\\007'; printf 'DONE\\n'; sleep 30");
+    } = session("ring\\007DONE\\n");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

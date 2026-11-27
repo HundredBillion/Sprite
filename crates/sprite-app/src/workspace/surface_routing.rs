@@ -183,7 +183,7 @@ mod tests {
                 cleanup.await;
             }
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.serve_surface_request(SurfaceRequest::Open {
@@ -206,7 +206,7 @@ mod tests {
         let pane = workspace.read_with(cx, |workspace, _| {
             workspace.tabs.active().unwrap().focus().unwrap()
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.serve_surface_request(crate::surface::channel::SurfaceRequest::Open {
@@ -252,7 +252,7 @@ mod tests {
         let pane = workspace.read_with(cx, |workspace, _| {
             workspace.tabs.active().unwrap().focus().unwrap()
         });
-        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.serve_surface_request(crate::surface::channel::SurfaceRequest::Open {
@@ -272,7 +272,12 @@ mod tests {
         draw_workspace(cx);
         let split = focused_handle(&workspace, cx);
         cx.update(|window, _| assert!(split.is_focused(window)));
-        for (back, away) in [("cmd-[", "cmd-]"), ("ctrl-shift-left", "ctrl-shift-right")] {
+        let bindings: &[(&str, &str)] = if cfg!(target_os = "windows") {
+            &[("ctrl-shift-left", "ctrl-shift-right")]
+        } else {
+            &[("cmd-[", "cmd-]"), ("ctrl-shift-left", "ctrl-shift-right")]
+        };
+        for &(back, away) in bindings {
             cx.simulate_keystrokes(back);
             draw_workspace(cx);
             cx.update(|window, _| {
@@ -286,15 +291,20 @@ mod tests {
             cx.update(|window, _| assert!(split.is_focused(window)));
         }
 
+        let (back, away) = if cfg!(target_os = "windows") {
+            ("ctrl-shift-left", "ctrl-shift-right")
+        } else {
+            ("cmd-[", "cmd-]")
+        };
         // The terminal is remembered the same way when it held the keyboard.
-        cx.simulate_keystrokes("cmd-[");
+        cx.simulate_keystrokes(back);
         draw_workspace(cx);
         cx.simulate_keystrokes("ctrl-shift-space");
         draw_workspace(cx);
         cx.update(|window, _| assert!(terminal_focus.is_focused(window)));
-        cx.simulate_keystrokes("cmd-]");
+        cx.simulate_keystrokes(away);
         draw_workspace(cx);
-        cx.simulate_keystrokes("cmd-[");
+        cx.simulate_keystrokes(back);
         draw_workspace(cx);
         cx.update(|window, _| assert!(terminal_focus.is_focused(window)));
 
@@ -303,7 +313,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-shift-space");
         draw_workspace(cx);
         cx.update(|window, _| assert!(surface_focus.is_focused(window)));
-        cx.simulate_keystrokes("cmd-]");
+        cx.simulate_keystrokes(away);
         draw_workspace(cx);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.serve_surface_request(
@@ -316,7 +326,7 @@ mod tests {
             );
         });
         draw_workspace(cx);
-        cx.simulate_keystrokes("cmd-[");
+        cx.simulate_keystrokes(back);
         draw_workspace(cx);
         cx.update(|window, _| assert!(terminal_focus.is_focused(window)));
     }
@@ -346,7 +356,7 @@ mod tests {
             (pane, Refusal::NotATerminal),
             (PaneId(u64::MAX), Refusal::UnknownPane),
         ] {
-            let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let (stream, _peer) = crate::local_socket::LocalStream::pair().unwrap();
             let (reply, receiver) = std::sync::mpsc::sync_channel(1);
             workspace.update_in(cx, |workspace, window, cx| {
                 workspace.serve_surface_request(

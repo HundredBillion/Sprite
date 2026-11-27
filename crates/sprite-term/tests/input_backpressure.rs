@@ -11,14 +11,8 @@
 
 mod support;
 
-use std::ffi::OsString;
-
-use sprite_term::{SessionConfig, TerminalCommand, TerminalSession};
+use sprite_term::{TerminalCommand, TerminalSession};
 use support::{EventPump, SnapshotPump, pane_text};
-
-fn args(values: &[&str]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
-}
 
 /// The largest counter the child has printed so far.
 fn highest_count(text: &str) -> u64 {
@@ -40,14 +34,19 @@ fn input_the_child_is_not_reading_does_not_stall_its_output() {
     // program or a line editor would leave the tty: a canonical queue that
     // overflows is discarded, but a raw one fills and then blocks the writer.
     // `-echo` so what piles up is the input itself rather than the tty's copy.
-    let script = "stty -icanon -echo min 1 time 0; i=0; \
-                  while :; do i=$((i+1)); printf 'ALIVE%s\\n' $i; sleep 0.02; done";
     let sprite_term::Spawned {
         mut session,
         events,
         snapshots,
-    } = TerminalSession::spawn(SessionConfig::command("/bin/sh", args(&["-c", script])))
-        .expect("spawn session");
+    } = TerminalSession::spawn(support::test_child_config(&[
+        "--raw-noecho",
+        "--seq-prefix-ms",
+        "ALIVE",
+        "1",
+        "1000000",
+        "20",
+    ]))
+    .expect("spawn session");
     let events = EventPump::new(events);
     let snapshots = SnapshotPump::new(snapshots);
     events.expect_ready();

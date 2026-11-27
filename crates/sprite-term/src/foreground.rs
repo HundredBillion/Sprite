@@ -6,17 +6,21 @@
 //! output would answer late, and a confirmation that appears after the pane has
 //! closed is no confirmation at all.
 //!
-//! So it is answered from the kernel instead. Every terminal has a foreground
-//! process group — the one that receives a Ctrl+C.
-//! The initial group is idle only while its leader is a recognized shell.
-//! A directly launched application or an application replacing the shell with
-//! `exec` keeps that group, so group equality alone cannot mean idle.
-//! The kernel's current program name distinguishes them without the worker.
+//! On Unix this is answered from the kernel's foreground process group and
+//! basename-only process name. On Windows it inspects the session's Job Object
+//! and basename-only image names, ignoring ConPTY console host helpers.
 
+#[cfg(unix)]
 use std::os::fd::{OwnedFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
+#[cfg(windows)]
+use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::pty_unix;
+use portable_pty::MasterPty;
+
+use crate::pty;
 
 /// What is in the foreground of a pane's terminal.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,6 +51,7 @@ impl ForegroundState {
     }
 }
 
+#[cfg(unix)]
 struct Attached {
     /// A private duplicate, so the question survives the worker's own copy.
     master: OwnedFd,
@@ -54,6 +59,14 @@ struct Attached {
     initial_group: i32,
     /// The name the child carries until its own program replaces it.
     spawner_name: Option<String>,
+}
+
+#[cfg(windows)]
+struct Attached {
+    /// The session's Job Object handle.
+    job: Arc<OwnedHandle>,
+    /// The initial shell PID placed in the job.
+    initial_pid: u32,
 }
 
 /// A handle on the "what is running" question for one pane.
@@ -68,14 +81,42 @@ pub struct ForegroundWatch {
 }
 
 impl ForegroundWatch {
-    /// Called once by the worker, as soon as the PTY and child exist.
-    ///
-    /// A session whose child has no process group is left unattached, and
-    /// answers `Unknown` forever — which is honest: without the group there is
-    /// nothing to compare against.
-    ///
-    /// `spawner_name` is the name a forked child inherits, read on the thread
-    /// that spawned it.
+    /// Attaches the running session's kernel handle for foreground inspection.
+    pub(crate) fn attach_session(
+        &self,
+        master: &(dyn MasterPty + Send),
+        processes: Option<&pty::SessionProcesses>,
+        initial_group: Option<i32>,
+        spawner_name: Option<String>,
+    ) {
+        #[cfg(unix)]
+        {
+            let _ = processes;
+            if let Some(master_fd) = master.as_raw_fd() {
+                self.attach(master_fd, initial_group, spawner_name);
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = (master, spawner_name);
+            let Some(processes) = processes else {
+                return;
+            };
+            let Some(initial_pid) = initial_group.and_then(|pid| u32::try_from(pid).ok()) else {
+                return;
+            };
+            let mut attached = self.lock();
+            if attached.is_none() {
+                *attached = Some(Attached {
+                    job: processes.job_handle(),
+                    initial_pid,
+                });
+            }
+        }
+    }
+
+    /// Called once by the worker on Unix, as soon as the PTY and child exist.
+    #[cfg(unix)]
     pub(crate) fn attach(
         &self,
         master_fd: RawFd,
@@ -85,7 +126,7 @@ impl ForegroundWatch {
         let Some(initial_group) = initial_group else {
             return;
         };
-        let Some(master) = pty_unix::duplicate(master_fd) else {
+        let Some(master) = pty::duplicate(master_fd) else {
             return;
         };
         let mut attached = self.lock();
@@ -99,11 +140,6 @@ impl ForegroundWatch {
     }
 
     /// Closes the private duplicate once the session has ended.
-    ///
-    /// Held any longer, it keeps the PTY master open after the worker has
-    /// closed its own, and an Ordinary Session Job still holding the terminal is never
-    /// told it hung up. Afterwards the pane answers `Unknown`, which is all an
-    /// ended session can honestly say.
     pub(crate) fn detach(&self) {
         let detached = self.lock().take();
         drop(detached);
@@ -115,53 +151,85 @@ impl ForegroundWatch {
 
     /// Asks the kernel what is in the foreground of this pane, right now.
     pub fn state(&self) -> ForegroundState {
-        // The master is asked under the lock, which is what keeps `detach`
-        // from closing it mid-call; what follows needs only the answer.
-        let (group, initial_group, spawner_name) = match self.lock().as_ref() {
-            Some(attached) => (
-                pty_unix::foreground_group(&attached.master),
-                attached.initial_group,
-                attached.spawner_name.clone(),
-            ),
-            None => return ForegroundState::Unknown,
-        };
-        let Some(group) = group else {
-            return ForegroundState::Unknown;
-        };
-        // A group the terminal still names but nothing is left in belongs to a
-        // program that has already finished; there is nothing to lose by
-        // closing.
-        if !pty_unix::group_is_alive(group) {
-            return ForegroundState::Idle;
-        }
-        let program = executable_name(group);
-        if group == initial_group {
-            // Linux renames a process late in exec, after `spawn` has already
-            // returned, so a just-opened pane can still carry its starter's
-            // name. Its program has not run yet, so there is nothing to lose.
-            if program.is_some() && program == spawner_name {
-                return ForegroundState::Unknown;
-            }
-            // Shell names are a prompt heuristic, not a process-identity guarantee.
-            // Unrecognized shells ask before closing rather than risking unsaved work.
-            return match program.as_deref() {
-                Some(
-                    "sh" | "bash" | "dash" | "zsh" | "fish" | "ksh" | "mksh" | "pdksh" | "ash"
-                    | "csh" | "tcsh" | "nu" | "xonsh" | "elvish" | "ion",
-                ) => ForegroundState::Idle,
-                Some(_) => ForegroundState::Busy(program),
-                None => ForegroundState::Unknown,
+        #[cfg(unix)]
+        {
+            let (group, initial_group, spawner_name) = match self.lock().as_ref() {
+                Some(attached) => (
+                    pty::foreground_group(&attached.master),
+                    attached.initial_group,
+                    attached.spawner_name.clone(),
+                ),
+                None => return ForegroundState::Unknown,
             };
+            let Some(group) = group else {
+                return ForegroundState::Unknown;
+            };
+            if !pty::group_is_alive(group) {
+                return ForegroundState::Idle;
+            }
+            let program = executable_name(group);
+            if group == initial_group {
+                if program.is_some() && program == spawner_name {
+                    return ForegroundState::Unknown;
+                }
+                return match program.as_deref() {
+                    Some(name) if is_recognized_shell(name) => ForegroundState::Idle,
+                    Some(_) => ForegroundState::Busy(program),
+                    None => ForegroundState::Unknown,
+                };
+            }
+            ForegroundState::Busy(program)
         }
-        ForegroundState::Busy(program)
+        #[cfg(windows)]
+        {
+            let (job, initial_pid) = match self.lock().as_ref() {
+                Some(attached) => (Arc::clone(&attached.job), attached.initial_pid),
+                None => return ForegroundState::Unknown,
+            };
+            let Some(pids) = pty::job_process_ids(&job) else {
+                return ForegroundState::Unknown;
+            };
+            let mut active: Vec<(u32, Option<String>)> = Vec::new();
+            for pid in pids {
+                let name = i32::try_from(pid).ok().and_then(executable_name);
+                if name.as_deref().is_some_and(is_windows_console_helper) {
+                    continue;
+                }
+                active.push((pid, name));
+            }
+            if active.is_empty() {
+                return ForegroundState::Idle;
+            }
+            if let Some((_, child_name)) = active.iter().rev().find(|(pid, _)| *pid != initial_pid)
+            {
+                return ForegroundState::Busy(child_name.clone());
+            }
+            match active.first().and_then(|(_, name)| name.as_deref()) {
+                Some(name) if is_recognized_shell(name) => ForegroundState::Idle,
+                Some(name) => ForegroundState::Busy(Some(name.to_owned())),
+                None => ForegroundState::Unknown,
+            }
+        }
     }
 
     /// Returns the process group when `pid` owns this pane's foreground.
     pub fn owner_group(&self, pid: u32) -> Option<i32> {
-        // Asked under the lock, so `detach` cannot close the master mid-call.
-        let foreground = pty_unix::foreground_group(&self.lock().as_ref()?.master)?;
-        let candidate = pty_unix::process_group_of(pid)?;
-        (foreground == candidate).then_some(candidate)
+        #[cfg(unix)]
+        {
+            let foreground = pty::foreground_group(&self.lock().as_ref()?.master)?;
+            let candidate = pty::process_group_of(pid)?;
+            (foreground == candidate).then_some(candidate)
+        }
+        #[cfg(windows)]
+        {
+            let (job, initial_pid) = self
+                .lock()
+                .as_ref()
+                .map(|attached| (Arc::clone(&attached.job), attached.initial_pid))?;
+            pty::is_process_in_job(&job, pid)
+                .then(|| i32::try_from(initial_pid).ok())
+                .flatten()
+        }
     }
 }
 
@@ -174,13 +242,42 @@ impl std::fmt::Debug for ForegroundWatch {
     }
 }
 
+fn is_recognized_shell(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    matches!(
+        stem,
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "ksh"
+            | "mksh"
+            | "pdksh"
+            | "ash"
+            | "csh"
+            | "tcsh"
+            | "nu"
+            | "xonsh"
+            | "elvish"
+            | "ion"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+    )
+}
+
+#[cfg(windows)]
+fn is_windows_console_helper(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "conhost.exe" | "openconsole.exe"
+    )
+}
+
 /// The basename of a process, and nothing else about it.
-///
-/// The kernel's answer, per platform, and deliberately only the name: see
-/// `pty_unix::process_name` for why the arguments and environment beside it
-/// are never read.
 fn executable_name(pid: i32) -> Option<String> {
-    pty_unix::process_name(pid)
+    pty::process_name(pid)
 }
 
 #[cfg(test)]
@@ -199,6 +296,7 @@ mod tests {
         assert_eq!(watch.owner_group(std::process::id()), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shell_without_a_group_stays_unattached() {
         let watch = ForegroundWatch::default();
@@ -215,6 +313,25 @@ mod tests {
         assert_eq!(ForegroundState::Idle.program(), None);
     }
 
+    #[test]
+    fn recognized_shells_cover_unix_and_windows_executables() {
+        for shell in [
+            "sh",
+            "bash",
+            "zsh",
+            "pwsh.exe",
+            "powershell.exe",
+            "cmd.exe",
+            "nu.exe",
+        ] {
+            assert!(is_recognized_shell(shell), "{shell} should be recognized");
+        }
+        for app in ["vim", "nvim.exe", "cargo.exe", "python3"] {
+            assert!(!is_recognized_shell(app), "{app} should not be a shell");
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn detaching_closes_the_private_duplicate() {
         use std::io::Read;
@@ -238,6 +355,7 @@ mod tests {
         assert_eq!(watch.state(), ForegroundState::Unknown);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shell_that_has_not_finished_starting_is_not_reported_as_a_program() {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -249,7 +367,7 @@ mod tests {
         command.arg("30");
         let mut child = pair.slave.spawn_command(command).expect("spawn sleep");
         let pid = child.process_id().expect("child pid");
-        let group = pty_unix::process_group_of(pid);
+        let group = pty::process_group_of(pid);
         let master_fd = pair.master.as_raw_fd().expect("master fd");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while executable_name(pid as i32).as_deref() != Some("sleep") {

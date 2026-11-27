@@ -7,10 +7,16 @@
 
 mod support;
 
-use sprite_term::{SessionConfig, ShellPreference, Spawned, TerminalCommand, TerminalSession};
-use std::time::{Duration, Instant};
+use sprite_term::Spawned;
+#[cfg(unix)]
+use sprite_term::{SessionConfig, ShellPreference};
+use sprite_term::{TerminalCommand, TerminalSession};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use support::{EventPump, SnapshotPump, pane_text};
 
+#[cfg(unix)]
 const PROMPT: &str = "SPRITE_PROMPT:/>";
 
 // A cleanup or warmup regression must not hold the test runner open.
@@ -59,38 +65,41 @@ fn ready_does_not_mean_the_directory_prompt_is_visible() {
         "ready_does_not_mean_the_directory_prompt_is_visible",
         Duration::from_secs(15),
         || {
-            let mut config = SessionConfig::command(
-                "/bin/sh",
-                vec![
-                    "-c".into(),
-                    "stty -echo; read release; printf 'SPRITE_PROMPT:%s>' \"$PWD\"; read done"
-                        .into(),
-                ],
-            );
-            config.working_directory = Some("/".into());
+            let dir = std::env::temp_dir()
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let expected_prompt = format!("SPRITE_PROMPT:{}>", dir.display());
+            let mut config = support::test_child_config(&[
+                "--noecho",
+                "--wait-line",
+                "--print-pwd-prompt",
+                "--wait-line",
+            ]);
+            config.working_directory = Some(dir);
             let Spawned {
                 mut session,
                 events,
                 snapshots,
-            } = TerminalSession::spawn(config).expect("spawn controlled shell");
+            } = TerminalSession::spawn(config).expect("spawn controlled child");
             let events = EventPump::new(events);
             let snapshots = SnapshotPump::new(snapshots);
             events.expect_ready();
             assert!(
-                !pane_text(&snapshots.next()).contains(PROMPT),
+                !pane_text(&snapshots.next()).contains(&expected_prompt),
                 "Ready and the initial blank snapshot must not count as a prompt"
             );
             session
                 .send(TerminalCommand::Input(b"\n".to_vec()))
                 .expect("release prompt");
             snapshots.wait_for("the directory prompt", |bundle| {
-                pane_text(bundle).contains(PROMPT)
+                pane_text(bundle).contains(&expected_prompt)
             });
             finish(session);
         },
     );
 }
 
+#[cfg(unix)]
 fn clean_shell() -> SessionConfig {
     let (mut config, complaints) = SessionConfig::shell(&ShellPreference {
         program: Some("/bin/bash".into()),
@@ -109,6 +118,7 @@ fn clean_shell() -> SessionConfig {
     config
 }
 
+#[cfg(unix)]
 fn sample(config: SessionConfig) -> (f64, f64) {
     let start = Instant::now();
     let Spawned {
@@ -128,6 +138,7 @@ fn sample(config: SessionConfig) -> (f64, f64) {
     (ready, prompt)
 }
 
+#[cfg(unix)]
 fn summarize(label: &str, mut samples: Vec<f64>) -> f64 {
     samples.sort_by(f64::total_cmp);
     let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
@@ -139,6 +150,7 @@ fn summarize(label: &str, mut samples: Vec<f64>) -> f64 {
     p95
 }
 
+#[cfg(unix)]
 fn start_busy_session() -> Spawned {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -162,6 +174,7 @@ fn start_busy_session() -> Spawned {
         .expect("background output must start")
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "release-mode latency measurement; run with --ignored --nocapture"]
 fn measure_first_directory_prompt() {
