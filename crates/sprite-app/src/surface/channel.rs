@@ -1348,6 +1348,8 @@ mod tests {
         assert!(connection.is_dead());
         #[cfg(windows)]
         drop((connection, stream));
+        peer.set_read_timeout(Some(crate::test_blocking_wait::watchdog()))
+            .unwrap();
         let mut received = Vec::new();
         peer.read_to_end(&mut received).unwrap();
         assert!(
@@ -1388,6 +1390,8 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
+        #[cfg(windows)]
+        let writer = connection.writer();
         let handle = connection.clone();
         let (lanes, receivers) = surface_lanes_with(1, 1);
         let filler = lanes.stream.clone();
@@ -1428,7 +1432,10 @@ mod tests {
         );
         assert!(handle.is_dead());
         #[cfg(windows)]
-        drop(handle);
+        {
+            assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+            drop((writer, handle));
+        }
         assert_eq!(receivers.stream.len(), 1);
         let mut wire = String::new();
         peer.read_to_string(&mut wire).unwrap();
@@ -1442,6 +1449,8 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
         let connection = SurfaceConnection::new(&stream).unwrap();
+        #[cfg(windows)]
+        let writer = connection.writer();
         let handle = connection.clone();
         let (lanes, receivers) = surface_lanes_with(1, 1);
         // Another program's handshake, unanswered, holds the one slot.
@@ -1482,7 +1491,10 @@ mod tests {
         );
         assert!(handle.is_dead());
         #[cfg(windows)]
-        drop(handle);
+        {
+            assert!(writer.finished_within(WRITE_TIMEOUT * 10));
+            drop((writer, handle));
+        }
         assert_eq!(receivers.one_shot.len(), 1, "the Open was never queued");
         assert!(
             receivers.stream.is_empty(),
@@ -1644,6 +1656,8 @@ mod tests {
     fn a_backpressured_batch_keeps_its_written_prefix_and_shuts_down_on_timeout() {
         use std::io::Read;
         let (stream, mut peer) = LocalStream::pair().unwrap();
+        peer.set_read_timeout(Some(crate::test_blocking_wait::watchdog()))
+            .unwrap();
         let connection = SurfaceConnection::new(&stream).unwrap();
         let writer = connection.writer();
         let opened = event_opened(SurfaceId(1));

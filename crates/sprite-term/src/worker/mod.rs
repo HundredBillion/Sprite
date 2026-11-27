@@ -61,8 +61,15 @@ struct Batch {
 impl Batch {
     fn admit(&mut self, message: &Message) {
         self.messages += 1;
-        if let Message::PtyOutput(chunk) = message {
-            self.output_bytes += chunk.as_bytes().len();
+        match message {
+            Message::PtyOutput(chunk) => {
+                self.output_bytes += chunk.as_bytes().len();
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            Message::TestVtOutput(bytes) => {
+                self.output_bytes += bytes.len();
+            }
+            _ => {}
         }
     }
 
@@ -107,6 +114,10 @@ pub(crate) enum Message {
     },
     /// One chunk of PTY output, carrying one output permit.
     PtyOutput(crate::pty::OutputChunk),
+    /// Direct VT output injected by tests when a platform PTY filters a
+    /// sequence (such as Kitty graphics APC under Windows inbox ConPTY).
+    #[cfg(any(test, feature = "test-support"))]
+    TestVtOutput(Vec<u8>),
     /// The consumer took a snapshot and is ready for the next one.
     CaptureRequested,
     /// A knock: something is waiting on the control lane. Carries nothing.
@@ -130,6 +141,8 @@ impl Message {
             | Self::Shutdown => unreachable!("only a command is offered through admit"),
             #[cfg(test)]
             Self::HistoryGate { .. } => unreachable!("only a command is offered through admit"),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::TestVtOutput(_) => unreachable!("only a command is offered through admit"),
         }
     }
 }
@@ -397,7 +410,10 @@ impl Session {
             // What earlier output in this pass raised is published before
             // anything else is handled, so a command's own event never
             // overtakes the notices that preceded it.
-            if !matches!(message, Message::PtyOutput(_)) && self.publish_notices().is_break() {
+            let is_output = matches!(message, Message::PtyOutput(_));
+            #[cfg(any(test, feature = "test-support"))]
+            let is_output = is_output || matches!(message, Message::TestVtOutput(_));
+            if !is_output && self.publish_notices().is_break() {
                 // Nothing more is delivered, but a helper's report already
                 // taken from the queue is still recorded: each helper reports
                 // once, and closing waits for both reports.
@@ -476,6 +492,8 @@ impl Session {
             | Message::Shutdown) => other,
             #[cfg(test)]
             other @ Message::HistoryGate { .. } => other,
+            #[cfg(any(test, feature = "test-support"))]
+            other @ Message::TestVtOutput(_) => other,
         };
         let Self {
             owned:
@@ -523,6 +541,15 @@ impl Session {
                 }
                 pending.mutated();
                 drop(chunk);
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            Message::TestVtOutput(bytes) => {
+                terminal.vt_write(&bytes);
+                #[cfg(test)]
+                if let Some(metrics) = &self.cadence_metrics {
+                    metrics.parsed(bytes.len());
+                }
+                pending.mutated();
             }
             // Not a no-op: a wake. The snapshot slot holds one bundle
             // (SNAPSHOT_CAPACITY = 1), so a mutation arriving while it is full

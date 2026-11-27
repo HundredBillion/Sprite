@@ -4,9 +4,6 @@
 //! escape-sequence bytes from an arbitrary child, so "a program printed
 //! something" must not become "the terminal read a file nobody named" or "the
 //! terminal held a gigabyte".
-// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
-// graphics tests run on Unix.
-#![cfg(unix)]
 #![expect(
     clippy::expect_used,
     reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"

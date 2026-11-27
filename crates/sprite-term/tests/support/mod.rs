@@ -301,17 +301,90 @@ pub fn repl_session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, Snap
     (session, events, snapshots)
 }
 
+#[cfg(windows)]
+fn unescape_vt(input: &str) -> Vec<u8> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        match bytes[i] {
+            b'n' => {
+                out.extend_from_slice(b"\r\n");
+                i += 1;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 1;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 1;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                i += 1;
+            }
+            b'e' => {
+                out.push(0x1b);
+                i += 1;
+            }
+            b'x' => {
+                if i + 2 < bytes.len()
+                    && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    && let Ok(value) = u8::from_str_radix(hex, 16)
+                {
+                    out.push(value);
+                    i += 3;
+                } else {
+                    out.push(b'x');
+                    i += 1;
+                }
+            }
+            b'0'..=b'7' => {
+                let mut val = 0_u16;
+                let mut count = 0;
+                while i + count < bytes.len()
+                    && count < 3
+                    && (b'0'..=b'7').contains(&bytes[i + count])
+                {
+                    val = val * 8 + u16::from(bytes[i + count] - b'0');
+                    count += 1;
+                }
+                out.push((val & 0xff) as u8);
+                i += count;
+            }
+            other => {
+                out.push(b'\\');
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 pub fn repl_feed(
     session: &mut TerminalSession,
     snapshots: &SnapshotPump,
     escapes: &str,
     mark: u32,
 ) -> Arc<SnapshotBundle> {
+    #[cfg(not(windows))]
     session
         .send(TerminalCommand::Input(
             format!("PRINT {escapes}\n").into_bytes(),
         ))
         .expect("ask the child to print the payload");
+    #[cfg(windows)]
+    session
+        .inject_test_vt_output(&unescape_vt(escapes))
+        .expect("inject vt output");
 
     let (command, marker) = marker_command(mark);
     session

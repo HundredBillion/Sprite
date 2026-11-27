@@ -757,6 +757,13 @@ fn only_open_panes_count_toward_the_cap(cx: &mut gpui::TestAppContext) {
         return;
     }
     let (workspace, cx) = test_support::test_workspace(cx);
+    workspace.update(cx, |workspace, cx| {
+        let exe = crate::test_event_pressure::child_program();
+        workspace.settings.shell.program =
+            crate::config::NonBlank::new(exe.to_string_lossy().into_owned());
+        workspace.settings.shell.args = Some(vec!["--cat".into()]);
+        cx.set_global(crate::config::ActiveSettings(workspace.active_settings()));
+    });
     let fixed = target(&workspace, cx);
     let human = format!("{}:0", fixed.window);
     for _ in 0..control::MAX_PANES {

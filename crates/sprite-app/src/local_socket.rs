@@ -337,6 +337,14 @@ mod windows_ipc {
         }
     }
 
+    fn duration_to_wait_ms(limit: Duration) -> u32 {
+        if limit.is_zero() {
+            return 0;
+        }
+        ((limit.as_nanos().saturating_add(999_999)) / 1_000_000).clamp(1, u128::from(u32::MAX - 1))
+            as u32
+    }
+
     impl WakeReceiver {
         pub(crate) fn drain(&self) {
             // SAFETY: `self.0` holds a live event handle.
@@ -346,7 +354,7 @@ mod windows_ipc {
         }
 
         pub(crate) fn wait_timeout(&self, limit: Duration) -> bool {
-            let millis = limit.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+            let millis = duration_to_wait_ms(limit);
             // SAFETY: `self.0` holds a live event handle.
             unsafe { WaitForSingleObject(HANDLE(self.0.as_raw_handle()), millis) == WAIT_OBJECT_0 }
         }
@@ -655,7 +663,8 @@ mod windows_ipc {
                     };
                 }
                 let wait_ms = timeout.map_or(INFINITE, |d| {
-                    d.as_millis().clamp(1, u128::from(u32::MAX - 1)) as u32
+                    ((d.as_nanos().saturating_add(999_999)) / 1_000_000)
+                        .clamp(1, u128::from(u32::MAX - 1)) as u32
                 });
                 // SAFETY: waits on the event associated with `overlapped`.
                 let waited = unsafe { WaitForSingleObject(HANDLE(event.as_raw_handle()), wait_ms) };
@@ -793,7 +802,8 @@ mod windows_ipc {
                     };
                 }
                 let wait_ms = timeout.map_or(INFINITE, |d| {
-                    d.as_millis().clamp(1, u128::from(u32::MAX - 1)) as u32
+                    ((d.as_nanos().saturating_add(999_999)) / 1_000_000)
+                        .clamp(1, u128::from(u32::MAX - 1)) as u32
                 });
                 // SAFETY: waits on the event associated with `overlapped`.
                 let waited = unsafe { WaitForSingleObject(HANDLE(event.as_raw_handle()), wait_ms) };
@@ -1017,16 +1027,28 @@ mod windows_ipc {
             if let Some(parent) = socket.parent() {
                 create_private_dir(parent)?;
             }
-            let pipe_name = format!(
-                "{PIPE_PREFIX}sprite-{}",
-                super::SocketKey::generate()?.to_hex()
-            );
+            let key_hex = super::SocketKey::generate()?.to_hex();
+            let pipe_name = format!("{PIPE_PREFIX}sprite-{key_hex}");
             let instance = create_pipe_instance(&pipe_name, true)?;
-            let mut marker = create_private_file(socket, false)?;
-            try_lock_sentinel(&marker)?;
-            marker.set_len(0)?;
-            marker.write_all(pipe_name.as_bytes())?;
-            marker.flush()?;
+            let staging = match socket.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => {
+                    parent.join(format!(".{key_hex}.tmp"))
+                }
+                _ => PathBuf::from(format!(".{key_hex}.tmp")),
+            };
+            let mut marker = create_private_file(&staging, true)?;
+            let publish = (|| -> io::Result<()> {
+                try_lock_sentinel(&marker)?;
+                marker.write_all(pipe_name.as_bytes())?;
+                marker.flush()?;
+                fs::rename(&staging, socket)?;
+                Ok(())
+            })();
+            if let Err(error) = publish {
+                drop(marker);
+                fs::remove_file(&staging).ok();
+                return Err(error);
+            }
             Ok(Self {
                 pipe_name,
                 next_instance: Mutex::new(Some(instance)),
@@ -1052,7 +1074,7 @@ mod windows_ipc {
             cancel: &WakeReceiver,
             limit: Duration,
         ) -> io::Result<Option<LocalStream>> {
-            let millis = limit.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+            let millis = duration_to_wait_ms(limit);
             self.accept_inner(cancel, millis)
         }
 
@@ -1161,9 +1183,9 @@ mod windows_ipc {
             return;
         };
         if try_lock_sentinel(&file).is_ok() {
-            drop(file);
             fs::remove_file(&path).ok();
         }
+        drop(file);
     }
 
     pub(crate) fn generate_random_bytes(bytes: &mut [u8]) -> io::Result<()> {
@@ -1857,7 +1879,20 @@ fn authenticate(
         }
         // Socket timeouts apply per read, so every read uses the remaining total budget.
         stream.set_read_timeout(Some(remaining))?;
-        let bytes = reader.fill_buf()?;
+        let bytes = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if bytes.is_empty() {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }

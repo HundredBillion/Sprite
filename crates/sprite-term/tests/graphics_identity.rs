@@ -8,10 +8,6 @@
 //! of them, because they are separate mechanisms in libghostty and a single
 //! test passing would say nothing about the other four.
 
-// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
-// graphics tests run on Unix.
-#![cfg(unix)]
-
 mod support;
 
 use std::sync::Arc;

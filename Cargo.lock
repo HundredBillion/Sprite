@@ -5090,6 +5090,7 @@ dependencies = [
  "nix 0.28.0",
  "png 0.18.1",
  "portable-pty",
+ "sprite-term",
  "windows 0.61.3",
 ]
 

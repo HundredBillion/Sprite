@@ -1,10 +1,6 @@
 //! The owned graphics projection: what a renderer receives, what it costs, and
 //! what it is guaranteed to agree with.
 
-// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
-// graphics tests run on Unix.
-#![cfg(unix)]
-
 mod support;
 
 use std::sync::Arc;

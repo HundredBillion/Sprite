@@ -1117,6 +1117,16 @@ impl TerminalView {
         self.bundle.clone()
     }
 
+    #[cfg(all(test, windows))]
+    pub(crate) fn inject_test_vt_output(&self, bytes: &[u8]) {
+        match &self.session {
+            SessionState::Running(session) => session
+                .inject_test_vt_output(bytes)
+                .expect("inject test VT output"),
+            _ => panic!("expected a running session for test VT injection"),
+        }
+    }
+
     /// Whether this view's worker is stalled behind its event stream. False
     /// for a view that never started a session of its own.
     #[cfg(test)]

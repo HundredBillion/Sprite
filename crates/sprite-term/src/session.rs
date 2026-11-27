@@ -403,6 +403,29 @@ impl TerminalSession {
         self.commands().send(command)
     }
 
+    /// Injects raw VT output bytes directly into the terminal parser on the
+    /// worker thread, bypassing the OS PTY.
+    ///
+    /// Intended for tests covering VT sequences (such as Kitty graphics APC)
+    /// that Windows inbox ConPTY strips before they reach the terminal.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inject_test_vt_output(&self, bytes: &[u8]) -> Result<(), SessionError> {
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err(SessionError::ended(
+                "inject_test_vt_output",
+                "the terminal session is shutting down",
+            ));
+        }
+        self.control
+            .send(worker::Message::TestVtOutput(bytes.to_vec()))
+            .map_err(|_| {
+                SessionError::ended("inject_test_vt_output", "the terminal worker ended")
+            })?;
+        knock(&self.inbox);
+        Ok(())
+    }
+
     /// Offers a command without waiting, suitable for the UI thread.
     pub fn try_admit(
         &mut self,

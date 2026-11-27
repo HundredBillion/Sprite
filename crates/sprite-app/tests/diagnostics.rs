@@ -1,5 +1,13 @@
 use std::time::{Duration, Instant};
 
+fn watchdog() -> Duration {
+    let configured = std::env::var("SPRITE_TEST_WATCHDOG_SECS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(Duration::from_secs(5), Duration::from_secs);
+    Duration::from_secs(5).max(configured)
+}
+
 #[test]
 fn diagnostics_are_persisted_to_the_selected_directory() {
     let root = std::env::temp_dir().join(format!("sprite-logging-test-{}", std::process::id()));
@@ -145,12 +153,10 @@ fn a_pane_control_reply_is_not_mixed_with_diagnostics() {
     let listener = sprite_app::ipc_test_support::TestListener::bind(&socket).unwrap();
     let peer = std::thread::spawn(move || {
         let mut stream = listener
-            .accept_within(Duration::from_secs(5))
+            .accept_within(watchdog())
             .unwrap()
             .expect("client did not connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(watchdog())).unwrap();
         let mut line = String::new();
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)
@@ -197,12 +203,10 @@ fn authenticated_surface_stream_is_not_mixed_with_diagnostics() {
     let listener = sprite_app::ipc_test_support::TestListener::bind(&socket).unwrap();
     let peer = std::thread::spawn(move || {
         let mut stream = listener
-            .accept_within(Duration::from_secs(5))
+            .accept_within(watchdog())
             .unwrap()
             .expect("client did not connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(watchdog())).unwrap();
         let mut line = String::new();
         BufReader::new(stream.try_clone().unwrap())
             .read_line(&mut line)

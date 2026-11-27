@@ -4,9 +4,6 @@
 //! `ghostty_sys_set`. Clearing it for a disabled pane would clear it for every
 //! pane, so Sprite registers one decoder and gives each pane its own behind it;
 //! a pane that shows no images simply has none.
-// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
-// graphics tests run on Unix.
-#![cfg(unix)]
 #![expect(
     clippy::expect_used,
     reason = "integration-test helpers run only under test, where a failed setup stops the test with its cause"

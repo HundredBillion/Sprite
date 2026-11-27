@@ -277,11 +277,38 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
     let exe = crate::test_event_pressure::child_program();
     let expected_program = crate::test_event_pressure::child_program_name();
-    let shell_command: Vec<std::ffi::OsString> = if cfg!(windows) {
-        vec!["cmd.exe".into(), "/Q".into()]
-    } else {
-        vec!["/bin/sh".into(), "-i".into()]
+    #[cfg(windows)]
+    struct ShellDirCleanup(std::path::PathBuf);
+    #[cfg(windows)]
+    impl Drop for ShellDirCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[cfg(windows)]
+    let (_shell_cleanup, shell_command) = {
+        static NEXT_SHELL_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sprite-shell-runner-{}-{}",
+            std::process::id(),
+            NEXT_SHELL_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh_exe = dir.join("sh.exe");
+        std::fs::copy(&exe, &sh_exe).unwrap();
+        (
+            ShellDirCleanup(dir),
+            vec![
+                sh_exe.into_os_string(),
+                "--noecho".into(),
+                "--emit".into(),
+                "READY\\n".into(),
+                "--shell-runner".into(),
+            ],
+        )
     };
+    #[cfg(not(windows))]
+    let shell_command: Vec<std::ffi::OsString> = vec!["/bin/sh".into(), "-i".into()];
     let launch_line = if cfg!(windows) {
         format!("\"{}\" --noecho --wait-line\r\n", exe.display())
     } else {
@@ -307,7 +334,17 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
             cx,
         )
     });
-    wait_for_bundle(&view, cx, |_| true);
+    if cfg!(windows) {
+        wait_for_bundle(&view, cx, |bundle| {
+            bundle
+                .pane
+                .rows
+                .iter()
+                .any(|row| row.text.contains("READY"))
+        });
+    } else {
+        wait_for_bundle(&view, cx, |_| true);
+    }
     view.update(cx, |view, _| {
         view.send(TerminalCommand::SetCursor(sprite_term::CursorDefaults {
             style: None,
@@ -433,6 +470,15 @@ fn fallback_titles_use_existing_blink_activity_and_close_checks_stay_live(
         !view.read_with(cx, |view, _| view.pane_focused()),
         "the clock found that title for a pane without Pane Focus"
     );
+    #[cfg(windows)]
+    {
+        view.update(cx, |view, _| {
+            view.send(TerminalCommand::Input(b"\r".to_vec()))
+        });
+        if let Some(handle) = view.update(cx, |view, _| view.begin_shutdown()) {
+            handle.wait().ok();
+        }
+    }
 }
 
 #[gpui::test]
@@ -502,23 +548,24 @@ fn closing_an_owned_terminal_unregisters_before_retained_handles_drop(
     assert!(panes.panes().is_empty());
 }
 
-// Windows inbox ConPTY drops Kitty graphics APC (`\x1b_G...\x1b\\`), so PTY-transmitted
-// graphics tests run on Unix while parser/cache unit tests cover all platforms.
-#[cfg(unix)]
 #[gpui::test]
 fn texture_budget_growth_restores_a_quiet_terminal_image(cx: &mut gpui::TestAppContext) {
     let settings = crate::config::Settings::default();
     cx.set_global(crate::config::ActiveSettings(settings.clone()));
     cx.set_global(crate::tokens::TokenRegistry::new(&settings.colors));
     let (sender, _exits) = async_channel::unbounded();
+    #[cfg(not(windows))]
+    let command = crate::test_event_pressure::child_command(&[
+        "--emit",
+        "\\033_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\\033\\\\",
+        "--sleep",
+        "30",
+    ]);
+    #[cfg(windows)]
+    let command = crate::test_event_pressure::child_command(&["--sleep", "30"]);
     let (view, cx) = cx.add_window_view(|window, cx| {
         TerminalView::new(
-            Some(crate::test_event_pressure::child_command(&[
-                "--emit",
-                "\\033_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\\033\\\\",
-                "--sleep",
-                "30",
-            ])),
+            Some(command),
             settings.clone(),
             Vec::new(),
             None,
@@ -529,6 +576,10 @@ fn texture_budget_growth_restores_a_quiet_terminal_image(cx: &mut gpui::TestAppC
             window,
             cx,
         )
+    });
+    #[cfg(windows)]
+    view.update(cx, |view, _| {
+        view.inject_test_vt_output(b"\x1b_Ga=T,f=32,s=1,v=1,i=1,q=2;/////w==\x1b\\");
     });
     let initial = wait_for_bundle(&view, cx, |bundle| {
         bundle

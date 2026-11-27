@@ -635,7 +635,16 @@ pub(super) fn has_windows_drive_prefix(path: &str) -> bool {
 }
 
 pub(super) fn strip_file_scheme(destination: &str) -> &str {
-    let rest = destination.strip_prefix("file://").unwrap_or(destination);
+    let Some(mut rest) = destination.strip_prefix("file://") else {
+        return destination;
+    };
+    if rest
+        .as_bytes()
+        .get(..10)
+        .is_some_and(|head| head.eq_ignore_ascii_case(b"localhost/"))
+    {
+        rest = &rest[9..];
+    }
     if cfg!(windows)
         && let Some(stripped) = rest.strip_prefix('/')
         && has_windows_drive_prefix(stripped)
@@ -658,7 +667,10 @@ pub(super) fn resource_path(document: &str, destination: &str) -> Option<PathBuf
     } else {
         destination.contains(':')
     };
-    if has_scheme || destination.starts_with("//") {
+    if has_scheme
+        || destination.starts_with("//")
+        || (cfg!(windows) && destination.starts_with("\\\\"))
+    {
         return None;
     }
     let path = Path::new(destination);
@@ -985,11 +997,23 @@ mod tests {
                 super::resource_path("C:\\tmp\\README.md", "file:///C:/tmp/a%20b.png").unwrap(),
                 std::path::PathBuf::from("C:/tmp/a b.png")
             );
+            assert_eq!(
+                super::resource_path("C:\\tmp\\README.md", "file://localhost/C:/tmp/a%20b.png")
+                    .unwrap(),
+                std::path::PathBuf::from("C:/tmp/a b.png")
+            );
             assert!(super::resource_path("C:\\tmp\\README.md", "C:\\tmp\\bad:name.png").is_none());
+            assert!(
+                super::resource_path("C:\\tmp\\README.md", "\\\\server\\share\\a.png").is_none()
+            );
         }
         #[cfg(not(windows))]
         {
             assert!(super::resource_path("/tmp/README.md", "C:\\tmp\\a.png").is_none());
+            assert_eq!(
+                super::resource_path("/tmp/README.md", "file://localhost/tmp/a%20b.png").unwrap(),
+                std::path::PathBuf::from("/tmp/a b.png")
+            );
         }
     }
     #[test]

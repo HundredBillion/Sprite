@@ -633,6 +633,61 @@ fn run_drain_stdin() {
     }
 }
 
+fn read_shell_line_bytes() -> Option<String> {
+    let mut stdin = io::stdin().lock();
+    let mut buf = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        match stdin.read(&mut byte) {
+            Ok(0) => {
+                if buf.is_empty() {
+                    return None;
+                }
+                break;
+            }
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn parse_shell_command(line: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (program, rest) = if let Some(after_open) = trimmed.strip_prefix('"') {
+        let close = after_open.find('"')?;
+        (&after_open[..close], &after_open[close + 1..])
+    } else {
+        match trimmed.find(char::is_whitespace) {
+            Some(idx) => (&trimmed[..idx], &trimmed[idx..]),
+            None => (trimmed, ""),
+        }
+    };
+    if program.is_empty() {
+        return None;
+    }
+    let args = rest.split_whitespace().map(str::to_owned).collect();
+    Some((program.to_owned(), args))
+}
+
+fn run_shell_runner() {
+    set_noecho();
+    while let Some(line) = read_shell_line_bytes() {
+        let Some((program, args)) = parse_shell_command(&line) else {
+            continue;
+        };
+        let _ = Command::new(program).args(args).status();
+    }
+}
+
 fn next_arg(args: &[String], index: &mut usize, flag: &str) -> String {
     *index += 1;
     if *index >= args.len() {
@@ -776,6 +831,7 @@ fn main() {
                 }
             }
             "--drain-stdin" => run_drain_stdin(),
+            "--shell-runner" => run_shell_runner(),
             "--repl" => {
                 set_cbreak_noecho();
                 start_repl = true;

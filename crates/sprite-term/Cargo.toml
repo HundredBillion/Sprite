@@ -34,6 +34,7 @@ test-support = []
 
 [dev-dependencies]
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+sprite-term = { path = ".", features = ["test-support"] }
 
 [[bin]]
 name = "sprite-graphics-bench"
