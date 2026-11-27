@@ -40,6 +40,28 @@ fn shown(colors: ColorDefaults, emit: &str, marker: &str) -> Arc<SnapshotBundle>
     snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains(marker))
 }
 
+/// `shown`, with `emit` handed to the parser instead of printed by the
+/// child. Windows' inbox ConPTY drops the colour resets (OSC 104 and 111) on
+/// their way through, and what is under test is what Sprite does with them.
+#[cfg(windows)]
+fn shown_to_the_parser(colors: ColorDefaults, emit: &str, marker: &str) -> Arc<SnapshotBundle> {
+    let mut config = support::test_child_config(&["--emit", "READY\\n", "--sleep", "30"]);
+    config.colors = colors;
+    let sprite_term::Spawned {
+        session,
+        events,
+        snapshots,
+    } = TerminalSession::spawn(config).expect("spawn session");
+    let events = EventPump::new(events);
+    let snapshots = SnapshotPump::new(snapshots);
+    events.expect_ready();
+    snapshots.wait_for("the child", |bundle| pane_text(bundle).contains("READY"));
+    session
+        .inject_test_vt_output(&support::unescape_vt(emit))
+        .expect("inject the colour sequences");
+    snapshots.wait_for("the marker", |bundle| pane_text(bundle).contains(marker))
+}
+
 #[test]
 fn configured_colours_are_what_a_pane_starts_with() {
     let colors = ColorDefaults {
@@ -167,7 +189,10 @@ fn a_reset_returns_to_the_configured_colour() {
     // Set both, then reset both: OSC 111 and OSC 104.
     let script = "\\033]11;#040506\\007\\033]4;1;#0a0b0c\\007\
                   \\033]111\\007\\033]104;1\\007RESET\\n";
+    #[cfg(not(windows))]
     let bundle = shown(colors, script, "RESET");
+    #[cfg(windows)]
+    let bundle = shown_to_the_parser(colors, script, "RESET");
 
     assert_eq!(
         bundle.render.default_background, configured,

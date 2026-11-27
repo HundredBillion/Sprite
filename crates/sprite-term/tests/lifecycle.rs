@@ -210,8 +210,14 @@ fn the_login_shell_carries_sprite_identity() {
     #[cfg(windows)]
     {
         let exe = support::test_child_exe();
+        // Absolute, as a configured shell must be: a bare name is refused and
+        // the login shell, whatever that is here, runs instead.
+        let cmd = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()),
+        )
+        .join(r"System32\cmd.exe");
         let (config, complaints) = SessionConfig::shell(&sprite_term::ShellPreference {
-            program: Some("cmd.exe".into()),
+            program: Some(cmd),
             args: Some(vec!["/Q".into()]),
             ..Default::default()
         })
@@ -719,7 +725,7 @@ os._exit(0)
     #[cfg(windows)]
     let config = support::test_child_os_config(&[
         "--spawn-eof-waiter".into(),
-        pid_file.into_os_string(),
+        pid_file.clone().into_os_string(),
         ready_file.into_os_string(),
         hung_up.clone().into_os_string(),
     ]);
@@ -745,9 +751,25 @@ os._exit(0)
         | TerminalEvent::Error(_)) => panic!("expected natural Exited, got {other:?}"),
     }
     // `_session` is still alive here, as the application keeps an ended pane.
+    #[cfg(unix)]
     support::wait_until("the descendant to release the terminal", || {
         hung_up.exists().then_some(())
     });
+    // Windows has no hangup a console process can outlast: closing a console
+    // ends every process still attached to it, whatever it asked for, so the
+    // release shows as the descendant ending rather than reading its end.
+    #[cfg(windows)]
+    {
+        let pid = std::fs::read_to_string(&pid_file).expect("the parent named its descendant");
+        support::wait_until("the descendant to end with the terminal", || {
+            let alive = std::process::Command::new(support::test_child_exe())
+                .args(["--pid-alive", pid.trim()])
+                .status()
+                .expect("ask after the descendant")
+                .success();
+            (!alive).then_some(())
+        });
+    }
 }
 
 #[cfg(unix)]

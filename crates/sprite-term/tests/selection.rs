@@ -955,6 +955,11 @@ fn a_gesture_whose_anchor_stays_on_screen_after_scrolling_keeps_its_text() {
 /// A scroll below a region's top margin moves the anchor's text up inside the
 /// region; it stays on screen, so the gesture keeps it.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows' inbox ConPTY repaints a scrolled region's lines rather than scrolling them, \
+              so no scroll reaches the terminal for the anchor to follow"
+)]
 fn a_gesture_below_a_scrolled_region_top_keeps_its_text() {
     let config = support::test_child_config(&[
         "--noecho",

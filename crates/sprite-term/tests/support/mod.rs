@@ -301,8 +301,9 @@ pub fn repl_session(policy: GraphicsPolicy) -> (TerminalSession, EventPump, Snap
     (session, events, snapshots)
 }
 
+/// The bytes the test child's `--emit` would print for `input`.
 #[cfg(windows)]
-fn unescape_vt(input: &str) -> Vec<u8> {
+pub fn unescape_vt(input: &str) -> Vec<u8> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
