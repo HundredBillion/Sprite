@@ -241,3 +241,25 @@ pub(crate) fn process_name(pid: i32) -> Option<String> {
     let basename = full.rsplit(['\\', '/']).next()?.trim();
     (!basename.is_empty()).then(|| basename.to_owned())
 }
+
+/// Waits up to `limit` for the process `pid` names to end, and says
+/// whether it has.
+///
+/// `TerminateProcess` only starts the end: the exit code is set at once,
+/// which is all `Child::try_wait` reads, and the process finishes going a
+/// moment later. The process object signals only when it has. A PID that no
+/// longer opens names a process that has ended.
+#[allow(unsafe_code, reason = "Win32 OpenProcess/WaitForSingleObject FFI")]
+pub(crate) fn wait_until_ended(pid: u32, limit: std::time::Duration) -> bool {
+    use windows::Win32::Foundation::WAIT_OBJECT_0;
+    use windows::Win32::System::Threading::{PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    // SAFETY: opens `pid` with synchronize access only.
+    let Ok(raw) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
+        return true;
+    };
+    // SAFETY: `raw` is a fresh handle owned exclusively by `process`.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+    let millis = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX - 1);
+    // SAFETY: `process` is a live process handle for the whole wait.
+    (unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), millis) }) == WAIT_OBJECT_0
+}

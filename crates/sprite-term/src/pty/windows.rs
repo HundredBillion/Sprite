@@ -15,6 +15,7 @@
 //!   parked in a blocking pipe call.
 
 mod processes;
+pub(crate) use processes::wait_until_ended;
 pub(crate) use processes::{SessionProcesses, is_process_in_job, job_process_ids, process_name};
 
 use std::collections::VecDeque;

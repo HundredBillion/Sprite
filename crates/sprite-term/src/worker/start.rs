@@ -526,9 +526,23 @@ fn adopt_child(
 /// sent KILL and left unreaped, so `wait` is what reaps that one.
 fn discard(mut child: SpawnedChild, master: Box<dyn MasterPty + Send>) {
     drop(master);
+    #[cfg(windows)]
+    let pid = child.process_id();
     let _killed = child.kill();
     let _reaped = child.wait();
+    // A killed Windows child reports its exit before it has finished ending,
+    // and `wait` returns on that report; wait for the end itself.
+    #[cfg(windows)]
+    if let Some(pid) = pid {
+        pty::wait_until_ended(pid, DISCARD_END_LIMIT);
+    }
 }
+
+/// How long a discarded Windows child is given to finish ending once it has
+/// been terminated. It is at most a shell with nothing started, so this is
+/// a bound on a stuck system, not a time it is expected to take.
+#[cfg(windows)]
+const DISCARD_END_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Blocks in `Child::wait` off the worker so a quiet exit is reaped without a
 /// timer, and Ordinary Session Jobs holding the PTY open cannot mask it.
@@ -730,7 +744,7 @@ mod tests {
         #[cfg(windows)]
         {
             assert!(
-                crate::pty::process_name(raw_pid as i32).is_none(),
+                crate::pty::wait_until_ended(raw_pid, std::time::Duration::ZERO),
                 "the child outlived its failed start-up"
             );
         }
