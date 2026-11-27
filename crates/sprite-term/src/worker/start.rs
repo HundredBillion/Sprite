@@ -25,6 +25,10 @@ pub(super) fn initialize(
     // Lifecycle notices raised from inside the parser. Same reason as the
     // clipboard: a callback must not block on a channel.
     let notices = Rc::new(RefCell::new(Notices::default()));
+    #[cfg(windows)]
+    {
+        notices.borrow_mut().console_program = Some(config.program.clone());
+    }
 
     let size = config.size;
     let mut terminal = match crate::new_terminal(size.cols(), size.rows(), config.scrollback_bytes)

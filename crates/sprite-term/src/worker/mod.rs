@@ -180,9 +180,56 @@ struct Notices {
     bell_pending: bool,
     title: Option<Option<String>>,
     working_directory: Option<Option<String>>,
+    /// The program a Windows console was started for. ConPTY titles a new
+    /// console with that program's path, and cmd.exe puts the path back after
+    /// each command; neither is a title the program chose.
+    #[cfg(windows)]
+    console_program: Option<std::path::PathBuf>,
+    /// Whether a title of the program's own is the latest one taken in.
+    #[cfg(windows)]
+    titled: bool,
+    /// The latest title taken in, as `retitle` reports it. Snapshots carry
+    /// this rather than the parser's, so they agree with the events.
+    #[cfg(windows)]
+    shown: Option<String>,
 }
 
 impl Notices {
+    fn retitle(&mut self, title: Option<String>) {
+        #[cfg(windows)]
+        let title = {
+            let title = title.filter(|title| !self.is_console_default(title));
+            // The default is reported as no title, and a console that has
+            // not been titled yet has no title to take back.
+            if title.is_none() && !self.titled {
+                return;
+            }
+            self.titled = title.is_some();
+            self.shown.clone_from(&title);
+            title
+        };
+        self.title = Some(title);
+    }
+
+    #[cfg(windows)]
+    fn is_console_default(&self, title: &str) -> bool {
+        let title = std::path::Path::new(title);
+        let (Some(program), Some(name)) = (self.console_program.as_deref(), title.file_name())
+        else {
+            return false;
+        };
+        let Some(program_name) = program.file_name() else {
+            return false;
+        };
+        let name = name.to_ascii_lowercase();
+        let mut wanted = program_name.to_ascii_lowercase();
+        // A program named without its extension still runs as an `.exe`.
+        if program.extension().is_none() {
+            wanted.push(".exe");
+        }
+        title.is_absolute() && name == wanted
+    }
+
     fn take(&mut self) -> Vec<TerminalEvent> {
         let mut events = Vec::new();
         if let Some(title) = self.title.take() {
@@ -215,7 +262,9 @@ fn register_title(
 ) -> Result<(), libghostty_vt::Error> {
     terminal
         .on_title_changed(move |terminal: &Terminal<'_, '_>| {
-            notices.borrow_mut().title = Some(crate::reported(terminal.title()));
+            notices
+                .borrow_mut()
+                .retitle(crate::reported(terminal.title()));
         })
         .map(|_| ())
 }
@@ -520,6 +569,8 @@ impl Session {
             pending,
             size,
             has_selection,
+            #[cfg(windows)]
+            notices,
             ..
         } = self;
         match message {
@@ -846,6 +897,8 @@ impl Session {
                     #[cfg(test)]
                     HISTORY_TRAVERSALS.set(HISTORY_TRAVERSALS.get() + 1);
                     let foreground = foreground_executable(master.as_ref(), foreground.as_ref());
+                    #[cfg(windows)]
+                    projector.shown_title.clone_from(&notices.borrow().shown);
                     match projector.capture_history(
                         pending.generation,
                         *size,
@@ -910,6 +963,11 @@ impl Session {
                     .cadence_metrics
                     .as_ref()
                     .map(|metrics| metrics.capture(false));
+                #[cfg(windows)]
+                self.owned
+                    .projector
+                    .shown_title
+                    .clone_from(&self.notices.borrow().shown);
                 self.owned.projector.capture(
                     self.pending.generation,
                     self.size,
@@ -969,6 +1027,11 @@ impl Session {
                     .cadence_metrics
                     .as_ref()
                     .map(|metrics| metrics.capture(true));
+                #[cfg(windows)]
+                self.owned
+                    .projector
+                    .shown_title
+                    .clone_from(&self.notices.borrow().shown);
                 self.owned.projector.capture(
                     self.pending.generation,
                     self.size,
