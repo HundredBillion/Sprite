@@ -756,13 +756,20 @@ fn only_open_panes_count_toward_the_cap(cx: &mut gpui::TestAppContext) {
     if !private_runtime(module_path!(), cx) {
         return;
     }
-    let (workspace, cx) = test_support::test_workspace(cx);
-    workspace.update(cx, |workspace, cx| {
-        let exe = crate::test_event_pressure::child_program();
-        workspace.settings.shell.program =
-            crate::config::NonBlank::new(exe.to_string_lossy().into_owned());
-        workspace.settings.shell.args = Some(vec!["--cat".into()]);
-        cx.set_global(crate::config::ActiveSettings(workspace.active_settings()));
+    // Every pane runs the test child, which ends as soon as it is hung up.
+    // The workspace's own command is what a split runs, ahead of the shell
+    // setting, and the missing test command would fall back to the login
+    // shell — on Windows a PowerShell that, closed while it starts, can take
+    // the full escalation to end, a cap's worth of which outlasts the child
+    // test's deadline.
+    let (workspace, cx) = cx.add_window_view(|window, cx| {
+        super::Workspace::new(
+            Some(crate::test_event_pressure::child_command(&["--cat"])),
+            crate::config::Settings::default(),
+            None,
+            window,
+            cx,
+        )
     });
     let fixed = target(&workspace, cx);
     let human = format!("{}:0", fixed.window);

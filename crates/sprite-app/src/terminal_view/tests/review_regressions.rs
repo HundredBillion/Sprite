@@ -55,14 +55,25 @@ fn an_image_below_the_text_is_drawn_under_the_glyphs_over_it(cx: &mut gpui::Test
         "30",
     ]);
     #[cfg(windows)]
-    let command = shell(&["--sleep", "30"]);
+    let command = shell(&["--emit", "READY", "--sleep", "30"]);
     with_view(cx, command, |view, cx| {
+        // ConPTY's first paint of its own buffer would blank injected text,
+        // so the letters go in only after that paint has arrived.
         #[cfg(windows)]
-        view.update(cx, |view, _| {
-            view.inject_test_vt_output(
-                b"\x1b_Ga=T,f=32,s=1,v=1,i=1,c=4,r=1,z=-1,C=1,q=2;/////w==\x1b\\WWWW",
-            );
-        });
+        {
+            wait_for_bundle(view, cx, |bundle| {
+                bundle
+                    .pane
+                    .rows
+                    .iter()
+                    .any(|row| row.text.contains("READY"))
+            });
+            view.update(cx, |view, _| {
+                view.inject_test_vt_output(
+                    b"\x1b_Ga=T,f=32,s=1,v=1,i=1,c=4,r=1,z=-1,C=1,q=2;/////w==\x1b\\WWWW",
+                );
+            });
+        }
         wait_for_bundle(view, cx, |bundle| {
             bundle
                 .graphics
