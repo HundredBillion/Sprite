@@ -453,6 +453,8 @@ fn start_with(
     }
     configure_child_environment(&mut command, &config.environment);
 
+    #[cfg(windows)]
+    pty::let_children_take_ctrl_c();
     let child = pair
         .slave
         .spawn_command(command)

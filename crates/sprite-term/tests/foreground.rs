@@ -57,7 +57,13 @@ fn reported_owner(text: &str) -> Option<u32> {
 
 /// An interactive shell, its prompt reached, and its snapshot pump alive for
 /// as long as the returned session is.
-fn interactive_shell() -> (TerminalSession, SnapshotPump) {
+/// A shell at its prompt, with the pumps that keep its session alive.
+///
+/// The events are returned to be held, not read: a session whose events
+/// nobody takes ends, and on Windows cmd.exe retitles the console around
+/// every program it runs, so a test that let them go lost its session to
+/// the first title after start-up.
+fn interactive_shell() -> (TerminalSession, SnapshotPump, EventPump) {
     // `-i` on Unix because job control is what puts a started program into its
     // own process group; a shell without it runs everything in its own.
     #[cfg(unix)]
@@ -85,12 +91,12 @@ fn interactive_shell() -> (TerminalSession, SnapshotPump) {
     snapshots.wait_for("the shell's first output", |bundle| {
         pane_text(bundle).contains("AT-PROMPT")
     });
-    (session, snapshots)
+    (session, snapshots, events)
 }
 
 #[test]
 fn a_shell_at_its_prompt_is_idle() {
-    let (session, _snapshots) = interactive_shell();
+    let (session, _snapshots, _events) = interactive_shell();
 
     let state = wait_for(&session, "an idle shell", |state| {
         *state == ForegroundState::Idle
@@ -132,7 +138,7 @@ fn a_directly_launched_program_is_busy() {
 
 #[test]
 fn a_program_that_replaces_the_idle_shell_is_busy() {
-    let (mut session, snapshots) = interactive_shell();
+    let (mut session, snapshots, _events) = interactive_shell();
     wait_for(&session, "the shell's initial idle state", |state| {
         *state == ForegroundState::Idle
     });
@@ -159,7 +165,7 @@ fn a_program_that_replaces_the_idle_shell_is_busy() {
 
 #[test]
 fn a_running_program_is_reported_by_name() {
-    let (mut session, _snapshots) = interactive_shell();
+    let (mut session, _snapshots, _events) = interactive_shell();
 
     // Far longer than any wait below, so the program cannot finish before it
     // is sampled; the test interrupts it instead of waiting it out.
@@ -180,15 +186,30 @@ fn a_running_program_is_reported_by_name() {
     session
         .send(TerminalCommand::Input(vec![0x03]))
         .expect("interrupt the program");
-    wait_for(&session, "the interrupted program to leave", |state| {
-        *state == ForegroundState::Idle
+    // A Windows program is in the pane's job a moment before it is attached
+    // to the console, and a Ctrl+C typed in between reaches only the shell;
+    // so the interrupt is typed again, as a person would, until it lands.
+    #[cfg(windows)]
+    let mut polls = 0_u32;
+    support::wait_until("the interrupted program to leave", || {
+        let state = session.foreground();
+        #[cfg(windows)]
+        {
+            polls += 1;
+            if state != ForegroundState::Idle && polls.is_multiple_of(25) {
+                session
+                    .send(TerminalCommand::Input(vec![0x03]))
+                    .expect("interrupt the program again");
+            }
+        }
+        (state == ForegroundState::Idle).then_some(())
     });
 }
 
 /// The other half: a pane that *was* busy goes back to idle.
 #[test]
 fn a_finished_program_leaves_the_pane_idle_again() {
-    let (mut session, _snapshots) = interactive_shell();
+    let (mut session, _snapshots, _events) = interactive_shell();
 
     let exe = support::test_child_exe();
     #[cfg(unix)]
@@ -211,7 +232,7 @@ fn a_finished_program_leaves_the_pane_idle_again() {
 #[cfg(unix)]
 #[test]
 fn owner_matches_only_the_live_foreground_job() {
-    let (mut session, snapshots) = interactive_shell();
+    let (mut session, snapshots, _events) = interactive_shell();
 
     session
         .send(TerminalCommand::Input(

@@ -242,6 +242,21 @@ pub(crate) fn process_name(pid: i32) -> Option<String> {
     (!basename.is_empty()).then(|| basename.to_owned())
 }
 
+/// Lets the programs a pane starts take Ctrl+C.
+///
+/// Whether a process ignores Ctrl+C is inherited by every process it
+/// creates, and Sprite may have been started by something that set it: a
+/// launcher that used `CREATE_NEW_PROCESS_GROUP` does. Every program in
+/// every pane would then ignore the Ctrl+C typed at it. Restoring normal
+/// processing in Sprite's own process is what its children inherit; Sprite
+/// has no console of its own for the change to reach.
+#[allow(unsafe_code, reason = "Win32 SetConsoleCtrlHandler FFI")]
+pub(crate) fn let_children_take_ctrl_c() {
+    // SAFETY: a null handler with `false` only clears this process's
+    // ignore-Ctrl+C attribute; no routine is registered.
+    unsafe { windows::Win32::System::Console::SetConsoleCtrlHandler(None, false) }.ok();
+}
+
 /// Waits up to `limit` for the process `pid` names to end, and says
 /// whether it has.
 ///
