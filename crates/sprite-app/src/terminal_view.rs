@@ -1120,10 +1120,14 @@ impl TerminalView {
     #[cfg(all(test, windows))]
     pub(crate) fn inject_test_vt_output(&self, bytes: &[u8]) {
         match &self.session {
-            SessionState::Running(session) => session
-                .inject_test_vt_output(bytes)
-                .expect("inject test VT output"),
-            _ => panic!("expected a running session for test VT injection"),
+            SessionState::Running(session) => {
+                if let Err(error) = session.inject_test_vt_output(bytes) {
+                    panic!("inject test VT output: {error}");
+                }
+            }
+            SessionState::NeverStarted | SessionState::Ended(_) => {
+                panic!("expected a running session for test VT injection");
+            }
         }
     }
 
