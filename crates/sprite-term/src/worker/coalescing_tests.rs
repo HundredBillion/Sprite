@@ -115,15 +115,24 @@ impl Fixture {
     /// Shuts the worker down; returns every event published after this
     /// point and the generation of any snapshot left unread.
     fn finish(self) -> (Vec<TerminalEvent>, Option<u64>) {
+        // Read while the worker winds down: the mailbox holds nothing, so a
+        // notice raised on the way out — on Windows, ConPTY's own title
+        // landing after the chunks — would otherwise wait for a reader that
+        // is waiting for the worker.
+        let events = self.events;
+        let collector = std::thread::spawn(move || {
+            let mut remaining = Vec::new();
+            while let Ok(event) = events.next_blocking() {
+                remaining.push(event);
+            }
+            remaining
+        });
         self.shutdown.store(true, Ordering::SeqCst);
         self.commands.send(Message::Shutdown).ok();
         if let Some(processes) = self.worker.join().expect("the worker did not panic") {
             finish_shutdown(processes, std::time::Instant::now());
         }
-        let mut remaining = Vec::new();
-        while let Ok(event) = self.events.next_blocking() {
-            remaining.push(event);
-        }
+        let remaining = collector.join().expect("the event collector did not panic");
         let unread = self
             .snapshots
             .try_recv()
@@ -187,9 +196,23 @@ fn a_pass_stops_at_sixteen_kibibytes_of_output() {
         assert_eq!(title_of(fixture.next_event()), "bytes-1");
         assert_eq!(fixture.next_generation(), 2, "two 8 KiB chunks fill a pass");
         assert_eq!(title_of(fixture.next_event()), "bytes-2");
-        assert_eq!(fixture.next_generation(), 3);
+        let generation = fixture.next_generation();
         let (_, unread) = fixture.finish();
-        assert_eq!(unread, None);
+        // A Windows child sits behind ConPTY, whose own first paint is output
+        // too. It is read only once the worker runs, so it queues behind the
+        // chunks and can only add to the generations after them.
+        #[cfg(not(windows))]
+        {
+            assert_eq!(generation, 3);
+            assert_eq!(unread, None);
+        }
+        #[cfg(windows)]
+        assert!(
+            generation >= 3,
+            "the last chunk is in generation {generation}"
+        );
+        #[cfg(windows)]
+        let _ = unread;
     });
 }
 
